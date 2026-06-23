@@ -10,7 +10,10 @@
 
 ## Option A — prebuilt addon (fastest)
 
-Once a release is published, the native addon is attached to the GitHub Release.
+Once a release is published, the native addon is attached to the GitHub
+Release. The CI cross-compile uses the Android NDK r27 directly (clang as both
+compiler and linker) — cargo-zigbuild cannot provide bionic libc, so a
+zig-based pipeline is not used.
 
 ```sh
 pkg install -y git bun

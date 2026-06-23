@@ -3,6 +3,12 @@ name: Android build
 # Cross-compiles the pi-natives addon for aarch64-linux-android (Termux/bionic)
 # on a standard Ubuntu runner and uploads it as an artifact. This is the
 # release/prebuilt path; on-device builds use android/scripts/build-termux.sh.
+#
+# The cross-compile uses the Android NDK directly (NDK clang as both compiler
+# and linker) — cargo-zigbuild cannot provide bionic libc and is not a viable
+# path for Android. The build script calls `napi build --target ...` directly
+# so napi invokes `cargo build` (not cargo-zigbuild) with cargo/cc env pointing
+# at the NDK clang.
 
 on:
   push:
@@ -42,11 +48,12 @@ jobs:
           rustup show active-toolchain || rustup toolchain install
           rustup target add aarch64-linux-android
 
-      - name: Install zig + cargo-zigbuild
-        run: |
-          set -euo pipefail
-          pipx install ziglang || pip install ziglang
-          cargo install --locked cargo-zigbuild
+      - name: Install Android NDK r27
+        id: ndk
+        uses: nttld/setup-ndk@v1
+        with:
+          ndk-version: r27
+          add-to-path: false
 
       - name: Apply android patches
         run: bash android/scripts/apply-patches.sh
@@ -54,25 +61,17 @@ jobs:
       - name: Install JS dependencies
         run: bun install --frozen-lockfile
 
-      - name: Cross-compile native addon
+      - name: Cross-compile native addon (NDK clang)
         env:
-          CROSS_TARGET: aarch64-linux-android
-          TARGET_PLATFORM: android
-          TARGET_ARCH: arm64
-        run: bun --cwd=packages/natives run build
-
-      - name: Verify artifact is aarch64 ELF
-        run: |
-          set -euo pipefail
-          addon="packages/natives/native/pi_natives.android-arm64.node"
-          test -f "$addon" || { echo "missing $addon"; ls -la packages/natives/native; exit 1; }
-          file "$addon"
-          file "$addon" | grep -q "ELF 64-bit" || { echo "not a 64-bit ELF"; exit 1; }
-          file "$addon" | grep -qi "aarch64\|ARM aarch64" || { echo "not aarch64"; exit 1; }
+          ANDROID_NDK_ROOT: ${{ steps.ndk.outputs.ndk-path }}
+          CARGO_BUILD_JOBS: 2
+        run: bash android/scripts/build-android-ci.sh
 
       - name: Upload addon artifact
         uses: actions/upload-artifact@v4
         with:
           name: pi_natives.android-arm64
-          path: packages/natives/native/pi_natives.android-arm64.node
+          path: |
+            packages/natives/native/pi_natives.android-arm64.node
+            packages/natives/native/pi_natives.android-arm64.node.sha256
           if-no-files-found: error

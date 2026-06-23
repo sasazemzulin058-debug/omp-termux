@@ -83,11 +83,18 @@ its platform tag from `${process.platform}-${process.arch}`, which is
 - `cargo check -p pi-natives` on host `aarch64-linux-android` — **0 errors, 0
   warnings** after patches.
 - `cargo check -p pi-shell` on host `aarch64-linux-android` — clean.
+- `cargo check -p pi-iso` on host `aarch64-linux-android` — clean.
 - `git apply --check` on all six patches individually and combined — clean
   against the upstream tree.
+- Cross-compile (CI) uses the Android NDK r27 directly. **cargo-zigbuild is
+  not viable for Android targets** — zig ships no bionic libc, so
+  `zig cc -target aarch64-linux-android` fails with `libc not available`. The
+  CI pipeline therefore calls `napi build --target aarch64-linux-android`
+  directly (bypassing `build-native.ts`'s `--cross-compile` branch), and
+  points `CC_aarch64_linux_android` and `CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER`
+  at the NDK clang.
 
 ## Not yet runtime-verified
 
-- Full `bun --cwd=packages/natives run build` producing the `.node` (compile is
-  proven via `cargo check`; the napi link/copy step is exercised by CI).
-- End-to-end `omp` run on-device.
+- End-to-end `omp` run on-device (compile is proven via `cargo check` on the
+  Android host triple; the napi link/copy step is exercised by CI).
