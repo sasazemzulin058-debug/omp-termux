@@ -65,10 +65,12 @@ TMP_DIR="$(mktemp -d "$NATIVE_DIR/.build/cross-XXXXXX")"
 	--platform --no-js --dts index.d.ts \
 	-o "$TMP_DIR"
 
-# napi copies the produced .node into $TMP_DIR with a name derived from target
-BUILT="$(ls "$TMP_DIR"/pi_natives.aarch64-linux-android*.node 2>/dev/null | head -1 || true)"
-if [ -z "$BUILT" ]; then
-	echo "error: napi build did not produce a .node under $TMP_DIR" >&2
+# napi copies the produced .node into $TMP_DIR named `pi_natives.<platformArchABI>.node`
+# (see @napi-rs/cli src/api/build.ts:839). For --target aarch64-linux-android that
+# becomes `pi_natives.android-arm64.node`.
+BUILT="$TMP_DIR/pi_natives.android-arm64.node"
+if [ ! -f "$BUILT" ]; then
+	echo "error: napi build did not produce $BUILT" >&2
 	ls -la "$TMP_DIR" >&2
 	exit 1
 fi
