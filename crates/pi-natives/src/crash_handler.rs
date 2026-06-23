@@ -30,10 +30,7 @@ use std::{
 	io::Write as _,
 	path::{Path, PathBuf},
 	process,
-	sync::{
-		Once,
-		atomic::{AtomicBool, Ordering},
-	},
+	sync::Once,
 	thread,
 	time::{SystemTime, UNIX_EPOCH},
 };
@@ -48,7 +45,6 @@ const DEFAULT_CONFIG_DIR: &str = ".omp";
 const APP_NAME: &str = "omp";
 
 static INSTALL: Once = Once::new();
-static ALLOC_HOOK_ACTIVE: AtomicBool = AtomicBool::new(false);
 
 /// Install the panic and allocation-error hooks. Idempotent.
 pub fn install() {
@@ -60,25 +56,18 @@ pub fn install() {
 			prev_panic(info);
 		}));
 
-		std::alloc::set_alloc_error_hook(|layout| {
-			// Print the canonical line before doing anything allocation-prone.
-			// If this is genuine process-wide OOM, report formatting/path work may
-			// recursively enter this hook; the secondary entry writes the same
-			// stack-only fallback and aborts immediately.
-			write_alloc_failure_line(std::io::stderr(), layout.size());
-			if ALLOC_HOOK_ACTIVE.swap(true, Ordering::AcqRel) {
-				process::abort();
-			}
-			let report = format_alloc_report(layout);
-			persist(&report, CrashKind::Alloc);
-			process::abort();
-		});
+		// alloc hook disabled on bionic: nightly-only feature(alloc_error_hook)
+		// was removed; we accept reduced OOM diagnostics in exchange for
+		// stable-Rust builds on Termux.
 	});
 }
 
 #[derive(Clone, Copy)]
 enum CrashKind {
 	Panic,
+	// Retained for the unit tests that exercise alloc-report formatting; the
+	// runtime alloc-error hook is disabled on stable Rust (no feature(alloc_error_hook)).
+	#[allow(dead_code, reason = "alloc hook disabled on bionic; kept for tests")]
 	Alloc,
 }
 
@@ -104,6 +93,7 @@ fn format_panic_report(info: &std::panic::PanicHookInfo<'_>) -> String {
 	out
 }
 
+#[allow(dead_code, reason = "alloc hook disabled on bionic; kept for tests")]
 fn format_alloc_report(layout: Layout) -> String {
 	// Capturing a backtrace allocates. If the global allocator is in a state
 	// where small allocations keep failing this will recurse into the hook —
@@ -128,6 +118,7 @@ fn report_header(kind: CrashKind) -> String {
 		pid = process::id(),
 	)
 }
+#[allow(dead_code, reason = "alloc hook disabled on bionic; kept for tests")]
 fn write_alloc_failure_line(mut out: impl std::io::Write, size: usize) {
 	let _ = out.write_all(b"memory allocation of ");
 	let mut digits = [0u8; usize::MAX.ilog10() as usize + 1];
