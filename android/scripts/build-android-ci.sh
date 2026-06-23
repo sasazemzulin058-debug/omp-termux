@@ -40,12 +40,44 @@ export CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER="$NDK_CLANG"
 export CARGO_TARGET_AARCH64_LINUX_ANDROID_AR="$NDK_AR"
 export CARGO_TARGET_AARCH64_LINUX_ANDROID_RANLIB="$NDK_RANLIB"
 
-# Locate the napi bin
-NAPI_BIN="$(node_modules/.bin/napi 2>/dev/null || true)"
-if [ -z "$NAPI_BIN" ] || [ ! -x "$NAPI_BIN" ]; then
-	NAPI_BIN="$(command -v napi || true)"
+# Locate the napi bin. The CLI is declared as a dev dependency in
+# packages/natives, so `bun install` should hoist `node_modules/.bin/napi` to
+# the repo root, but workspace hoisting varies; check several locations and
+# fall back to a direct JS entry.
+NAPI_BIN=""
+for candidate in \
+	"$REPO_ROOT/node_modules/.bin/napi" \
+	"$REPO_ROOT/packages/natives/node_modules/.bin/napi"
+do
+	if [ -x "$candidate" ]; then
+		NAPI_BIN="$candidate"
+		break
+	fi
+done
+if [ -z "$NAPI_BIN" ]; then
+	NAPI_BIN="$(command -v napi 2>/dev/null || true)"
 fi
-[ -x "$NAPI_BIN" ] || { echo "error: napi CLI not found; run 'bun install' first" >&2; exit 1; }
+# Last resort: invoke the JS entry directly via node.
+if [ -z "$NAPI_BIN" ] || [ ! -x "$NAPI_BIN" ]; then
+	ENTRY=""
+	for c in \
+		"$REPO_ROOT/node_modules/@napi-rs/cli/cli.mjs" \
+		"$REPO_ROOT/node_modules/@napi-rs/cli/dist/cli.js" \
+		"$REPO_ROOT/packages/natives/node_modules/@napi-rs/cli/cli.mjs"
+	do
+		if [ -f "$c" ]; then ENTRY="$c"; break; fi
+	done
+	if [ -n "$ENTRY" ] && command -v node >/dev/null 2>&1; then
+		NAPI_BIN="node"
+		# Use a wrapper: shift args to put the entry first.
+		napi_entry="$ENTRY"
+	fi
+fi
+if [ -z "$NAPI_BIN" ]; then
+	echo "error: napi CLI not found in workspace node_modules" >&2
+	echo "rerun 'bun install' from repo root" >&2
+	exit 1
+fi
 
 echo "==> Cross-compiling pi-natives (aarch64-linux-android, jobs=$JOBS)"
 echo "    NDK clang: $NDK_CLANG"
@@ -57,13 +89,24 @@ TMP_DIR="$(mktemp -d "$NATIVE_DIR/.build/cross-XXXXXX")"
 # Call napi build directly with --target but WITHOUT --cross-compile, so napi
 # invokes `cargo build --target aarch64-linux-android` (not cargo-zigbuild,
 # which cannot provide bionic libc).
-"$NAPI_BIN" build \
-	--manifest-path "$REPO_ROOT/crates/pi-natives/Cargo.toml" \
-	--package-json-path "$REPO_ROOT/packages/natives/package.json" \
-	--target aarch64-linux-android \
-	--profile release \
-	--platform --no-js --dts index.d.ts \
-	-o "$TMP_DIR"
+if [ "$NAPI_BIN" = "node" ] && [ -n "${napi_entry:-}" ]; then
+	# Direct entry-point invocation (fallback when .bin was not hoisted).
+	"$NAPI_BIN" "$napi_entry" build \
+		--manifest-path "$REPO_ROOT/crates/pi-natives/Cargo.toml" \
+		--package-json-path "$REPO_ROOT/packages/natives/package.json" \
+		--target aarch64-linux-android \
+		--profile release \
+		--platform --no-js --dts index.d.ts \
+		-o "$TMP_DIR"
+else
+	"$NAPI_BIN" build \
+		--manifest-path "$REPO_ROOT/crates/pi-natives/Cargo.toml" \
+		--package-json-path "$REPO_ROOT/packages/natives/package.json" \
+		--target aarch64-linux-android \
+		--profile release \
+		--platform --no-js --dts index.d.ts \
+		-o "$TMP_DIR"
+fi
 
 # napi copies the produced .node into $TMP_DIR named `pi_natives.<platformArchABI>.node`
 # (see @napi-rs/cli src/api/build.ts:839). For --target aarch64-linux-android that
