@@ -1,0 +1,77 @@
+name: Android release
+
+# On a pushed `v*` tag: cross-compile the android-arm64 addon and attach it to
+# the GitHub Release so Termux users can download a prebuilt .node instead of
+# building on-device.
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing tag to build and attach to"
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Build and attach android-arm64 addon
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+
+      - name: Install Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: "1.3.14"
+
+      - name: Install stable Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install Rust target for the repo-pinned toolchain
+        run: |
+          set -euo pipefail
+          rustup show active-toolchain || rustup toolchain install
+          rustup target add aarch64-linux-android
+
+      - name: Install zig + cargo-zigbuild
+        run: |
+          set -euo pipefail
+          pipx install ziglang || pip install ziglang
+          cargo install --locked cargo-zigbuild
+
+      - name: Apply android patches
+        run: bash android/scripts/apply-patches.sh
+
+      - name: Install JS dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Cross-compile native addon
+        env:
+          CROSS_TARGET: aarch64-linux-android
+          TARGET_PLATFORM: android
+          TARGET_ARCH: arm64
+        run: bun --cwd=packages/natives run build
+
+      - name: Verify + checksum
+        run: |
+          set -euo pipefail
+          addon="packages/natives/native/pi_natives.android-arm64.node"
+          test -f "$addon" || { echo "missing $addon"; exit 1; }
+          file "$addon" | grep -qi "aarch64\|ARM aarch64" || { echo "not aarch64"; exit 1; }
+          sha256sum "$addon" | awk '{print $1}' > "$addon.sha256"
+
+      - name: Attach to release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.event.inputs.tag || github.ref_name }}
+          files: |
+            packages/natives/native/pi_natives.android-arm64.node
+            packages/natives/native/pi_natives.android-arm64.node.sha256
+          fail_on_unmatched_files: true

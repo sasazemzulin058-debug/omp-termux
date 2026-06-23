@@ -1,0 +1,22 @@
+diff --git a/crates/pi-natives/Cargo.toml b/crates/pi-natives/Cargo.toml
+index df713c7..00c7140 100644
+--- a/crates/pi-natives/Cargo.toml
++++ b/crates/pi-natives/Cargo.toml
+@@ -14,7 +14,6 @@ workspace = true
+ 
+ [dependencies]
+ anyhow.workspace = true
+-arboard.workspace = true
+ ast-grep-core.workspace = true
+ base64.workspace = true
+ clap.workspace = true
+@@ -59,6 +58,9 @@ libc.workspace = true
+ [target.'cfg(windows)'.dependencies]
+ winreg.workspace = true
+ 
++[target.'cfg(not(target_os = "android"))'.dependencies]
++arboard.workspace = true
++
+ [build-dependencies]
+ napi-build.workspace = true
+ serde.workspace = true

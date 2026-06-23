@@ -1,0 +1,78 @@
+name: Android build
+
+# Cross-compiles the pi-natives addon for aarch64-linux-android (Termux/bionic)
+# on a standard Ubuntu runner and uploads it as an artifact. This is the
+# release/prebuilt path; on-device builds use android/scripts/build-termux.sh.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "crates/**"
+      - "packages/natives/**"
+      - "android/**"
+      - ".github/workflows/android-build.yml"
+  pull_request:
+    paths:
+      - "crates/**"
+      - "packages/natives/**"
+      - "android/**"
+      - ".github/workflows/android-build.yml"
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: Cross-compile android-arm64 addon
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: "1.3.14"
+
+      - name: Install Rust target for the repo-pinned toolchain
+        # rust-toolchain.toml pins nightly-2026-04-29; rustup auto-activates it
+        # for any cargo invocation in the repo. dtolnay's `targets:` input only
+        # applies to the toolchain IT installs, so add the android target to the
+        # pinned toolchain explicitly or the cross-build can't find std.
+        run: |
+          set -euo pipefail
+          rustup show active-toolchain || rustup toolchain install
+          rustup target add aarch64-linux-android
+
+      - name: Install zig + cargo-zigbuild
+        run: |
+          set -euo pipefail
+          pipx install ziglang || pip install ziglang
+          cargo install --locked cargo-zigbuild
+
+      - name: Apply android patches
+        run: bash android/scripts/apply-patches.sh
+
+      - name: Install JS dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Cross-compile native addon
+        env:
+          CROSS_TARGET: aarch64-linux-android
+          TARGET_PLATFORM: android
+          TARGET_ARCH: arm64
+        run: bun --cwd=packages/natives run build
+
+      - name: Verify artifact is aarch64 ELF
+        run: |
+          set -euo pipefail
+          addon="packages/natives/native/pi_natives.android-arm64.node"
+          test -f "$addon" || { echo "missing $addon"; ls -la packages/natives/native; exit 1; }
+          file "$addon"
+          file "$addon" | grep -q "ELF 64-bit" || { echo "not a 64-bit ELF"; exit 1; }
+          file "$addon" | grep -qi "aarch64\|ARM aarch64" || { echo "not aarch64"; exit 1; }
+
+      - name: Upload addon artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: pi_natives.android-arm64
+          path: packages/natives/native/pi_natives.android-arm64.node
+          if-no-files-found: error

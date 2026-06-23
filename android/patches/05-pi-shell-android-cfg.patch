@@ -1,0 +1,13 @@
+diff --git a/crates/pi-shell/src/process.rs b/crates/pi-shell/src/process.rs
+index 5664727..8b9c403 100644
+--- a/crates/pi-shell/src/process.rs
++++ b/crates/pi-shell/src/process.rs
+@@ -15,7 +15,7 @@ pub enum ProcessStatus {
+ 	Exited,
+ }
+ 
+-#[cfg(target_os = "linux")]
++#[cfg(any(target_os = "linux", target_os = "android"))]
+ mod platform {
+ 	use std::{
+ 		collections::HashSet,
