@@ -50,6 +50,16 @@ jobs:
       - name: Install JS dependencies
         run: bun install --frozen-lockfile
 
+      # bun's hoisting does not always surface @napi-rs/cli as a top-level
+      # .bin. Add the explicit dep in a scratch workspace to guarantee the bin
+      # exists when the build script needs it.
+      - name: Ensure napi CLI is available
+        run: |
+          if [ ! -x node_modules/.bin/napi ]; then
+            bun add --no-save @napi-rs/cli@3.7.0
+          fi
+          test -x node_modules/.bin/napi || { echo "napi still missing"; exit 1; }
+
       - name: Cross-compile native addon (NDK clang)
         env:
           ANDROID_NDK_ROOT: ${{ steps.ndk.outputs.ndk-path }}
