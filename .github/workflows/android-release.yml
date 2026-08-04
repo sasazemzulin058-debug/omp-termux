@@ -76,9 +76,9 @@ jobs:
           bun build --target=bun --minify --keep-names \
             --external @oh-my-pi/pi-natives \
             --define 'process.env.PI_BUNDLED="true"' \
-            packages/coding-agent/src/cli.ts --outfile termux-cli.js
+            packages/coding-agent/src/cli.ts --outdir termux-build
           mkdir -p termux-bundle/node_modules/@oh-my-pi/pi-natives/native
-          cp termux-cli.js termux-bundle/cli.js
+          cp termux-build/cli.js termux-bundle/cli.js
           cp packages/natives/package.json termux-bundle/node_modules/@oh-my-pi/pi-natives/
           cp packages/natives/native/index.js packages/natives/native/loader-state.js \
             packages/natives/native/embedded-addon.js \
