@@ -10,7 +10,7 @@ echo "🚀 Installing omp-termux (Oh My Pi Native Termux Port)..."
 
 PREFIX_DIR="${PREFIX:-/data/data/com.termux/files/usr}"
 BIN_DIR="${PREFIX_DIR}/bin"
-INSTALL_DIR="${OMP_INSTALL_DIR:-$HOME/omp-termux}"
+INSTALL_DIR="${OMP_INSTALL_DIR:-$PREFIX_DIR/lib/omp-termux}"
 REPO_URL="https://github.com/sasazemzulin058-debug/omp-termux.git"
 RELEASE_TAG="v0.0.1"
 NATIVE_URL="https://github.com/sasazemzulin058-debug/omp-termux/releases/download/${RELEASE_TAG}/pi_natives.android-arm64.node"
@@ -90,7 +90,7 @@ GLIBC_RUNNER="$(command -v glibc-runner || command -v grun)"
 cat << 'EOF' > "$LAUNCHER"
 #!/data/data/com.termux/files/usr/bin/sh
 # Launcher script for omp-termux
-OMP_DIR="${OMP_DIR:-$HOME/omp-termux}"
+OMP_DIR="${OMP_DIR:-/data/data/com.termux/files/usr/lib/omp-termux}"
 GLIBC_RUNNER="$(command -v glibc-runner || command -v grun)"
 
 if [ ! -d "$OMP_DIR" ]; then
