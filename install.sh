@@ -32,14 +32,12 @@ NATIVE_FILE="$LIB_DIR/packages/natives/native/pi_natives.android-arm64.node"
 
 # 3. Download standalone JS bundle (24 MB)
 echo "📥 Downloading standalone omp JavaScript bundle..."
-curl -fsSL -L "$BUNDLE_URL" -o "$BUNDLE_FILE.tmp"
-mv "$BUNDLE_FILE.tmp" "$BUNDLE_FILE"
+curl -fsSL -L "$BUNDLE_URL" -o "$BUNDLE_FILE"
 
 # 4. Download Android arm64 native addon (113 MB) if missing/incomplete
 if [ ! -f "$NATIVE_FILE" ] || [ $(wc -c < "$NATIVE_FILE") -lt 100000000 ]; then
     echo "📥 Downloading Android arm64 native addon..."
-    curl -fsSL -L "$NATIVE_URL" -o "$NATIVE_FILE.tmp"
-    mv "$NATIVE_FILE.tmp" "$NATIVE_FILE"
+    curl -fsSL -L "$NATIVE_URL" -o "$NATIVE_FILE"
 fi
 
 # 5. Create launcher at $PREFIX/bin/omp
