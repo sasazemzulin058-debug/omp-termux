@@ -1,6 +1,28 @@
-import * as path from "node:path";
-import { Glob } from "bun";
+import * as fs from "node:fs/promises";
+import fg from "fast-glob";
 import { getProjectDir } from "./dirs";
+
+class NodeGlob {
+	constructor(private pattern: string) {}
+	async *scan(options: { cwd?: string; dot?: boolean; onlyFiles?: boolean }) {
+		const entries = await fg(this.pattern, {
+			cwd: options.cwd,
+			dot: options.dot,
+			onlyFiles: options.onlyFiles,
+			suppressErrors: true,
+		});
+		for (const entry of entries) {
+			yield entry;
+		}
+	}
+	match(filepath: string): boolean {
+		return fg.isMatch(filepath, this.pattern);
+	}
+}
+
+const Glob = typeof Bun !== "undefined" && (Bun as unknown as { Glob?: typeof NodeGlob }).Glob
+	? (Bun as unknown as { Glob: typeof NodeGlob }).Glob
+	: NodeGlob;
 
 export interface GlobPathsOptions {
 	/** Base directory for glob patterns. Defaults to getProjectDir(). */
@@ -107,7 +129,7 @@ export async function loadGitignorePatterns(baseDir: string): Promise<string[]> 
 		const gitignorePath = path.join(current, ".gitignore");
 
 		try {
-			const content = await Bun.file(gitignorePath).text();
+			const content = typeof Bun !== "undefined" ? await Bun.file(gitignorePath).text() : await fs.readFile(gitignorePath, "utf8");
 			const filePatterns = parseGitignorePatterns(content, current, absoluteBase);
 			patterns.push(...filePatterns);
 		} catch {

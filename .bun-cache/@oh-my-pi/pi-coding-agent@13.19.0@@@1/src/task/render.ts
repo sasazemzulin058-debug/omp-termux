@@ -1,0 +1,1021 @@
+/**
+ * TUI rendering for task tool.
+ *
+ * Provides renderCall and renderResult functions for displaying
+ * task execution in the terminal UI.
+ */
+import path from "node:path";
+import type { Component } from "@oh-my-pi/pi-tui";
+import { Container, Text } from "@oh-my-pi/pi-tui";
+import { formatNumber } from "@oh-my-pi/pi-utils";
+import type { RenderResultOptions } from "../extensibility/custom-tools/types";
+import type { Theme } from "../modes/theme/theme";
+import {
+	formatBadge,
+	formatDuration,
+	formatMoreItems,
+	formatStatusIcon,
+	replaceTabs,
+	truncateToWidth,
+} from "../tools/render-utils";
+import {
+	type FindingPriority,
+	getPriorityInfo,
+	PRIORITY_LABELS,
+	parseReportFindingDetails,
+	type ReportFindingDetails,
+	type SubmitReviewDetails,
+} from "../tools/review";
+import { Ellipsis, Hasher, type RenderCache, renderStatusLine } from "../tui";
+import { subprocessToolRegistry } from "./subprocess-tool-registry";
+import type { AgentProgress, SingleResult, TaskParams, TaskToolDetails } from "./types";
+
+/**
+ * Get status icon for agent state.
+ * For running status, uses animated spinner if spinnerFrame is provided.
+ * Maps AgentProgress status to styled icon format.
+ */
+function getStatusIcon(status: AgentProgress["status"], theme: Theme, spinnerFrame?: number): string {
+	switch (status) {
+		case "pending":
+			return formatStatusIcon("pending", theme);
+		case "running":
+			return formatStatusIcon("running", theme, spinnerFrame);
+		case "completed":
+			return formatStatusIcon("success", theme);
+		case "failed":
+			return formatStatusIcon("error", theme);
+		case "aborted":
+			return formatStatusIcon("aborted", theme);
+	}
+}
+
+function formatFindingSummary(findings: ReportFindingDetails[], theme: Theme): string {
+	if (findings.length === 0) return theme.fg("dim", "Findings: none");
+
+	const counts: { [P in FindingPriority]?: number } = {};
+	for (const finding of findings) {
+		counts[finding.priority] = (counts[finding.priority] ?? 0) + 1;
+	}
+
+	const parts: string[] = [];
+	for (const label of PRIORITY_LABELS) {
+		const { symbol, color } = getPriorityInfo(label);
+		const count = counts[label] ?? 0;
+		const text = theme.fg(color, `${label}:${count}`);
+		parts.push(theme.styledSymbol(symbol, color) ? `${theme.styledSymbol(symbol, color)} ${text}` : text);
+	}
+
+	return `${theme.fg("dim", "Findings:")} ${parts.join(theme.sep.dot)}`;
+}
+
+function normalizeReportFindings(value: unknown): ReportFindingDetails[] {
+	if (!Array.isArray(value)) return [];
+	const findings: ReportFindingDetails[] = [];
+	for (const item of value) {
+		const finding = parseReportFindingDetails(item);
+		if (finding) findings.push(finding);
+	}
+	return findings;
+}
+
+function formatJsonScalar(value: unknown, _theme: Theme): string {
+	if (value === null) return "null";
+	if (typeof value === "string") {
+		const trimmed = truncateToWidth(value, 70);
+		return `"${trimmed}"`;
+	}
+	if (typeof value === "number" || typeof value === "boolean") return String(value);
+	return "";
+}
+
+function formatTaskId(id: string): string {
+	const segments = id.split(".");
+	if (segments.length < 2) return id;
+
+	const parsed = segments.map(segment => segment.match(/^(\d+)-(.+)$/));
+	if (parsed.some(match => !match)) return id;
+
+	const indices = parsed.map(match => match![1]).join(".");
+	const labels = parsed.map(match => match![2]).join(">");
+	return `${indices} ${labels}`;
+}
+
+const MISSING_SUBMIT_RESULT_WARNING_PREFIX = "SYSTEM WARNING: Subagent exited without calling submit_result tool";
+
+function extractMissingSubmitResultWarning(output: string): { warning?: string; rest: string } {
+	const lines = output.split("\n");
+	const firstLine = lines[0]?.trim() ?? "";
+	if (!firstLine.startsWith(MISSING_SUBMIT_RESULT_WARNING_PREFIX)) {
+		return { rest: output };
+	}
+	const rest = lines
+		.slice(1)
+		.join("\n")
+		.replace(/^\s*\n+/, "");
+	return { warning: firstLine, rest };
+}
+
+function buildTreePrefix(ancestors: boolean[], theme: Theme): string {
+	return ancestors.map(hasNext => (hasNext ? `${theme.tree.vertical}  ` : "   ")).join("");
+}
+
+function renderJsonTreeLines(
+	value: unknown,
+	theme: Theme,
+	maxDepth: number,
+	maxLines: number,
+): { lines: string[]; truncated: boolean } {
+	const lines: string[] = [];
+	let truncated = false;
+
+	const iconObject = theme.styledSymbol("icon.folder", "muted");
+	const iconArray = theme.styledSymbol("icon.package", "muted");
+	const iconScalar = theme.styledSymbol("icon.file", "muted");
+
+	const pushLine = (line: string) => {
+		if (lines.length >= maxLines) {
+			truncated = true;
+			return false;
+		}
+		lines.push(line);
+		return true;
+	};
+
+	const renderNode = (val: unknown, key: string | undefined, ancestors: boolean[], isLast: boolean, depth: number) => {
+		if (lines.length >= maxLines) {
+			truncated = true;
+			return;
+		}
+
+		const connector = isLast ? theme.tree.last : theme.tree.branch;
+		const prefix = `${buildTreePrefix(ancestors, theme)}${theme.fg("dim", connector)} `;
+		const scalar = formatJsonScalar(val, theme);
+
+		if (scalar) {
+			const label = key ? theme.fg("muted", key) : theme.fg("muted", "value");
+			pushLine(`${prefix}${iconScalar} ${label}: ${theme.fg("dim", scalar)}`);
+			return;
+		}
+
+		if (Array.isArray(val)) {
+			const header = key ? theme.fg("muted", key) : theme.fg("muted", "array");
+			pushLine(`${prefix}${iconArray} ${header}`);
+			if (val.length === 0) {
+				pushLine(
+					`${buildTreePrefix([...ancestors, !isLast], theme)}${theme.fg("dim", theme.tree.last)} ${theme.fg(
+						"dim",
+						"[]",
+					)}`,
+				);
+				return;
+			}
+			if (depth >= maxDepth) {
+				pushLine(
+					`${buildTreePrefix([...ancestors, !isLast], theme)}${theme.fg("dim", theme.tree.last)} ${theme.fg(
+						"dim",
+						"…",
+					)}`,
+				);
+				return;
+			}
+			const nextAncestors = [...ancestors, !isLast];
+			for (let i = 0; i < val.length; i++) {
+				renderNode(val[i], `[${i}]`, nextAncestors, i === val.length - 1, depth + 1);
+				if (lines.length >= maxLines) {
+					truncated = true;
+					return;
+				}
+			}
+			return;
+		}
+
+		if (val && typeof val === "object") {
+			const header = key ? theme.fg("muted", key) : theme.fg("muted", "object");
+			pushLine(`${prefix}${iconObject} ${header}`);
+			const entries = Object.entries(val as Record<string, unknown>);
+			if (entries.length === 0) {
+				pushLine(
+					`${buildTreePrefix([...ancestors, !isLast], theme)}${theme.fg("dim", theme.tree.last)} ${theme.fg(
+						"dim",
+						"{}",
+					)}`,
+				);
+				return;
+			}
+			if (depth >= maxDepth) {
+				pushLine(
+					`${buildTreePrefix([...ancestors, !isLast], theme)}${theme.fg("dim", theme.tree.last)} ${theme.fg(
+						"dim",
+						"…",
+					)}`,
+				);
+				return;
+			}
+			const nextAncestors = [...ancestors, !isLast];
+			for (let i = 0; i < entries.length; i++) {
+				const [childKey, child] = entries[i];
+				renderNode(child, childKey, nextAncestors, i === entries.length - 1, depth + 1);
+				if (lines.length >= maxLines) {
+					truncated = true;
+					return;
+				}
+			}
+			return;
+		}
+
+		const label = key ? theme.fg("muted", key) : theme.fg("muted", "value");
+		pushLine(`${prefix}${iconScalar} ${label}: ${theme.fg("dim", String(val))}`);
+	};
+
+	const renderRoot = (val: unknown) => {
+		if (Array.isArray(val)) {
+			for (let i = 0; i < val.length; i++) {
+				renderNode(val[i], `[${i}]`, [], i === val.length - 1, 1);
+				if (lines.length >= maxLines) {
+					truncated = true;
+					return;
+				}
+			}
+			return;
+		}
+		if (val && typeof val === "object") {
+			const entries = Object.entries(val as Record<string, unknown>);
+			for (let i = 0; i < entries.length; i++) {
+				const [childKey, child] = entries[i];
+				renderNode(child, childKey, [], i === entries.length - 1, 1);
+				if (lines.length >= maxLines) {
+					truncated = true;
+					return;
+				}
+			}
+			return;
+		}
+		renderNode(val, undefined, [], true, 0);
+	};
+
+	renderRoot(value);
+
+	return { lines, truncated };
+}
+
+function renderOutputSection(
+	output: string,
+	continuePrefix: string,
+	expanded: boolean,
+	theme: Theme,
+	maxCollapsed = 3,
+	maxExpanded = 10,
+	warning?: string,
+): string[] {
+	const lines: string[] = [];
+	const trimmedOutput = output.trimEnd();
+	if (!trimmedOutput && !warning) return lines;
+
+	if (warning) {
+		lines.push(`${continuePrefix}${theme.fg("dim", "Output")}`);
+		lines.push(
+			`${continuePrefix}  ${theme.fg("warning", theme.status.warning)} ${theme.fg(
+				"dim",
+				truncateToWidth(warning, 80),
+			)}`,
+		);
+
+		if (!trimmedOutput) {
+			return lines;
+		}
+
+		if (trimmedOutput.startsWith("{") || trimmedOutput.startsWith("[")) {
+			try {
+				const parsed = JSON.parse(trimmedOutput);
+
+				if (!expanded) {
+					lines.push(`${continuePrefix}  ${theme.fg("dim", formatOutputInline(parsed, theme))}`);
+					return lines;
+				}
+
+				const tree = renderJsonTreeLines(parsed, theme, expanded ? 6 : 2, expanded ? 24 : 6);
+				if (tree.lines.length > 0) {
+					for (const line of tree.lines) {
+						lines.push(`${continuePrefix}  ${line}`);
+					}
+					if (tree.truncated) {
+						lines.push(`${continuePrefix}  ${theme.fg("dim", "…")}`);
+					}
+					return lines;
+				}
+			} catch {
+				// Fall back to raw output
+			}
+		}
+
+		const outputLines = output.trimEnd().split("\n");
+		const previewCount = expanded ? maxExpanded : maxCollapsed;
+		for (const line of outputLines.slice(0, previewCount)) {
+			lines.push(`${continuePrefix}  ${theme.fg("dim", truncateToWidth(replaceTabs(line), 70))}`);
+		}
+
+		if (outputLines.length > previewCount) {
+			lines.push(
+				`${continuePrefix}  ${theme.fg("dim", formatMoreItems(outputLines.length - previewCount, "line"))}`,
+			);
+		}
+
+		return lines;
+	}
+
+	if (trimmedOutput.startsWith("{") || trimmedOutput.startsWith("[")) {
+		try {
+			const parsed = JSON.parse(trimmedOutput);
+
+			// Collapsed: inline format like Args
+			if (!expanded) {
+				lines.push(`${continuePrefix}${theme.fg("dim", formatOutputInline(parsed, theme))}`);
+				return lines;
+			}
+
+			// Expanded: tree format
+			lines.push(`${continuePrefix}${theme.fg("dim", "Output")}`);
+			const tree = renderJsonTreeLines(parsed, theme, expanded ? 6 : 2, expanded ? 24 : 6);
+			if (tree.lines.length > 0) {
+				for (const line of tree.lines) {
+					lines.push(`${continuePrefix}  ${line}`);
+				}
+				if (tree.truncated) {
+					lines.push(`${continuePrefix}  ${theme.fg("dim", "…")}`);
+				}
+				return lines;
+			}
+		} catch {
+			// Fall back to raw output
+		}
+	}
+
+	lines.push(`${continuePrefix}${theme.fg("dim", "Output")}`);
+
+	const outputLines = output.trimEnd().split("\n");
+	const previewCount = expanded ? maxExpanded : maxCollapsed;
+	for (const line of outputLines.slice(0, previewCount)) {
+		lines.push(`${continuePrefix}  ${theme.fg("dim", truncateToWidth(replaceTabs(line), 70))}`);
+	}
+
+	if (outputLines.length > previewCount) {
+		lines.push(`${continuePrefix}  ${theme.fg("dim", formatMoreItems(outputLines.length - previewCount, "line"))}`);
+	}
+
+	return lines;
+}
+
+function renderTaskSection(
+	task: string,
+	continuePrefix: string,
+	expanded: boolean,
+	theme: Theme,
+	maxExpanded = 20,
+): string[] {
+	const lines: string[] = [];
+	const trimmed = task.trim();
+	if (!expanded || !trimmed) return lines;
+
+	lines.push(`${continuePrefix}${theme.fg("dim", "Task")}`);
+	const taskLines = trimmed.split("\n");
+	for (const line of taskLines.slice(0, maxExpanded)) {
+		lines.push(`${continuePrefix}  ${theme.fg("dim", truncateToWidth(replaceTabs(line), 70))}`);
+	}
+	if (taskLines.length > maxExpanded) {
+		lines.push(`${continuePrefix}  ${theme.fg("dim", formatMoreItems(taskLines.length - maxExpanded, "line"))}`);
+	}
+
+	return lines;
+}
+
+function formatScalarInline(value: unknown, maxLen: number, _theme: Theme): string {
+	if (value === null) return "null";
+	if (value === undefined) return "undefined";
+	if (typeof value === "boolean") return String(value);
+	if (typeof value === "number") return String(value);
+	if (typeof value === "string") {
+		const firstLine = value.split("\n")[0].trim();
+		if (firstLine.length === 0) return `"" (${value.split("\n").length} lines)`;
+		const preview = truncateToWidth(firstLine, maxLen);
+		if (value.includes("\n")) return `"${preview}…" (${value.split("\n").length} lines)`;
+		return `"${preview}"`;
+	}
+	if (Array.isArray(value)) return `[${value.length} items]`;
+	if (typeof value === "object") {
+		const keys = Object.keys(value);
+		return `{${keys.length} keys}`;
+	}
+	return String(value);
+}
+
+function formatOutputInline(data: unknown, theme: Theme, maxWidth = 80): string {
+	if (data === null || data === undefined) return "Output: none";
+
+	// For scalars, show directly
+	if (typeof data !== "object") {
+		return `Output: ${formatScalarInline(data, 60, theme)}`;
+	}
+
+	// For arrays, show count and first element preview
+	if (Array.isArray(data)) {
+		if (data.length === 0) return "Output: []";
+		const preview = formatScalarInline(data[0], 40, theme);
+		return `Output: [${data.length} items] ${preview}${data.length > 1 ? "…" : ""}`;
+	}
+
+	// For objects, show key=value pairs inline
+	const entries = Object.entries(data as Record<string, unknown>);
+	if (entries.length === 0) return "Output: {}";
+
+	const pairs: string[] = [];
+	let totalLen = "Output: ".length;
+
+	for (const [key, value] of entries) {
+		const valueStr = formatScalarInline(value, 24, theme);
+		const pairStr = `${key}=${valueStr}`;
+		const addLen = pairs.length > 0 ? pairStr.length + 2 : pairStr.length; // +2 for ", "
+
+		if (totalLen + addLen > maxWidth && pairs.length > 0) {
+			pairs.push("…");
+			break;
+		}
+
+		pairs.push(pairStr);
+		totalLen += addLen;
+	}
+
+	return `Output: ${pairs.join(", ")}`;
+}
+
+/**
+ * Render the tool call arguments.
+ */
+export function renderCall(args: TaskParams, _options: RenderResultOptions, theme: Theme): Component {
+	const lines: string[] = [];
+	lines.push(renderStatusLine({ icon: "pending", title: "Task", description: args.agent }, theme));
+
+	const contextTemplate = args.context ?? "";
+	const context = contextTemplate.trim();
+	const hasContext = context.length > 0;
+	const branch = theme.fg("dim", theme.tree.branch);
+	const last = theme.fg("dim", theme.tree.last);
+	const vertical = theme.fg("dim", theme.tree.vertical);
+	const showIsolated = "isolated" in args && args.isolated === true;
+
+	if (hasContext) {
+		lines.push(` ${branch} ${theme.fg("dim", "Context")}`);
+		for (const line of context.split("\n")) {
+			const content = line ? theme.fg("muted", replaceTabs(line)) : "";
+			lines.push(` ${vertical}  ${content}`);
+		}
+		const taskPrefix = showIsolated ? branch : last;
+		lines.push(` ${taskPrefix} ${theme.fg("dim", "Tasks")}: ${theme.fg("muted", `${args.tasks.length} agents`)}`);
+		if (showIsolated) {
+			lines.push(` ${last} ${theme.fg("dim", "Isolated")}: ${theme.fg("muted", "true")}`);
+		}
+		return new Text(lines.join("\n"), 0, 0);
+	}
+
+	lines.push(`${theme.fg("dim", "Tasks")}: ${theme.fg("muted", `${args.tasks.length} agents`)}`);
+	if (showIsolated) {
+		lines.push(`${theme.fg("dim", "Isolated")}: ${theme.fg("muted", "true")}`);
+	}
+
+	return new Text(lines.join("\n"), 0, 0);
+}
+
+/**
+ * Render streaming progress for a single agent.
+ */
+function renderAgentProgress(
+	progress: AgentProgress,
+	isLast: boolean,
+	expanded: boolean,
+	theme: Theme,
+	spinnerFrame?: number,
+): string[] {
+	const lines: string[] = [];
+	const prefix = isLast ? theme.fg("dim", theme.tree.last) : theme.fg("dim", theme.tree.branch);
+	const continuePrefix = isLast ? "   " : `${theme.fg("dim", theme.tree.vertical)}  `;
+
+	const icon = getStatusIcon(progress.status, theme, spinnerFrame);
+	const iconColor =
+		progress.status === "completed"
+			? "success"
+			: progress.status === "failed" || progress.status === "aborted"
+				? "error"
+				: "accent";
+
+	// Main status line: id: description [status] · stats · ⟨agent⟩
+	const description = progress.description?.trim();
+	const displayId = formatTaskId(progress.id);
+	const titlePart = description ? `${theme.bold(displayId)}: ${description}` : displayId;
+	let statusLine = `${prefix} ${theme.fg(iconColor, icon)} ${theme.fg("accent", titlePart)}`;
+
+	// Only show badge for non-running states (spinner already indicates running)
+	if (progress.status === "failed" || progress.status === "aborted") {
+		const statusLabel = progress.status === "failed" ? "failed" : "aborted";
+		statusLine += ` ${formatBadge(statusLabel, iconColor, theme)}`;
+	}
+
+	if (progress.status === "running") {
+		if (!description) {
+			const taskPreview = truncateToWidth(progress.assignment ?? progress.task, 40);
+			statusLine += ` ${theme.fg("muted", taskPreview)}`;
+		}
+		if (progress.toolCount > 0) {
+			statusLine += `${theme.sep.dot}${theme.fg("dim", `${progress.toolCount} tools`)}`;
+		}
+		if (progress.tokens > 0) {
+			statusLine += `${theme.sep.dot}${theme.fg("dim", `${formatNumber(progress.tokens)} tokens`)}`;
+		}
+	} else if (progress.status === "completed") {
+		if (progress.toolCount > 0) {
+			statusLine += `${theme.sep.dot}${theme.fg("dim", `${progress.toolCount} tools`)}`;
+		}
+		if (progress.tokens > 0) {
+			statusLine += `${theme.sep.dot}${theme.fg("dim", `${formatNumber(progress.tokens)} tokens`)}`;
+		}
+	}
+
+	lines.push(statusLine);
+
+	lines.push(...renderTaskSection(progress.assignment ?? progress.task, continuePrefix, expanded, theme));
+
+	// Current tool (if running) or most recent completed tool
+	if (progress.status === "running") {
+		if (progress.currentTool) {
+			let toolLine = `${continuePrefix}${theme.tree.hook} ${theme.fg("muted", progress.currentTool)}`;
+			const toolDetail = progress.lastIntent ?? progress.currentToolArgs;
+			if (toolDetail) {
+				toolLine += `: ${theme.fg("dim", truncateToWidth(replaceTabs(toolDetail), 40))}`;
+			}
+			if (progress.currentToolStartMs) {
+				const elapsed = Date.now() - progress.currentToolStartMs;
+				if (elapsed > 5000) {
+					toolLine += `${theme.sep.dot}${theme.fg("warning", formatDuration(elapsed))}`;
+				}
+			}
+			lines.push(toolLine);
+		} else if (progress.recentTools.length > 0) {
+			// Show most recent completed tool when idle between tools
+			const recent = progress.recentTools[0];
+			let toolLine = `${continuePrefix}${theme.tree.hook} ${theme.fg("dim", recent.tool)}`;
+			const toolDetail = progress.lastIntent ?? recent.args;
+			if (toolDetail) {
+				toolLine += `: ${theme.fg("dim", truncateToWidth(replaceTabs(toolDetail), 40))}`;
+			}
+			lines.push(toolLine);
+		}
+	}
+
+	// Render extracted tool data inline (e.g., review findings)
+	if (progress.extractedToolData) {
+		// For completed tasks, check for review verdict from submit_result tool
+		if (progress.status === "completed") {
+			const completeData = progress.extractedToolData.submit_result as Array<{ data: unknown }> | undefined;
+			const reportFindingData = normalizeReportFindings(progress.extractedToolData.report_finding);
+			const reviewData = completeData
+				?.map(c => c.data as SubmitReviewDetails)
+				.filter(d => d && typeof d === "object" && "overall_correctness" in d);
+			if (reviewData && reviewData.length > 0) {
+				const summary = reviewData[reviewData.length - 1];
+				const findings = reportFindingData;
+				lines.push(...renderReviewResult(summary, findings, continuePrefix, expanded, theme));
+				return lines; // Review result handles its own rendering
+			}
+		}
+
+		for (const [toolName, dataArray] of Object.entries(progress.extractedToolData)) {
+			// Handle report_finding with tree formatting
+			if (toolName === "report_finding") {
+				const findings = normalizeReportFindings(dataArray);
+				if (findings.length === 0) continue;
+				lines.push(`${continuePrefix}${formatFindingSummary(findings, theme)}`);
+				lines.push(...renderFindings(findings, continuePrefix, expanded, theme));
+				continue;
+			}
+
+			const handler = subprocessToolRegistry.getHandler(toolName);
+			if (handler?.renderInline) {
+				const displayCount = expanded ? (dataArray as unknown[]).length : 3;
+				const recentData = (dataArray as unknown[]).slice(-displayCount);
+				for (const data of recentData) {
+					const component = handler.renderInline(data, theme);
+					if (component instanceof Text) {
+						lines.push(`${continuePrefix}${component.getText()}`);
+					}
+				}
+				if ((dataArray as unknown[]).length > displayCount) {
+					lines.push(
+						`${continuePrefix}${theme.fg(
+							"dim",
+							formatMoreItems((dataArray as unknown[]).length - displayCount, "item"),
+						)}`,
+					);
+				}
+			}
+		}
+	}
+
+	// Expanded view: recent output and tools
+	if (expanded && progress.status === "running") {
+		const output = progress.recentOutput.join("\n");
+		lines.push(...renderOutputSection(output, continuePrefix, true, theme, 2, 6));
+	}
+
+	return lines;
+}
+
+/**
+ * Render review result with combined verdict + findings in tree structure.
+ */
+function renderReviewResult(
+	summary: SubmitReviewDetails,
+	findings: ReportFindingDetails[],
+	continuePrefix: string,
+	expanded: boolean,
+	theme: Theme,
+): string[] {
+	const lines: string[] = [];
+
+	// Verdict line
+	const verdictColor = summary.overall_correctness === "correct" ? "success" : "error";
+	const verdictIcon = summary.overall_correctness === "correct" ? theme.status.success : theme.status.error;
+	lines.push(
+		`${continuePrefix} Patch is ${theme.fg(verdictColor, summary.overall_correctness)} ${theme.fg(
+			verdictColor,
+			verdictIcon,
+		)} ${theme.fg("dim", `(${(summary.confidence * 100).toFixed(0)}% confidence)`)}`,
+	);
+
+	// Explanation preview (first ~80 chars when collapsed, full when expanded)
+	if (summary.explanation) {
+		if (expanded) {
+			lines.push(`${continuePrefix}${theme.fg("dim", "Summary")}`);
+			const explanationLines = summary.explanation.split("\n");
+			for (const line of explanationLines) {
+				lines.push(`${continuePrefix}  ${theme.fg("dim", replaceTabs(line))}`);
+			}
+		} else {
+			// Preview: first sentence or ~100 chars
+			const preview = truncateToWidth(`${summary.explanation.split(/[.!?]/)[0]}.`, 100);
+			lines.push(`${continuePrefix}${theme.fg("dim", preview)}`);
+		}
+	}
+
+	// Findings summary + list
+	lines.push(`${continuePrefix}${formatFindingSummary(findings, theme)}`);
+
+	if (findings.length > 0) {
+		lines.push(...renderFindings(findings, continuePrefix, expanded, theme));
+	}
+
+	return lines;
+}
+
+/**
+ * Render review findings list.
+ */
+function renderFindings(
+	findings: ReportFindingDetails[],
+	continuePrefix: string,
+	expanded: boolean,
+	theme: Theme,
+): string[] {
+	const lines: string[] = [];
+
+	// Sort by priority (lower = more severe) when collapsed to show most important first
+	const sortedFindings = expanded
+		? findings
+		: [...findings].sort((a, b) => getPriorityInfo(a.priority).ord - getPriorityInfo(b.priority).ord);
+	const displayCount = expanded ? sortedFindings.length : Math.min(3, sortedFindings.length);
+
+	for (let i = 0; i < displayCount; i++) {
+		const finding = sortedFindings[i];
+		const isLastFinding = i === displayCount - 1 && (expanded || sortedFindings.length <= 3);
+		const findingPrefix = isLastFinding ? theme.tree.last : theme.tree.branch;
+		const findingContinue = isLastFinding ? "   " : `${theme.tree.vertical}  `;
+
+		const { color } = getPriorityInfo(finding.priority);
+		const titleText = finding.title?.replace(/^\[P\d\]\s*/, "") ?? "Untitled";
+		const loc = `${path.basename(finding.file_path || "<unknown>")}:${finding.line_start}`;
+
+		lines.push(
+			`${continuePrefix}${findingPrefix} ${theme.fg(color, `[${finding.priority}]`)} ${titleText} ${theme.fg("dim", loc)}`,
+		);
+
+		// Show body when expanded
+		if (expanded && finding.body) {
+			// Wrap body text
+			const bodyLines = finding.body.split("\n");
+			for (const bodyLine of bodyLines) {
+				lines.push(`${continuePrefix}${findingContinue}${theme.fg("dim", replaceTabs(bodyLine))}`);
+			}
+		}
+	}
+
+	if (!expanded && findings.length > 3) {
+		lines.push(`${continuePrefix}${theme.fg("dim", formatMoreItems(findings.length - 3, "finding"))}`);
+	}
+
+	return lines;
+}
+
+/**
+ * Render final result for a single agent.
+ */
+function renderAgentResult(result: SingleResult, isLast: boolean, expanded: boolean, theme: Theme): string[] {
+	const lines: string[] = [];
+	const prefix = isLast ? theme.fg("dim", theme.tree.last) : theme.fg("dim", theme.tree.branch);
+	const continuePrefix = isLast ? "   " : `${theme.fg("dim", theme.tree.vertical)}  `;
+
+	const { warning: missingCompleteWarning, rest: outputWithoutWarning } = extractMissingSubmitResultWarning(
+		result.output,
+	);
+	const aborted = result.aborted ?? false;
+	const mergeFailed = !aborted && result.exitCode === 0 && !!result.error;
+	const success = !aborted && result.exitCode === 0 && !result.error;
+	const needsWarning = Boolean(missingCompleteWarning) && success;
+	const icon = aborted
+		? theme.status.aborted
+		: needsWarning
+			? theme.status.warning
+			: success
+				? theme.status.success
+				: theme.status.error;
+	const iconColor = needsWarning ? "warning" : success ? "success" : mergeFailed ? "warning" : "error";
+	const statusText = aborted
+		? "aborted"
+		: needsWarning
+			? "warning"
+			: success
+				? "done"
+				: mergeFailed
+					? "merge failed"
+					: "failed";
+
+	// Main status line: id: description [status] · stats · ⟨agent⟩
+	const description = result.description?.trim();
+	const displayId = formatTaskId(result.id);
+	const titlePart = description ? `${theme.bold(displayId)}: ${description}` : displayId;
+	let statusLine = `${prefix} ${theme.fg(iconColor, icon)} ${theme.fg("accent", titlePart)} ${formatBadge(
+		statusText,
+		iconColor,
+		theme,
+	)}`;
+	if (result.tokens > 0) {
+		statusLine += `${theme.sep.dot}${theme.fg("dim", `${formatNumber(result.tokens)} tokens`)}`;
+	}
+	statusLine += `${theme.sep.dot}${theme.fg("dim", formatDuration(result.durationMs))}`;
+
+	if (result.truncated) {
+		statusLine += ` ${theme.fg("warning", "[truncated]")}`;
+	}
+
+	lines.push(statusLine);
+
+	lines.push(...renderTaskSection(result.assignment ?? result.task, continuePrefix, expanded, theme));
+
+	if (aborted && result.abortReason) {
+		lines.push(
+			`${continuePrefix}${theme.fg("error", theme.status.aborted)} ${theme.fg("dim", truncateToWidth(replaceTabs(result.abortReason), 80))}`,
+		);
+	}
+	// Check for review result (submit_result with review schema + report_finding)
+	const completeData = result.extractedToolData?.submit_result as Array<{ data: unknown }> | undefined;
+	const reportFindingData = normalizeReportFindings(result.extractedToolData?.report_finding);
+
+	// Extract review verdict from submit_result tool's data field if it matches SubmitReviewDetails
+	const reviewData = completeData
+		?.map(c => c.data as SubmitReviewDetails)
+		.filter(d => d && typeof d === "object" && "overall_correctness" in d);
+	const submitReviewData = reviewData && reviewData.length > 0 ? reviewData : undefined;
+
+	if (submitReviewData && submitReviewData.length > 0) {
+		// Use combined review renderer
+		const summary = submitReviewData[submitReviewData.length - 1];
+		const findings = reportFindingData;
+		lines.push(...renderReviewResult(summary, findings, continuePrefix, expanded, theme));
+		return lines;
+	}
+	if (reportFindingData.length > 0) {
+		const hasCompleteData = completeData && completeData.length > 0;
+		const message = hasCompleteData
+			? "Review verdict missing expected fields"
+			: "Review incomplete (submit_result not called)";
+		lines.push(`${continuePrefix}${theme.fg("warning", theme.status.warning)} ${theme.fg("dim", message)}`);
+		lines.push(`${continuePrefix}${formatFindingSummary(reportFindingData, theme)}`);
+		lines.push(...renderFindings(reportFindingData, continuePrefix, expanded, theme));
+		return lines;
+	}
+
+	// Check for extracted tool data with custom renderers (skip review tools)
+	let hasCustomRendering = false;
+	const deferredToolLines: string[] = [];
+	if (result.extractedToolData) {
+		for (const [toolName, dataArray] of Object.entries(result.extractedToolData)) {
+			// Skip review tools - handled above
+			if (toolName === "submit_result" || toolName === "report_finding") continue;
+
+			const handler = subprocessToolRegistry.getHandler(toolName);
+			if (handler?.renderFinal && (dataArray as unknown[]).length > 0) {
+				const isTaskTool = toolName === "task";
+				const component = handler.renderFinal(dataArray as unknown[], theme, expanded);
+				const target = isTaskTool ? deferredToolLines : lines;
+				if (!isTaskTool) {
+					hasCustomRendering = true;
+					target.push(`${continuePrefix}${theme.fg("dim", `Tool: ${toolName}`)}`);
+				}
+				if (component instanceof Text) {
+					// Prefix each line with continuePrefix
+					const text = component.getText();
+					for (const line of text.split("\n")) {
+						target.push(`${continuePrefix}${line}`);
+					}
+				} else if (component instanceof Container) {
+					// For containers, render each child
+					for (const child of (component as Container).children) {
+						if (child instanceof Text) {
+							target.push(`${continuePrefix}${child.getText()}`);
+						}
+					}
+				}
+			}
+		}
+	}
+
+	if (hasCustomRendering && missingCompleteWarning) {
+		lines.push(
+			`${continuePrefix}${theme.fg("warning", theme.status.warning)} ${theme.fg(
+				"dim",
+				truncateToWidth(missingCompleteWarning, 80),
+			)}`,
+		);
+	}
+
+	// Fallback to output preview if no custom rendering
+	if (!hasCustomRendering) {
+		lines.push(
+			...renderOutputSection(outputWithoutWarning, continuePrefix, expanded, theme, 3, 12, missingCompleteWarning),
+		);
+	}
+
+	if (deferredToolLines.length > 0) {
+		lines.push(...deferredToolLines);
+	}
+
+	if (result.patchPath && !aborted && result.exitCode === 0) {
+		lines.push(`${continuePrefix}${theme.fg("dim", `Patch: ${result.patchPath}`)}`);
+	} else if (result.branchName && !aborted && result.exitCode === 0) {
+		lines.push(`${continuePrefix}${theme.fg("dim", `Branch: ${result.branchName}`)}`);
+	}
+
+	// Error message
+	if (result.error && (!success || mergeFailed) && (!aborted || result.error !== result.abortReason)) {
+		lines.push(
+			`${continuePrefix}${theme.fg(mergeFailed ? "warning" : "error", truncateToWidth(replaceTabs(result.error), 70))}`,
+		);
+	}
+
+	return lines;
+}
+
+/**
+ * Render the tool result.
+ */
+export function renderResult(
+	result: { content: Array<{ type: string; text?: string }>; details?: TaskToolDetails },
+	options: RenderResultOptions,
+	theme: Theme,
+): Component {
+	const fallbackText = result.content.find(c => c.type === "text")?.text ?? "";
+	const details = result.details;
+
+	if (!details) {
+		const text = result.content.find(c => c.type === "text")?.text || "";
+		return new Text(theme.fg("dim", truncateToWidth(text, 100)), 0, 0);
+	}
+
+	let cached: RenderCache | undefined;
+
+	return {
+		render(width) {
+			const { expanded, isPartial, spinnerFrame } = options;
+			const key = new Hasher()
+				.bool(expanded)
+				.bool(isPartial)
+				.u32(spinnerFrame ?? 0)
+				.u32(width)
+				.digest();
+			if (cached?.key === key) return cached.lines;
+
+			const lines: string[] = [];
+
+			const shouldRenderProgress =
+				Boolean(details.progress && details.progress.length > 0) && (isPartial || details.results.length === 0);
+			if (shouldRenderProgress && details.progress) {
+				details.progress.forEach((progress, i) => {
+					const isLast = i === details.progress!.length - 1;
+					lines.push(...renderAgentProgress(progress, isLast, expanded, theme, spinnerFrame));
+				});
+			} else if (details.results && details.results.length > 0) {
+				details.results.forEach((res, i) => {
+					const isLast = i === details.results.length - 1;
+					lines.push(...renderAgentResult(res, isLast, expanded, theme));
+				});
+
+				const abortedCount = details.results.filter(r => r.aborted).length;
+				const mergeFailedCount = details.results.filter(r => !r.aborted && r.exitCode === 0 && r.error).length;
+				const successCount = details.results.filter(r => !r.aborted && r.exitCode === 0 && !r.error).length;
+				const failCount = details.results.length - successCount - mergeFailedCount - abortedCount;
+				let summary = `${theme.fg("dim", "Total:")} `;
+				if (abortedCount > 0) {
+					summary += theme.fg("error", `${abortedCount} aborted`);
+					if (successCount > 0 || mergeFailedCount > 0 || failCount > 0) summary += theme.sep.dot;
+				}
+				if (successCount > 0) {
+					summary += theme.fg("success", `${successCount} succeeded`);
+					if (mergeFailedCount > 0 || failCount > 0) summary += theme.sep.dot;
+				}
+				if (mergeFailedCount > 0) {
+					summary += theme.fg("warning", `${mergeFailedCount} merge failed`);
+					if (failCount > 0) summary += theme.sep.dot;
+				}
+				if (failCount > 0) {
+					summary += theme.fg("error", `${failCount} failed`);
+				}
+				summary += `${theme.sep.dot}${theme.fg("dim", formatDuration(details.totalDurationMs))}`;
+				lines.push(summary);
+			}
+
+			if (lines.length === 0) {
+				const text = fallbackText.trim() ? fallbackText : "No results";
+				const result = [theme.fg("dim", truncateToWidth(text, width))];
+				cached = { key, lines: result };
+				return result;
+			}
+
+			if (fallbackText.trim()) {
+				const summaryLines = fallbackText.split("\n");
+				const markerIndex = summaryLines.findIndex(
+					line => line.includes("<system-notification>") || line.startsWith("Applied patches:"),
+				);
+				if (markerIndex >= 0) {
+					const extra = summaryLines.slice(markerIndex);
+					for (const line of extra) {
+						if (!line.trim()) continue;
+						lines.push(theme.fg("dim", line));
+					}
+				}
+			}
+
+			const indented = lines.map(line =>
+				line.length > 0 ? truncateToWidth(`   ${line}`, width, Ellipsis.Omit) : "",
+			);
+			cached = { key, lines: indented };
+			return indented;
+		},
+		invalidate() {
+			cached = undefined;
+		},
+	};
+}
+
+function isTaskToolDetails(value: unknown): value is TaskToolDetails {
+	return (
+		Boolean(value) &&
+		typeof value === "object" &&
+		"results" in (value as TaskToolDetails) &&
+		Array.isArray((value as TaskToolDetails).results)
+	);
+}
+
+function renderNestedTaskResults(detailsList: TaskToolDetails[], expanded: boolean, theme: Theme): string[] {
+	const lines: string[] = [];
+	for (const details of detailsList) {
+		if (!details.results || details.results.length === 0) continue;
+		details.results.forEach((result, index) => {
+			const isLast = index === details.results.length - 1;
+			lines.push(...renderAgentResult(result, isLast, expanded, theme));
+		});
+	}
+	return lines;
+}
+
+subprocessToolRegistry.register<TaskToolDetails>("task", {
+	extractData: event => {
+		const details = event.result?.details;
+		return isTaskToolDetails(details) ? details : undefined;
+	},
+	renderFinal: (allData, theme, expanded) => {
+		const lines = renderNestedTaskResults(allData, expanded, theme);
+		return new Text(lines.join("\n"), 0, 0);
+	},
+});
+
+export const taskToolRenderer = {
+	renderCall,
+	renderResult,
+};

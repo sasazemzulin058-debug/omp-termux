@@ -10,7 +10,7 @@ let workerHostMain: string | null = null;
 
 /** Called by CLI entrypoints whose main module dispatches worker argv selectors. */
 export function declareWorkerHostEntry(): void {
-	workerHostMain = Bun.main;
+	workerHostMain = typeof Bun !== "undefined" ? Bun.main : (process.argv[1] ?? null);
 }
 
 /** Main-module path of the self-dispatching CLI host, or null outside it. */

@@ -1,4 +1,4 @@
-#!/bin/sh
+#!/data/data/com.termux/files/usr/bin/sh
 set -e
 
 # =========================================================================
@@ -85,21 +85,20 @@ npm install --ignore-scripts --no-fund --no-audit
 LAUNCHER="${BIN_DIR}/omp"
 echo "🔧 Setting up native launcher at ${LAUNCHER}..."
 
+GLIBC_RUNNER="$(command -v glibc-runner || command -v grun)"
+
 cat << 'EOF' > "$LAUNCHER"
-#!/bin/sh
-# Native launcher for omp-termux
+#!/data/data/com.termux/files/usr/bin/sh
+# Launcher script for omp-termux
 OMP_DIR="${OMP_DIR:-$HOME/omp-termux}"
+GLIBC_RUNNER="$(command -v glibc-runner || command -v grun)"
 
 if [ ! -d "$OMP_DIR" ]; then
     echo "Error: omp-termux directory not found at $OMP_DIR"
     exit 1
 fi
 
-if command -v node >/dev/null 2>&1; then
-    exec node --experimental-strip-types "$OMP_DIR/packages/coding-agent/src/cli.ts" "$@"
-else
-    exec bun "$OMP_DIR/packages/coding-agent/src/cli.ts" "$@"
-fi
+exec "$GLIBC_RUNNER" -s "bun --cwd=$OMP_DIR packages/coding-agent/src/cli.ts $@"
 EOF
 
 chmod +x "$LAUNCHER"

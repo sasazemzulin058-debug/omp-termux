@@ -28,7 +28,7 @@ import { declareWorkerHostEntry, installWorkerInbox } from "@oh-my-pi/pi-utils/w
 import { installProfileAlias, resolveProfileAliasCommandFromProcess } from "./cli/profile-alias";
 import { extractProfileFlags } from "./cli/profile-bootstrap";
 
-if (Bun.semver.order(Bun.version, MIN_BUN_VERSION) < 0) {
+if (typeof Bun !== "undefined" && Bun.semver.order(Bun.version, MIN_BUN_VERSION) < 0) {
 	process.stderr.write(
 		`error: Bun runtime must be >= ${MIN_BUN_VERSION} (found v${Bun.version}). Please upgrade: bun upgrade\n`,
 	);
@@ -318,9 +318,10 @@ export async function runCli(argv: string[]): Promise<void> {
 // launch the agent as a side effect. Worker threads re-enter this module as
 // their entry with `import.meta.main === false`, so the worker-host dispatch
 // is admitted via `!Bun.isMainThread`.
-if (import.meta.main || !Bun.isMainThread) {
+if (import.meta.main || (typeof Bun !== "undefined" && !Bun.isMainThread)) {
 	runCli(process.argv.slice(2)).catch((err: unknown) => {
-		process.stderr.write(`${Bun.inspect(err, { colors: process.stderr.isTTY === true })}\n`);
+		const formatted = typeof Bun !== "undefined" ? Bun.inspect(err, { colors: process.stderr.isTTY === true }) : (err instanceof Error ? err.stack || err.message : String(err));
+		process.stderr.write(`${formatted}\n`);
 		process.exit(1);
 	});
 }

@@ -1,6 +1,10 @@
-import { YAML } from "bun";
+import yaml from "js-yaml";
 import { truncate } from "./format";
 import * as logger from "./logger";
+
+const YAML = typeof Bun !== "undefined" && (Bun as unknown as { YAML?: { parse: (s: string) => unknown } }).YAML 
+	? (Bun as unknown as { YAML: { parse: (s: string) => unknown } }).YAML 
+	: { parse: (src: string) => yaml.load(src) };
 
 function stripHtmlComments(content: string): string {
 	return content.replace(/<!--[\s\S]*?-->/g, "");
