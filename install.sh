@@ -23,14 +23,12 @@ bun -e 'if (!Bun.version) process.exit(1)' || {
 
 mkdir -p "$BIN_DIR" "$PREFIX_DIR/lib"
 tmp="$PREFIX_DIR/tmp/omp-termux.$$"
-trap 'rm -rf "$tmp"' EXIT INT TERM
+trap 'rm -rf "$tmp" "$LIB_DIR.new"' EXIT INT TERM
 mkdir -p "$tmp" "$LIB_DIR.new"
-curl -fL --retry 3 "$BASE/omp-termux.tar.gz" -o "$tmp/app.tar.gz"
-curl -fL --retry 3 "$BASE/omp-termux.tar.gz.sha256" -o "$tmp/app.sha256"
-(cd "$tmp" && sha256sum -c app.sha256)
-rm -rf "$LIB_DIR.new"
-mkdir -p "$LIB_DIR.new"
-tar -xzf "$tmp/app.tar.gz" -C "$LIB_DIR.new"
+curl -fL --retry 3 "$BASE/omp-termux.tar.gz" -o "$tmp/omp-termux.tar.gz"
+curl -fL --retry 3 "$BASE/omp-termux.tar.gz.sha256" -o "$tmp/omp-termux.tar.gz.sha256"
+(cd "$tmp" && sha256sum -c omp-termux.tar.gz.sha256)
+tar -xzf "$tmp/omp-termux.tar.gz" -C "$LIB_DIR.new"
 rm -rf "$LIB_DIR"
 mv "$LIB_DIR.new" "$LIB_DIR"
 
