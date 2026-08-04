@@ -7,7 +7,6 @@ on:
 
 permissions:
   contents: write
-  pull-requests: write
 
 jobs:
   sync:
@@ -16,25 +15,43 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-      - name: Fetch upstream
-        run: git fetch https://github.com/can1357/oh-my-pi.git main --tags
-      - name: Rebase overlay and validate patches
+      - name: Import upstream tree
+        shell: bash
         run: |
           set -euo pipefail
-          git merge --no-commit --no-ff FETCH_HEAD || {
-            git merge --abort || true
-            echo 'Upstream merge conflict. Open manual PR.'
-            exit 1
-          }
-          bash android/scripts/apply-patches.sh
-          git diff --exit-code -- crates packages
-          git diff --check
-      - name: Build release assets
-        run: echo 'Validated. Android release workflow builds assets on tag.'
-      - name: Push sync commit
+          git fetch --no-tags https://github.com/can1357/oh-my-pi.git main
+          tmp=$(mktemp -d)
+          trap 'rm -rf "$tmp"' EXIT
+          git archive FETCH_HEAD | tar -x -C "$tmp"
+          rsync -a --delete \
+            --exclude='.git/' \
+            --exclude='.github/' \
+            --exclude='android/' \
+            --exclude='quickstart.sh' \
+            --exclude='install.sh' \
+            "$tmp/" ./
+      - name: Apply and verify Termux patches
+        shell: bash
         run: |
+          set -euo pipefail
+          bash android/scripts/apply-patches.sh
+          git diff --check
+          for patch in android/patches/[0-9][0-9]-*.patch; do
+            git apply --reverse --check "$patch"
+          done
+      - name: Verify upstream build inputs
+        run: |
+          test -f package.json
+          test -f bun.lock
+          test -f crates/pi-natives/Cargo.toml
+          test -f packages/natives/native/loader-state.js
+      - name: Push sync commit
+        shell: bash
+        run: |
+          set -euo pipefail
           git config user.name github-actions[bot]
           git config user.email \
             41898282+github-actions[bot]@users.noreply.github.com
-          git commit -am 'chore: sync upstream' || exit 0
+          git add -A
+          git commit -m 'chore: sync upstream' || exit 0
           git push origin HEAD:main
