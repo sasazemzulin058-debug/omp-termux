@@ -13,7 +13,7 @@ BIN_DIR="${PREFIX_DIR}/bin"
 LIB_DIR="${PREFIX_DIR}/lib/omp"
 RELEASE_TAG="v0.0.1"
 
-BUNDLE_URL="https://github.com/sasazemzulin058-debug/omp-termux/releases/download/${RELEASE_TAG}/omp-standalone.js"
+BUNDLE_URL="https://github.com/sasazemzulin058-debug/omp-termux/releases/download/${RELEASE_TAG}/cli.js"
 NATIVE_URL="https://github.com/sasazemzulin058-debug/omp-termux/releases/download/${RELEASE_TAG}/pi_natives.android-arm64.node"
 
 # 1. Ensure required packages in Termux
