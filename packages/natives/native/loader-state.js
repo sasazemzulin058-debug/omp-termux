@@ -647,7 +647,8 @@ function buildHelpMessage(ctx) {
  * helpers from this file doesn't trigger AVX2 detection or filesystem probes.
  */
 function initLoaderContext() {
-	const platformTag = `${process.platform}-${process.arch}`;
+	const runtimePlatform = process.env.OMP_PLATFORM || process.platform;
+	const platformTag = `${runtimePlatform}-${process.arch}`;
 	const packageVersion = packageJson.version;
 	const currentDir = import.meta.dir || import.meta.dirname || path.dirname(new URL(import.meta.url).pathname);
 	const nativeDir = path.join(currentDir, "..", "native");
