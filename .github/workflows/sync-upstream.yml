@@ -1,40 +1,40 @@
-name: Sync Upstream & Release
+name: Sync upstream
 
 on:
   schedule:
-    - cron: '0 0 * * *' # Auto-sync daily at 00:00 UTC
-  workflow_dispatch:     # Allow manual trigger via GitHub UI/CLI
+    - cron: '17 */6 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
 
 jobs:
   sync:
-    name: Sync Upstream & Trigger Build
     runs-on: ubuntu-24.04
-    permissions:
-      contents: write
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-          token: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Configure Git author
+      - name: Fetch upstream
+        run: git fetch https://github.com/can1357/oh-my-pi.git main --tags
+      - name: Rebase overlay and validate patches
         run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-
-      - name: Add upstream remote
-        run: |
-          git remote add upstream https://github.com/can1357/oh-my-pi.git
-          git fetch upstream main --tags
-
-      - name: Merge upstream main into main
-        run: |
-          git merge upstream/main -m "chore: auto-sync with upstream can1357/oh-my-pi" || {
-            echo "::error::Merge conflict detected with upstream. Manual resolution required."
+          set -euo pipefail
+          git merge --no-commit --no-ff FETCH_HEAD || {
+            git merge --abort || true
+            echo 'Upstream merge conflict. Open manual PR.'
             exit 1
           }
-
-      - name: Push updated main branch
+          bash android/scripts/apply-patches.sh
+          git diff --exit-code -- crates packages
+          git diff --check
+      - name: Build release assets
+        run: echo 'Validated. Android release workflow builds assets on tag.'
+      - name: Push sync commit
         run: |
-          git push origin main
+          git config user.name github-actions[bot]
+          git config user.email \
+            41898282+github-actions[bot]@users.noreply.github.com
+          git commit -am 'chore: sync upstream' || exit 0
+          git push origin HEAD:main

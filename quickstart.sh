@@ -1,15 +1,8 @@
 #!/bin/sh
-set -e
+set -eu
 
-# quickstart.sh - install standalone omp and verify
-SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)"
-
+SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)
 if [ -f "$SCRIPT_DIR/install.sh" ]; then
-    sh "$SCRIPT_DIR/install.sh"
-else
-    curl -fsSL https://raw.githubusercontent.com/sasazemzulin058-debug/omp-termux/main/install.sh | sh
+    exec sh "$SCRIPT_DIR/install.sh" "$@"
 fi
-
-echo ""
-echo "🔍 Verifying omp..."
-omp --version
+exec sh -c 'curl -fsSL https://raw.githubusercontent.com/sasazemzulin058-debug/omp-termux/main/install.sh | sh'

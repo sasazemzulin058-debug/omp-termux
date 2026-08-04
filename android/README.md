@@ -16,31 +16,31 @@ android/
 
 ## Quick start (end user)
 
-On a Termux session (Android 14+, aarch64):
+On any aarch64 Termux session:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/sasazemzulin058-debug/omp-termux/main/android/scripts/install-termux.sh | bash
+curl -fsSL https://raw.githubusercontent.com/sasazemzulin058-debug/omp-termux/main/install.sh | sh
 omp --version
 ```
 
-This installs `rust`, `clang`, `git`, and `bun`, clones the repo, applies the
-patches, builds the native addon on-device (~10 min), and installs an `omp`
-launcher into `$PREFIX/bin`.
+GitHub Actions builds and publishes one `omp-termux.tar.gz` app archive plus
+checksum. Device only installs packaged Termux `bun`; no `npm`, `bun install`,
+Rust, clang, source clone, proot, or `glibc-runner`.
 
 ## Build paths
 
 | Path | Where | Script |
-|------|-------|--------|
-| On-device | Termux (host = aarch64-linux-android) | `android/scripts/build-termux.sh` |
-| Cross-compile | CI / Linux x86_64 + zig | `.github/workflows/android-build.yml` |
-| Prebuilt | GitHub Release on `v*` tag | `.github/workflows/android-release.yml` |
+| ------ | ------- | -------- |
+| CI build | GitHub Actions + Android NDK | `.github/workflows/android-release.yml` |
+| Installer | Termux aarch64, packaged Bun runtime | `install.sh` |
+| Source fallback | Termux, slow and optional | `android/scripts/build-termux.sh` |
 
 ## The patches
 
 Six patches, each a single concern, applied in numeric order:
 
 | Patch | File | Why |
-|-------|------|-----|
+| ------- | ------ | ----- |
 | 01 | `crates/pi-natives/Cargo.toml` | Gate `arboard` to non-Android (no bionic clipboard backend) |
 | 02 | `crates/pi-natives/src/lib.rs` | Drop nightly-only `feature(alloc_error_hook)` |
 | 03 | `crates/pi-natives/src/crash_handler.rs` | Disable the alloc-error hook; keep tests via `#[allow(dead_code)]` |

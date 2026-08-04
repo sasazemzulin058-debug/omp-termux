@@ -66,11 +66,42 @@ jobs:
           CARGO_BUILD_JOBS: 2
         run: bash android/scripts/build-android-ci.sh
 
+      - name: Build Termux bundle
+        shell: bash
+        run: |
+          set -euo pipefail
+          bun --cwd=packages/stats scripts/generate-client-bundle.ts --generate
+          bun --cwd=packages/coding-agent scripts/generate-docs-index.ts --generate
+          bun --cwd=packages/coding-agent scripts/embed-mupdf-wasm.ts --generate
+          bun build --target=bun --minify --keep-names \
+            --external @oh-my-pi/pi-natives \
+            --define 'process.env.PI_BUNDLED="true"' \
+            packages/coding-agent/src/cli.ts --outfile termux-cli.js
+          mkdir -p termux-bundle/node_modules/@oh-my-pi/pi-natives/native
+          cp termux-cli.js termux-bundle/cli.js
+          cp packages/natives/package.json termux-bundle/node_modules/@oh-my-pi/pi-natives/
+          cp packages/natives/native/index.js packages/natives/native/loader-state.js \
+            packages/natives/native/embedded-addon.js \
+            termux-bundle/node_modules/@oh-my-pi/pi-natives/native/
+          cp packages/natives/native/pi_natives.android-arm64.node \
+            termux-bundle/node_modules/@oh-my-pi/pi-natives/native/
+          # All JS dependencies are bundled. Only Android native addon stays external.
+          tar -czf omp-termux.tar.gz -C termux-bundle .
+          sha256sum omp-termux.tar.gz > omp-termux.tar.gz.sha256
+
+      - name: Test Termux bundle shape
+        run: |
+          test -s omp-termux.tar.gz
+          tar -tzf omp-termux.tar.gz | grep -Fx './cli.js'
+          tar -tzf omp-termux.tar.gz | grep -F 'pi_natives.android-arm64.node'
+
       - name: Attach to release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ github.event.inputs.tag || github.ref_name }}
           files: |
+            omp-termux.tar.gz
+            omp-termux.tar.gz.sha256
             packages/natives/native/pi_natives.android-arm64.node
             packages/natives/native/pi_natives.android-arm64.node.sha256
           fail_on_unmatched_files: true
