@@ -1,0 +1,40 @@
+name: Sync Upstream & Release
+
+on:
+  schedule:
+    - cron: '0 0 * * *' # Auto-sync daily at 00:00 UTC
+  workflow_dispatch:     # Allow manual trigger via GitHub UI/CLI
+
+jobs:
+  sync:
+    name: Sync Upstream & Trigger Build
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Configure Git author
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Add upstream remote
+        run: |
+          git remote add upstream https://github.com/can1357/oh-my-pi.git
+          git fetch upstream main --tags
+
+      - name: Merge upstream main into main
+        run: |
+          git merge upstream/main -m "chore: auto-sync with upstream can1357/oh-my-pi" || {
+            echo "::error::Merge conflict detected with upstream. Manual resolution required."
+            exit 1
+          }
+
+      - name: Push updated main branch
+        run: |
+          git push origin main
