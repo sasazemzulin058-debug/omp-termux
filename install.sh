@@ -2,103 +2,54 @@
 set -e
 
 # =========================================================================
-# omp-termux Native 1-Command Installer for Termux (Android aarch64)
+# omp-termux 1-Command Standalone Installer for Termux (Android aarch64)
 # Repository: sasazemzulin058-debug/omp-termux
 # =========================================================================
 
-echo "🚀 Installing omp-termux (Oh My Pi Native Termux Port)..."
+echo "🚀 Installing omp-termux (Standalone Single Bundle)..."
 
 PREFIX_DIR="${PREFIX:-/data/data/com.termux/files/usr}"
 BIN_DIR="${PREFIX_DIR}/bin"
-INSTALL_DIR="${OMP_INSTALL_DIR:-$PREFIX_DIR/lib/omp-termux}"
-REPO_URL="https://github.com/sasazemzulin058-debug/omp-termux.git"
+LIB_DIR="${PREFIX_DIR}/lib/omp"
 RELEASE_TAG="v0.0.1"
+
+BUNDLE_URL="https://github.com/sasazemzulin058-debug/omp-termux/releases/download/${RELEASE_TAG}/omp-standalone.js"
 NATIVE_URL="https://github.com/sasazemzulin058-debug/omp-termux/releases/download/${RELEASE_TAG}/pi_natives.android-arm64.node"
 
 # 1. Ensure required packages in Termux
-echo "🔍 Checking dependencies (nodejs, git, curl)..."
-for pkg in node git curl; do
+for pkg in curl; do
     if ! command -v "$pkg" >/dev/null 2>&1; then
         echo "Installing missing package: $pkg..."
         pkg install -y "$pkg"
     fi
 done
 
-# 2. Clone or update repository
-if [ ! -d "$INSTALL_DIR" ]; then
-    echo "📦 Cloning repository to $INSTALL_DIR..."
-    git clone "$REPO_URL" "$INSTALL_DIR"
-else
-    echo "🔄 Repository already exists at $INSTALL_DIR."
-fi
+# 2. Create system directories
+mkdir -p "$BIN_DIR" "$LIB_DIR/packages/natives/native"
 
-cd "$INSTALL_DIR"
+BUNDLE_FILE="$LIB_DIR/omp-standalone.js"
+NATIVE_FILE="$LIB_DIR/packages/natives/native/pi_natives.android-arm64.node"
 
-# 3. Download prebuilt Android arm64 native bionic addon if missing/incomplete
-NATIVE_FILE="packages/natives/native/pi_natives.android-arm64.node"
-mkdir -p packages/natives/native
+# 3. Download standalone JS bundle (24 MB)
+echo "📥 Downloading standalone omp JavaScript bundle..."
+curl -fsSL -L "$BUNDLE_URL" -o "$BUNDLE_FILE.tmp"
+mv "$BUNDLE_FILE.tmp" "$BUNDLE_FILE"
 
+# 4. Download Android arm64 native addon (113 MB) if missing/incomplete
 if [ ! -f "$NATIVE_FILE" ] || [ $(wc -c < "$NATIVE_FILE") -lt 100000000 ]; then
-    echo "📥 Downloading prebuilt Android arm64 native addon (pi_natives.android-arm64.node)..."
+    echo "📥 Downloading Android arm64 native addon..."
     curl -fsSL -L "$NATIVE_URL" -o "$NATIVE_FILE.tmp"
     mv "$NATIVE_FILE.tmp" "$NATIVE_FILE"
 fi
 
-# 4. Expand catalog / workspace dependencies for npm
-echo "⚙️ Configuring npm workspace dependencies..."
-node -e '
-const fs = require("fs");
-const path = require("path");
-const rootPkgPath = path.resolve("package.json");
-const rootPkg = JSON.parse(fs.readFileSync(rootPkgPath, "utf8"));
-const catalog = rootPkg.workspaces?.catalog || rootPkg.catalog || {};
-
-function processFile(filePath) {
-  if (!fs.existsSync(filePath)) return;
-  const pkg = JSON.parse(fs.readFileSync(filePath, "utf8"));
-  let changed = false;
-  for (const depType of ["dependencies", "devDependencies", "optionalDependencies", "peerDependencies"]) {
-    if (!pkg[depType]) continue;
-    for (const [name, ver] of Object.entries(pkg[depType])) {
-      if (ver === "catalog:") {
-        if (catalog[name]) { pkg[depType][name] = catalog[name]; changed = true; }
-      } else if (typeof ver === "string" && ver.startsWith("workspace:")) {
-        pkg[depType][name] = "*"; changed = true;
-      }
-    }
-  }
-  if (changed) fs.writeFileSync(filePath, JSON.stringify(pkg, null, 2) + "\n");
-}
-
-processFile(rootPkgPath);
-const packagesDir = path.resolve("packages");
-if (fs.existsSync(packagesDir)) {
-  fs.readdirSync(packagesDir).forEach(dir => processFile(path.join(packagesDir, dir, "package.json")));
-}
-'
-
-# 5. Run npm install (bionic native)
-echo "📦 Installing Node modules via npm..."
-npm install --ignore-scripts --no-fund --no-audit
-
-# 6. Install global binary executable at $PREFIX/bin/omp
+# 5. Create launcher at $PREFIX/bin/omp
 LAUNCHER="${BIN_DIR}/omp"
-echo "🔧 Setting up native launcher at ${LAUNCHER}..."
+echo "🔧 Setting up launcher at ${LAUNCHER}..."
 
-GLIBC_RUNNER="$(command -v glibc-runner || command -v grun)"
-
-cat << 'EOF' > "$LAUNCHER"
-#!/data/data/com.termux/files/usr/bin/sh
-# Launcher script for omp-termux
-OMP_DIR="${OMP_DIR:-/data/data/com.termux/files/usr/lib/omp-termux}"
-GLIBC_RUNNER="$(command -v glibc-runner || command -v grun)"
-
-if [ ! -d "$OMP_DIR" ]; then
-    echo "Error: omp-termux directory not found at $OMP_DIR"
-    exit 1
-fi
-
-exec "$GLIBC_RUNNER" -s "bun --cwd=$OMP_DIR packages/coding-agent/src/cli.ts $@"
+cat << EOF > "$LAUNCHER"
+#!/bin/sh
+GLIBC_RUNNER="\$(command -v glibc-runner || command -v grun)"
+exec "\$GLIBC_RUNNER" -s "bun --cwd=$LIB_DIR $BUNDLE_FILE \$@"
 EOF
 
 chmod +x "$LAUNCHER"

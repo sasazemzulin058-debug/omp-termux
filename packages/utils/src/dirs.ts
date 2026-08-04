@@ -14,7 +14,8 @@
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { engines, version } from "../package.json" with { type: "json" };
+import pkg from "../package.json" with { type: "json" };
+const { engines, version } = pkg;
 
 /** App name (e.g. "omp") */
 export const APP_NAME: string = "omp";
