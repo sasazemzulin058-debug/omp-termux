@@ -1,8 +1,8 @@
 diff --git a/crates/pi-natives/Cargo.toml b/crates/pi-natives/Cargo.toml
-index df713c7..00c7140 100644
+index a0b56e9..62b1efd 100644
 --- a/crates/pi-natives/Cargo.toml
 +++ b/crates/pi-natives/Cargo.toml
-@@ -14,7 +14,6 @@ workspace = true
+@@ -23,7 +23,6 @@ wayland-pipewire = ["dep:pipewire"]
  
  [dependencies]
  anyhow.workspace = true
@@ -10,13 +10,13 @@ index df713c7..00c7140 100644
  ast-grep-core.workspace = true
  base64.workspace = true
  clap.workspace = true
-@@ -59,6 +58,9 @@ libc.workspace = true
- [target.'cfg(windows)'.dependencies]
+@@ -96,6 +95,9 @@ clipboard-win.workspace = true
+ uiautomation = "=0.25.0"
  winreg.workspace = true
  
 +[target.'cfg(not(target_os = "android"))'.dependencies]
 +arboard.workspace = true
 +
- [build-dependencies]
- napi-build.workspace = true
- serde.workspace = true
+ [dev-dependencies]
+ xkeysym = "=0.2.1"
+ 
