@@ -48,7 +48,7 @@ jobs:
         run: bash android/scripts/apply-patches.sh
 
       - name: Install JS dependencies
-        run: bun install --frozen-lockfile --minimum-release-age 0
+        run: bun install --minimum-release-age 0
 
       # bun's hoisting does not always surface @napi-rs/cli as a top-level
       # .bin. Add the explicit dep in a scratch workspace to guarantee the bin
