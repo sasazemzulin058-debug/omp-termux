@@ -649,7 +649,8 @@ function buildHelpMessage(ctx) {
 function initLoaderContext() {
 	const platformTag = `${process.platform}-${process.arch}`;
 	const packageVersion = packageJson.version;
-	const nativeDir = path.join(import.meta.dir, "..", "native");
+	const currentDir = import.meta.dir || import.meta.dirname || path.dirname(new URL(import.meta.url).pathname);
+	const nativeDir = path.join(currentDir, "..", "native");
 	const execDir = path.dirname(process.execPath);
 	const nativesDir = getNativesDir();
 	const versionedDir = path.join(nativesDir, packageVersion);
