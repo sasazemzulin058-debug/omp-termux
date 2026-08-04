@@ -1,4 +1,6 @@
 # Dependencies
+.bun-cache/
+tmp/
 node_modules/
 .npm/
 
