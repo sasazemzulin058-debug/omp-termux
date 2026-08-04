@@ -34,7 +34,7 @@ mv "$LIB_DIR.new" "$LIB_DIR"
 
 cat > "$BIN_DIR/omp" <<EOF
 #!/bin/sh
-exec "$PREFIX_DIR/bin/bun" "$LIB_DIR/cli.js" "\$@"
+exec env OMP_PLATFORM=android "$PREFIX_DIR/bin/bun" "$LIB_DIR/cli.js" "\$@"
 EOF
 chmod 755 "$BIN_DIR/omp"
 "$BIN_DIR/omp" --version
