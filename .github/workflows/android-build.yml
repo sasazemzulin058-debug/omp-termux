@@ -30,6 +30,7 @@ jobs:
   build:
     name: Cross-compile android-arm64 addon
     runs-on: ubuntu-24.04
+    timeout-minutes: 120
     steps:
       - uses: actions/checkout@v4
 
@@ -43,13 +44,21 @@ jobs:
         with:
           bun-version: "1.3.14"
 
-      - name: Install Rust target for the repo-pinned toolchain
-        # rust-toolchain.toml pins nightly-2026-04-29; rustup auto-activates it
-        # for any cargo invocation in the repo.
-        run: |
-          rustup show active-toolchain
-          rustup toolchain install
-          rustup target add aarch64-linux-android
+      - name: Setup Rust with caching
+        uses: dtolnay/rust-toolchain@nightly
+        with:
+          targets: aarch64-linux-android
+
+      - name: Cache Rust artifacts
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
 
       - name: Install Android NDK r27
         id: ndk
@@ -90,7 +99,7 @@ jobs:
       - name: Cross-compile native addon (NDK clang)
         env:
           ANDROID_NDK_ROOT: ${{ steps.ndk.outputs.ndk-path }}
-          CARGO_BUILD_JOBS: 1
+          CARGO_BUILD_JOBS: 2
           CARGO_PROFILE_CI_LTO: "false"
           CARGO_PROFILE_CI_CODEGEN_UNITS: "16"
           CARGO_PROFILE_CI_DEBUG: "false"
@@ -99,6 +108,7 @@ jobs:
           CMAKE_GENERATOR: Ninja
           CMAKE_MAKE_PROGRAM: /usr/bin/ninja
           CMAKE_ARGS: -DCMAKE_MAKE_PROGRAM=/usr/bin/ninja
+          CARGO_INCREMENTAL: "1"
         run: bash android/scripts/build-android-ci.sh
 
       - name: Upload addon artifact
