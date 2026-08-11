@@ -53,13 +53,17 @@ export CARGO_TARGET_AARCH64_LINUX_ANDROID_RANLIB="$NDK_RANLIB"
 # default and keeps all native objects on same NDK toolchain.
 mkdir -p .cargo
 CARGO_CONFIG_BACKUP=""
+CARGO_MANIFEST_BACKUP="$(mktemp)"
+cp Cargo.toml "$CARGO_MANIFEST_BACKUP"
+restore_cargo_config() {
+	if [ -n "$CARGO_CONFIG_BACKUP" ]; then cp "$CARGO_CONFIG_BACKUP" .cargo/config.toml; rm -f "$CARGO_CONFIG_BACKUP"; else rm -f .cargo/config.toml; fi
+	cp "$CARGO_MANIFEST_BACKUP" Cargo.toml
+	rm -f "$CARGO_MANIFEST_BACKUP"
+}
 if [ -f .cargo/config.toml ]; then
 	CARGO_CONFIG_BACKUP="$(mktemp)"
 	cp .cargo/config.toml "$CARGO_CONFIG_BACKUP"
 fi
-restore_cargo_config() {
-	if [ -n "$CARGO_CONFIG_BACKUP" ]; then cp "$CARGO_CONFIG_BACKUP" .cargo/config.toml; rm -f "$CARGO_CONFIG_BACKUP"; else rm -f .cargo/config.toml; fi
-}
 trap restore_cargo_config EXIT
 cat > .cargo/config.toml <<EOF
 [target.aarch64-linux-android]
@@ -113,6 +117,16 @@ echo "    napi bin:  $NAPI_BIN"
 
 mkdir -p "$NATIVE_DIR/.build"
 TMP_DIR="$(mktemp -d "$NATIVE_DIR/.build/cross-XXXXXX")"
+
+# Avoid inherited release optimization for every dependency. This keeps Rust
+# memory below GitHub runner limits; final addon is stripped below.
+cat >> Cargo.toml <<'EOF'
+
+[profile.ci.package."*"]
+opt-level = 0
+debug = false
+codegen-units = 256
+EOF
 
 # Build with cargo directly. napi injects runner NDK r29 linker into target
 # builds, which creates incompatible Opus objects. Cargo config above keeps all
