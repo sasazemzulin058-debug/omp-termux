@@ -61,6 +61,18 @@ jobs:
       - name: Install native build tools
         run: sudo apt-get update && sudo apt-get install -y ninja-build
 
+      - name: Make CMake find Ninja
+        run: |
+          set -euo pipefail
+          ninja=$(command -v ninja || command -v ninja-build)
+          mkdir -p "$RUNNER_TEMP/bin"
+          cat > "$RUNNER_TEMP/bin/cmake" <<EOF
+          #!/bin/sh
+          exec /usr/bin/cmake "\$@" -DCMAKE_MAKE_PROGRAM=$ninja
+          EOF
+          chmod +x "$RUNNER_TEMP/bin/cmake"
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+
       - name: Cross-compile native addon (NDK clang)
         env:
           ANDROID_NDK_ROOT: ${{ steps.ndk.outputs.ndk-path }}
