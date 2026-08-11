@@ -76,7 +76,7 @@ jobs:
             esac
             args="\$args \"\$arg\""
           done
-          eval exec "$cmake_bin" \$args -DCMAKE_MAKE_PROGRAM="$ninja"
+          eval exec "$cmake_bin" \$args -DCMAKE_MAKE_PROGRAM="$ninja" -DCMAKE_POLICY_DEFAULT_CMP0057=NEW
           EOF
           chmod +x "$RUNNER_TEMP/bin/cmake"
           echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
