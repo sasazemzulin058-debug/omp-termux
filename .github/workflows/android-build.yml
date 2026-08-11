@@ -29,7 +29,7 @@ on:
 jobs:
   build:
     name: Cross-compile android-arm64 addon
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-24.04-8-core
     steps:
       - uses: actions/checkout@v4
 

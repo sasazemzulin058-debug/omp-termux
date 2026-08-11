@@ -24,7 +24,7 @@ env:
 jobs:
   native-addon:
     name: Build Android ARM64 native addon
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-24.04-8-core
     steps:
       - uses: actions/checkout@v4
         with:
