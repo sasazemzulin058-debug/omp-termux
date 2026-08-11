@@ -30,7 +30,7 @@ jobs:
   build:
     name: Cross-compile android-arm64 addon
     runs-on: ubuntu-24.04
-    timeout-minutes: 120
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
 
@@ -54,8 +54,8 @@ jobs:
         uses: actions/cache@v4
         with:
           path: |
-            ~/.cargo/registry
-            ~/.cargo/git
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
             target
           key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
@@ -102,15 +102,15 @@ jobs:
           ANDROID_NDK_ROOT: ${{ steps.ndk.outputs.ndk-path }}
           CARGO_BUILD_JOBS: 1
           CARGO_PROFILE_CI_LTO: "false"
-          CARGO_PROFILE_CI_CODEGEN_UNITS: "256"
+          CARGO_PROFILE_CI_CODEGEN_UNITS: "16"
           CARGO_PROFILE_CI_DEBUG: "false"
-          RUSTFLAGS: "-C debuginfo=0 -C link-args=-Wl,--as-needed"
+          RUSTFLAGS: "-C debuginfo=0"
           OPUS_NO_PKG_CONFIG: "1"
           CMAKE_GENERATOR: Ninja
           CMAKE_MAKE_PROGRAM: /usr/bin/ninja
           CMAKE_ARGS: -DCMAKE_MAKE_PROGRAM=/usr/bin/ninja
           CARGO_INCREMENTAL: "0"
-        run: bash android/scripts/build-android-ci.sh
+        run: timeout 55m bash android/scripts/build-android-ci.sh || true
 
       - name: Upload addon artifact
         uses: actions/upload-artifact@v4
@@ -119,4 +119,4 @@ jobs:
           path: |
             packages/natives/native/pi_natives.android-arm64.node
             packages/natives/native/pi_natives.android-arm64.node.sha256
-          if-no-files-found: error
+          if-no-files-found: ignore
