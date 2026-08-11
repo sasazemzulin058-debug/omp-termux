@@ -1,10 +1,6 @@
 #!/usr/bin/env bash
-# Apply the Android/Termux source patches onto a clean upstream checkout.
-#
-# The patches live in android/patches/ and target upstream source files. They
-# are intentionally NOT committed into the source tree so this fork stays a thin
-# overlay: clone upstream, run this script, build. Re-runnable — already-applied
-# patches are detected and skipped (via `git apply --reverse --check`).
+# Apply legacy Android patches. New upstream sync uses apply-overlay.py.
+# Kept for local maintenance and old checkouts.
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"

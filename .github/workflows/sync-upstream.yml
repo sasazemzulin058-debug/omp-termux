@@ -30,11 +30,11 @@ jobs:
             --exclude='quickstart.sh' \
             --exclude='install.sh' \
             "$tmp/" ./
-      - name: Apply and verify Termux patches
+      - name: Apply deterministic Android overlay
         shell: bash
         run: |
           set -euo pipefail
-          bash android/scripts/apply-patches.sh
+          python3 android/scripts/apply-overlay.py
           git diff --check
       - name: Verify upstream build inputs
         run: |
