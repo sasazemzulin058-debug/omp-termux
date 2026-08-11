@@ -34,6 +34,15 @@ done
 # Point cargo + cc-rs at the NDK clang for the aarch64-linux-android target.
 # `cc` (cc-rs) reads CC_<target> (dashes → underscores); cargo reads
 # CARGO_TARGET_<TARGET>_LINKER / _AR. Both must agree on the toolchain.
+NDK_BIN="$(dirname "$NDK_CLANG")"
+# Rust/napi can resolve target linker by generic name. Put selected NDK first
+# and provide aliases so it cannot silently select runner NDK r29.
+ln -sf "$NDK_CLANG" "$NDK_BIN/aarch64-linux-android-clang"
+ln -sf "$NDK_CLANG" "$NDK_BIN/aarch64-linux-android24-clang"
+ln -sf "$NDK_CLANG" "$NDK_BIN/clang"
+export PATH="$NDK_BIN:$PATH"
+export CC="$NDK_CLANG"
+export CXX="$NDK_BIN/aarch64-linux-android24-clang++"
 export CC_aarch64_linux_android="$NDK_CLANG"
 export AR_aarch64_linux_android="$NDK_AR"
 export CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER="$NDK_CLANG"
@@ -105,31 +114,14 @@ echo "    napi bin:  $NAPI_BIN"
 mkdir -p "$NATIVE_DIR/.build"
 TMP_DIR="$(mktemp -d "$NATIVE_DIR/.build/cross-XXXXXX")"
 
-# Call napi build directly with --target but WITHOUT --cross-compile, so napi
-# invokes `cargo build --target aarch64-linux-android` (not cargo-zigbuild,
-# which cannot provide bionic libc).
-if [ "$NAPI_BIN" = "node" ] && [ -n "${napi_entry:-}" ]; then
-	# Direct entry-point invocation (fallback when .bin was not hoisted).
-	"$NAPI_BIN" "$napi_entry" build \
-		--manifest-path "$REPO_ROOT/crates/pi-natives/Cargo.toml" \
-		--package-json-path "$REPO_ROOT/packages/natives/package.json" \
-		--target aarch64-linux-android \
-		--profile release \
-		--platform --no-js --dts index.d.ts \
-		-o "$TMP_DIR"
-else
-	"$NAPI_BIN" build \
-		--manifest-path "$REPO_ROOT/crates/pi-natives/Cargo.toml" \
-		--package-json-path "$REPO_ROOT/packages/natives/package.json" \
-		--target aarch64-linux-android \
-		--profile release \
-		--platform --no-js --dts index.d.ts \
-		-o "$TMP_DIR"
-fi
+# Build with cargo directly. napi injects runner NDK r29 linker into target
+# builds, which creates incompatible Opus objects. Cargo config above keeps all
+# C/C++/Rust objects on selected NDK r27.
+cargo build --manifest-path crates/pi-natives/Cargo.toml \
+	--target aarch64-linux-android --release --locked
 
-# napi copies the produced .node into $TMP_DIR named `pi_natives.<platformArchABI>.node`
-# (see @napi-rs/cli src/api/build.ts:839). For --target aarch64-linux-android that
-# becomes `pi_natives.android-arm64.node`.
+BUILT="$REPO_ROOT/target/aarch64-linux-android/release/libpi_natives.so"
+cp "$BUILT" "$TMP_DIR/pi_natives.android-arm64.node"
 BUILT="$TMP_DIR/pi_natives.android-arm64.node"
 if [ ! -f "$BUILT" ]; then
 	echo "error: napi build did not produce $BUILT" >&2
