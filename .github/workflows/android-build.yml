@@ -30,6 +30,9 @@ jobs:
   build:
     name: Cross-compile android-arm64 addon
     runs-on: [self-hosted, Windows, X64]
+    defaults:
+      run:
+        shell: bash
     steps:
       - uses: actions/checkout@v4
 
@@ -62,8 +65,6 @@ jobs:
       - name: Verify Android overlay
         run: python3 android/scripts/verify-overlay.py
 
-      - name: Install native build tools
-        run: sudo apt-get update && sudo apt-get install -y ninja-build
 
       - name: Make CMake find Ninja
         run: |
@@ -88,18 +89,6 @@ jobs:
           chmod +x "$RUNNER_TEMP/bin/cmake"
           echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
 
-      - name: Add compile swap
-        run: |
-          set -euo pipefail
-          if ! sudo swapon --show=NAME | grep -qx /swapfile; then
-            sudo swapoff /swapfile 2>/dev/null || true
-            sudo rm -f /swapfile
-            sudo fallocate -l 8G /swapfile
-            sudo chmod 600 /swapfile
-            sudo mkswap /swapfile
-            sudo swapon /swapfile
-          fi
-          free -h
 
       - name: Cross-compile native addon (NDK clang)
         env:
