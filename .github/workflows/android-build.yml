@@ -29,12 +29,14 @@ on:
 jobs:
   build:
     name: Cross-compile android-arm64 addon
-    runs-on: [self-hosted, Windows, X64]
-    defaults:
-      run:
-        shell: 'C:/PROGRA~1/Git/bin/bash.exe --noprofile --norc -eo pipefail {0}'
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ninja-build cmake python3
 
       - name: Install Bun
         uses: oven-sh/setup-bun@v2
@@ -44,10 +46,9 @@ jobs:
       - name: Install Rust target for the repo-pinned toolchain
         # rust-toolchain.toml pins nightly-2026-04-29; rustup auto-activates it
         # for any cargo invocation in the repo.
-        shell: powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command "& '{0}'"
         run: |
           rustup show active-toolchain
-          if ($LASTEXITCODE -ne 0) { rustup toolchain install }
+          rustup toolchain install
           rustup target add aarch64-linux-android
 
       - name: Install Android NDK r27
@@ -57,13 +58,11 @@ jobs:
           ndk-version: r27
           add-to-path: false
 
-
       - name: Install JS dependencies
         run: bun install --frozen-lockfile --minimum-release-age 0
 
       - name: Verify Android overlay
         run: python3 android/scripts/verify-overlay.py
-
 
       - name: Make CMake find Ninja
         run: |
@@ -88,7 +87,6 @@ jobs:
           chmod +x "$RUNNER_TEMP/bin/cmake"
           echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
 
-
       - name: Cross-compile native addon (NDK clang)
         env:
           ANDROID_NDK_ROOT: ${{ steps.ndk.outputs.ndk-path }}
@@ -98,7 +96,6 @@ jobs:
           CARGO_PROFILE_CI_DEBUG: "false"
           RUSTFLAGS: "-C debuginfo=0"
           OPUS_NO_PKG_CONFIG: "1"
-
           CMAKE_GENERATOR: Ninja
           CMAKE_MAKE_PROGRAM: /usr/bin/ninja
           CMAKE_ARGS: -DCMAKE_MAKE_PROGRAM=/usr/bin/ninja
