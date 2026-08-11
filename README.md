@@ -19,14 +19,29 @@
 </p>
 
 <p align="center">
-  Fork of <a href="https://github.com/badlogic/pi-mono">Pi</a> by <a href="https://github.com/mariozechner">@mariozechner</a> 
+  Termux Android arm64 port of <a href="https://github.com/can1357/oh-my-pi">oh-my-pi</a>
 </p>
+
+> This fork follows upstream OMP versions. Android-specific changes stay in
+> `android/` and are applied by deterministic overlay during GitHub Actions.
 
 The most capable agent surface that ships. Continuously tuned by real-world use — complete out of the box, open all the way down.
 
 **40+** providers · **32** built-in tools · **14** lsp ops · **28** dap ops · **~55k** lines of Rust core.
 
-## Install
+## Termux install
+
+Termux Android arm64 users get prebuilt native addon, Android Bun runtime, and
+bundled CLI. Device does not run `bun install`, Rust, clang, or source build.
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/sasazemzulin058-debug/omp-termux/main/quickstart.sh | sh
+```
+
+Installer verifies archive SHA-256, installs Android Bun runtime, then checks
+`omp --version`. Pin release with `OMP_VERSION=v0.1.6`.
+
+## Upstream install
 
 **macOS · Linux**
 

@@ -7,7 +7,7 @@ name: Android release
 on:
   push:
     tags:
-      - "v*"
+      - "v*-termux"
   workflow_dispatch:
     inputs:
       tag:
