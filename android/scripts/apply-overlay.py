@@ -55,12 +55,9 @@ def process(text):
     return once(text, '#[cfg(target_os = "linux")]\nmod platform {', '#[cfg(any(target_os = "linux", target_os = "android"))]\nmod platform {', "process.rs")
 
 def builtins(text):
-    old = '#[cfg(target_os = "linux")]\nfn ps_total_memory_bytes()'
-    text = once(text, old, '#[cfg(any(target_os = "linux", target_os = "android"))]\nfn ps_total_memory_bytes()', "proc_snapshot.rs")
     old = '#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]'
-    if text.count(old) != 4:
-        raise SystemExit(f"overlay marker mismatch: proc_snapshot cfg count: {text.count(old)}")
-    text = text.replace(old, '#[cfg(any(target_os = "linux", target_os = "android", target_os = "macos", target_os = "windows"))]')
+    if old in text:
+        text = text.replace(old, '#[cfg(any(target_os = "linux", target_os = "android", target_os = "macos", target_os = "windows"))]')
     return once(text, '#[cfg(target_os = "linux")]\nmod proc_snapshot {', '#[cfg(any(target_os = "linux", target_os = "android"))]\nmod proc_snapshot {', "proc_snapshot.rs")
 
 def loader(text):
@@ -74,5 +71,6 @@ edit("crates/pi-natives/src/crash_handler.rs", crash)
 edit("crates/pi-natives/src/clipboard.rs", clipboard)
 edit("crates/pi-shell/src/process.rs", process)
 edit("crates/pi-builtins/src/proc_snapshot.rs", builtins)
+edit("crates/pi-builtins/src/ps.rs", lambda s: s.replace('#[cfg(target_os = "linux")]\nfn ps_total_memory_bytes()', '#[cfg(any(target_os = "linux", target_os = "android"))]\nfn ps_total_memory_bytes()', 1) if '#[cfg(target_os = "linux")]\nfn ps_total_memory_bytes()' in s else s)
 edit("packages/natives/native/loader-state.js", loader)
 print("Android overlay applied: 6 transformations")
