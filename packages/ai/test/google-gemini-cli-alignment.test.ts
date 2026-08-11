@@ -557,18 +557,26 @@ describe("Google Gemini CLI alignment", () => {
 	});
 
 	describe("planning leak interception", () => {
-		it("intercepts fragmented planning leak and discards it", async () => {
+		it("intercepts a fragmented planning leak and retries after discarding it", async () => {
 			const sseChunks = [
 				'data: {"response":{"candidates":[{"content":{"role":"model","parts":[{"text":"{\\n"}]}}]}}\n\n',
 				'data: {"response":{"candidates":[{"content":{"role":"model","parts":[{"text":"  \\"thought\\": \\"let us do something\\",\\n"}]}}]}}\n\n',
 				'data: {"response":{"candidates":[{"content":{"role":"model","parts":[{"text":"  \\"call\\": \\"read\\",\\n  \\"paths\\": [\\"src/main.ts\\"]\\n}"}]},"finishReason":"STOP"}]}}\n\n',
 			];
 
+			let fetchCalls = 0;
 			const fetchMock: FetchImpl = async () => {
+				fetchCalls += 1;
+				const chunks =
+					fetchCalls === 1
+						? sseChunks
+						: [
+								'data: {"response":{"candidates":[{"content":{"role":"model","parts":[{"text":"Recovered."}]},"finishReason":"STOP"}]}}\n\n',
+							];
 				const stream = new ReadableStream({
 					async start(controller) {
 						const encoder = new TextEncoder();
-						for (const chunk of sseChunks) {
+						for (const chunk of chunks) {
 							controller.enqueue(encoder.encode(chunk));
 							await Bun.sleep(5);
 						}
@@ -596,15 +604,13 @@ describe("Google Gemini CLI alignment", () => {
 			}
 			const result = await stream.result();
 
-			expect(result.content).toHaveLength(1);
-			expect(result.content[0]).toEqual({
-				type: "text",
-				text: "",
-			});
+			expect(fetchCalls).toBe(2);
+			expect(result.content).toEqual([{ type: "text", text: "Recovered." }]);
 			expect(result.stopReason).toBe("stop");
 
 			const textDeltaEvents = events.filter(e => e.type === "text_delta");
-			expect(textDeltaEvents).toHaveLength(0);
+			expect(textDeltaEvents).toHaveLength(1);
+			expect(textDeltaEvents[0].delta).toBe("Recovered.");
 		});
 
 		it("does not intercept normal JSON starting with { and releases it", async () => {
@@ -838,15 +844,11 @@ describe("Google Gemini CLI alignment", () => {
 			}
 			const result = await stream.result();
 
-			expect(result.content).toHaveLength(2);
-			expect(result.content[0]).toEqual({
-				type: "text",
-				text: "",
-			});
-			expect(result.content[1].type).toBe("toolCall");
-			if (result.content[1].type === "toolCall") {
-				expect(result.content[1].name).toBe("read");
-				expect(result.content[1].arguments).toEqual({ path: "src/main.ts" });
+			expect(result.content).toHaveLength(1);
+			expect(result.content[0].type).toBe("toolCall");
+			if (result.content[0].type === "toolCall") {
+				expect(result.content[0].name).toBe("read");
+				expect(result.content[0].arguments).toEqual({ path: "src/main.ts" });
 			}
 
 			expect(events.filter(e => e.type === "toolcall_start")).toHaveLength(1);
@@ -917,11 +919,7 @@ describe("Google Gemini CLI alignment", () => {
 				events.push(event);
 			}
 			const result = await stream.result();
-			expect(result.content).toHaveLength(1);
-			expect(result.content[0]).toEqual({
-				type: "text",
-				text: "",
-			});
+			expect(result.content).toHaveLength(0);
 		});
 	});
 });

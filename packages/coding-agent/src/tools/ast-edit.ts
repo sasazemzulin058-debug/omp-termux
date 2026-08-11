@@ -1,21 +1,29 @@
 import * as path from "node:path";
 import { formatHashlineHeader } from "@oh-my-pi/hashline";
+import { type } from "@oh-my-pi/omptype";
 import type { AgentTool, AgentToolContext, AgentToolResult, AgentToolUpdateCallback } from "@oh-my-pi/pi-agent-core";
 import type { ToolExample } from "@oh-my-pi/pi-ai";
 import { type AstReplaceChange, type AstReplaceFileChange, astEdit } from "@oh-my-pi/pi-natives";
 import type { Component } from "@oh-my-pi/pi-tui";
 import { replaceTabs, Text } from "@oh-my-pi/pi-tui";
 import { $envpos, prompt, untilAborted } from "@oh-my-pi/pi-utils";
-import { type } from "arktype";
 import { canonicalSnapshotKey, getFileSnapshotStore } from "../edit/file-snapshot-store";
 import { normalizeToLF } from "../edit/normalize";
 import type { RenderResultOptions } from "../extensibility/custom-tools/types";
 import type { Theme } from "../modes/theme/theme";
 import astEditDescription from "../prompts/tools/ast-edit.md" with { type: "text" };
-import { Ellipsis, fileHyperlink, framedBlock, renderStatusLine, truncateToWidth } from "../tui";
+import {
+	Ellipsis,
+	fileHyperlink,
+	framedBlock,
+	outputBlockContentWidth,
+	renderStatusLine,
+	truncateToWidth,
+} from "../tui";
 import { resolveFileDisplayMode } from "../utils/file-display-mode";
 import type { ToolSession } from ".";
 import { truncateForPrompt } from "./approval";
+import { parseReadUrlTarget } from "./fetch";
 import { createFileRecorder, formatResultPath } from "./file-recorder";
 import { classifyGroupedLines, formatGroupedFiles, groupLineIndicesByBlank } from "./grouped-file-output";
 import type { OutputMeta } from "./output-meta";
@@ -31,7 +39,7 @@ import {
 	formatParseErrorsCountLabel,
 	PREVIEW_LIMITS,
 } from "./render-utils";
-import { queueResolveHandler } from "./resolve";
+import { PREVIEW_PENDING_NOTICE, queueResolveHandler } from "./resolve";
 import { ToolError } from "./tool-errors";
 import { toolResult } from "./tool-result";
 
@@ -283,6 +291,13 @@ export class AstEditTool implements AgentTool<typeof astEditSchema, AstEditToolD
 				settings: this.session.settings,
 				signal,
 				localProtocolOptions: this.session.localProtocolOptions,
+				skills: this.session.skills,
+				resolveExternalUrl: async rawPath => {
+					if (!parseReadUrlTarget(rawPath)) return undefined;
+					throw new ToolError(
+						`Cannot rewrite external URL: ${rawPath}. Use \`read\` or \`search\` to inspect fetched web content; ast_edit only applies to local files.`,
+					);
+				},
 			});
 			const { searchPath: resolvedSearchPath, scopePath, isDirectory, multiTargets, globFilter } = scope;
 
@@ -512,6 +527,9 @@ export class AstEditTool implements AgentTool<typeof astEditSchema, AstEditToolD
 						return toolResult(appliedDetails).text(text).done();
 					},
 				});
+				// The renderer's ⟨proposed⟩ badge is TUI-only; this line is the model's
+				// in-result signal that the diff above is staged, not applied.
+				outputLines.unshift(PREVIEW_PENDING_NOTICE, "");
 			}
 
 			const details: AstEditToolDetails = {
@@ -684,7 +702,7 @@ export const astEditToolRenderer = {
 		}
 		return framedBlock(uiTheme, width => {
 			const changeLines = buildChangeBody(changeGroups, Boolean(options.expanded), COLLAPSED_CHANGE_LIMIT, uiTheme);
-			const innerWidth = Math.max(1, width - 3);
+			const innerWidth = outputBlockContentWidth(width);
 			const bodyLines = [...changeLines, ...extraLines].map(l => truncateToWidth(l, innerWidth, Ellipsis.Omit));
 			while (bodyLines.length > 0 && bodyLines[0].trim() === "") bodyLines.shift();
 			return {

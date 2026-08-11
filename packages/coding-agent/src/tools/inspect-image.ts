@@ -1,13 +1,26 @@
+import { type } from "@oh-my-pi/omptype";
 import type { AgentTool, AgentToolContext, AgentToolResult, AgentToolUpdateCallback } from "@oh-my-pi/pi-agent-core";
 import { instrumentedCompleteSimple, resolveTelemetry } from "@oh-my-pi/pi-agent-core";
-import { type Api, completeSimple, type ImageContent, type Model, type ToolExample } from "@oh-my-pi/pi-ai";
+import {
+	type Api,
+	type AssistantMessage,
+	completeSimple,
+	type ImageContent,
+	type Model,
+	type ToolExample,
+} from "@oh-my-pi/pi-ai";
 import { prompt } from "@oh-my-pi/pi-utils";
-import { type } from "arktype";
 import { extractTextContent } from "../commit/utils";
 
-import { expandRoleAlias, getModelMatchPreferences, resolveModelFromString } from "../config/model-resolver";
+import {
+	expandRoleAlias,
+	extractExplicitThinkingSelector,
+	getModelMatchPreferences,
+	resolveModelFromString,
+} from "../config/model-resolver";
 import inspectImageDescription from "../prompts/tools/inspect-image.md" with { type: "text" };
 import inspectImageSystemPromptTemplate from "../prompts/tools/inspect-image-system.md" with { type: "text" };
+import { concreteThinkingLevel, resolveThinkingLevelForModel, toReasoningEffort } from "../thinking";
 import {
 	ImageInputTooLargeError,
 	type LoadedImageInput,
@@ -152,15 +165,21 @@ export class InspectImageTool implements AgentTool<typeof inspectImageSchema, In
 		const resolvePattern = (pattern: string | undefined): Model<Api> | undefined => {
 			if (!pattern) return undefined;
 			const expanded = expandRoleAlias(pattern, this.session.settings);
-			return resolveModelFromString(expanded, availableModels, matchPreferences, modelRegistry);
+			return resolveModelFromString(expanded, availableModels, matchPreferences);
 		};
 
 		const activeModelPattern = this.session.getActiveModelString?.() ?? this.session.getModelString?.();
-		const model =
-			resolvePattern("pi/vision") ??
-			resolvePattern("pi/default") ??
-			resolvePattern(activeModelPattern) ??
-			availableModels[0];
+		let model: Model<Api> | undefined;
+		let selectedPattern: string | undefined;
+		for (const pattern of ["@vision", "@default", activeModelPattern]) {
+			const resolved = resolvePattern(pattern);
+			if (resolved) {
+				model = resolved;
+				selectedPattern = pattern;
+				break;
+			}
+		}
+		model ??= availableModels[0];
 		if (!model) {
 			throw new ToolError("Unable to resolve a model for inspect_image.");
 		}
@@ -212,32 +231,69 @@ export class InspectImageTool implements AgentTool<typeof inspectImageSchema, In
 		}
 
 		const telemetry = resolveTelemetry(this.session.getTelemetry?.(), this.session.getSessionId?.() ?? undefined);
-		const response = await instrumentedCompleteSimple(
-			model,
-			{
-				systemPrompt: [prompt.render(inspectImageSystemPromptTemplate)],
-				messages: [
-					{
-						role: "user",
-						content: [
-							{ type: "image", data: imageInput.data, mimeType: imageInput.mimeType },
-							{ type: "text", text: params.question },
-						],
-						timestamp: Date.now(),
-					},
-				],
-			},
-			{
-				apiKey: modelRegistry.resolver(model, this.session.getSessionId?.() ?? undefined),
-				signal,
-			},
-			{ telemetry, oneshotKind: "inspect_image", completeImpl: this.completeImageRequest },
+		const timeoutMs = this.session.settings.get("inspect_image.timeoutMs");
+		const hasTimeout = typeof timeoutMs === "number" && Number.isFinite(timeoutMs) && timeoutMs > 0;
+		const timeoutSignal = hasTimeout ? AbortSignal.timeout(timeoutMs) : undefined;
+		const effectiveSignal = timeoutSignal
+			? signal
+				? AbortSignal.any([signal, timeoutSignal])
+				: timeoutSignal
+			: signal;
+		const timedOut = (): boolean => Boolean(timeoutSignal?.aborted) && !signal?.aborted;
+		const formatTimeoutMessage = (): string => {
+			const seconds = timeoutMs % 1000 === 0 ? `${timeoutMs / 1000}` : (timeoutMs / 1000).toFixed(1);
+			return `inspect_image request timed out after ${seconds}s. Increase inspect_image.timeoutMs (currently ${timeoutMs}ms; 0 disables) or check the vision model provider.`;
+		};
+
+		// Honor the thinking effort configured on the resolved model role
+		// (e.g. `modelRoles.vision: <model>:high`). Without it the oneshot sent a
+		// suppressed/zero thinking budget, which thinking-only models (Gemini 3.x)
+		// reject with HTTP 400 ("Budget 0 is invalid. This model only works in
+		// thinking mode.").
+		const configuredThinking = concreteThinkingLevel(
+			extractExplicitThinkingSelector(selectedPattern, this.session.settings, {
+				isLiteralModelId: (provider, id) =>
+					availableModels.some(candidate => candidate.provider === provider && candidate.id === id),
+			}),
 		);
+		const reasoning = toReasoningEffort(resolveThinkingLevelForModel(model, configuredThinking));
+
+		let response: AssistantMessage;
+		try {
+			response = await instrumentedCompleteSimple(
+				model,
+				{
+					systemPrompt: [prompt.render(inspectImageSystemPromptTemplate)],
+					messages: [
+						{
+							role: "user",
+							content: [
+								{ type: "image", data: imageInput.data, mimeType: imageInput.mimeType },
+								{ type: "text", text: params.question },
+							],
+							timestamp: Date.now(),
+						},
+					],
+				},
+				{
+					apiKey: modelRegistry.resolver(model, this.session.getSessionId?.() ?? undefined),
+					signal: effectiveSignal,
+					reasoning,
+				},
+				{ telemetry, oneshotKind: "inspect_image", completeImpl: this.completeImageRequest },
+			);
+		} catch (error) {
+			if (error instanceof Error && (error.name === "AbortError" || error.name === "TimeoutError")) {
+				if (timedOut()) throw new ToolError(formatTimeoutMessage());
+			}
+			throw error;
+		}
 
 		if (response.stopReason === "error") {
 			throw new ToolError(response.errorMessage ?? "inspect_image request failed.");
 		}
 		if (response.stopReason === "aborted") {
+			if (timedOut()) throw new ToolError(formatTimeoutMessage());
 			throw new ToolError("inspect_image request aborted.");
 		}
 

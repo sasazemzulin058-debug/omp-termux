@@ -650,7 +650,7 @@ async def test_run_rpc_stops_reminding_after_terminal_tool(tmp_path: Path, setti
             # driver registers the callback before prompt_and_wait, so we
             # replay it here.
             for cb in client._tool_end_callbacks:
-                cb(SimpleNamespace(tool_name="gh_open_pr", result={}))
+                cb(SimpleNamespace(tool_name="gh_open_pr", result={}, is_error=None))
 
     # Capture the registered tool_end callback on the fake.
     original_on_tool_end = _FakeRpcClient.on_tool_execution_end
@@ -759,7 +759,7 @@ async def test_run_rpc_review_pr_stops_after_submit_without_dirty_probe(
 
     def _on_prompt(client: _FakeRpcClient, _prompt: str) -> None:
         for cb in client._tool_end_callbacks:
-            cb(SimpleNamespace(tool_name="submit_pr_review", result={}))
+            cb(SimpleNamespace(tool_name="submit_pr_review", result={}, is_error=None))
 
     _FakeRpcClient.on_tool_execution_end = _record_tool_end  # type: ignore[assignment]
     try:
@@ -781,6 +781,55 @@ async def test_run_rpc_review_pr_stops_after_submit_without_dirty_probe(
 
     fake = _FakeRpcClient.instances[0]
     assert fake.prompts == ["kickoff"]
+
+
+@pytest.mark.asyncio
+async def test_run_rpc_review_pr_still_reminds_when_submit_fails(tmp_path: Path, settings: Settings) -> None:
+    """An errored terminal-tool end event does not count as the terminal action.
+
+    omp_rpc normalizes xd:// device dispatches to the host-tool name, so a
+    rejected `submit_pr_review` surfaces as an end event with `is_error=True`
+    under its real name. Counting it would end the review task silently with
+    no review submitted — the completion reminder must still fire.
+    """
+    inputs, bindings = _make_inputs(tmp_path, settings, session_has_jsonl=False)
+    original_on_tool_end = _FakeRpcClient.on_tool_execution_end
+
+    def _record_tool_end(self, cb) -> None:
+        self._tool_end_callbacks = getattr(self, "_tool_end_callbacks", [])
+        self._tool_end_callbacks.append(cb)
+
+    def _on_prompt(client: _FakeRpcClient, _prompt: str) -> None:
+        for cb in client._tool_end_callbacks:
+            cb(
+                SimpleNamespace(
+                    tool_name="submit_pr_review",
+                    result={"content": [{"type": "text", "text": "GitHub rejected PR review: 422"}]},
+                    is_error=True,
+                )
+            )
+
+    _FakeRpcClient.on_tool_execution_end = _record_tool_end  # type: ignore[assignment]
+    try:
+        _FakeRpcClient.on_prompt = staticmethod(_on_prompt)  # type: ignore[attr-defined]
+        loop = asyncio.new_event_loop()
+        try:
+            worker._run_rpc_blocking(
+                inputs,
+                task_kind="review_pr",
+                prompt="kickoff",
+                loop=loop,
+                bindings=bindings,  # type: ignore[arg-type]
+            )
+        finally:
+            loop.close()
+    finally:
+        _FakeRpcClient.on_tool_execution_end = original_on_tool_end  # type: ignore[assignment]
+        delattr(_FakeRpcClient, "on_prompt")
+
+    fake = _FakeRpcClient.instances[0]
+    assert len(fake.prompts) == 1 + settings.task_completion_max_reminders
+    assert all("submit_pr_review" in p for p in fake.prompts[1:])
 
 
 # ---------------------------------------------------------------------------

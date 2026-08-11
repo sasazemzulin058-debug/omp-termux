@@ -1,10 +1,11 @@
 /**
  * Types for the internal URL routing system.
  *
- * Internal URLs (`agent://`, `artifact://`, `history://`, `issue://`, `local://`, `mcp://`, `memory://`, `omp://`, `pr://`, `rule://`, `skill://`, and `vault://`) are resolved by tools like read,
+ * Internal URLs (`agent://`, `artifact://`, `history://`, `issue://`, `local://`, `mcp://`, `memory://`, `omp://`, `pr://`, `rule://`, `security://`, `skill://`, `ssh://`, `vault://`, and `xd://`) are resolved by tools like read,
  * providing access to agent outputs and server resources without exposing filesystem paths.
  */
 
+import type { Skill } from "../extensibility/skills";
 import type { LocalProtocolOptions } from "./local-protocol";
 
 /**
@@ -32,6 +33,13 @@ export interface InternalResource {
 	 * resources. Mutable resources (e.g. local://) behave like editable files.
 	 */
 	immutable?: boolean;
+	/**
+	 * True when the resource is a directory listing rather than file content.
+	 * `search` refuses to grep such a resource when it has no `sourcePath` — a
+	 * remote `ssh://` listing has no local path to recurse, so its listing text
+	 * must never be mistaken for the directory's contents.
+	 */
+	isDirectory?: boolean;
 }
 
 /**
@@ -62,6 +70,12 @@ export interface InternalUrl extends URL {
 	 * Raw pathname extracted from input, preserving traversal markers before URL normalization.
 	 */
 	rawPathname?: string;
+	/**
+	 * Exact input string this URL was parsed from, before any normalization.
+	 * Set by `parseInternalUrl`; used where byte-exact URI matching matters
+	 * (e.g. MCP resource URIs compared by string equality).
+	 */
+	rawHref?: string;
 }
 
 /**
@@ -90,6 +104,29 @@ export interface ResolveContext {
 	 * [#1608](https://github.com/can1357/oh-my-pi/issues/1608).
 	 */
 	localProtocolOptions?: LocalProtocolOptions;
+	/** Calling session's loaded skills. Prefer this over process-global skill state. */
+	skills?: readonly Skill[];
+	/** Session-bound `xd://` documentation resolver. */
+	xd?: {
+		read(name: string | null): Promise<string>;
+	};
+	/**
+	 * When set, handlers that would otherwise materialize an expensive directory
+	 * listing (e.g. the ssh:// handler draining a full remote `ls`) instead return
+	 * the directory shape (`isDirectory: true`) with empty content. `search`/`find`
+	 * reject directory resources, so they never need the listing.
+	 */
+	skipDirectoryListing?: boolean;
+	/**
+	 * When set, handlers that would otherwise materialize expensive content
+	 * (e.g. reading a multi-MiB artifact into memory just to expose its
+	 * `sourcePath`) may return the resource shape without content. Callers
+	 * that only need `sourcePath` — search/grep, bash URL expansion — pass
+	 * this so a large `artifact://` still resolves to its backing file
+	 * without OOM risk. Handlers that cannot separate path from content
+	 * ignore the flag.
+	 */
+	pathOnly?: boolean;
 }
 
 /**
@@ -104,10 +141,14 @@ export interface WriteContext {
 	signal?: AbortSignal;
 	/** Calling session's `local://` root mapping — see {@link ResolveContext.localProtocolOptions}. */
 	localProtocolOptions?: LocalProtocolOptions;
+	/** Session-bound `xd://` device dispatcher. */
+	xd?: {
+		write(name: string | null, content: string): Promise<void>;
+	};
 }
 
 /**
- * Handler for a specific internal URL scheme (e.g., agent://, memory://, skill://, mcp://).
+ * Handler for a specific internal URL scheme (e.g., agent://, memory://, skill://, xd://).
  */
 export interface ProtocolHandler {
 	/** The scheme this handler processes (without trailing ://) */
@@ -147,6 +188,9 @@ export interface ProtocolHandler {
 	 * mcp://) omit it. The caller fuzzy-filters the returned set against the
 	 * partially typed `query`, so handlers return their full (bounded) candidate
 	 * list; `query` is provided only so handlers can scope expensive enumeration.
+	 * `context.cwd`/`context.localProtocolOptions` carry the caller's working dir
+	 * and session, for handlers whose candidates are project- or session-scoped
+	 * (e.g. ssh:// hosts from a project `ssh.json`, local:// roots per session).
 	 */
-	complete?(query: string): Promise<UrlCompletion[]>;
+	complete?(query?: string, context?: ResolveContext): Promise<UrlCompletion[]>;
 }

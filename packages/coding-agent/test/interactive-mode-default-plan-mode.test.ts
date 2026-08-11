@@ -1,5 +1,6 @@
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "bun:test";
 import * as path from "node:path";
+import { type } from "@oh-my-pi/omptype";
 import { Agent, type AgentTool } from "@oh-my-pi/pi-agent-core";
 import { type Api, Effort, type Model } from "@oh-my-pi/pi-ai";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
@@ -8,9 +9,10 @@ import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { TempDir } from "@oh-my-pi/pi-utils";
-import { type } from "arktype";
 import { ModelRegistry } from "../src/config/model-registry";
+import type { CustomTool } from "../src/extensibility/custom-tools/types";
 import { InteractiveMode } from "../src/modes/interactive-mode";
+import { resolveXdevTool, type XdevState } from "../src/tools/xdev";
 
 function makeTool(name: string): AgentTool {
 	return {
@@ -27,6 +29,8 @@ function makeTool(name: string): AgentTool {
 interface HarnessOptions {
 	extraRegistryTools?: readonly AgentTool[];
 	builtInToolNames?: Iterable<string>;
+	rebuildGate?: { fail: boolean; calls?: number };
+	xdev?: XdevState;
 }
 
 describe("InteractiveMode plan.defaultOnStartup", () => {
@@ -40,7 +44,6 @@ describe("InteractiveMode plan.defaultOnStartup", () => {
 	});
 
 	beforeEach(async () => {
-		Bun.gc(true);
 		resetSettingsForTest();
 		tempDir = TempDir.createSync("@pi-default-plan-");
 		await Settings.init({ inMemory: true, cwd: tempDir.path() });
@@ -60,7 +63,6 @@ describe("InteractiveMode plan.defaultOnStartup", () => {
 		authStorage = undefined as unknown as AuthStorage;
 		tempDir = undefined as unknown as TempDir;
 		resetSettingsForTest();
-		Bun.gc(true);
 	});
 
 	function modelOrThrow(registry: ModelRegistry, id: string): Model<Api> {
@@ -78,13 +80,12 @@ describe("InteractiveMode plan.defaultOnStartup", () => {
 		const registry = new ModelRegistry(authStorage, path.join(tempDir.path(), `models-${Bun.nanoseconds()}.yml`));
 		const initialModel = modelOrThrow(registry, "claude-sonnet-4-5");
 		const readTool = makeTool("read");
-		const resolveTool = makeTool("resolve");
-		// AgentSession requires a Map-typed tool registry; the harness needs both
-		// `read` (the initial active tool) and `resolve` (added on plan-mode entry).
-		const toolRegistry = new Map<string, AgentTool>([
-			[readTool.name, readTool],
-			[resolveTool.name, resolveTool],
-		]);
+		// AgentSession requires a Map-typed tool registry; `read` is the initial
+		// active tool. Plan approval is a `write` to xd://propose, so plan-mode
+		// entry only augments the built-in `write` tool when present.
+		const xdev = options.xdev;
+		const toolRegistry = xdev?.tools ?? new Map<string, AgentTool>();
+		toolRegistry.set(readTool.name, readTool);
 		for (const tool of options.extraRegistryTools ?? []) {
 			toolRegistry.set(tool.name, tool);
 		}
@@ -103,7 +104,15 @@ describe("InteractiveMode plan.defaultOnStartup", () => {
 			settings,
 			modelRegistry: registry,
 			toolRegistry,
-			builtInToolNames: options.builtInToolNames ?? ["read", "resolve"],
+			builtInToolNames: options.builtInToolNames ?? ["read"],
+			rebuildSystemPrompt: options.rebuildGate
+				? async () => {
+						if (options.rebuildGate) options.rebuildGate.calls = (options.rebuildGate.calls ?? 0) + 1;
+						if (options.rebuildGate?.fail) throw new Error("rebuild failed");
+						return { systemPrompt: ["Test"] };
+					}
+				: undefined,
+			xdev,
 		});
 		session = createdSession;
 		mode = new InteractiveMode(createdSession, "test");
@@ -117,7 +126,7 @@ describe("InteractiveMode plan.defaultOnStartup", () => {
 
 		expect(created.planModeEnabled).toBe(true);
 		expect(session?.getPlanModeState()).toMatchObject({ enabled: true, planFilePath: "local://PLAN.md" });
-		expect(session?.getActiveToolNames()).toContain("resolve");
+		expect(session?.getActiveToolNames()).toContain("read");
 	});
 
 	it("activates write when entering plan mode even if it was hidden by discoveryMode (issue #3165)", async () => {
@@ -129,7 +138,7 @@ describe("InteractiveMode plan.defaultOnStartup", () => {
 		const writeTool = makeTool("write");
 		const created = createHarness(Settings.isolated({ "plan.defaultOnStartup": true, "compaction.enabled": false }), {
 			extraRegistryTools: [writeTool],
-			builtInToolNames: ["read", "resolve", "write"],
+			builtInToolNames: ["read", "write"],
 		});
 
 		expect(session?.getActiveToolNames()).not.toContain("write");
@@ -138,7 +147,6 @@ describe("InteractiveMode plan.defaultOnStartup", () => {
 
 		expect(created.planModeEnabled).toBe(true);
 		expect(session?.getActiveToolNames()).toContain("write");
-		expect(session?.getActiveToolNames()).toContain("resolve");
 	});
 
 	it("does not activate an extension-shadowed write tool in plan mode", async () => {
@@ -150,8 +158,149 @@ describe("InteractiveMode plan.defaultOnStartup", () => {
 		await created.init({ suppressWelcomeIntro: true });
 
 		expect(created.planModeEnabled).toBe(true);
-		expect(session?.getActiveToolNames()).toContain("resolve");
 		expect(session?.getActiveToolNames()).not.toContain("write");
+	});
+
+	it("removes plan-only write when exiting to the previous read-only tool set", async () => {
+		const writeTool = makeTool("write");
+		const created = createHarness(Settings.isolated({ "plan.defaultOnStartup": true, "compaction.enabled": false }), {
+			extraRegistryTools: [writeTool],
+			builtInToolNames: ["read", "write"],
+		});
+		await created.init({ suppressWelcomeIntro: true });
+		expect(session?.getActiveToolNames()).toContain("write");
+
+		await created.handlePlanModeCommand();
+
+		expect(created.planModeEnabled).toBe(false);
+		expect(session?.getPlanModeState()).toBeUndefined();
+		expect(session?.getActiveToolNames()).toEqual(["read"]);
+	});
+
+	it("keeps plan mode retryable when prior-tool restoration fails", async () => {
+		const writeTool = makeTool("write");
+		const rebuildGate = { fail: false };
+		const created = createHarness(Settings.isolated({ "plan.defaultOnStartup": true, "compaction.enabled": false }), {
+			extraRegistryTools: [writeTool],
+			builtInToolNames: ["read", "write"],
+			rebuildGate,
+		});
+		await created.init({ suppressWelcomeIntro: true });
+		const activeBefore = session?.getActiveToolNames();
+		rebuildGate.fail = true;
+
+		await expect(created.handlePlanModeCommand()).rejects.toThrow("rebuild failed");
+		expect(created.planModeEnabled).toBe(true);
+		expect(session?.getPlanModeState()?.enabled).toBe(true);
+		expect(session?.getActiveToolNames()).toEqual(activeBefore);
+
+		rebuildGate.fail = false;
+		await created.handlePlanModeCommand();
+		expect(created.planModeEnabled).toBe(false);
+		expect(session?.getPlanModeState()).toBeUndefined();
+		expect(session?.getActiveToolNames()).toEqual(["read"]);
+	});
+
+	it("restores plan tool presentation when prior-model restoration fails", async () => {
+		const settings = Settings.isolated({ "plan.defaultOnStartup": true, "compaction.enabled": false });
+		settings.setModelRole("plan", "anthropic/claude-haiku-4-5:high");
+		const writeTool = makeTool("write");
+		const planSelectedTool = makeTool("plan_selected");
+		const mountedTool: CustomTool = {
+			name: "mcp__ambient_search",
+			label: "ambient/search",
+			description: "Search ambient data",
+			parameters: type({}),
+			loadMode: "discoverable",
+			mcpServerName: "ambient",
+			mcpToolName: "search",
+			async execute() {
+				return { content: [{ type: "text", text: "ok" }] };
+			},
+		};
+		const xdev: XdevState = {
+			tools: new Map(),
+			mountedNames: new Set(),
+			builtInNames: new Set(["read", "write"]),
+			isActive: name => session?.getActiveToolNames().includes(name) === true,
+		};
+		const created = createHarness(settings, {
+			extraRegistryTools: [writeTool, planSelectedTool],
+			builtInToolNames: ["read", "write"],
+			xdev,
+		});
+		const previousModel = session?.model;
+		await created.init({ suppressWelcomeIntro: true });
+		const planModel = session?.model;
+		await session!.refreshMCPTools([mountedTool]);
+		await session!.setActiveToolsByName([...session!.getEnabledToolNames(), planSelectedTool.name]);
+		const planTools = session!.getEnabledToolNames();
+		const planActiveTools = session!.getActiveToolNames();
+		const planMountedTools = session!.getMountedXdevToolNames();
+		expect(planModel?.id).toBe("claude-haiku-4-5");
+		expect(session?.configuredThinkingLevel()).toBe(Effort.High);
+		expect(planActiveTools).toEqual(["read", "write", planSelectedTool.name]);
+		expect(planMountedTools).toEqual([mountedTool.name]);
+		expect(xdev.mountedNames.has(mountedTool.name)).toBe(true);
+
+		const setModelTemporary = session!.setModelTemporary.bind(session);
+		const restoreModel = vi.spyOn(session!, "setModelTemporary").mockImplementationOnce(async (...args) => {
+			await setModelTemporary(...args);
+			throw new Error("model restore failed after switch");
+		});
+		await expect(created.handlePlanModeCommand()).rejects.toThrow("model restore failed after switch");
+
+		expect(created.planModeEnabled).toBe(true);
+		expect(created.planModePaused).toBe(false);
+		expect(session?.getPlanModeState()?.enabled).toBe(true);
+		expect(session?.peekPlanProposalHandler()).toBeDefined();
+		expect(session?.model?.id).toBe(planModel?.id);
+		expect(session?.configuredThinkingLevel()).toBe(Effort.High);
+		expect(session?.getEnabledToolNames()).toEqual(planTools);
+		expect(session?.getActiveToolNames()).toEqual(planActiveTools);
+		expect(session?.getMountedXdevToolNames()).toEqual(planMountedTools);
+		expect(xdev.mountedNames.has(mountedTool.name)).toBe(true);
+
+		restoreModel.mockRestore();
+		await created.handlePlanModeCommand();
+		expect(created.planModeEnabled).toBe(false);
+		expect(session?.getPlanModeState()).toBeUndefined();
+		expect(session?.model?.id).toBe(previousModel?.id);
+		// Pre-existing successful-exit behavior (unchanged by this fix): restoring the
+		// pre-plan tool set drops the MCP device and plan-only selections entirely.
+		expect(session?.getActiveToolNames()).toEqual(["read"]);
+		expect(session?.getMountedXdevToolNames()).toEqual([]);
+		expect(xdev.tools.has(mountedTool.name)).toBe(true);
+		expect(resolveXdevTool(xdev, mountedTool.name)).toBeUndefined();
+	});
+
+	it("clears old plan UI state when target-session reconciliation restore fails", async () => {
+		const writeTool = makeTool("write");
+		const rebuildGate = { fail: false, calls: 0 };
+		const created = createHarness(Settings.isolated({ "plan.defaultOnStartup": true, "compaction.enabled": false }), {
+			extraRegistryTools: [writeTool],
+			builtInToolNames: ["read", "write"],
+			rebuildGate,
+		});
+		await created.init({ suppressWelcomeIntro: true });
+		expect(created.planModeEnabled).toBe(true);
+		expect(session?.peekPlanProposalHandler()).toBeDefined();
+
+		const targetManager = SessionManager.create(tempDir.path(), path.join(tempDir.path(), "target-sessions"));
+		await targetManager.flush();
+		const targetSessionFile = targetManager.getSessionFile();
+		expect(targetSessionFile).toBeString();
+		await targetManager.close();
+		const callsBeforeSwitch = rebuildGate.calls;
+		rebuildGate.fail = true;
+
+		await expect(session!.switchSession(targetSessionFile!)).resolves.toBe(true);
+		expect(session?.sessionFile).toBe(targetSessionFile);
+		expect(created.planModeEnabled).toBe(false);
+		expect(rebuildGate.calls).toBeGreaterThan(callsBeforeSwitch);
+		expect(created.planModePaused).toBe(false);
+		expect(session?.getPlanModeState()).toBeUndefined();
+		expect(session?.peekPlanProposalHandler()).toBeUndefined();
 	});
 
 	it("does not enter plan mode at startup by default", async () => {
@@ -175,6 +324,23 @@ describe("InteractiveMode plan.defaultOnStartup", () => {
 
 		expect(created.planModeEnabled).toBe(false);
 		expect(session?.getPlanModeState()).toBeUndefined();
+	});
+
+	it("preserves the restored model when resuming an active plan session", async () => {
+		const created = createHarness(
+			Settings.isolated({
+				"compaction.enabled": false,
+				modelRoles: { plan: "anthropic/claude-sonnet-4-6" },
+			}),
+		);
+		created.sessionManager.appendModelChange("anthropic/claude-sonnet-4-5");
+		created.sessionManager.appendModeChange("plan", { planFilePath: "local://PLAN.md" });
+		created.sessionManager.appendMessage({ role: "user", content: "prior plan turn", timestamp: Date.now() });
+
+		await created.init({ suppressWelcomeIntro: true });
+
+		expect(created.planModeEnabled).toBe(true);
+		expect(session?.model?.id).toBe("claude-sonnet-4-5");
 	});
 
 	it("enters plan mode for a fresh session that carries only startup metadata", async () => {

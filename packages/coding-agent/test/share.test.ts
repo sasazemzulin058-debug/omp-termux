@@ -152,7 +152,14 @@ describe("buildShareSnapshot", () => {
 				},
 			} as unknown as SessionEntry,
 		];
-		const header = { type: "session", version: 3, id: "t", timestamp: ts, cwd: `/home/${secret}/proj` };
+		const header = {
+			type: "session",
+			version: 3,
+			id: "t",
+			timestamp: ts,
+			cwd: `/home/${secret}/proj`,
+			previousSessionFiles: [`/home/${secret}/old/session.jsonl`],
+		};
 		const sm = {
 			getHeader: () => header,
 			getEntries: () => entries,
@@ -169,11 +176,13 @@ describe("buildShareSnapshot", () => {
 		expect(flat).toContain("/.env");
 		// Source entries keep the real values; redaction is share-only.
 		expect(JSON.stringify(entries)).toContain(secret);
+		expect(JSON.stringify(header)).toContain(secret);
 	});
 
 	test("redacts assistant tool calls / error messages and bash meta, and drops provider replay payloads", () => {
 		const secret = "asst-secret-ABCDE";
 		const replaySentinel = "REPLAY_BLOB_SENTINEL_XYZ";
+		const serverToolSentinel = "SERVER_TOOL_ENCRYPTED_SENTINEL_QWE";
 		const ts = "2026-06-12T00:00:00.000Z";
 		const usage = {
 			input: 0,
@@ -200,6 +209,23 @@ describe("buildShareSnapshot", () => {
 							arguments: { path: `/x/${secret}` },
 							intent: `intent ${secret}`,
 							rawBlock: `raw ${secret}`,
+						},
+						{
+							type: "anthropicServerTool",
+							block: {
+								type: "server_tool_use",
+								id: "srvtoolu_1",
+								name: "web_search",
+								input: { query: `find ${secret}` },
+							},
+						},
+						{
+							type: "anthropicServerTool",
+							block: {
+								type: "web_search_tool_result",
+								tool_use_id: "srvtoolu_1",
+								content: [{ type: "web_search_result", encrypted_content: serverToolSentinel }],
+							},
 						},
 					],
 					api: "test",
@@ -246,8 +272,271 @@ describe("buildShareSnapshot", () => {
 		// Opaque provider-replay payload is dropped wholesale — the sentinel is NOT a configured secret,
 		// so its absence proves the subtree was removed rather than merely obfuscated.
 		expect(flat).not.toContain(replaySentinel);
+		// Native Anthropic server-tool blocks are opaque provider-replay state: dropped wholesale,
+		// so neither the obfuscated query secret nor the encrypted result sentinel can leak.
+		expect(flat).not.toContain(serverToolSentinel);
 		// Source entries keep the real values; redaction is share-only.
 		expect(JSON.stringify(entries)).toContain(secret);
+	});
+
+	test("redacts every title-change field before sharing", () => {
+		const secret = "share-title-secret";
+		const entries: SessionEntry[] = [
+			{
+				type: "title_change",
+				id: "title-1",
+				parentId: null,
+				timestamp: "2026-06-12T00:00:00.000Z",
+				title: `new ${secret}`,
+				previousTitle: `old ${secret}`,
+				source: "user",
+				trigger: `rename ${secret}`,
+			} as SessionEntry,
+		];
+		const sm = {
+			getHeader: () => sessionData([], "x").header,
+			getEntries: () => entries,
+			getLeafId: () => "title-1",
+		} as unknown as SessionManager;
+		const snapshot = buildShareSnapshot(sm, {
+			obfuscator: new SecretObfuscator([{ type: "plain", content: secret }]),
+		});
+
+		expect(JSON.stringify(snapshot)).not.toContain(secret);
+		expect(JSON.stringify(entries)).toContain(secret);
+	});
+
+	test("includes every title-change field in the regex collision pre-scan", () => {
+		const plainTitle = "PLAIN_TITLE_SECRET";
+		const plainPreviousTitle = "PLAIN_PREVIOUS_TITLE_SECRET";
+		const plainTrigger = "PLAIN_TRIGGER_SECRET";
+		const friendlyTitle = "TOKTITLEABC";
+		const friendlyPreviousTitle = "TOKPREVABC";
+		const friendlyTrigger = "TOKTRIGGERABC";
+		const entries: SessionEntry[] = [
+			{
+				type: "title_change",
+				id: "title-1",
+				parentId: null,
+				timestamp: "2026-06-12T00:00:00.000Z",
+				title: "tok_title_abc",
+				previousTitle: "tok_prev_abc",
+				source: "user",
+				trigger: "tok_trigger_abc",
+			} as SessionEntry,
+		];
+		const sm = {
+			getHeader: () => ({
+				...sessionData([], "x").header,
+				title: `${plainTitle} ${plainPreviousTitle} ${plainTrigger}`,
+			}),
+			getEntries: () => entries,
+			getLeafId: () => "title-1",
+		} as unknown as SessionManager;
+		const obfuscator = new SecretObfuscator([
+			{ type: "plain", content: plainTitle, friendlyName: friendlyTitle },
+			{ type: "plain", content: plainPreviousTitle, friendlyName: friendlyPreviousTitle },
+			{ type: "plain", content: plainTrigger, friendlyName: friendlyTrigger },
+			{ type: "regex", content: "tok_title_[a-z]+" },
+			{ type: "regex", content: "tok_prev_[a-z]+" },
+			{ type: "regex", content: "tok_trigger_[a-z]+" },
+		]);
+
+		const flat = JSON.stringify(buildShareSnapshot(sm, { obfuscator }));
+
+		expect(flat).not.toContain(friendlyTitle);
+		expect(flat).not.toContain(friendlyPreviousTitle);
+		expect(flat).not.toContain(friendlyTrigger);
+	});
+
+	test("collects regex-protected values across the whole snapshot so an earlier field's friendly-name placeholder cannot leak a later field's secret", () => {
+		// `buildShareSnapshot` must precompute regex-matched secret values across the ENTIRE
+		// snapshot (header + entries) before redacting any single field. Otherwise the header
+		// (redacted first) would obfuscate `plainSecret` under its friendly name unaware that
+		// `regexSecret` — only present in a LATER bash-output field — sanitizes to the exact
+		// same label, and the friendly prefix would leak the regex secret's shape into the share.
+		const plainSecret = "OTHERSECRET";
+		const friendlyName = "TOKABC123";
+		const regexSecret = "tok_abc123";
+		const ts = "2026-06-12T00:00:00.000Z";
+		const header = {
+			type: "session",
+			version: 3,
+			id: "t",
+			timestamp: ts,
+			cwd: "/tmp",
+			title: `investigating ${plainSecret}`,
+		};
+		const entries: SessionEntry[] = [
+			{
+				type: "message",
+				id: "b1",
+				parentId: null,
+				timestamp: ts,
+				message: {
+					role: "bashExecution",
+					command: "cat token.txt",
+					output: `token is ${regexSecret}`,
+					exitCode: 0,
+					cancelled: false,
+					truncated: false,
+					timestamp: 1,
+				},
+			} as unknown as SessionEntry,
+		];
+		const sm = {
+			getHeader: () => header,
+			getEntries: () => entries,
+			getLeafId: () => "b1",
+		} as unknown as SessionManager;
+		const obfuscator = new SecretObfuscator([
+			{ type: "plain", content: plainSecret, friendlyName },
+			{ type: "regex", content: "tok_[a-z0-9]+" },
+		]);
+
+		const flat = JSON.stringify(buildShareSnapshot(sm, { obfuscator }));
+
+		// Neither raw secret leaves the share...
+		expect(flat).not.toContain(plainSecret);
+		expect(flat).not.toContain(regexSecret);
+		// ...and the header's placeholder for `plainSecret` was NOT minted with the friendly
+		// prefix that spells out the later field's regex-protected value's sanitized shape.
+		expect(flat).not.toContain(`${friendlyName}_`);
+
+		// Deobfuscating the redacted share recovers both originals (the stripped placeholder
+		// still carries its friendly-name-independent alias), and is a fixed point.
+		const recovered = obfuscator.deobfuscate(flat);
+		expect(recovered).toContain(plainSecret);
+		expect(recovered).toContain(regexSecret);
+		expect(obfuscator.deobfuscate(recovered)).toBe(recovered);
+	});
+
+	test("skips raw image payload bytes when collecting regex-protected values, so image data cannot spuriously trigger friendly-prefix collision avoidance", () => {
+		// Regression: the whole-snapshot collision pre-scan only skipped strings
+		// already shaped like a `data:image/...` URL, but `ImageContent.data` at
+		// rest is raw base64 (that URL form only exists in the rendered viewer).
+		// Left unguarded, every image payload gets regex-scanned like any other
+		// string on each share — wasteful for large images, and an accidental
+		// regex match inside the base64 bytes would poison the whole-snapshot
+		// collision set used to decide whether OTHER fields' friendly-name
+		// placeholders are safe to render.
+		const plainSecret = "OTHERSECRET";
+		const friendlyName = "TOKABC123";
+		const regexSecret = "tok_abc123";
+		const ts = "2026-06-12T00:00:00.000Z";
+		// A regex secret ("tok_[a-z0-9]+") happens to match literally inside this
+		// "image" payload, cleanly bounded so the match is exactly `regexSecret`;
+		// a correct scan must never see it.
+		const imageData = `binary noise ${regexSecret} more noise`;
+		const entries: SessionEntry[] = [
+			{
+				type: "message",
+				id: "a1",
+				parentId: null,
+				timestamp: ts,
+				message: {
+					role: "user",
+					content: [
+						{ type: "text", text: `remember ${plainSecret} for later` },
+						{ type: "image", data: imageData, mimeType: "image/png" },
+					],
+					timestamp: 1,
+				},
+			} as unknown as SessionEntry,
+		];
+		const sm = {
+			getHeader: () => sessionData([], "x").header,
+			getEntries: () => entries,
+			getLeafId: () => "a1",
+		} as unknown as SessionManager;
+		const obfuscator = new SecretObfuscator([
+			{ type: "plain", content: plainSecret, friendlyName },
+			{ type: "regex", content: "tok_[a-z0-9]+" },
+		]);
+
+		const flat = JSON.stringify(buildShareSnapshot(sm, { obfuscator }));
+
+		expect(flat).not.toContain(plainSecret);
+		// The image payload is left byte-for-byte intact — redaction never
+		// touches inline image bytes (size trimming is a separate later pass).
+		expect(flat).toContain(imageData);
+		// Because the image bytes were skipped by the collision pre-scan, the
+		// sibling plain secret's friendly-name placeholder needed no collision
+		// avoidance and keeps its normal friendly prefix.
+		expect(flat).toContain(`${friendlyName}_`);
+	});
+
+	test("ignores dropped provider replay payloads when collecting regex collision values", () => {
+		const plainSecret = "OTHERSECRET";
+		const friendlyName = "TOKABC123";
+		const regexSecret = "tok_abc123";
+		const ts = "2026-06-12T00:00:00.000Z";
+		const entries: SessionEntry[] = [
+			{
+				type: "message",
+				id: "a1",
+				parentId: null,
+				timestamp: ts,
+				message: {
+					role: "assistant",
+					content: [{ type: "text", text: `remember ${plainSecret} for later` }],
+					providerPayload: { items: [{ note: regexSecret }] },
+					timestamp: 1,
+				},
+			} as unknown as SessionEntry,
+		];
+		const sm = {
+			getHeader: () => sessionData([], "x").header,
+			getEntries: () => entries,
+			getLeafId: () => "a1",
+		} as unknown as SessionManager;
+		const obfuscator = new SecretObfuscator([
+			{ type: "plain", content: plainSecret, friendlyName },
+			{ type: "regex", content: "tok_[a-z0-9]+" },
+		]);
+
+		const flat = JSON.stringify(buildShareSnapshot(sm, { obfuscator }));
+
+		expect(flat).not.toContain(plainSecret);
+		expect(flat).not.toContain(regexSecret);
+		expect(flat).toContain(`${friendlyName}_`);
+	});
+
+	test("collects regex values from tool arguments that resemble image blocks", () => {
+		const plainSecret = "OTHERSECRET";
+		const friendlyName = "TOKABC123";
+		const regexSecret = "tok_abc123";
+		const ts = "2026-06-12T00:00:00.000Z";
+		const entries: SessionEntry[] = [
+			{
+				type: "message",
+				id: "a1",
+				parentId: null,
+				timestamp: ts,
+				message: {
+					role: "assistant",
+					content: [
+						{ type: "toolCall", id: "call-1", name: "read", arguments: { type: "image", value: regexSecret } },
+					],
+					timestamp: 1,
+				},
+			} as unknown as SessionEntry,
+		];
+		const sm = {
+			getHeader: () => ({ ...sessionData([], "x").header, title: `remember ${plainSecret}` }),
+			getEntries: () => entries,
+			getLeafId: () => "a1",
+		} as unknown as SessionManager;
+		const obfuscator = new SecretObfuscator([
+			{ type: "plain", content: plainSecret, friendlyName },
+			{ type: "regex", content: "tok_[a-z0-9]+" },
+		]);
+
+		const flat = JSON.stringify(buildShareSnapshot(sm, { obfuscator }));
+
+		expect(flat).not.toContain(plainSecret);
+		expect(flat).not.toContain(regexSecret);
+		expect(flat).not.toContain(`${friendlyName}_`);
 	});
 });
 

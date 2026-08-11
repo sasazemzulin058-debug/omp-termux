@@ -2,6 +2,56 @@
 
 ## [Unreleased]
 
+## [17.1.5] - 2026-07-27
+
+### Fixed
+
+- Fixed snapcompact resume guides reporting only the HQ grid width for mixed-width foveated archives ([#6712](https://github.com/can1357/oh-my-pi/issues/6712)).
+
+## [17.1.0] - 2026-07-24
+
+### Added
+
+- Added an `includeThinking` serialization option (defaulting to `true`) to allow excluding assistant reasoning (`¶think:` sections) from archived transcripts.
+
+## [16.5.0] - 2026-07-13
+
+### Changed
+
+- Updated archived transcript rendering to use a more compact format with `¶user:`, `¶think:`, `¶ai:`, and `¶call:` scopes, omitting repeated adjacent scope headers and appending tool-call intents as comments.
+
+## [16.3.7] - 2026-07-05
+
+### Fixed
+
+- Fixed `resolveShapeForText(..., "auto")` to correctly select the `silver16-bw` shape for CJK-heavy transcript text while preserving explicit shape overrides.
+
+## [16.2.8] - 2026-06-30
+
+### Fixed
+
+- Fixed large snapcompact archives being reconstructed into unbounded per-request image payloads by adding a frame base64 byte budget and omitting over-budget archive frames from prompt blocks. ([#3792](https://github.com/can1357/oh-my-pi/issues/3792))
+
+## [16.2.7] - 2026-06-30
+
+### Added
+
+- Added the `silver16-bw` shape backed by an embedded Silver TrueType font to support CJK and other non-Latin text.
+- Added `resolveShapeForText` to support font-aware shape resolution.
+
+### Changed
+
+- Improved non-ASCII text normalization by folding semantic emojis to ASCII labels (e.g., `[OK]`, `[WARN]`), dropping decorative emojis, and folding box-drawing symbols to ASCII skeletons.
+- Enhanced missing glyph rendering to use the embedded Silver TrueType fallback per-character, including support for East Asian wide characters across two grid cells.
+- Updated text wrapping, pagination, and provider shape geometries to support wide character footprints and updated X.org 8x13 font metrics.
+
+## [16.1.23] - 2026-06-26
+
+### Added
+
+- Added `archiveSourceText(archive)` to extract a persisted frame archive's source text as plain text for LLM summarization. ([#3561](https://github.com/can1357/oh-my-pi/pull/3561) by [@serverinspector](https://github.com/serverinspector))
+- Added `stripPreservedArchive(preserveData)` to drop the persisted frame-archive slot (`PRESERVE_KEY`) and collapse to `undefined` when no other state remains — shared by the agent and coding-agent compaction paths instead of duplicating the strip rule.
+
 ## [16.1.13] - 2026-06-22
 
 ### Fixed

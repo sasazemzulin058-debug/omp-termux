@@ -5,12 +5,12 @@ import {
 	createWorkerHandle,
 	createWorkerSubprocess,
 	logWorkerMessage,
+	type RefCountedWorkerHandle,
 	resolveWorkerSpawnCmd,
 	SMOKE_TEST_TIMEOUT_MS,
 	type SpawnedSubprocess,
 	smokeTestWorker,
 	spawnWorkerOrUnavailable,
-	type WorkerHandle,
 	workerEnvFromParent,
 } from "../subprocess/worker-client";
 import { safeSend } from "../utils/ipc";
@@ -29,7 +29,12 @@ import type { TinyTitleProgressEvent, TinyTitleWorkerInbound, TinyTitleWorkerOut
 type PendingRequest =
 	| { kind: "generate"; modelKey: TinyTitleLocalModelKey; resolve: (title: string | null) => void }
 	| { kind: "complete"; modelKey: TinyMemoryLocalModelKey; resolve: (text: string | null) => void }
-	| { kind: "download"; modelKey: TinyLocalModelKey; resolve: (ok: boolean) => void };
+	| { kind: "download"; modelKey: TinyLocalModelKey; resolve: (result: TinyTitleDownloadResult) => void };
+
+export interface TinyTitleDownloadResult {
+	ok: boolean;
+	error?: string;
+}
 
 export interface TinyTitleDownloadOptions {
 	signal?: AbortSignal;
@@ -128,33 +133,60 @@ export function createTinyTitleSubprocess(): SpawnedSubprocess<TinyTitleWorkerOu
 
 function wrapSubprocess(
 	spawned: SpawnedSubprocess<TinyTitleWorkerOutbound>,
-): WorkerHandle<TinyTitleWorkerInbound, TinyTitleWorkerOutbound> {
+): RefCountedWorkerHandle<TinyTitleWorkerInbound, TinyTitleWorkerOutbound> {
 	const { proc } = spawned;
-	return createWorkerHandle<TinyTitleWorkerInbound, TinyTitleWorkerOutbound>(spawned, message =>
-		safeSend(proc, message, "tiny-title"),
-	);
+	return {
+		...createWorkerHandle<TinyTitleWorkerInbound, TinyTitleWorkerOutbound>(spawned, message =>
+			safeSend(proc, message, "tiny-title"),
+		),
+		ref() {
+			try {
+				proc.ref();
+			} catch {
+				// Already gone.
+			}
+		},
+		unref() {
+			try {
+				proc.unref();
+			} catch {
+				// Already gone.
+			}
+		},
+	};
 }
 
-function spawnTinyTitleWorker(): WorkerHandle<TinyTitleWorkerInbound, TinyTitleWorkerOutbound> {
+function spawnInlineUnavailableWorker(
+	error: unknown,
+): RefCountedWorkerHandle<TinyTitleWorkerInbound, TinyTitleWorkerOutbound> {
+	return {
+		...createUnavailableWorker<TinyTitleWorkerInbound, TinyTitleWorkerOutbound>(error),
+		ref() {},
+		unref() {},
+	};
+}
+
+function spawnTinyTitleWorker(): RefCountedWorkerHandle<TinyTitleWorkerInbound, TinyTitleWorkerOutbound> {
 	return spawnWorkerOrUnavailable(
 		() => wrapSubprocess(createTinyTitleSubprocess()),
-		createUnavailableWorker<TinyTitleWorkerInbound, TinyTitleWorkerOutbound>,
+		spawnInlineUnavailableWorker,
 		"Tiny title worker spawn failed; local titles disabled",
 	);
 }
 
 export class TinyTitleClient {
-	#worker: WorkerHandle<TinyTitleWorkerInbound, TinyTitleWorkerOutbound> | null = null;
+	#worker: RefCountedWorkerHandle<TinyTitleWorkerInbound, TinyTitleWorkerOutbound> | null = null;
 	#unsubscribeMessage: (() => void) | null = null;
 	#unsubscribeError: (() => void) | null = null;
 	#pending = new Map<string, PendingRequest>();
 	#failedModels = new Set<TinyLocalModelKey>();
 	#progressListeners = new Set<(event: TinyTitleProgressEvent) => void>();
 	#nextRequestId = 0;
-	#spawnWorker: () => WorkerHandle<TinyTitleWorkerInbound, TinyTitleWorkerOutbound>;
+	#refed = false;
+	#spawnWorker: () => RefCountedWorkerHandle<TinyTitleWorkerInbound, TinyTitleWorkerOutbound>;
 
 	constructor(
-		spawnWorker: () => WorkerHandle<TinyTitleWorkerInbound, TinyTitleWorkerOutbound> = spawnTinyTitleWorker,
+		spawnWorker: () => RefCountedWorkerHandle<TinyTitleWorkerInbound, TinyTitleWorkerOutbound> = spawnTinyTitleWorker,
 	) {
 		this.#spawnWorker = spawnWorker;
 	}
@@ -162,6 +194,28 @@ export class TinyTitleClient {
 	onProgress(listener: (event: TinyTitleProgressEvent) => void): () => void {
 		this.#progressListeners.add(listener);
 		return () => this.#progressListeners.delete(listener);
+	}
+
+	/**
+	 * Spawn the tiny-model worker ahead of first use without loading any model.
+	 * Called from idle TUI startup so the first {@link generate} reuses a live,
+	 * unref'd subprocess instead of paying subprocess-spawn latency on the submit
+	 * hot path (issue #6462). No-ops for online / non-local keys and for models
+	 * already marked failed. A no-op `ping` round-trips the transport to fault in
+	 * the worker's module graph; no pending request is registered, so
+	 * {@link #syncWorkerRef} leaves the worker unref'd and idle sessions still exit.
+	 */
+	prewarm(modelKey: string): void {
+		if (!isTinyTitleLocalModelKey(modelKey) || this.#failedModels.has(modelKey)) return;
+		try {
+			const worker = this.#ensureWorker();
+			worker.send({ type: "ping", id: String(++this.#nextRequestId) });
+		} catch (error) {
+			logger.debug("tiny-title: prewarm failed", {
+				modelKey,
+				error: error instanceof Error ? error.message : String(error),
+			});
+		}
 	}
 
 	async generate(modelKey: string, message: string, signal?: AbortSignal): Promise<string | null>;
@@ -179,11 +233,11 @@ export class TinyTitleClient {
 			const worker = this.#ensureWorker();
 			const id = String(++this.#nextRequestId);
 			const { promise, resolve } = Promise.withResolvers<string | null>();
-			this.#pending.set(id, { kind: "generate", modelKey, resolve });
+			this.#addPending(id, { kind: "generate", modelKey, resolve });
 			const abort = (): void => {
 				const pending = this.#pending.get(id);
 				if (pending?.kind !== "generate") return;
-				this.#pending.delete(id);
+				this.#deletePending(id);
 				pending.resolve(null);
 			};
 			options.signal?.addEventListener("abort", abort, { once: true });
@@ -195,7 +249,7 @@ export class TinyTitleClient {
 				return await promise;
 			} finally {
 				options.signal?.removeEventListener("abort", abort);
-				this.#pending.delete(id);
+				this.#deletePending(id);
 			}
 		} catch (error) {
 			logger.debug("tiny-title: local generation failed", {
@@ -218,11 +272,11 @@ export class TinyTitleClient {
 			const worker = this.#ensureWorker();
 			const id = String(++this.#nextRequestId);
 			const { promise, resolve } = Promise.withResolvers<string | null>();
-			this.#pending.set(id, { kind: "complete", modelKey, resolve });
+			this.#addPending(id, { kind: "complete", modelKey, resolve });
 			const abort = (): void => {
 				const pending = this.#pending.get(id);
 				if (pending?.kind !== "complete") return;
-				this.#pending.delete(id);
+				this.#deletePending(id);
 				pending.resolve(null);
 			};
 			options.signal?.addEventListener("abort", abort, { once: true });
@@ -231,7 +285,7 @@ export class TinyTitleClient {
 				return await promise;
 			} finally {
 				options.signal?.removeEventListener("abort", abort);
-				this.#pending.delete(id);
+				this.#deletePending(id);
 			}
 		} catch (error) {
 			logger.debug("tiny-model: local completion failed", {
@@ -242,21 +296,21 @@ export class TinyTitleClient {
 		}
 	}
 
-	async downloadModel(modelKey: string, options: TinyTitleDownloadOptions = {}): Promise<boolean> {
-		if (!isTinyLocalModelKey(modelKey)) return false;
-		if (options.signal?.aborted) return false;
+	async downloadModel(modelKey: string, options: TinyTitleDownloadOptions = {}): Promise<TinyTitleDownloadResult> {
+		if (!isTinyLocalModelKey(modelKey)) return { ok: false };
+		if (options.signal?.aborted) return { ok: false };
 
 		const unsubscribe = options.onProgress ? this.onProgress(options.onProgress) : undefined;
 		try {
 			const worker = this.#ensureWorker();
 			const id = String(++this.#nextRequestId);
-			const { promise, resolve } = Promise.withResolvers<boolean>();
-			this.#pending.set(id, { kind: "download", modelKey, resolve });
+			const { promise, resolve } = Promise.withResolvers<TinyTitleDownloadResult>();
+			this.#addPending(id, { kind: "download", modelKey, resolve });
 			const abort = (): void => {
 				const pending = this.#pending.get(id);
 				if (pending?.kind !== "download") return;
-				this.#pending.delete(id);
-				pending.resolve(false);
+				this.#deletePending(id);
+				pending.resolve({ ok: false });
 			};
 			options.signal?.addEventListener("abort", abort, { once: true });
 			try {
@@ -264,14 +318,15 @@ export class TinyTitleClient {
 				return await promise;
 			} finally {
 				options.signal?.removeEventListener("abort", abort);
-				this.#pending.delete(id);
+				this.#deletePending(id);
 			}
 		} catch (error) {
+			const message = error instanceof Error ? error.message : String(error);
 			logger.debug("tiny-title: local model download failed", {
 				modelKey,
-				error: error instanceof Error ? error.message : String(error),
+				error: message,
 			});
-			return false;
+			return { ok: false, error: message };
 		} finally {
 			unsubscribe?.();
 		}
@@ -287,9 +342,10 @@ export class TinyTitleClient {
 		for (const pending of this.#pending.values()) {
 			this.#emitProgress({ modelKey: pending.modelKey, status: "error" });
 			if (pending.kind === "generate" || pending.kind === "complete") pending.resolve(null);
-			else pending.resolve(false);
+			else pending.resolve({ ok: false });
 		}
 		this.#pending.clear();
+		this.#refed = false;
 		try {
 			await worker?.terminate();
 		} catch {
@@ -297,13 +353,39 @@ export class TinyTitleClient {
 		}
 	}
 
-	#ensureWorker(): WorkerHandle<TinyTitleWorkerInbound, TinyTitleWorkerOutbound> {
+	#ensureWorker(): RefCountedWorkerHandle<TinyTitleWorkerInbound, TinyTitleWorkerOutbound> {
 		if (this.#worker) return this.#worker;
 		const worker = this.#spawnWorker();
 		this.#worker = worker;
 		this.#unsubscribeMessage = worker.onMessage(message => this.#handleMessage(message));
 		this.#unsubscribeError = worker.onError(error => this.#handleWorkerError(error));
 		return worker;
+	}
+
+	/** Register a pending request and keep the worker referenced while work is in flight. */
+	#addPending(id: string, request: PendingRequest): void {
+		this.#pending.set(id, request);
+		this.#syncWorkerRef();
+	}
+
+	/** Drop a pending request and unref the worker once nothing is in flight. */
+	#deletePending(id: string): void {
+		if (this.#pending.delete(id)) this.#syncWorkerRef();
+	}
+
+	/**
+	 * Tiny-model workers are spawned `unref`'d so idle TUI sessions can exit.
+	 * Short-lived CLI downloads need the opposite while awaiting worker IPC, or
+	 * Bun can drain the event loop before the subprocess answers.
+	 */
+	#syncWorkerRef(): void {
+		const worker = this.#worker;
+		if (!worker) return;
+		const shouldRef = this.#pending.size > 0;
+		if (shouldRef === this.#refed) return;
+		this.#refed = shouldRef;
+		if (shouldRef) worker.ref();
+		else worker.unref();
 	}
 
 	#handleMessage(message: TinyTitleWorkerOutbound): void {
@@ -319,13 +401,13 @@ export class TinyTitleClient {
 
 		const pending = this.#pending.get(message.id);
 		if (!pending) return;
-		this.#pending.delete(message.id);
+		this.#deletePending(message.id);
 		if (message.type === "title") {
 			if (pending.kind === "generate") pending.resolve(message.title);
 			return;
 		}
 		if (message.type === "downloaded") {
-			if (pending.kind === "download") pending.resolve(true);
+			if (pending.kind === "download") pending.resolve({ ok: true });
 			return;
 		}
 		if (message.type === "completion") {
@@ -335,8 +417,8 @@ export class TinyTitleClient {
 		logger.debug("tiny-title: worker returned error", { error: message.error });
 		this.#markFailedModel(pending);
 		this.#emitProgress({ modelKey: pending.modelKey, status: "error" });
-		if (pending.kind === "generate" || pending.kind === "complete") pending.resolve(null);
-		else pending.resolve(false);
+		if (pending.kind === "download") pending.resolve({ ok: false, error: message.error });
+		else pending.resolve(null);
 		void this.terminate();
 	}
 
@@ -353,7 +435,7 @@ export class TinyTitleClient {
 		for (const pending of this.#pending.values()) {
 			this.#emitProgress({ modelKey: pending.modelKey, status: "error" });
 			if (pending.kind === "generate" || pending.kind === "complete") pending.resolve(null);
-			else pending.resolve(false);
+			else pending.resolve({ ok: false, error: error.message });
 		}
 		this.#pending.clear();
 		void this.terminate();

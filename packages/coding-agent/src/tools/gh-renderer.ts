@@ -1,7 +1,7 @@
 import { type Component, padding, Text, visibleWidth } from "@oh-my-pi/pi-tui";
 import type { RenderResultOptions } from "../extensibility/custom-tools/types";
 import type { Theme, ThemeColor } from "../modes/theme/theme";
-import { framedBlock, renderStatusLine } from "../tui";
+import { framedBlock, outputBlockContentWidth, renderStatusLine } from "../tui";
 import type {
 	GhRunWatchFailedLogDetails,
 	GhRunWatchJobDetails,
@@ -364,7 +364,7 @@ function renderFallbackComponent(
 	}
 
 	return framedBlock(theme, width => {
-		const lineWidth = Math.max(1, (width || FALLBACK_WIDTH) - 3);
+		const lineWidth = outputBlockContentWidth(width || FALLBACK_WIDTH);
 		const expanded = options.expanded;
 		const limit = expanded ? allLines.length : Math.min(allLines.length, PREVIEW_LIMITS.OUTPUT_EXPANDED);
 		const visible = allLines.slice(0, limit);
@@ -416,6 +416,9 @@ function renderWatchCall(args: GithubToolRenderArgs, options: RenderResultOption
 }
 
 export const githubToolRenderer = {
+	// No animatedPendingPreview: renderCall materializes plain Text components
+	// once per display rebuild (no render closure), so a live spinner interval
+	// would request 30fps repaints while the visible glyph stays frozen.
 	renderCall(args: GithubToolRenderArgs, options: RenderResultOptions, uiTheme: Theme): Component {
 		const op = typeof args.op === "string" && args.op.trim().length > 0 ? args.op.trim() : undefined;
 		if (op === "run_watch") {
@@ -461,7 +464,7 @@ export const githubToolRenderer = {
 				uiTheme,
 			);
 			return framedBlock(uiTheme, width => {
-				const innerWidth = Math.max(1, (width || FALLBACK_WIDTH) - 3);
+				const innerWidth = outputBlockContentWidth(width || FALLBACK_WIDTH);
 				const sections = buildWatchSections(watch, uiTheme, options, innerWidth);
 				return {
 					header,

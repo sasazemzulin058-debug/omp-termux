@@ -80,14 +80,19 @@ export class ImageInputTooLargeError extends Error {
 	}
 }
 
+/** Converts an image to PNG, rejecting when the runtime cannot decode or encode it. */
+export async function convertImageToPng(image: ImageContent): Promise<ImageContent> {
+	const bytes = Buffer.from(image.data, "base64");
+	const data = await new Bun.Image(bytes).png().toBase64();
+	return { ...image, data, mimeType: "image/png" };
+}
+
 export async function ensureSupportedImageInput(image: ImageContent): Promise<ImageContent | null> {
 	if (SUPPORTED_INPUT_IMAGE_MIME_TYPES.has(image.mimeType)) {
 		return image;
 	}
 	try {
-		const bytes = Buffer.from(image.data, "base64");
-		const data = await new Bun.Image(bytes).png().toBase64();
-		return { type: "image", data, mimeType: "image/png" };
+		return await convertImageToPng(image);
 	} catch {
 		return null;
 	}

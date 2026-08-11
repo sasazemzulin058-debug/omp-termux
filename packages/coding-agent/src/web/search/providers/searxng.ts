@@ -14,6 +14,9 @@
  *   searxng.basicUsername - Optional RFC 7617 Basic auth username
  *   searxng.basicPassword - Optional RFC 7617 Basic auth password
  *   searxng.categories    - Optional comma-separated categories filter
+ *   searxng.engines       - Optional comma-separated engine names or shortcuts
+ *                           (e.g. "duckduckgo, br, sp"); shortcuts resolve via
+ *                           the instance's /config endpoint
  *   searxng.language      - Optional language code (e.g. en, zh-CN)
  *
  * Environment variable fallbacks:
@@ -21,6 +24,11 @@
  *   SEARXNG_TOKEN          - Optional bearer token
  *   SEARXNG_BASIC_USERNAME - Optional RFC 7617 Basic auth username
  *   SEARXNG_BASIC_PASSWORD - Optional RFC 7617 Basic auth password
+ *
+ * Bang syntax in queries is passed through: `!ddg foo` selects an engine or
+ * category server-side and the bang token is stripped from the upstream query.
+ * External bangs (`!!g`) are removed client-side because SearXNG answers them
+ * with an HTTP redirect even for JSON requests.
  *
  * Reference: https://docs.searxng.org/dev/search_api.html
  */
@@ -30,6 +38,8 @@ import type { AuthStorage, FetchImpl } from "@oh-my-pi/pi-ai";
 import { settings } from "../../../config/settings";
 import type { SearchResponse, SearchSource } from "../../../web/search/types";
 import { SearchProviderError } from "../../../web/search/types";
+import type { StructuredQuery } from "../query";
+import { formatScraperQuery, parseSearchQuery } from "../query";
 import { clampNumResults, dateToAgeSeconds } from "../utils";
 import type { SearchParams } from "./base";
 import { SearchProvider } from "./base";
@@ -71,6 +81,11 @@ interface SearXNGResponse {
 interface SearXNGAuth {
 	type: "basic" | "bearer";
 	value: string;
+}
+
+/** Subset of the SearXNG /config payload used for engine shortcut resolution. */
+interface SearXNGConfig {
+	engines?: Array<{ name?: string; shortcut?: string }>;
 }
 
 /** Find SearXNG endpoint from settings or environment. */
@@ -150,6 +165,113 @@ function findAuth(): SearXNGAuth | null {
 	return token ? { type: "bearer", value: token } : null;
 }
 
+/** Find configured engine names/shortcuts from settings. */
+function findEngines(): string | null {
+	try {
+		const engines = settings.get("searxng.engines");
+		if (engines) return engines;
+	} catch {
+		// Settings not initialized yet
+	}
+	return null;
+}
+
+/** Build request headers including authentication. */
+function buildHeaders(auth: SearXNGAuth | null): Record<string, string> {
+	const headers: Record<string, string> = { Accept: "application/json" };
+	if (auth?.type === "basic") {
+		headers.Authorization = `Basic ${auth.value}`;
+	} else if (auth?.type === "bearer") {
+		headers.Authorization = `Bearer ${auth.value}`;
+	}
+	return headers;
+}
+
+/** Per-endpoint cache of shortcut/name → canonical engine name maps. */
+const engineNameMapCache = new Map<string, Promise<Map<string, string> | null>>();
+
+/** Fetch the instance's /config and build a lookup of lowercased engine names
+ *  and shortcuts to canonical engine names. Returns null on any failure. */
+async function fetchEngineNameMap(
+	base: string,
+	auth: SearXNGAuth | null,
+	fetchImpl: FetchImpl | undefined,
+	signal: AbortSignal | undefined,
+	timeoutMs?: number,
+): Promise<Map<string, string> | null> {
+	try {
+		const response = await (fetchImpl ?? fetch)(`${base}/config`, {
+			headers: buildHeaders(auth),
+			signal: withHardTimeout(signal, timeoutMs),
+		});
+		if (!response.ok) return null;
+		const config = (await response.json()) as SearXNGConfig;
+		const map = new Map<string, string>();
+		for (const engine of config.engines ?? []) {
+			if (!engine.name) continue;
+			map.set(engine.name.toLowerCase(), engine.name);
+			if (engine.shortcut) map.set(engine.shortcut.toLowerCase(), engine.name);
+		}
+		return map.size ? map : null;
+	} catch {
+		return null;
+	}
+}
+
+/** Get the engine name map for an endpoint, cached for the process lifetime.
+ *  Failures are not cached so a transient error retries on the next search. */
+function getEngineNameMap(
+	endpoint: string,
+	auth: SearXNGAuth | null,
+	fetchImpl: FetchImpl | undefined,
+	signal: AbortSignal | undefined,
+	timeoutMs?: number,
+): Promise<Map<string, string> | null> {
+	const base = endpoint.replace(/\/+$/, "");
+	let cached = engineNameMapCache.get(base);
+	if (!cached) {
+		cached = fetchEngineNameMap(base, auth, fetchImpl, signal, timeoutMs).then(map => {
+			if (!map) engineNameMapCache.delete(base);
+			return map;
+		});
+		engineNameMapCache.set(base, cached);
+	}
+	return cached;
+}
+
+/** Resolve configured engine entries (canonical names or shortcuts like `ddg`)
+ *  to canonical names for SearXNG's `engines=` parameter, which accepts names
+ *  only — shortcuts resolve exclusively through bang syntax. Unknown entries
+ *  pass through verbatim; the server drops them and falls back to categories. */
+async function resolveEngineNames(
+	raw: string,
+	endpoint: string,
+	auth: SearXNGAuth | null,
+	fetchImpl: FetchImpl | undefined,
+	signal: AbortSignal | undefined,
+	timeoutMs?: number,
+): Promise<string | undefined> {
+	const entries = raw
+		.split(",")
+		.map(entry => entry.trim())
+		.filter(Boolean);
+	if (!entries.length) return undefined;
+	const map = await getEngineNameMap(endpoint, auth, fetchImpl, signal, timeoutMs);
+	if (!map) return entries.join(",");
+	return entries.map(entry => map.get(entry.toLowerCase()) ?? entry).join(",");
+}
+
+/** Strip external bang tokens (`!!g`, bare `!!`): SearXNG answers them with an
+ *  HTTP redirect even for JSON requests, which breaks response parsing.
+ *  Single-bang engine/category selectors (`!ddg`, `!images`) are kept — the
+ *  instance resolves and removes them server-side. */
+function stripExternalBangs(query: string): string {
+	return query
+		.split(/\s+/)
+		.filter(part => !part.startsWith("!!"))
+		.join(" ");
+}
+
 /** Build the search URL and headers for a SearXNG request */
 function buildRequest(
 	endpoint: string,
@@ -158,6 +280,7 @@ function buildRequest(
 		num_results?: number;
 		recency?: "day" | "week" | "month" | "year";
 		categories?: string;
+		engines?: string;
 		language?: string;
 		signal?: AbortSignal;
 	},
@@ -181,19 +304,15 @@ function buildRequest(
 		url.searchParams.set("categories", params.categories);
 	}
 
+	if (params.engines) {
+		url.searchParams.set("engines", params.engines);
+	}
+
 	if (params.language) {
 		url.searchParams.set("language", params.language);
 	}
 
-	const headers: Record<string, string> = {
-		Accept: "application/json",
-	};
-
-	if (auth?.type === "basic") {
-		headers.Authorization = `Basic ${auth.value}`;
-	} else if (auth?.type === "bearer") {
-		headers.Authorization = `Bearer ${auth.value}`;
-	}
+	const headers = buildHeaders(auth);
 
 	return { url, headers };
 }
@@ -205,8 +324,10 @@ async function callSearXNGSearch(
 		num_results?: number;
 		recency?: "day" | "week" | "month" | "year";
 		categories?: string;
+		engines?: string;
 		language?: string;
 		signal?: AbortSignal;
+		timeoutMs?: number;
 		fetch?: FetchImpl;
 	},
 	auth: SearXNGAuth | null,
@@ -215,7 +336,7 @@ async function callSearXNGSearch(
 
 	const response = await (params.fetch ?? fetch)(url, {
 		headers,
-		signal: withHardTimeout(params.signal),
+		signal: withHardTimeout(params.signal, params.timeoutMs),
 	});
 
 	if (!response.ok) {
@@ -231,9 +352,11 @@ async function callSearXNGSearch(
 /** Execute SearXNG web search. */
 export async function searchSearXNG(params: {
 	query: string;
+	parsedQuery?: StructuredQuery;
 	num_results?: number;
 	recency?: "day" | "week" | "month" | "year";
 	signal?: AbortSignal;
+	timeoutMs?: number;
 	fetch?: FetchImpl;
 }): Promise<SearchResponse> {
 	const numResults = clampNumResults(params.num_results, DEFAULT_NUM_RESULTS, MAX_NUM_RESULTS);
@@ -255,12 +378,29 @@ export async function searchSearXNG(params: {
 	} catch {
 		// Settings not initialized yet
 	}
+	const configuredEngines = findEngines();
+
+	// SearXNG forwards `q` to downstream engines, so build it with the shared
+	// scraper formatter: operators are canonicalized and scraper-hostile ones
+	// (path-carrying `site:`, `inurl:`) are structurally demoted to plain
+	// terms before formatting, so paren-grouped `site:` filters are covered
+	// too. `lang:` maps onto the native `language` param (overriding the
+	// configured default).
+	const parsed = params.parsedQuery ?? parseSearchQuery(params.query);
+	const query = formatScraperQuery(params.query, parsed);
+	if (parsed.lang) language = parsed.lang;
+
+	const engines = configuredEngines
+		? await resolveEngineNames(configuredEngines, endpoint, auth, params.fetch, params.signal, params.timeoutMs)
+		: undefined;
 
 	const response = await callSearXNGSearch(
 		endpoint,
 		{
 			...params,
+			query: stripExternalBangs(query),
 			categories,
+			engines,
 			language,
 			fetch: params.fetch,
 		},
@@ -315,10 +455,12 @@ export class SearXNGProvider extends SearchProvider {
 
 	search(params: SearchParams): Promise<SearchResponse> {
 		return searchSearXNG({
+			parsedQuery: params.parsedQuery,
 			query: params.query,
 			num_results: params.numSearchResults ?? params.limit,
 			recency: params.recency,
 			signal: params.signal,
+			timeoutMs: params.timeoutMs,
 			fetch: params.fetch,
 		});
 	}

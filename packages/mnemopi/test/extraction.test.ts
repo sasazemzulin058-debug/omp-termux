@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it } from "bun:test";
+import type { FetchImpl } from "@oh-my-pi/pi-ai";
 import {
 	buildExtractionPrompt,
 	extractFacts,
@@ -52,6 +53,33 @@ describe("structured extraction", () => {
 		expect(parseFacts("NO_FACTS")).toEqual([]);
 	});
 
+	it("unwraps category-specific object facts and drops unrecognized objects", () => {
+		const modelJson = JSON.stringify({
+			facts: [{ fact: "The user prefers tabs over spaces" }, { nested: {} }, "The user likes concise replies."],
+			instructions: [{ instruction: "Always include verification details" }],
+			preferences: [{ preference: "Prefers dark mode" }],
+			timelines: [
+				{ date: "2026-08-01", description: "release" },
+				{ subject: "release", predicate: "on", object: "2026-08-01" },
+			],
+		});
+
+		expect(parseFacts(modelJson)).toEqual([
+			"The user prefers tabs over spaces",
+			"The user likes concise replies",
+			"Always include verification details",
+			"Prefers dark mode",
+			"release 2026-08-01",
+		]);
+	});
+
+	it("treats a valid empty structured extraction as no facts", () => {
+		expect(parseFacts('{"facts": [], "instructions": [], "preferences": [], "timelines": [], "kg": []}')).toEqual([]);
+		expect(
+			parseFacts('```json\n{"facts": [], "instructions": [], "preferences": [], "timelines": [], "kg": []}\n```'),
+		).toEqual([]);
+	});
+
 	it("uses deterministic heuristic extraction when no LLM is configured", async () => {
 		process.env.MNEMOPI_LLM_ENABLED = "false";
 		const facts = await extractFactsSafe("My name is Ada. I work at Example Corp and I prefer dark mode.");
@@ -87,6 +115,23 @@ describe("structured extraction", () => {
 		expect(getExtractionStats().by_tier.host.successes).toBe(1);
 	});
 
+	it("strips reasoning wrappers from remote extraction so facts are not reasoning prose", async () => {
+		process.env.MNEMOPI_LLM_ENABLED = "true";
+		process.env.MNEMOPI_HOST_LLM_ENABLED = "false";
+		process.env.MNEMOPI_LLM_BASE_URL = "http://reasoning.invalid/v1";
+		const content =
+			'<think>\nThe user is providing information in English. Let me analyze what qualifies:\n- candidate fact\n</think>\n{"facts":["My preferred shell is zsh"],"instructions":[],"preferences":[],"timelines":[],"kg":[]}';
+		const fetchMock: FetchImpl = async () =>
+			new Response(JSON.stringify({ choices: [{ message: { content } }] }), {
+				status: 200,
+				headers: { "Content-Type": "application/json" },
+			});
+
+		const facts = await extractFacts("I use zsh.", { fetch: fetchMock });
+		expect(facts).toEqual(["My preferred shell is zsh"]);
+		expect(getExtractionStats().by_tier.remote.successes).toBe(1);
+	});
+
 	it("prefers a configured completion with the extraction-prompt override at temperature zero", async () => {
 		process.env.MNEMOPI_LLM_ENABLED = "true";
 		let capturedPrompt = "";
@@ -118,5 +163,22 @@ describe("structured extraction", () => {
 			"The user lives in Berlin",
 			"The user uses TypeScript",
 		]);
+	});
+
+	it("captures `Instruction:` facts only when a subject precedes always/never", () => {
+		// Subject-led imperatives are still captured.
+		expect(heuristicExtractFacts("I never use semicolons and you always wrap lines at 100.")).toEqual([
+			"Instruction: never use semicolons",
+			"Instruction: always wrap lines at 100",
+		]);
+	});
+
+	it("ignores subjectless always/never sentences (issue #3372)", () => {
+		// Pre-fix this would have produced `Instruction: never activates` and
+		// `Instruction: never populates …` from assistant narrative prose.
+		const transcript =
+			"[role: assistant]\nso reorder never activates and the panel never populates (because pointer events fire before the drop handler binds).\n[assistant:end]";
+		const facts = heuristicExtractFacts(transcript);
+		expect(facts.some(f => f.startsWith("Instruction:"))).toBe(false);
 	});
 });

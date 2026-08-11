@@ -1,22 +1,25 @@
 /**
  * Broker-aware auth-storage discovery used by both the coding-agent runtime and
- * the catalog model generator. Keeps the precedence logic (env → config.yml →
+ * the catalog model generator. Keeps the precedence logic (env → config.yml/config.yaml →
  * token file → local SQLite) in one place so build-time tooling sees the same
  * credentials as the TUI.
  */
 import * as path from "node:path";
 import {
+	$envExact,
 	getAgentDbPath,
 	getAgentDir,
 	getAuthBrokerSnapshotCachePath,
 	getConfigRootDir,
 	isEnoent,
 	logger,
+	MAIN_CONFIG_FILENAMES,
 } from "@oh-my-pi/pi-utils";
 import { YAML } from "bun";
 import { AuthStorage } from "../auth-storage";
-import { AuthBrokerClient } from "./client";
-import { RemoteAuthCredentialStore } from "./remote-store";
+import * as AIError from "../error";
+import { AuthBrokerClient, AuthBrokerError } from "./client";
+import { type AuthBrokerAccountPool, RemoteAuthCredentialStore } from "./remote-store";
 import { readAuthBrokerSnapshotCache, writeAuthBrokerSnapshotCache } from "./snapshot-cache";
 import { DEFAULT_SNAPSHOT_CACHE_TTL_MS, type SnapshotResponse } from "./types";
 
@@ -35,7 +38,11 @@ export interface DiscoverAuthStorageOptions {
 	configValueResolver?: (config: string) => Promise<string | undefined>;
 	cachePath?: string;
 	sourceLabel?: string;
+	/** Programmatic pool for SDK hosts. Takes precedence over the environment file. */
+	accountPool?: AuthBrokerAccountPool;
 }
+
+const SNAPSHOT_CACHE_REVALIDATION_TIMEOUT_MS = 500;
 
 /** Path to the local bearer token file. Created by `omp auth-broker token`. */
 export function getAuthBrokerTokenFilePath(): string {
@@ -49,7 +56,7 @@ export function getAuthBrokerTokenFilePath(): string {
  */
 async function defaultResolveConfigValue(config: string): Promise<string | undefined> {
 	if (config.startsWith("!")) return undefined;
-	const envValue = process.env[config];
+	const envValue = $envExact(config);
 	return envValue || config;
 }
 
@@ -70,22 +77,95 @@ interface ConfigSnapshot {
 	token?: string;
 }
 
-async function readConfigYaml(agentDir: string): Promise<ConfigSnapshot> {
-	const configPath = path.join(agentDir, "config.yml");
-	try {
-		const raw = await Bun.file(configPath).text();
-		const parsed = YAML.parse(raw);
-		if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return {};
-		const record = parsed as Record<string, unknown>;
-		const url = typeof record["auth.broker.url"] === "string" ? (record["auth.broker.url"] as string) : undefined;
-		const token =
-			typeof record["auth.broker.token"] === "string" ? (record["auth.broker.token"] as string) : undefined;
-		return { url, token };
-	} catch (err) {
-		if (isEnoent(err)) return {};
-		logger.warn("auth-broker config.yml unreadable", { error: String(err) });
-		return {};
+/**
+ * Resolve a dotted config key (e.g. `auth.broker.url`) against a parsed YAML
+ * record, accepting both nested form (`auth: { broker: { url } }`) and the
+ * legacy flat literal-dot key (`"auth.broker.url": ...`). Nested wins when both
+ * are present. Returns the value only when it is a string.
+ */
+function readDottedString(record: Record<string, unknown>, dottedKey: string): string | undefined {
+	let current: unknown = record;
+	for (const segment of dottedKey.split(".")) {
+		if (current === null || typeof current !== "object" || Array.isArray(current)) {
+			current = undefined;
+			break;
+		}
+		current = (current as Record<string, unknown>)[segment];
 	}
+	if (typeof current === "string") return current;
+	const flat = record[dottedKey];
+	return typeof flat === "string" ? flat : undefined;
+}
+
+async function readConfigYaml(agentDir: string): Promise<ConfigSnapshot> {
+	for (const filename of MAIN_CONFIG_FILENAMES) {
+		const configPath = path.join(agentDir, filename);
+		try {
+			const raw = await Bun.file(configPath).text();
+			const parsed = YAML.parse(raw);
+			if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return {};
+			const record = parsed as Record<string, unknown>;
+			const url = readDottedString(record, "auth.broker.url");
+			const token = readDottedString(record, "auth.broker.token");
+			return { url, token };
+		} catch (err) {
+			if (isEnoent(err)) continue;
+			logger.warn("auth-broker config unreadable", { path: configPath, error: String(err) });
+			return {};
+		}
+	}
+	return {};
+}
+
+export async function loadAuthBrokerAccountPool(): Promise<AuthBrokerAccountPool | undefined> {
+	const filePath = process.env.OMP_AUTH_BROKER_ACCOUNT_POOL_FILE?.trim();
+	if (!filePath) return undefined;
+
+	let parsed: unknown;
+	try {
+		parsed = await Bun.file(filePath).json();
+	} catch (error) {
+		throw new AIError.ConfigurationError(`Unable to read OMP_AUTH_BROKER_ACCOUNT_POOL_FILE at ${filePath}`, {
+			cause: error,
+		});
+	}
+	if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
+		throw new AIError.ConfigurationError("OMP_AUTH_BROKER_ACCOUNT_POOL_FILE must contain a JSON object");
+	}
+
+	const accountPool = new Map<string, ReadonlySet<string>>();
+	for (const [provider, value] of Object.entries(parsed)) {
+		const normalizedProvider = provider.trim();
+		if (normalizedProvider.length === 0) {
+			throw new AIError.ConfigurationError("OMP_AUTH_BROKER_ACCOUNT_POOL_FILE contains an empty provider id");
+		}
+		if (provider !== normalizedProvider) {
+			throw new AIError.ConfigurationError(
+				"OMP_AUTH_BROKER_ACCOUNT_POOL_FILE contains a provider id with surrounding whitespace",
+			);
+		}
+		if (!Array.isArray(value)) {
+			throw new AIError.ConfigurationError(
+				`OMP_AUTH_BROKER_ACCOUNT_POOL_FILE entry for ${provider} must be an array of identity keys`,
+			);
+		}
+		const identities = new Set<string>();
+		for (const identity of value) {
+			if (typeof identity !== "string" || identity.length === 0) {
+				throw new AIError.ConfigurationError(
+					`OMP_AUTH_BROKER_ACCOUNT_POOL_FILE entry for ${provider} contains an invalid identity key`,
+				);
+			}
+			if (identity !== identity.trim()) {
+				throw new AIError.ConfigurationError(
+					`OMP_AUTH_BROKER_ACCOUNT_POOL_FILE entry for ${provider} contains an identity key with surrounding whitespace`,
+				);
+			}
+			identities.add(identity);
+		}
+		accountPool.set(provider, identities);
+	}
+	return accountPool;
 }
 
 function resolveSnapshotTtlMs(): number {
@@ -103,7 +183,7 @@ function resolveSnapshotTtlMs(): number {
  * Resolve broker connection configuration using the same precedence as the TUI:
  *
  * 1. `OMP_AUTH_BROKER_URL` / `OMP_AUTH_BROKER_TOKEN` env vars.
- * 2. `auth.broker.url` / `auth.broker.token` in `<agentDir>/config.yml`.
+ * 2. `auth.broker.url` / `auth.broker.token` in `<agentDir>/config.yml` or `<agentDir>/config.yaml`.
  * 3. `<config-root>/auth-broker.token` file (paired with a URL from env/config).
  *
  * Returns `null` when no broker URL is configured — callers should fall back to
@@ -137,7 +217,8 @@ export async function resolveAuthBrokerConfig(
 	const token =
 		(envToken && envToken.length > 0 ? envToken : undefined) ?? configToken ?? (await readTokenFile()) ?? undefined;
 	if (!token) {
-		throw new Error(
+		throw new AIError.MissingApiKeyError(
+			undefined,
 			`OMP_AUTH_BROKER_URL is set (${url}) but no bearer token is available. ` +
 				`Set OMP_AUTH_BROKER_TOKEN, the \`auth.broker.token\` config entry, or place one at ${getAuthBrokerTokenFilePath()}.`,
 		);
@@ -158,6 +239,7 @@ export async function discoverAuthStorage(options: DiscoverAuthStorageOptions = 
 	});
 
 	if (brokerConfig) {
+		const accountPool = options.accountPool ?? (await loadAuthBrokerAccountPool());
 		const client = new AuthBrokerClient({ url: brokerConfig.url, token: brokerConfig.token });
 		const cachePath = options.cachePath ?? getAuthBrokerSnapshotCachePath();
 		const ttlMs = resolveSnapshotTtlMs();
@@ -175,9 +257,9 @@ export async function discoverAuthStorage(options: DiscoverAuthStorageOptions = 
 					}
 				: undefined;
 
-		let initialSnapshot: SnapshotResponse | undefined;
+		let cachedSnapshot: SnapshotResponse | undefined;
 		if (ttlMs > 0) {
-			initialSnapshot =
+			cachedSnapshot =
 				(await readAuthBrokerSnapshotCache({
 					path: cachePath,
 					token: brokerConfig.token,
@@ -188,16 +270,27 @@ export async function discoverAuthStorage(options: DiscoverAuthStorageOptions = 
 					return null;
 				})) ?? undefined;
 		}
-		if (!initialSnapshot) {
-			const initialResult = await client.fetchSnapshot();
-			if (initialResult.status !== 200) throw new Error("Auth broker returned no initial snapshot");
+
+		let initialSnapshot = cachedSnapshot;
+		try {
+			const initialResult = await client.fetchSnapshot({
+				signal: cachedSnapshot ? AbortSignal.timeout(SNAPSHOT_CACHE_REVALIDATION_TIMEOUT_MS) : undefined,
+			});
+			if (initialResult.status !== 200)
+				throw new AuthBrokerError("Auth broker returned no initial snapshot", {
+					status: initialResult.status,
+				});
 			initialSnapshot = initialResult.snapshot;
 			persist?.(initialSnapshot);
+		} catch (error) {
+			if (!cachedSnapshot || (error instanceof AuthBrokerError && [401, 403].includes(error.status ?? 0)))
+				throw error;
 		}
 		const store = new RemoteAuthCredentialStore({
 			client,
 			initialSnapshot,
 			onSnapshot: persist,
+			accountPool,
 		});
 		const storage = new AuthStorage(store, {
 			configValueResolver: options.configValueResolver,

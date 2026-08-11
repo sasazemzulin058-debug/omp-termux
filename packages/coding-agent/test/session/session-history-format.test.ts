@@ -106,13 +106,128 @@ describe("formatSessionHistoryMarkdown", () => {
 			{
 				role: "toolResult",
 				toolCallId: "tc-orphan",
-				toolName: "search",
+				toolName: "grep",
 				content: [{ type: "text", text: "one match" }],
 				isError: false,
 				timestamp: 1,
 			},
 		]);
-		expect(output).toContain("→ search() ⇒ ok · 1 line");
+		expect(output).toContain("→ grep() ⇒ ok · 1 line");
+	});
+
+	it("renders find paths without falling back to JSON arguments", () => {
+		const output = formatSessionHistoryMarkdown([
+			{
+				role: "assistant",
+				content: [
+					{
+						type: "toolCall",
+						id: "tc-glob",
+						name: "glob",
+						arguments: { path: "packages/coding-agent/src/**/*.ts" },
+					},
+				],
+				timestamp: 1,
+			},
+			{
+				role: "toolResult",
+				toolCallId: "tc-glob",
+				toolName: "glob",
+				content: [{ type: "text", text: "session-history-format.ts" }],
+				isError: false,
+				timestamp: 2,
+			},
+		]);
+
+		expect(output).toContain("→ glob(packages/coding-agent/src/**/*.ts) ⇒ ok · 1 line");
+		expect(output).not.toContain('{"paths"');
+	});
+
+	it("renders search path scope alongside the pattern", () => {
+		const output = formatSessionHistoryMarkdown([
+			{
+				role: "assistant",
+				content: [
+					{
+						type: "toolCall",
+						id: "tc-grep",
+						name: "grep",
+						arguments: { pattern: "PRIMARY_ARG_KEYS", path: "packages/coding-agent/src/session" },
+					},
+				],
+				timestamp: 1,
+			},
+			{
+				role: "toolResult",
+				toolCallId: "tc-grep",
+				toolName: "grep",
+				content: [{ type: "text", text: "timed out" }],
+				isError: true,
+				timestamp: 2,
+			},
+		]);
+
+		expect(output).toContain(
+			"→ grep(PRIMARY_ARG_KEYS @ packages/coding-agent/src/session) ⇒ error · 1 line — timed out",
+		);
+	});
+
+	it("keeps the ast_grep pattern visible instead of only its paths scope", () => {
+		const output = formatSessionHistoryMarkdown([
+			{
+				role: "assistant",
+				content: [
+					{
+						type: "toolCall",
+						id: "tc-astgrep",
+						name: "ast_grep",
+						arguments: { pat: "console.log($$$)", path: "packages/coding-agent/src/**/*.ts" },
+					},
+				],
+				timestamp: 1,
+			},
+			{
+				role: "toolResult",
+				toolCallId: "tc-astgrep",
+				toolName: "ast_grep",
+				content: [{ type: "text", text: "match" }],
+				isError: false,
+				timestamp: 2,
+			},
+		]);
+
+		expect(output).toContain("→ ast_grep(console.log($$$)) ⇒ ok · 1 line");
+	});
+
+	it("keeps the ast_edit op pattern visible instead of only its paths scope", () => {
+		const output = formatSessionHistoryMarkdown([
+			{
+				role: "assistant",
+				content: [
+					{
+						type: "toolCall",
+						id: "tc-astedit",
+						name: "ast_edit",
+						arguments: {
+							ops: [{ pat: "oldApi($$$A)", out: "newApi($$$A)" }],
+							paths: ["packages/coding-agent/src/**/*.ts"],
+						},
+					},
+				],
+				timestamp: 1,
+			},
+			{
+				role: "toolResult",
+				toolCallId: "tc-astedit",
+				toolName: "ast_edit",
+				content: [{ type: "text", text: "1 change" }],
+				isError: false,
+				timestamp: 2,
+			},
+		]);
+
+		expect(output).toContain("oldApi($$$A)");
+		expect(output).not.toContain("→ ast_edit(packages/coding-agent/src/**/*.ts)");
 	});
 
 	it("renders tool intent comments immediately before tool call lines when includeToolIntent is true", () => {
@@ -194,5 +309,82 @@ describe("formatSessionHistoryMarkdown", () => {
 		const output = formatSessionHistoryMarkdown(messages);
 		expect(output).toContain("→ advise(concern: Avoid shadowing the outer variable.) ⇒ ok · 1 line");
 		expect(output).not.toContain("Recorded.");
+	});
+
+	it("attributes a user bang command to the user, not the preceding agent turn", () => {
+		const delta = [
+			{
+				role: "assistant",
+				content: [{ type: "text", text: "It's safe to remove it. I'd run `rm -rf .wt/foo` but will stop here." }],
+				stopReason: "endTurn",
+				timestamp: 1,
+			},
+			{
+				role: "bashExecution",
+				command: "rm -rf .wt/foo",
+				output: "",
+				exitCode: 0,
+				cancelled: false,
+				truncated: false,
+				excludeFromContext: false,
+				timestamp: 2,
+			},
+			{ role: "user", content: "Done!", timestamp: 3 },
+		];
+
+		const output = formatSessionHistoryMarkdown(delta, { watchedRoles: true });
+
+		// The execution line is prefixed `user-bash!` and sits under a `**user**:`
+		// label, not trailing the `**agent**:` block, so the advisor cannot read
+		// the user-run command as an agent action.
+		expect(output).toContain("→ user-bash! rm -rf .wt/foo ⇒ ok · 0 lines");
+		const agentIdx = output.indexOf("**agent**:");
+		const userIdx = output.indexOf("**user**:");
+		const execIdx = output.indexOf("→ user-bash!");
+		expect(agentIdx).toBeGreaterThanOrEqual(0);
+		expect(userIdx).toBeGreaterThan(agentIdx);
+		expect(execIdx).toBeGreaterThan(userIdx);
+	});
+
+	it("prefixes a user python bang execution with user-python in watched mode", () => {
+		const output = formatSessionHistoryMarkdown(
+			[
+				{
+					role: "pythonExecution",
+					code: "print(1)",
+					output: "1",
+					exitCode: 0,
+					cancelled: false,
+					truncated: false,
+					timestamp: 1,
+				},
+			],
+			{ watchedRoles: true },
+		);
+		expect(output).toContain("**user**:");
+		expect(output).toContain("→ user-python! print(1) ⇒ ok · 1 line");
+	});
+
+	it("keeps the bare user-prefixed line without a role label outside watched mode", () => {
+		const output = formatSessionHistoryMarkdown([
+			{
+				role: "assistant",
+				content: [{ type: "text", text: "Recommending cleanup." }],
+				stopReason: "endTurn",
+				timestamp: 1,
+			},
+			{
+				role: "bashExecution",
+				command: "rm -rf .wt/foo",
+				output: "",
+				exitCode: 0,
+				cancelled: false,
+				truncated: false,
+				timestamp: 2,
+			},
+		]);
+		expect(output).toContain("→ user-bash! rm -rf .wt/foo ⇒ ok · 0 lines");
+		expect(output).not.toContain("**user**:");
+		expect(output).toContain("## assistant");
 	});
 });

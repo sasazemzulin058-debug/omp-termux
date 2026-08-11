@@ -18,6 +18,12 @@ const apiKeyAuthStorage = {
 		if (provider === "openrouter") return process.env.OPENROUTER_API_KEY;
 		return undefined;
 	},
+	getCredentialOrigin(provider: string) {
+		// Env-backed key (not OAuth) — the direct api-key config must still be emitted.
+		if (provider === "perplexity" && process.env.PERPLEXITY_API_KEY) return { kind: "env" };
+		if (provider === "openrouter" && process.env.OPENROUTER_API_KEY) return { kind: "env" };
+		return undefined;
+	},
 	hasAuth() {
 		return false;
 	},
@@ -112,6 +118,22 @@ describe("Perplexity API-key request shape", () => {
 		expect(body?.num_search_results).toBe(5);
 	});
 
+	it("maps site:/-site:/after: directives onto native filters and strips them from the query", async () => {
+		let body: Record<string, unknown> | undefined;
+		const fetchMock = mockApi(b => (body = b), baseResponse());
+
+		await searchPerplexity({
+			query: "rust site:docs.rs -site:reddit.com after:2024-06-01",
+			authStorage: apiKeyAuthStorage,
+			fetch: fetchMock,
+		});
+
+		expect(body?.search_domain_filter).toEqual(["docs.rs", "-reddit.com"]);
+		expect(body?.search_after_date_filter).toBe("6/1/2024");
+		const messages = body?.messages as { role: string; content: string }[];
+		expect(messages.at(-1)?.content).toBe("rust");
+	});
+
 	it("parses related_questions into relatedQuestions, preserving order and dropping blanks", async () => {
 		const fetchMock = mockApi(
 			() => {},
@@ -138,7 +160,7 @@ describe("Perplexity API-key request shape", () => {
 
 		expect(response.relatedQuestions).toBeUndefined();
 	});
-	it("falls back to OpenRouter with the selected API-key config after direct Perplexity fails", async () => {
+	it("falls back to OpenRouter with the selected API-key config after a non-retryable direct Perplexity failure", async () => {
 		process.env.OPENROUTER_API_KEY = "openrouter-test-key";
 		const urls: string[] = [];
 		const bodies: Record<string, unknown>[] = [];
@@ -146,7 +168,7 @@ describe("Perplexity API-key request shape", () => {
 			const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
 			urls.push(url);
 			bodies.push(JSON.parse(init?.body as string));
-			if (url === API_URL) return new Response("direct failed", { status: 500 });
+			if (url === API_URL) return new Response("direct failed", { status: 400 });
 			if (url === OPENROUTER_API_URL) return sseResponse(baseResponse());
 			return new Response("not mocked", { status: 500 });
 		};
@@ -261,6 +283,9 @@ const oauthAuthStorage = {
 	async getApiKey() {
 		return undefined;
 	},
+	getCredentialOrigin(provider: string) {
+		return provider === "perplexity" ? { kind: "oauth" } : undefined;
+	},
 	hasAuth() {
 		return true;
 	},
@@ -271,6 +296,9 @@ const anonymousAuthStorage = {
 		return undefined;
 	},
 	async getApiKey() {
+		return undefined;
+	},
+	getCredentialOrigin() {
 		return undefined;
 	},
 	hasAuth() {
@@ -356,15 +384,133 @@ describe("Perplexity OAuth request shape", () => {
 
 		// The consumer ask endpoint has no system slot; prepending the prompt makes
 		// the model refuse ("I don't have web-search tools in this turn").
-		expect(body?.query_str).toBe("quic vs tcp");
-		expect((body?.params as Record<string, unknown>).query_str).toBe("quic vs tcp");
-		expect((body?.params as Record<string, unknown>).model_preference).toBe("experimental");
+		expect(body).toBeDefined();
+		expect(body!.query_str).toBe("quic vs tcp");
+		const params = body!.params as Record<string, unknown>;
+		expect(params.query_str).toBe("quic vs tcp");
+		expect(params.model_preference).toBe("experimental");
 		// The ask endpoint authenticates via the next-auth session cookie; a bearer
 		// header is ignored and silently downgrades to the anonymous `turbo` model.
 		expect(headers?.get("cookie")).toBe("__Secure-next-auth.session-token=test-oauth-token");
 		expect(headers?.has("authorization")).toBe(false);
 		expect(response.authMode).toBe("oauth");
 		expect(response.answer).toBe("OAuth answer");
+	});
+
+	it("maps directives onto ask-endpoint native filters and rewrites query_str", async () => {
+		let body: Record<string, unknown> | undefined;
+		const fetchMock = mockOAuth(b => (body = b));
+
+		await searchPerplexity({
+			query: "rust site:docs.rs -site:reddit.com after:2024-06-01",
+			search_recency_filter: "month",
+			authStorage: oauthAuthStorage,
+			fetch: fetchMock,
+		});
+
+		expect(body!.query_str).toBe("rust");
+		const params = body!.params as Record<string, unknown>;
+		expect(params.query_str).toBe("rust");
+		expect(params.search_domain_filter).toEqual(["docs.rs", "-reddit.com"]);
+		expect(params.search_after_date_filter).toBe("6/1/2024");
+		// Absolute date bounds take precedence over recency.
+		expect(params.search_recency_filter).toBeNull();
+	});
+});
+
+describe("Perplexity OAuth transport failure (issue #5315)", () => {
+	const savedCookies = process.env.PERPLEXITY_COOKIES;
+
+	beforeEach(() => {
+		delete process.env.PERPLEXITY_COOKIES; // cookies precede oauth; keep them out
+	});
+
+	afterEach(() => {
+		vi.restoreAllMocks();
+		if (savedCookies === undefined) delete process.env.PERPLEXITY_COOKIES;
+		else process.env.PERPLEXITY_COOKIES = savedCookies;
+	});
+
+	// Mirrors production: an active OAuth session makes getApiKey("perplexity")
+	// return the OAuth JWT itself, and getCredentialOrigin reports origin "oauth".
+	const oauthOriginStorage = {
+		async getOAuthAccess() {
+			return { accessToken: "oauth-session-jwt" };
+		},
+		async getApiKey(provider: string) {
+			if (provider === "perplexity") return "oauth-session-jwt";
+			return undefined;
+		},
+		getCredentialOrigin(provider: string) {
+			return provider === "perplexity" ? { kind: "oauth" } : undefined;
+		},
+		async rotateSessionCredential() {
+			return false;
+		},
+		hasAuth() {
+			return true;
+		},
+	} as unknown as AuthStorage;
+
+	it("does not emit a direct api-key config from the OAuth session token", async () => {
+		const methods = await getAvailableAuthMethods(oauthOriginStorage, undefined, undefined);
+		expect(methods.some(m => m.type === "oauth")).toBe(true);
+		// The OAuth JWT must never appear as a Perplexity api_key config — that is
+		// what got sent as a Bearer to api.perplexity.ai and rejected with 401.
+		expect(methods.some(m => m.type === "api_key" && m.provider === "perplexity")).toBe(false);
+	});
+
+	it("retries the ask endpoint once on transport failure and never falls through to /chat/completions", async () => {
+		let askCalls = 0;
+		let apiCalls = 0;
+		const event = {
+			final: true,
+			display_model: "pplx_pro",
+			uuid: "req-oauth",
+			blocks: [{ intended_usage: "ask_text", markdown_block: { answer: "OAuth answer" } }],
+		};
+		const askBody = `data: ${JSON.stringify(event)}\n\n`;
+		const fetchMock: FetchImpl = async input => {
+			const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
+			if (url === OAUTH_ASK_URL) {
+				askCalls++;
+				if (askCalls === 1) throw new TypeError("socket connection closed before an HTTP response");
+				return new Response(askBody, { status: 200, headers: { "Content-Type": "text/event-stream" } });
+			}
+			if (url === API_URL) {
+				apiCalls++;
+				return new Response(JSON.stringify({ error: { message: "Unauthorized" } }), { status: 401 });
+			}
+			return new Response("not mocked", { status: 500 });
+		};
+
+		const response = await searchPerplexity({
+			query: "OpenAI official website",
+			authStorage: oauthOriginStorage,
+			fetch: fetchMock,
+		});
+
+		expect(askCalls).toBe(2); // first fails at transport, second succeeds
+		expect(apiCalls).toBe(0); // the OAuth token is never sent to the api-key endpoint
+		expect(response.authMode).toBe("oauth");
+		expect(response.answer).toBe("OAuth answer");
+	});
+
+	it("does not retry once an HTTP response is received", async () => {
+		let askCalls = 0;
+		const fetchMock: FetchImpl = async input => {
+			const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
+			if (url === OAUTH_ASK_URL) {
+				askCalls++;
+				return new Response("nope", { status: 401 });
+			}
+			return new Response("not mocked", { status: 500 });
+		};
+
+		await expect(
+			searchPerplexity({ query: "q", authStorage: oauthOriginStorage, fetch: fetchMock }),
+		).rejects.toThrow();
+		expect(askCalls).toBe(1); // a real HTTP error is final, not retried
 	});
 });
 
@@ -527,6 +673,9 @@ describe("Perplexity Authentication order", () => {
 			async getApiKey() {
 				return undefined;
 			},
+			getCredentialOrigin(provider: string) {
+				return provider === "perplexity" ? { kind: "oauth" } : undefined;
+			},
 			hasAuth() {
 				return true;
 			},
@@ -553,6 +702,9 @@ describe("Perplexity Authentication order", () => {
 			async getApiKey(provider: string) {
 				if (provider === "perplexity") return "api-key";
 				return undefined;
+			},
+			getCredentialOrigin(provider: string) {
+				return provider === "perplexity" ? { kind: "oauth" } : undefined;
 			},
 			hasAuth() {
 				return true;

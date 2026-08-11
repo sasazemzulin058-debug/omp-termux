@@ -2,15 +2,21 @@ import { afterEach, describe, expect, it, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import { applyResolvedSystemPromptInputs, submitInteractiveInput } from "@oh-my-pi/pi-coding-agent/main";
+import {
+	applyResolvedSystemPromptInputs,
+	readPipedInput,
+	submitInteractiveInput,
+} from "@oh-my-pi/pi-coding-agent/main";
 import type { SubmittedUserInput } from "@oh-my-pi/pi-coding-agent/modes/types";
 import type { CreateAgentSessionOptions } from "@oh-my-pi/pi-coding-agent/sdk";
 import { discoverTitleSystemPromptFile } from "@oh-my-pi/pi-coding-agent/system-prompt";
+import { removeWithRetries } from "@oh-my-pi/pi-utils";
 
 const cleanupDirs: string[] = [];
 
 afterEach(async () => {
-	await Promise.all(cleanupDirs.splice(0).map(dir => fs.rm(dir, { recursive: true, force: true })));
+	await Promise.all(cleanupDirs.splice(0).map(dir => removeWithRetries(dir)));
+	vi.restoreAllMocks();
 });
 
 function createInput(overrides: Partial<SubmittedUserInput> = {}): SubmittedUserInput {
@@ -33,6 +39,21 @@ describe("discoverTitleSystemPromptFile", () => {
 		await fs.writeFile(promptPath, "custom title prompt");
 
 		expect(discoverTitleSystemPromptFile(projectDir)).toBe(promptPath);
+	});
+});
+
+describe("readPipedInput", () => {
+	it("reads redirected stdin when Bun reports isTTY as undefined", async () => {
+		const originalIsTTY = process.stdin.isTTY;
+		const readText = vi.spyOn(Bun.stdin, "text").mockResolvedValue("piped prompt\n");
+		Object.defineProperty(process.stdin, "isTTY", { value: undefined, configurable: true });
+
+		try {
+			expect(await readPipedInput()).toBe("piped prompt\n");
+			expect(readText).toHaveBeenCalledTimes(1);
+		} finally {
+			Object.defineProperty(process.stdin, "isTTY", { value: originalIsTTY, configurable: true });
+		}
 	});
 });
 

@@ -39,7 +39,7 @@ export class ArtifactManager {
 	#nextId = 0;
 	readonly #dir: string;
 	#dirCreated = false;
-	#initialized = false;
+	#initPromise: Promise<void> | null = null;
 
 	/**
 	 * @param dir Directory that will hold artifact files. Created lazily on first save.
@@ -61,10 +61,11 @@ export class ArtifactManager {
 			await fs.mkdir(this.#dir, { recursive: true });
 			this.#dirCreated = true;
 		}
-		if (!this.#initialized) {
-			await this.#scanExistingIds();
-			this.#initialized = true;
-		}
+		// Memoize the first-use scan so it runs exactly once. Concurrent callers
+		// share the in-flight promise instead of each re-seeding #nextId across
+		// the readdir yield in #scanExistingIds (which would hand duplicate ids).
+		this.#initPromise ??= this.#scanExistingIds();
+		await this.#initPromise;
 	}
 
 	/**

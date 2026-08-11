@@ -1,5 +1,5 @@
+import { type } from "@oh-my-pi/omptype";
 import type { AgentTool, AgentToolResult } from "@oh-my-pi/pi-agent-core";
-import { type } from "arktype";
 import memoryEditDescription from "../prompts/tools/memory-edit.md" with { type: "text" };
 import type { ToolSession } from ".";
 
@@ -50,7 +50,9 @@ export class MemoryEditTool implements AgentTool<typeof memoryEditSchema> {
 		const text =
 			result.status === "not_found"
 				? `Memory ${params.id} was not found${location}.`
-				: `Memory ${params.id} ${result.status}${location}.`;
+				: result.status === "not_editable"
+					? `Memory ${params.id} is a read-only fact${location}; it cannot be edited. Read it with memory://${params.id}.`
+					: `Memory ${params.id} ${result.status}${location}.`;
 		return {
 			content: [{ type: "text", text }],
 			details: result,

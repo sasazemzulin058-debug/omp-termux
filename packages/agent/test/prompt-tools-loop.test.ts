@@ -1,9 +1,9 @@
 import { describe, expect, it } from "bun:test";
+import { type } from "@oh-my-pi/omptype";
 import { agentLoop } from "@oh-my-pi/pi-agent-core/agent-loop";
 import type { AgentContext, AgentLoopConfig, AgentMessage, AgentTool } from "@oh-my-pi/pi-agent-core/types";
 import type { AssistantMessage, Context, Message, TextContent, ToolResultMessage } from "@oh-my-pi/pi-ai";
 import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
-import { type } from "arktype";
 import { createUserMessage } from "./helpers";
 
 function identityConverter(messages: AgentMessage[]): Message[] {
@@ -66,7 +66,7 @@ describe("agentLoop with owned in-band tool calls", () => {
 		const promptSection = sys0.join("\n");
 		expect(promptSection).toContain("<tools>");
 		expect(promptSection).toContain('"name":"echo"');
-		expect(promptSection).toContain("YOU MUST EMIT THE STOP SEQUENCE AND HALT");
+		expect(promptSection).toContain("<arg_key>name</arg_key>");
 
 		// Second request: the wire carries NO native tool blocks — prior call/result
 		// are plain <tool_call> / <tool_response> text, and tools are still stripped.

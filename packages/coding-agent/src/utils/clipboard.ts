@@ -1,7 +1,62 @@
-import { execSync } from "node:child_process";
-import type { ClipboardImage } from "@oh-my-pi/pi-natives";
-import * as native from "@oh-my-pi/pi-natives";
-import { logger } from "@oh-my-pi/pi-utils";
+import {
+	type ClipboardImage,
+	copyToClipboard as nativeCopyToClipboard,
+	readImageFromClipboard as nativeReadImageFromClipboard,
+} from "@oh-my-pi/pi-natives/clipboard";
+import * as logger from "@oh-my-pi/pi-utils/logger";
+import { SUPPORTED_IMAGE_MIME_TYPES } from "@oh-my-pi/pi-utils/mime";
+import MAC_FILE_URL_SCRIPT from "./mac-file-urls.applescript" with { type: "text" };
+
+type SpawnCaptureOptions = { input?: string; timeoutMs?: number };
+
+/**
+ * Run a subprocess and capture its stdout without blocking the event loop.
+ *
+ * `readTextFromClipboard`, `readMacFileUrlsFromClipboard`, and the Termux copy
+ * path all shell out to CLI clipboard tools. The synchronous `execSync` API
+ * parks the render loop until the child exits or the timeout fires, so a hung
+ * clipboard daemon freezes the TUI for the full 2000ms budget (#4235). This
+ * helper mirrors the previous semantics — capture stdout, throw on non-zero
+ * exit or timeout, forward optional stdin — but yields to the event loop while
+ * the child runs.
+ *
+ * @throws Error when the child fails to spawn, is killed by the timeout, or
+ *   exits with a non-zero status. Callers rely on this to use platform
+ *   fallbacks or report an empty clipboard.
+ */
+async function spawnCapture(cmd: string[], options: SpawnCaptureOptions & { encoding: "bytes" }): Promise<Uint8Array>;
+async function spawnCapture(cmd: string[], options?: SpawnCaptureOptions): Promise<string>;
+async function spawnCapture(
+	cmd: string[],
+	options: SpawnCaptureOptions & { encoding?: "bytes" } = {},
+): Promise<string | Uint8Array> {
+	const timeoutMs = options.timeoutMs ?? 2000;
+	const proc = Bun.spawn(cmd, {
+		stdout: "pipe",
+		stderr: "ignore",
+		stdin: options.input !== undefined ? Buffer.from(options.input) : "ignore",
+	});
+	let timedOut = false;
+	const timer = setTimeout(() => {
+		timedOut = true;
+		proc.kill();
+	}, timeoutMs);
+	try {
+		const response = new Response(proc.stdout);
+		const stdout =
+			options.encoding === "bytes" ? new Uint8Array(await response.arrayBuffer()) : await response.text();
+		await proc.exited;
+		if (timedOut) {
+			throw new Error(`${cmd[0]} timed out after ${timeoutMs}ms`);
+		}
+		if (proc.exitCode !== 0) {
+			throw new Error(`${cmd[0]} exited with code ${proc.exitCode}`);
+		}
+		return stdout;
+	} finally {
+		clearTimeout(timer);
+	}
+}
 
 function hasDisplay(): boolean {
 	return process.platform !== "linux" || Boolean(process.env.DISPLAY || process.env.WAYLAND_DISPLAY);
@@ -9,6 +64,29 @@ function hasDisplay(): boolean {
 
 function isWsl(): boolean {
 	return process.platform === "linux" && Boolean(process.env.WSL_DISTRO_NAME || process.env.WSL_INTEROP);
+}
+
+/**
+ * Read file paths from the macOS pasteboard's `public.file-url` representation.
+ *
+ * Used to reach the Finder `Cmd+C` pasteboard (which exposes only file URLs,
+ * no plain text or raw image bytes) so an image-file clipboard can be attached
+ * via {@link handleImagePathPaste} instead of falling through to "Clipboard is
+ * empty". Returns an empty array on non-darwin platforms, when AppleScript is
+ * unavailable, or when the pasteboard holds no file URLs.
+ */
+export async function readMacFileUrlsFromClipboard(): Promise<string[]> {
+	if (process.platform !== "darwin") return [];
+	try {
+		const stdout = await spawnCapture(["osascript", "-"], { input: MAC_FILE_URL_SCRIPT });
+		return stdout
+			.split(/\r?\n/)
+			.map(line => line.trim())
+			.filter(line => line.length > 0);
+	} catch (error) {
+		logger.warn("clipboard: failed to read macOS file URLs", { error: String(error) });
+		return [];
+	}
 }
 
 /**
@@ -53,14 +131,14 @@ export async function copyToClipboard(text: string): Promise<void> {
 	try {
 		if (process.env.TERMUX_VERSION) {
 			try {
-				execSync("termux-clipboard-set", { input: text, timeout: 5000 });
+				await spawnCapture(["termux-clipboard-set"], { input: text, timeoutMs: 5000 });
 				return;
 			} catch {
 				// Fall through to native
 			}
 		}
 
-		await native.copyToClipboard(text);
+		await nativeCopyToClipboard(text);
 	} catch {
 		// Ignore — clipboard copy is best-effort
 	}
@@ -181,6 +259,14 @@ async function readTextViaPowerShell(): Promise<string | null> {
 	}
 }
 
+async function readTextFromX11Clipboard(): Promise<string> {
+	try {
+		return await spawnCapture(["xclip", "-selection", "clipboard", "-o"]);
+	} catch {
+		return await spawnCapture(["xsel", "--clipboard", "--output"]);
+	}
+}
+
 /**
  * Read an image from the system clipboard.
  *
@@ -190,7 +276,7 @@ async function readTextViaPowerShell(): Promise<string | null> {
  * because terminal clipboard paths can leave image payloads invisible to the
  * native bridge.
  *
- * @returns PNG payload or null when no image is available.
+ * @returns A supported image payload or null when no image is available.
  */
 export async function readImageFromClipboard(): Promise<ClipboardImage | null> {
 	if (process.env.TERMUX_VERSION) {
@@ -207,7 +293,7 @@ export async function readImageFromClipboard(): Promise<ClipboardImage | null> {
 
 	if (process.platform === "win32") {
 		try {
-			const image = await native.readImageFromClipboard();
+			const image = await nativeReadImageFromClipboard();
 			if (image) return image;
 		} catch (err) {
 			logger.warn("clipboard: native Windows image read failed", { error: String(err) });
@@ -215,11 +301,24 @@ export async function readImageFromClipboard(): Promise<ClipboardImage | null> {
 		return await readImageViaPowerShell();
 	}
 
+	if (process.platform === "linux" && process.env.WAYLAND_DISPLAY) {
+		try {
+			const offeredMimeTypes = new Set((await spawnCapture(["wl-paste", "--list-types"])).split(/\r?\n/));
+			for (const mimeType of SUPPORTED_IMAGE_MIME_TYPES) {
+				if (!offeredMimeTypes.has(mimeType)) continue;
+				const data = await spawnCapture(["wl-paste", "--type", mimeType], { encoding: "bytes" });
+				if (data.byteLength > 0) return { data, mimeType };
+			}
+		} catch {
+			// Fall through when wl-clipboard is absent or no advertised image payload can be read.
+		}
+	}
+
 	if (!hasDisplay()) {
 		return null;
 	}
 
-	return (await native.readImageFromClipboard()) ?? null;
+	return (await nativeReadImageFromClipboard()) ?? null;
 }
 
 /**
@@ -229,13 +328,13 @@ export async function readTextFromClipboard(): Promise<string> {
 	try {
 		const p = process.platform;
 		if (p === "darwin") {
-			return execSync("pbpaste", { encoding: "utf8", timeout: 2000 }).toString();
+			return await spawnCapture(["pbpaste"]);
 		}
 		if (p === "win32") {
 			return (await readTextViaPowerShell()) ?? "";
 		}
 		if (process.env.TERMUX_VERSION) {
-			return execSync("termux-clipboard-get", { encoding: "utf8", timeout: 2000 }).toString();
+			return await spawnCapture(["termux-clipboard-get"]);
 		}
 		if (isWsl()) {
 			const text = await readTextViaPowerShell();
@@ -246,14 +345,14 @@ export async function readTextFromClipboard(): Promise<string> {
 		const hasX11Display = Boolean(process.env.DISPLAY);
 		if (hasWaylandDisplay) {
 			try {
-				return execSync("wl-paste --type text/plain --no-newline", { encoding: "utf8", timeout: 2000 }).toString();
+				return await spawnCapture(["wl-paste", "--type", "text/plain", "--no-newline"]);
 			} catch {
 				if (hasX11Display) {
-					return execSync("xclip -selection clipboard -o", { encoding: "utf8", timeout: 2000 }).toString();
+					return await readTextFromX11Clipboard();
 				}
 			}
 		} else if (hasX11Display) {
-			return execSync("xclip -selection clipboard -o", { encoding: "utf8", timeout: 2000 }).toString();
+			return await readTextFromX11Clipboard();
 		}
 	} catch (error) {
 		logger.warn("clipboard: failed to read clipboard text", { error: String(error) });

@@ -6,7 +6,7 @@ import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { ReadTool } from "@oh-my-pi/pi-coding-agent/tools/read";
 import * as scrapers from "@oh-my-pi/pi-coding-agent/web/scrapers/types";
-import { Snowflake } from "@oh-my-pi/pi-utils";
+import { removeSyncWithRetries, Snowflake } from "@oh-my-pi/pi-utils";
 
 const ATOM = `<?xml version="1.0"?>\n<feed xmlns="http://www.w3.org/2005/Atom"><title>Sample</title><entry><title>One</title><id>1</id><updated>2024-01-01T00:00:00Z</updated><content>body</content></entry></feed>`;
 const JSON_BODY = `{"alpha":1,"beta":[2,3]}`;
@@ -47,7 +47,7 @@ describe("read URL with :raw selector (regression: JSON/feed parsers ignored raw
 	});
 	afterEach(() => {
 		vi.restoreAllMocks();
-		fs.rmSync(testDir, { recursive: true, force: true });
+		removeSyncWithRetries(testDir);
 	});
 
 	it("returns the raw atom feed body when :raw is set", async () => {
@@ -99,6 +99,30 @@ describe("read URL with :raw selector (regression: JSON/feed parsers ignored raw
 		expect(textBlock?.text).toContain('"alpha": 1');
 	});
 
+	it("refetches the same URL on subsequent reads", async () => {
+		const session = makeSession(testDir);
+		const tool = new ReadTool(session);
+		let body = "v1";
+		const loadPage = vi.spyOn(scrapers, "loadPage").mockImplementation(async (requestedUrl: string) => ({
+			ok: true,
+			status: 200,
+			finalUrl: requestedUrl,
+			contentType: "text/plain",
+			content: body,
+		}));
+
+		const first = await tool.execute("first", { path: "https://example.com/live.txt:raw" });
+		body = "v2";
+		const second = await tool.execute("second", { path: "https://example.com/live.txt:raw" });
+		const firstText = first.content.find(entry => entry.type === "text");
+		const secondText = second.content.find(entry => entry.type === "text");
+
+		expect(firstText?.text).toContain("v1");
+		expect(secondText?.text).toContain("v2");
+		expect(secondText?.text).not.toContain("v1");
+		expect(loadPage).toHaveBeenCalledTimes(2);
+	});
+
 	it("returns slices of raw content when :raw is combined with a range", async () => {
 		const session = makeSession(testDir);
 		const tool = new ReadTool(session);
@@ -130,7 +154,7 @@ describe("read URL with multi-range selector (regression: was stuck on URL → 4
 	});
 	afterEach(() => {
 		vi.restoreAllMocks();
-		fs.rmSync(testDir, { recursive: true, force: true });
+		removeSyncWithRetries(testDir);
 	});
 
 	it("routes :A-B,C-D to the multi-range builder against the cached body", async () => {

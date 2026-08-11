@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import {
+	hasOpus47ApiRestrictions,
 	isClaudeModelId,
 	isGlmVisionModelId,
 	isGrokReasoningEffortCapable,
@@ -8,9 +9,12 @@ import {
 	isMinimaxM2FamilyModelId,
 	isMinimaxM3FamilyModelId,
 	isOpenAIGptOssModelId,
+	isOpenAIModelId,
 	isReasoningGlmModelId,
 	modelFamilyToken,
+	parseAnthropicModel,
 	supportsAdaptiveThinkingDisplay,
+	supportsMidConversationSystemMessages,
 } from "@oh-my-pi/pi-catalog/identity";
 
 describe("isKimiModelId", () => {
@@ -41,20 +45,82 @@ describe("isClaudeModelId", () => {
 		expect(isClaudeModelId("anthropic/claude.3")).toBe(true);
 		expect(isClaudeModelId("my-claudius")).toBe(false);
 	});
+	test("matches dotted Bedrock cross-region inference profile ids for Claude kinds not enumerated in parseAnthropicModel", () => {
+		// `parseAnthropicModel` only classifies opus/sonnet/fable/mythos, so a
+		// Haiku Bedrock profile (`us.anthropic.claude-haiku-…`) slips past its
+		// regex and MUST still classify as Claude via this fallback so
+		// `modelFamilyToken`/`preferredDialect` route it to the Anthropic
+		// dialect instead of falling through to XML.
+		expect(isClaudeModelId("us.anthropic.claude-haiku-4-5-20251001-v1:0")).toBe(true);
+		expect(isClaudeModelId("eu.anthropic.claude-haiku-4-5-20251001-v1:0")).toBe(true);
+		expect(isClaudeModelId("global.anthropic.claude-haiku-4-5-20251001-v1:0")).toBe(true);
+		expect(isClaudeModelId("au.anthropic.claude-haiku-4-5-20251001-v1:0")).toBe(true);
+		// Non-Claude names that happen to contain "claude" as a substring
+		// stay unmatched — no `.` / `/` / start delimiter before `claude-`.
+		expect(isClaudeModelId("subclaudian")).toBe(false);
+		expect(isClaudeModelId("claudius-5")).toBe(false);
+	});
+});
+
+describe("parseAnthropicModel", () => {
+	test("parses SAP hai-proxy version-first Claude ids without accepting Haiku", () => {
+		expect(parseAnthropicModel("anthropic--claude-4.8-opus")).toEqual({
+			family: "anthropic",
+			kind: "opus",
+			version: { major: 4, minor: 8, patch: 0 },
+		});
+		expect(parseAnthropicModel("anthropic--claude-4.6-opus")).toEqual({
+			family: "anthropic",
+			kind: "opus",
+			version: { major: 4, minor: 6, patch: 0 },
+		});
+		expect(parseAnthropicModel("anthropic--claude-4.8-haiku")).toBeNull();
+	});
 });
 
 describe("supportsAdaptiveThinkingDisplay", () => {
-	test("allows Claude Fable 5 and Opus 4.7 or newer only", () => {
+	test("allows Claude Fable 5, Opus 4.7 or newer, and Sonnet 5 or newer only", () => {
 		expect(supportsAdaptiveThinkingDisplay("claude-fable-5")).toBe(true);
 		expect(supportsAdaptiveThinkingDisplay("claude-opus-4-7")).toBe(true);
 		expect(supportsAdaptiveThinkingDisplay("claude-opus-5-0")).toBe(true);
+		expect(supportsAdaptiveThinkingDisplay("claude-sonnet-5")).toBe(true);
+		expect(supportsAdaptiveThinkingDisplay("us.anthropic.claude-sonnet-5")).toBe(true);
 		// Dotted and dashed version separators are equivalent.
 		expect(supportsAdaptiveThinkingDisplay("claude-opus-4.7")).toBe(true);
 		expect(supportsAdaptiveThinkingDisplay("anthropic/claude-opus-4.8")).toBe(true);
+		expect(supportsAdaptiveThinkingDisplay("anthropic--claude-4.8-opus")).toBe(true);
+		expect(supportsAdaptiveThinkingDisplay("anthropic--claude-4.6-opus")).toBe(false);
 		expect(supportsAdaptiveThinkingDisplay("claude-opus-4-6")).toBe(false);
 		expect(supportsAdaptiveThinkingDisplay("claude-opus-4.6")).toBe(false);
 		expect(supportsAdaptiveThinkingDisplay("claude-opus-4-20250514")).toBe(false);
 		expect(supportsAdaptiveThinkingDisplay("claude-sonnet-4-6")).toBe(false);
+	});
+});
+
+describe("hasOpus47ApiRestrictions", () => {
+	test("allows Claude Fable 5, Opus 4.7 or newer, and Sonnet 5 or newer only", () => {
+		expect(hasOpus47ApiRestrictions("claude-fable-5")).toBe(true);
+		expect(hasOpus47ApiRestrictions("claude-opus-4-7")).toBe(true);
+		expect(hasOpus47ApiRestrictions("claude-opus-4.8")).toBe(true);
+		expect(hasOpus47ApiRestrictions("anthropic--claude-4.7-opus")).toBe(true);
+		expect(hasOpus47ApiRestrictions("claude-sonnet-5")).toBe(true);
+		expect(hasOpus47ApiRestrictions("us.anthropic.claude-sonnet-5")).toBe(true);
+		expect(hasOpus47ApiRestrictions("claude-opus-4-6")).toBe(false);
+		expect(hasOpus47ApiRestrictions("claude-sonnet-4-6")).toBe(false);
+		expect(hasOpus47ApiRestrictions("claude-sonnet-4-5")).toBe(false);
+	});
+});
+
+describe("supportsMidConversationSystemMessages", () => {
+	test("allows Claude Fable 5, Opus 4.8 or newer, and Sonnet 5 or newer only", () => {
+		expect(supportsMidConversationSystemMessages("claude-fable-5")).toBe(true);
+		expect(supportsMidConversationSystemMessages("claude-opus-4-8")).toBe(true);
+		expect(supportsMidConversationSystemMessages("claude-sonnet-5")).toBe(true);
+		expect(supportsMidConversationSystemMessages("us.anthropic.claude-sonnet-5")).toBe(true);
+		expect(supportsMidConversationSystemMessages("anthropic--claude-4.8-opus")).toBe(true);
+		expect(supportsMidConversationSystemMessages("anthropic--claude-4.7-opus")).toBe(false);
+		expect(supportsMidConversationSystemMessages("claude-opus-4-7")).toBe(false);
+		expect(supportsMidConversationSystemMessages("claude-sonnet-4-6")).toBe(false);
 	});
 });
 
@@ -127,6 +193,14 @@ describe("isOpenAIGptOssModelId", () => {
 	});
 });
 
+describe("isOpenAIModelId", () => {
+	test("matches current OpenAI ids across GPT, o-series, ChatGPT, and Codex aliases", () => {
+		for (const id of ["gpt-4o", "o3", "o4-mini", "chatgpt-4o-latest", "codex-mini-latest"]) {
+			expect(isOpenAIModelId(id)).toBe(true);
+		}
+	});
+});
+
 describe("isReasoningGlmModelId", () => {
 	test("matches the glm-4.5+ base / air / turbo reasoning lines", () => {
 		expect(isReasoningGlmModelId("glm-4.5")).toBe(true);
@@ -183,6 +257,14 @@ describe("modelFamilyToken", () => {
 		expect(modelFamilyToken("openrouter/anthropic/claude-opus-4-8")).toBe("anthropic");
 	});
 
+	test("classifies Bedrock cross-region profile ids for Claude kinds not enumerated in parseAnthropicModel", () => {
+		// `parseAnthropicModel` doesn't know `haiku`, so this exercises the
+		// isClaudeModelId fallback specifically for dotted Bedrock profiles.
+		expect(modelFamilyToken("us.anthropic.claude-haiku-4-5-20251001-v1:0")).toBe("anthropic");
+		expect(modelFamilyToken("eu.anthropic.claude-haiku-4-5-20251001-v1:0")).toBe("anthropic");
+		expect(modelFamilyToken("global.anthropic.claude-haiku-4-5-20251001-v1:0")).toBe("anthropic");
+	});
+
 	test("classifies non-first-party families", () => {
 		expect(modelFamilyToken("moonshotai/kimi-k2")).toBe("kimi");
 		expect(modelFamilyToken("qwen/qwen3-coder")).toBe("qwen");
@@ -205,6 +287,7 @@ describe("isGrokReasoningEffortCapable", () => {
 		expect(isGrokReasoningEffortCapable("grok-3-mini")).toBe(true);
 		expect(isGrokReasoningEffortCapable("grok-4.20-multi-agent")).toBe(true);
 		expect(isGrokReasoningEffortCapable("xai-oauth/grok-4.3")).toBe(true);
+		expect(isGrokReasoningEffortCapable("xai-oauth/grok-4.5")).toBe(true);
 		expect(isGrokReasoningEffortCapable("openrouter/xai/grok-3-mini")).toBe(true);
 	});
 

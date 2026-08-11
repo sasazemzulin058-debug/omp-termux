@@ -93,4 +93,30 @@ describe("ProcessTerminal headless suppression", () => {
 			setTerminalHeadless(previous);
 		}
 	});
+
+	// #6374: arrows stopped working inside omp and stayed broken in the shell
+	// after exit — a missing cursor-key/keypad reset. omp owns the TTY and emits
+	// a full private-mode reset menu, but never restored normal cursor-key
+	// (DECCKM) / numeric-keypad mode (terminfo `rmkx` = "\x1b[?1l\x1b>"). If the
+	// terminal was left in application-cursor-keys mode, arrows arrived as SS3
+	// and the parent shell's Up/Down history navigation broke. start() must
+	// normalize the state and stop() must restore it.
+	it("emits rmkx on start and stop to normalize/restore cursor-key + keypad mode (#6374)", () => {
+		const previous = setTerminalHeadless(false);
+		const terminal = new ProcessTerminal();
+		try {
+			terminal.start(
+				() => {},
+				() => {},
+			);
+			expect(writes.join("")).toContain("\x1b[?1l\x1b>");
+
+			writes.length = 0;
+			terminal.stop();
+			expect(writes.join("")).toContain("\x1b[?1l\x1b>");
+		} finally {
+			terminal.stop();
+			setTerminalHeadless(previous);
+		}
+	});
 });

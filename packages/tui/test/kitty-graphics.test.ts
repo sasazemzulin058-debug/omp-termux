@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { visibleWidth } from "@oh-my-pi/pi-natives";
 import {
 	detectKittyUnicodePlaceholdersSupport,
@@ -13,9 +13,16 @@ import {
 } from "@oh-my-pi/pi-tui/kitty-graphics";
 
 const ORIGINAL = { ...getKittyGraphics() };
+const ORIGINAL_TMUX = Bun.env.TMUX;
+
+beforeEach(() => {
+	delete Bun.env.TMUX;
+});
 
 afterEach(() => {
 	setKittyGraphics(ORIGINAL);
+	if (ORIGINAL_TMUX === undefined) delete Bun.env.TMUX;
+	else Bun.env.TMUX = ORIGINAL_TMUX;
 });
 
 describe("kitty Unicode placeholder encoding", () => {
@@ -93,11 +100,20 @@ describe("detectKittyUnicodePlaceholdersSupport", () => {
 
 	it("disables for wezterm and other Kitty-protocol paths that treat placeholders as literal PUA glyphs (#1877)", () => {
 		expect(detectKittyUnicodePlaceholdersSupport("wezterm", env())).toBe(false);
+		expect(detectKittyUnicodePlaceholdersSupport("warp", env())).toBe(false);
 		// Tmux/screen fallback: base terminal id with Kitty protocol forced on by
 		// `getFallbackImageProtocol`. The outer terminal need not understand U=1.
 		expect(detectKittyUnicodePlaceholdersSupport("base", env())).toBe(false);
 		expect(detectKittyUnicodePlaceholdersSupport("iterm2", env())).toBe(false);
 		expect(detectKittyUnicodePlaceholdersSupport("alacritty", env())).toBe(false);
+	});
+
+	it("uses scroll-aware placeholders when Kitty is explicitly forced through tmux", () => {
+		const forced = env({ TMUX: "/tmp/tmux-1000/default,1,0", PI_FORCE_IMAGE_PROTOCOL: "kitty" });
+		expect(detectKittyUnicodePlaceholdersSupport("base", forced)).toBe(true);
+		expect(detectKittyUnicodePlaceholdersSupport("wezterm", forced)).toBe(true);
+		// Automatic tmux fallback remains conservative when the outer terminal is unknown.
+		expect(detectKittyUnicodePlaceholdersSupport("base", env({ TMUX: "/tmp/tmux-1000/default,1,0" }))).toBe(false);
 	});
 
 	it("honors PI_NO_KITTY_PLACEHOLDERS=1 as a hard off override on supporting terminals", () => {
@@ -117,5 +133,14 @@ describe("detectKittyUnicodePlaceholdersSupport", () => {
 	it("PI_KITTY_PLACEHOLDERS=0 forces off on a default-on terminal", () => {
 		expect(detectKittyUnicodePlaceholdersSupport("kitty", env({ PI_KITTY_PLACEHOLDERS: "0" }))).toBe(false);
 		expect(detectKittyUnicodePlaceholdersSupport("ghostty", env({ PI_KITTY_PLACEHOLDERS: "off" }))).toBe(false);
+	});
+
+	it("placeholder opt-out beats forced Kitty under tmux", () => {
+		const forcedOff = env({
+			TMUX: "/tmp/tmux-1000/default,1,0",
+			PI_FORCE_IMAGE_PROTOCOL: "kitty",
+			PI_KITTY_PLACEHOLDERS: "0",
+		});
+		expect(detectKittyUnicodePlaceholdersSupport("base", forcedOff)).toBe(false);
 	});
 });

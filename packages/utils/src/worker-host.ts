@@ -1,3 +1,13 @@
+import { stripWindowsExtendedLengthPathPrefix } from "./path";
+
+/** Prefix reserved for argv selectors dispatched by the shared CLI worker host. */
+export const WORKER_HOST_SELECTOR_PREFIX = "__omp_worker_";
+
+/** Whether an argv value selects a worker hosted by the shared CLI entrypoint. */
+export function isWorkerHostSelector(value: string | undefined): value is string {
+	return value?.startsWith(WORKER_HOST_SELECTOR_PREFIX) ?? false;
+}
+
 /**
  * Main-module path declared by self-dispatching CLI entrypoints — entries
  * whose top-level argv handling routes hidden `__omp_*` worker selectors.
@@ -10,7 +20,7 @@ let workerHostMain: string | null = null;
 
 /** Called by CLI entrypoints whose main module dispatches worker argv selectors. */
 export function declareWorkerHostEntry(): void {
-	workerHostMain = typeof Bun !== "undefined" ? Bun.main : (process.argv[1] ?? null);
+	workerHostMain = stripWindowsExtendedLengthPathPrefix(Bun.main);
 }
 
 /** Main-module path of the self-dispatching CLI host, or null outside it. */

@@ -16,6 +16,7 @@ import { afterEach, describe, expect, it, vi } from "bun:test";
 import * as path from "node:path";
 import { Agent } from "@oh-my-pi/pi-agent-core";
 import type { AssistantMessage, TextContent } from "@oh-my-pi/pi-ai";
+import * as AIError from "@oh-my-pi/pi-ai/error";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
@@ -115,6 +116,7 @@ describe("AgentSession silent-abort marker stamping", () => {
 		await Promise.resolve();
 
 		expect(message.errorMessage).toBe(SILENT_ABORT_MARKER);
+		expect(AIError.is(message.errorId, AIError.Flag.SilentAbort)).toBe(true);
 		expect(session.isPlanInternalAbortPending).toBe(false);
 	});
 
@@ -162,16 +164,10 @@ describe("AgentSession silent-abort marker stamping", () => {
 		// `displayEvent = { ...event, message: { ...message, content } }` spread copy
 		// in `#handleAgentEvent`. The marker must be stamped BEFORE that spread so
 		// `displayEvent.message.errorMessage` inherits via the spread.
-		const placeholder = "#AAAA#"; // shape produced by buildPlaceholder for index 0
 		const obfuscator = new SecretObfuscator([{ type: "plain", content: "SECRET_VALUE" }]);
-		// Confirm our placeholder choice matches the obfuscator's deterministic output:
-		// the test asserts a real deobfuscation diff by checking the emitted content
-		// differs from the input ref, which is what we actually care about. The exact
-		// placeholder string doesn't matter as long as it's a known secret reference.
 		const obfuscatedText = obfuscator.obfuscate("hello SECRET_VALUE world");
 		// Sanity: obfuscation produced a placeholder embedded in the text.
 		expect(obfuscatedText).not.toBe("hello SECRET_VALUE world");
-		void placeholder;
 
 		fixture = await createSessionWithObfuscator(obfuscator);
 		const { session } = fixture;
@@ -200,6 +196,7 @@ describe("AgentSession silent-abort marker stamping", () => {
 		// `event.message` (the persistence-side reference) carries the marker via the
 		// in-place stamp.
 		expect(message.errorMessage).toBe(SILENT_ABORT_MARKER);
+		expect(AIError.is(message.errorId, AIError.Flag.SilentAbort)).toBe(true);
 
 		// The emitted display event ALSO carries the marker because the spread copy
 		// happened AFTER the stamp.
@@ -218,6 +215,7 @@ describe("AgentSession silent-abort marker stamping", () => {
 			throw new Error("expected emitted message_end to be an assistant message");
 		}
 		expect(emittedMessage.errorMessage).toBe(SILENT_ABORT_MARKER);
+		expect(AIError.is(emittedMessage.errorId, AIError.Flag.SilentAbort)).toBe(true);
 
 		// Prove the obfuscator branch actually ran by asserting the emitted message
 		// is a distinct object (post-spread) AND its content was deobfuscated back to

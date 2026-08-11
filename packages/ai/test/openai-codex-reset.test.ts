@@ -5,11 +5,15 @@
  * drift (and so we never need to spend a real credit to verify it):
  *
  *   GET  /wham/rate-limit-reset-credits
- *   POST /wham/rate-limit-reset-credits/consume  { credit_id, redeem_request_id }
+ *   POST /wham/rate-limit-reset-credits/consume  { credit_id, redeem_request_id, account_id? }
  */
 import { describe, expect, it } from "bun:test";
 import type { FetchImpl } from "@oh-my-pi/pi-ai/types";
-import { consumeCodexResetCredit, listCodexResetCredits } from "@oh-my-pi/pi-ai/usage/openai-codex-reset";
+import {
+	consumeCodexResetCredit,
+	listCodexResetCredits,
+	pickSoonestExpiringCredit,
+} from "@oh-my-pi/pi-ai/usage/openai-codex-reset";
 
 interface Captured {
 	url: string;
@@ -93,7 +97,11 @@ describe("consumeCodexResetCredit", () => {
 		expect(result.code).toBe("reset");
 		expect(calls[0]?.method).toBe("POST");
 		expect(calls[0]?.url).toBe("https://chatgpt.com/backend-api/wham/rate-limit-reset-credits/consume");
-		expect(calls[0]?.body).toEqual({ credit_id: "RateLimitResetCredit_abc", redeem_request_id: "req-123" });
+		expect(calls[0]?.body).toEqual({
+			credit_id: "RateLimitResetCredit_abc",
+			redeem_request_id: "req-123",
+			account_id: "acct-1",
+		});
 		expect(calls[0]?.headers["Content-Type"]).toBe("application/json");
 	});
 
@@ -117,5 +125,39 @@ describe("consumeCodexResetCredit", () => {
 		const result = await consumeCodexResetCredit({ creditId: "c1", accessToken: "tok", fetch });
 		expect(result.ok).toBe(false);
 		expect(result.code).toBe("http_500");
+	});
+});
+
+describe("pickSoonestExpiringCredit", () => {
+	it("spends in expiry order: soonest available credit first", () => {
+		const credits = [
+			{ id: "late", status: "available", expiresAt: "2026-08-12T00:00:00Z" },
+			{ id: "soon", status: "available", expiresAt: "2026-07-31T18:00:00Z" },
+			{ id: "mid", status: "available", expiresAt: "2026-08-11T00:00:00Z" },
+		];
+		expect(pickSoonestExpiringCredit(credits)?.id).toBe("soon");
+	});
+
+	it("never picks a non-available credit over an available one", () => {
+		const credits = [
+			{ id: "spent", status: "redeemed", expiresAt: "2026-07-31T18:00:00Z" },
+			{ id: "live", status: "available", expiresAt: "2026-08-12T00:00:00Z" },
+		];
+		expect(pickSoonestExpiringCredit(credits)?.id).toBe("live");
+	});
+
+	it("ranks dated credits before undated ones and treats missing status as available", () => {
+		const credits = [{ id: "undated" }, { id: "dated", expiresAt: "2026-08-12T00:00:00Z" }];
+		expect(pickSoonestExpiringCredit(credits)?.id).toBe("dated");
+		expect(pickSoonestExpiringCredit([{ id: "undated" }])?.id).toBe("undated");
+	});
+
+	it("falls back to the first credit when none are available (backend surfaces the outcome)", () => {
+		const credits = [
+			{ id: "first", status: "redeemed" },
+			{ id: "second", status: "redeemed" },
+		];
+		expect(pickSoonestExpiringCredit(credits)?.id).toBe("first");
+		expect(pickSoonestExpiringCredit([])).toBeUndefined();
 	});
 });

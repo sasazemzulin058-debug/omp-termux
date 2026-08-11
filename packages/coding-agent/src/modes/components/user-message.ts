@@ -1,4 +1,5 @@
-import { Container, Markdown } from "@oh-my-pi/pi-tui";
+import { type Component, Container, Markdown } from "@oh-my-pi/pi-tui";
+import { formatBytes } from "@oh-my-pi/pi-utils";
 import { getMarkdownTheme, theme } from "../../modes/theme/theme";
 import { imageReferenceHyperlink, renderPlaceholders } from "../image-references";
 import { highlightMagicKeywords } from "../magic-keywords";
@@ -65,4 +66,102 @@ export class UserMessageComponent extends Container {
 		this.#zoneLines = wrapped;
 		return wrapped;
 	}
+}
+
+/**
+ * Collapsed placeholder for a synthetic (agent-attributed) user input in the
+ * file/remote-backed transcript viewer — chiefly the advisor's `Session update`
+ * replay dumps, which can each be hundreds of KiB of Markdown and, on cold open,
+ * blocked the TUI for tens of seconds while every historical body was laid out
+ * before the viewport clip (issue #6308).
+ *
+ * Collapsed by default: renders one dim summary row (label · size · line count ·
+ * expand hint) and builds NO Markdown. The heavy {@link UserMessageComponent} is
+ * constructed lazily only when expanded via `ctrl+o`, so blocks above the
+ * viewport never pay layout cost until the reader asks to see them. The raw
+ * observability data stays intact in `__advisor.jsonl`.
+ */
+export class CollapsedSyntheticMessageComponent implements Component {
+	#expanded = false;
+	#cache?: { width: number; lines: readonly string[] };
+	#body?: UserMessageComponent;
+	readonly #summary: string;
+
+	constructor(
+		private readonly text: string,
+		private readonly imageLinks?: readonly (string | undefined)[],
+	) {
+		this.#summary = summarizeSyntheticInput(text);
+	}
+
+	/** ctrl+o toggle: reveal/hide the full Markdown body. */
+	setExpanded(expanded: boolean): void {
+		if (this.#expanded === expanded) return;
+		this.#expanded = expanded;
+		this.#cache = undefined;
+	}
+
+	invalidate(): void {
+		this.#cache = undefined;
+		this.#body?.invalidate?.();
+	}
+
+	dispose(): void {
+		this.#body?.dispose?.();
+	}
+
+	render(width: number): readonly string[] {
+		width = Math.max(1, width);
+		if (this.#cache?.width === width) return this.#cache.lines;
+		const lines = this.#expanded ? this.#renderExpanded(width) : [` ${this.#summaryRow(width)}`];
+		this.#cache = { width, lines };
+		return lines;
+	}
+
+	#renderExpanded(width: number): readonly string[] {
+		if (!this.#body) this.#body = new UserMessageComponent(this.text, true, this.imageLinks);
+		return [` ${this.#summaryRow(width)}`, ...this.#body.render(width)];
+	}
+
+	#summaryRow(width: number): string {
+		const hint = `${theme.sep.dot.trim()} ctrl+o`;
+		return theme.fg("dim", truncateSummary(`${this.#summary} ${hint}`, Math.max(10, width - 1)));
+	}
+}
+
+/** Truncate a plain summary label to `maxWidth` display columns, appending `…`. */
+function truncateSummary(text: string, maxWidth: number): string {
+	if (Bun.stringWidth(text, { countAnsiEscapeCodes: false }) <= maxWidth) return text;
+	let out = "";
+	let w = 0;
+	for (const ch of text) {
+		const cw = Bun.stringWidth(ch, { countAnsiEscapeCodes: false });
+		if (w + cw > maxWidth - 1) break;
+		out += ch;
+		w += cw;
+	}
+	return `${out}…`;
+}
+
+/**
+ * One-line summary for a collapsed synthetic input: `<label> · <size> · <n>
+ * lines`. The label is the first Markdown heading's text (e.g. `Session
+ * update`), falling back to `Synthetic input` when the body opens with none.
+ */
+function summarizeSyntheticInput(text: string): string {
+	const size = formatBytes(Buffer.byteLength(text, "utf-8"));
+	const lineCount = text === "" ? 0 : text.split("\n").length;
+	const dot = theme.sep.dot.trim();
+	return `${syntheticInputLabel(text)} ${dot} ${size} ${dot} ${lineCount} line${lineCount === 1 ? "" : "s"}`;
+}
+
+/** First Markdown heading text in `text`, else `Synthetic input`. */
+function syntheticInputLabel(text: string): string {
+	for (const raw of text.split("\n")) {
+		const line = raw.trim();
+		if (!line) continue;
+		const heading = /^#{1,6}\s+(.*)$/.exec(line);
+		return heading ? heading[1]!.trim() || "Synthetic input" : "Synthetic input";
+	}
+	return "Synthetic input";
 }

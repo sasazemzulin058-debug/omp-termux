@@ -60,6 +60,8 @@ export class OAuthSelectorComponent extends Container {
 	/** First provider index of the visible ScrollView window (last #updateList). */
 	#scrollStart = 0;
 	#visibleCount = 0;
+	/** Visible list window, shrunk by {@link setMaxHeight} on short screens. */
+	#maxVisible = OAUTH_SELECTOR_MAX_VISIBLE;
 	#mode: "login" | "logout";
 	#authStorage: AuthStorage;
 	#onSelectCallback: (providerId: string) => void;
@@ -110,6 +112,24 @@ export class OAuthSelectorComponent extends Container {
 	stopValidation(): void {
 		this.#validationGeneration += 1;
 		this.#stopSpinner();
+	}
+
+	/**
+	 * Fit the selector into `lines` rendered rows by shrinking the visible list
+	 * window (the window is centered on the selection, so the selected row is
+	 * always visible at any height). Prefers keeping the full chrome — borders,
+	 * spacers, title, search status — but sacrifices the trailing spacer/border
+	 * (clipped by the host) before dropping below three visible rows.
+	 */
+	setMaxHeight(lines: number): void {
+		// Above the rows: LIST_ROW_OFFSET; below: search status + spacer + border.
+		const strict = lines - LIST_ROW_OFFSET - 3;
+		// Keeps only the rows + search status inside `lines`.
+		const relaxed = lines - LIST_ROW_OFFSET - 1;
+		const rows = Math.min(OAUTH_SELECTOR_MAX_VISIBLE, Math.max(1, strict, Math.min(relaxed, 3)));
+		if (rows === this.#maxVisible) return;
+		this.#maxVisible = rows;
+		this.#updateList();
 	}
 	#hasSelectableAuth(providerId: string): boolean {
 		return this.#mode === "logout" ? this.#authStorage.has(providerId) : this.#authStorage.hasAuth(providerId);
@@ -227,7 +247,7 @@ export class OAuthSelectorComponent extends Container {
 	}
 
 	#isSearchEnabled(): boolean {
-		return this.#allProviders.length > OAUTH_SELECTOR_MAX_VISIBLE;
+		return this.#allProviders.length > this.#maxVisible;
 	}
 
 	#shouldRenderSearchStatus(): boolean {
@@ -286,7 +306,7 @@ export class OAuthSelectorComponent extends Container {
 		this.#listContainer.clear();
 
 		const total = this.#filteredProviders.length;
-		const maxVisible = OAUTH_SELECTOR_MAX_VISIBLE;
+		const maxVisible = this.#maxVisible;
 		const startIndex =
 			total <= maxVisible
 				? 0
@@ -381,7 +401,7 @@ export class OAuthSelectorComponent extends Container {
 		// Page up - jump up by one visible page
 		else if (matchesKey(keyData, "pageUp")) {
 			if (this.#filteredProviders.length > 0) {
-				this.#selectedIndex = Math.max(0, this.#selectedIndex - OAUTH_SELECTOR_MAX_VISIBLE);
+				this.#selectedIndex = Math.max(0, this.#selectedIndex - this.#maxVisible);
 			}
 			this.#statusMessage = undefined;
 			this.#updateList();
@@ -389,10 +409,7 @@ export class OAuthSelectorComponent extends Container {
 		// Page down - jump down by one visible page
 		else if (matchesKey(keyData, "pageDown")) {
 			if (this.#filteredProviders.length > 0) {
-				this.#selectedIndex = Math.min(
-					this.#filteredProviders.length - 1,
-					this.#selectedIndex + OAUTH_SELECTOR_MAX_VISIBLE,
-				);
+				this.#selectedIndex = Math.min(this.#filteredProviders.length - 1, this.#selectedIndex + this.#maxVisible);
 			}
 			this.#statusMessage = undefined;
 			this.#updateList();

@@ -19,7 +19,10 @@ import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import {
 	ADVISOR_TRANSCRIPT_FILENAME,
 	AdvisorTranscriptRecorder,
+	advisorTranscriptFilename,
+	loadAdvisorTranscriptCosts,
 } from "@oh-my-pi/pi-coding-agent/advisor/transcript-recorder";
+import { removeWithRetries } from "@oh-my-pi/pi-utils";
 
 interface AdvisorEntry {
 	type?: string;
@@ -38,7 +41,7 @@ async function withTempDir<T>(fn: (dir: string) => Promise<T>): Promise<T> {
 	try {
 		return await fn(dir);
 	} finally {
-		await fs.rm(dir, { recursive: true, force: true });
+		await removeWithRetries(dir);
 	}
 }
 
@@ -53,7 +56,7 @@ async function readMessageEntries(file: string): Promise<AdvisorEntry[]> {
 	return entries.filter(entry => entry.type === "message");
 }
 
-function assistantMessage(text: string, inputTokens: number): AgentMessage {
+function assistantMessage(text: string, inputTokens: number, cost = 0): AgentMessage {
 	const message = {
 		role: "assistant" as const,
 		content: [{ type: "text" as const, text }],
@@ -66,7 +69,7 @@ function assistantMessage(text: string, inputTokens: number): AgentMessage {
 			cacheRead: 0,
 			cacheWrite: 0,
 			totalTokens: inputTokens + 3,
-			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			cost: { input: 0, output: cost, cacheRead: 0, cacheWrite: 0, total: cost },
 		},
 		stopReason: "stop" as const,
 		timestamp: 1,
@@ -158,6 +161,55 @@ describe("AdvisorTranscriptRecorder", () => {
 			expect(first[0].message?.usage?.input).toBe(1);
 			expect(second).toHaveLength(1);
 			expect(second[0].message?.usage?.input).toBe(2);
+		});
+	});
+
+	it("loads cumulative costs by advisor slug", async () => {
+		await withTempDir(async dir => {
+			const sessionFile = path.join(dir, "sess.jsonl");
+			const primary = new AdvisorTranscriptRecorder(
+				() => sessionFile,
+				() => dir,
+			);
+			const security = new AdvisorTranscriptRecorder(
+				() => sessionFile,
+				() => dir,
+				advisorTranscriptFilename("security"),
+			);
+			primary.record(assistantMessage("primary", 1, 0.25));
+			security.record(assistantMessage("first", 1, 0.25));
+			security.record(assistantMessage("second", 1, 0.5));
+			await Promise.all([primary.close(), security.close()]);
+
+			expect(Object.fromEntries(await loadAdvisorTranscriptCosts(sessionFile))).toEqual({
+				"": 0.25,
+				security: 0.75,
+			});
+		});
+	});
+
+	it("keeps valid costs when persisted entries are malformed", async () => {
+		await withTempDir(async dir => {
+			const sessionFile = path.join(dir, "sess.jsonl");
+			const recorder = new AdvisorTranscriptRecorder(
+				() => sessionFile,
+				() => dir,
+			);
+			recorder.record(assistantMessage("valid", 1, 0.25));
+			await recorder.close();
+			const transcript = path.join(dir, "sess", ADVISOR_TRANSCRIPT_FILENAME);
+			const lines = (await fs.readFile(transcript, "utf8")).trimEnd().split("\n");
+			lines.splice(
+				-1,
+				0,
+				JSON.stringify({ type: "message", message: { role: "assistant" } }),
+				"{ this is not valid json",
+				JSON.stringify({ type: "message" }),
+				"null",
+			);
+			await fs.writeFile(transcript, `${lines.join("\n")}\n`);
+
+			expect((await loadAdvisorTranscriptCosts(sessionFile)).get("")).toBe(0.25);
 		});
 	});
 });

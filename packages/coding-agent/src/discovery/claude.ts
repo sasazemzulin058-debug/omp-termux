@@ -90,6 +90,7 @@ async function loadMCPServers(ctx: LoadContext): Promise<LoadResult<MCPServer>> 
 			const serverConfig = config as Record<string, unknown>;
 			return {
 				name,
+				enabled: typeof serverConfig.enabled === "boolean" ? serverConfig.enabled : undefined,
 				timeout: typeof serverConfig.timeout === "number" ? serverConfig.timeout : undefined,
 				command: serverConfig.command as string | undefined,
 				args: serverConfig.args as string[] | undefined,
@@ -102,17 +103,19 @@ async function loadMCPServers(ctx: LoadContext): Promise<LoadResult<MCPServer>> 
 		});
 	};
 
-	for (let i = 0; i < userPaths.length; i++) {
-		const servers = parseMcpServers(contents[i], userPaths[i].path, userPaths[i].level);
+	// Load project entries before user entries so a project `enabled: false`
+	// claims its dedupe key before a same-named user server can survive (#7654).
+	const projectOffset = userPaths.length;
+	for (let i = 0; i < projectPaths.length; i++) {
+		const servers = parseMcpServers(contents[projectOffset + i], projectPaths[i].path, projectPaths[i].level);
 		if (servers.length > 0) {
 			items.push(...servers);
 			break;
 		}
 	}
 
-	const projectOffset = userPaths.length;
-	for (let i = 0; i < projectPaths.length; i++) {
-		const servers = parseMcpServers(contents[projectOffset + i], projectPaths[i].path, projectPaths[i].level);
+	for (let i = 0; i < userPaths.length; i++) {
+		const servers = parseMcpServers(contents[i], userPaths[i].path, userPaths[i].level);
 		if (servers.length > 0) {
 			items.push(...servers);
 			break;
@@ -167,17 +170,21 @@ async function loadContextFiles(ctx: LoadContext): Promise<LoadResult<ContextFil
 async function loadSkills(ctx: LoadContext): Promise<LoadResult<Skill>> {
 	const userSkillsDir = path.join(getUserClaude(ctx), "skills");
 
-	// Walk up from cwd finding .claude/skills/ in ancestors
+	// Walk up from cwd finding .claude/skills/ in ancestors. Skip $HOME:
+	// that path is already scanned as the Claude user source below, and scanning
+	// it again as project would bypass enableClaudeUser when project skills stay enabled.
 	const projectScans: Promise<LoadResult<Skill>>[] = [];
 	let current = ctx.cwd;
 	while (true) {
-		projectScans.push(
-			scanSkillsFromDir(ctx, {
-				dir: path.join(current, CONFIG_DIR, "skills"),
-				providerId: PROVIDER_ID,
-				level: "project",
-			}),
-		);
+		if (current !== ctx.home) {
+			projectScans.push(
+				scanSkillsFromDir(ctx, {
+					dir: path.join(current, CONFIG_DIR, "skills"),
+					providerId: PROVIDER_ID,
+					level: "project",
+				}),
+			);
+		}
 		if (current === (ctx.repoRoot ?? ctx.home)) break;
 		const parent = path.dirname(current);
 		if (parent === current) break; // filesystem root

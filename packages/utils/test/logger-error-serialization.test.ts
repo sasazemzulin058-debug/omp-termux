@@ -12,18 +12,25 @@ import { logger } from "@oh-my-pi/pi-utils";
  */
 
 let tempDir: string;
-let restoredEnv: NodeJS.ProcessEnv;
+let prevAgentDir: string | undefined;
 
 beforeAll(() => {
 	tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-logger-error-"));
-	restoredEnv = { ...process.env };
 	// `getLogsDir()` honors OMP_AGENT_DIR / HOME for its base; pin to our tmp.
+	// Restore only this key on teardown — reassigning `process.env` wholesale
+	// would replace the live binding with a plain object, diverging it from
+	// `Bun.env` and poisoning every env-reading test that runs afterwards.
+	prevAgentDir = process.env.OMP_AGENT_DIR;
 	process.env.OMP_AGENT_DIR = tempDir;
 	logger.setTransports({ file: tempDir, console: false });
 });
 
 afterAll(() => {
-	process.env = restoredEnv;
+	if (prevAgentDir === undefined) {
+		delete process.env.OMP_AGENT_DIR;
+	} else {
+		process.env.OMP_AGENT_DIR = prevAgentDir;
+	}
 	logger.setTransports({ file: false, console: false });
 	fs.rmSync(tempDir, { force: true, recursive: true });
 });
@@ -40,7 +47,13 @@ async function waitForLogEntry(targetMessage: string): Promise<Record<string, un
 			const text = fs.readFileSync(path.join(tempDir, f), "utf8");
 			for (const line of text.split("\n")) {
 				if (line.length === 0) continue;
-				const entry = JSON.parse(line) as Record<string, unknown>;
+				let entry: Record<string, unknown>;
+				try {
+					entry = JSON.parse(line) as Record<string, unknown>;
+				} catch {
+					// Torn tail of an in-flight write; the line completes on a later poll.
+					continue;
+				}
 				if (entry.message === targetMessage) return entry;
 			}
 		}

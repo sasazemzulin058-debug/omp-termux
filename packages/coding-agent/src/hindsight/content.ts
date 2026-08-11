@@ -25,6 +25,7 @@ const LEGACY_HINDSIGHT_MEMORIES_REGEX = /<hindsight_memories>[\s\S]*?<\/hindsigh
 const LEGACY_RELEVANT_MEMORIES_REGEX = /<relevant_memories>[\s\S]*?<\/relevant_memories>/g;
 const MENTAL_MODELS_REGEX = /<mental_models>[\s\S]*?<\/mental_models>/g;
 
+const RETENTION_PROTOCOL_MARKER_REGEX = /^\[(?:role:\s*[-_a-zA-Z0-9]+|[-_a-zA-Z0-9]+:end)\]$/;
 /**
  * Strip `<memories>`, `<mental_models>`, and legacy memory blocks.
  *
@@ -189,6 +190,48 @@ export interface RetentionTranscript {
  * Messages are tag-stripped before framing to break the recall→retain loop.
  * Returns `{ transcript: null }` when nothing meaningful survives.
  */
+function formatRetentionMessages(messages: HindsightMessage[]): RetentionTranscript {
+	const parts: string[] = [];
+	for (const msg of messages) {
+		const content = stripMemoryTags(msg.content).trim();
+		if (!hasSubstantiveContent(content)) continue;
+		parts.push(`[role: ${msg.role}]\n${content}\n[${msg.role}:end]`);
+	}
+
+	if (parts.length === 0) return { transcript: null, messageCount: 0 };
+
+	const transcript = parts.join("\n\n");
+	if (transcript.trim().length < 10) return { transcript: null, messageCount: 0 };
+
+	return { transcript, messageCount: parts.length };
+}
+
+function formatEmbeddableRetentionMessages(messages: HindsightMessage[]): RetentionTranscript {
+	const parts: string[] = [];
+	for (const msg of messages) {
+		const content = stripRetentionProtocolMarkers(stripMemoryTags(msg.content)).trim();
+		if (!hasSubstantiveContent(content)) continue;
+		parts.push(content);
+	}
+
+	if (parts.length === 0) return { transcript: null, messageCount: 0 };
+
+	const transcript = parts.join("\n\n");
+	if (transcript.trim().length < 10) return { transcript: null, messageCount: 0 };
+
+	return { transcript, messageCount: parts.length };
+}
+
+/** Remove retention framing lines from a stored coding-agent episode transcript. */
+export function stripRetentionProtocolMarkers(content: string): string {
+	return content
+		.split(/\r?\n/)
+		.filter(line => !RETENTION_PROTOCOL_MARKER_REGEX.test(line.trim()))
+		.join("\n")
+		.replace(/\n{3,}/g, "\n\n")
+		.trim();
+}
+
 export function prepareRetentionTranscript(
 	messages: HindsightMessage[],
 	retainFullWindow = false,
@@ -210,17 +253,14 @@ export function prepareRetentionTranscript(
 		targetMessages = messages.slice(lastUserIdx);
 	}
 
-	const parts: string[] = [];
-	for (const msg of targetMessages) {
-		const content = stripMemoryTags(msg.content).trim();
-		if (!hasSubstantiveContent(content)) continue;
-		parts.push(`[role: ${msg.role}]\n${content}\n[${msg.role}:end]`);
-	}
+	return formatRetentionMessages(targetMessages);
+}
 
-	if (parts.length === 0) return { transcript: null, messageCount: 0 };
-
-	const transcript = parts.join("\n\n");
-	if (transcript.trim().length < 10) return { transcript: null, messageCount: 0 };
-
-	return { transcript, messageCount: parts.length };
+/** Format all retention messages without protocol markers for embedding, FTS, and recall display. */
+export function prepareEmbeddableRetentionTranscript(messages: HindsightMessage[]): RetentionTranscript {
+	return formatEmbeddableRetentionMessages(messages);
+}
+/** Format only user-authored messages for memory fact/entity extraction. */
+export function prepareUserRetentionTranscript(messages: HindsightMessage[]): RetentionTranscript {
+	return formatRetentionMessages(messages.filter(message => message.role === "user"));
 }

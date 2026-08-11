@@ -14,14 +14,16 @@
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import pkg from "../package.json" with { type: "json" };
-const { engines, version } = pkg;
+import { engines, version } from "../package.json" with { type: "json" };
 
 /** App name (e.g. "omp") */
 export const APP_NAME: string = "omp";
 
 /** Config directory name (e.g. ".omp") */
 export const CONFIG_DIR_NAME: string = ".omp";
+
+/** Ordered main settings filenames: canonical write target first, legacy-compatible YAML fallback second. */
+export const MAIN_CONFIG_FILENAMES = ["config.yml", "config.yaml"] as const;
 
 /** Version (e.g. "1.0.0") */
 export const VERSION: string = version;
@@ -432,6 +434,18 @@ export function __resetProfileSnapshotForTests(): void {
 	);
 }
 
+/**
+ * Test-only: rebuild profile + directory state from the current process env.
+ * Production code keeps the module-load profile stable; tests that mutate
+ * `setAgentDir`/`setProfile` need an exact restore point after they put env vars
+ * back.
+ */
+export function __resetDirsFromEnvForTests(): void {
+	activeProfile = readProfileFromEnvSafe();
+	__resetProfileSnapshotForTests();
+	refreshDirsFromEnv();
+}
+
 /** Activate a named profile. Passing undefined or "default" returns to the default profile. */
 export function setProfile(profile: string | undefined): void {
 	const next = normalizeProfileName(profile);
@@ -499,9 +513,9 @@ export function getLogsDir(): string {
 	return dirs.rootSubdir("logs", "state");
 }
 
-/** Get the path to a dated log file (~/.omp/logs/omp.YYYY-MM-DD.log). */
-export function getLogPath(date = new Date()): string {
-	return path.join(getLogsDir(), `${APP_NAME}.${date.toISOString().slice(0, 10)}.log`);
+/** Get this process's dated log path (~/.omp/logs/omp.YYYY-MM-DD.PID.log). */
+export function getLogPath(date = new Date(), pid = process.pid): string {
+	return path.join(getLogsDir(), `${APP_NAME}.${date.toISOString().slice(0, 10)}.${pid}.log`);
 }
 
 /**
@@ -541,9 +555,51 @@ export function getRemoteDir(): string {
 	return dirs.rootSubdir("remote", "data");
 }
 
-/** Get the agent-managed worktrees directory (~/.omp/wt). */
+/**
+ * Expand a leading `~` and require an absolute result. Returns `undefined` for
+ * empty/whitespace input or a path that is still relative after expansion.
+ *
+ * A worktree base is process-global and consumed by both creation
+ * (PR checkout, task isolation) and cleanup (`omp worktree`). A relative value
+ * would resolve against whatever cwd happened to launch `omp`, so checkout and
+ * cleanup could disagree — we refuse it rather than silently bind it to cwd.
+ */
+function resolveWorktreeBase(value: string | undefined): string | undefined {
+	const trimmed = value?.trim();
+	if (!trimmed) return undefined;
+	let p = trimmed;
+	if (p === "~") p = os.homedir();
+	else if (p.startsWith("~/") || p.startsWith("~\\")) p = os.homedir() + p.slice(1);
+	return path.isAbsolute(p) ? path.normalize(p) : undefined;
+}
+
+let worktreesDirOverride: string | undefined;
+
+/**
+ * Relocate the base directory for agent-managed worktrees (PR checkouts, task
+ * isolation, and `omp worktree` cleanup all read the same base). Driven by the
+ * `worktree.base` setting in coding-agent; pass `undefined`/empty to clear and
+ * fall back to `OMP_WORKTREE_DIR` or the `~/.omp/wt` default.
+ *
+ * `~` is expanded and a relative path is rejected (see {@link resolveWorktreeBase}).
+ * Returns the absolute path that took effect, or `undefined` if the input was
+ * cleared or rejected — callers can warn on a non-empty input that returns
+ * `undefined`.
+ */
+export function setWorktreesDir(dir: string | undefined): string | undefined {
+	worktreesDirOverride = resolveWorktreeBase(dir);
+	return worktreesDirOverride;
+}
+
+/**
+ * Get the agent-managed worktrees directory. Resolution order: the
+ * `OMP_WORKTREE_DIR` env var, then the {@link setWorktreesDir} override (the
+ * `worktree.base` setting), then the `~/.omp/wt` default. The env var and the
+ * override are both `~`-expanded and must be absolute; a relative value is
+ * ignored and resolution falls through.
+ */
 export function getWorktreesDir(): string {
-	return dirs.rootSubdir("wt", "data");
+	return resolveWorktreeBase(process.env.OMP_WORKTREE_DIR) ?? worktreesDirOverride ?? dirs.rootSubdir("wt", "data");
 }
 
 /** Get the SSH control socket directory (~/.omp/ssh-control). */
@@ -571,13 +627,18 @@ export function getPuppeteerDir(): string {
 	return dirs.rootSubdir("puppeteer", "cache");
 }
 
+/** Get the browser relay extension install directory (~/.omp/browser-relay). */
+export function getBrowserRelayDir(): string {
+	return dirs.rootSubdir("browser-relay", "data");
+}
+
 /** Get DOCS_RS cache directory () */
 export function getDocsRsCacheDir(): string {
 	return dirs.rootSubdir("webcache", "cache");
 }
 
-/**Get AutoQa db directory */
-export function getAutoQaDbDir(): string {
+/** Get the auto-QA grievances SQLite database path (~/.omp/autoqa.db; XDG: $XDG_DATA_HOME/omp/autoqa.db). */
+export function getAutoQaDbPath(): string {
 	return dirs.rootSubdir("autoqa.db", "data");
 }
 /**
@@ -665,6 +726,16 @@ export function getAutoresearchRunDir(encodedProject: string, runId: number): st
 	return path.join(getAutoresearchProjectDir(encodedProject), "runs", String(runId).padStart(4, "0"));
 }
 
+/** Get the security-analysis state directory (~/.omp/security). */
+export function getSecurityDir(): string {
+	return dirs.rootSubdir("security", "state");
+}
+
+/** Get one project's security-analysis state directory (~/.omp/security/<project-key>). */
+export function getSecurityProjectDir(projectKey: string): string {
+	return path.join(getSecurityDir(), projectKey);
+}
+
 // =============================================================================
 // Agent subdirectories (~/.omp/agent/*)
 // =============================================================================
@@ -692,6 +763,11 @@ export function getModelDbPath(agentDir?: string): string {
 /** Get the tiny title model cache directory (~/.omp/agent/cache/tiny-models). */
 export function getTinyModelsCacheDir(agentDir?: string): string {
 	return dirs.agentSubdir(agentDir, path.join("cache", "tiny-models"), "cache");
+}
+
+/** Get the document conversion cache directory (~/.omp/agent/cache/document-conversions; XDG default: $XDG_CACHE_HOME/omp/cache/document-conversions). */
+export function getDocumentConversionCacheDir(agentDir?: string): string {
+	return dirs.agentSubdir(agentDir, path.join("cache", "document-conversions"), "cache");
 }
 
 /** Get the sessions directory (~/.omp/agent/sessions). */
@@ -747,6 +823,58 @@ export function getCrashLogPath(agentDir?: string): string {
 /** Get the debug log path (~/.omp/agent/omp-debug.log). */
 export function getDebugLogPath(agentDir?: string): string {
 	return dirs.agentSubdir(agentDir, `${APP_NAME}-debug.log`, "state");
+}
+
+/**
+ * Best-effort one-time copy of a legacy config-root file to its redirected XDG
+ * location. Existing installs that enable XDG after the file was created keep
+ * their data (e.g. a placeholder key whose loss would break deobfuscation of
+ * persisted transcripts). The legacy file is left in place for older omp
+ * versions sharing the profile.
+ */
+function adoptLegacyFile(legacyPath: string, targetPath: string): void {
+	if (targetPath === legacyPath) return;
+	try {
+		if (fs.existsSync(targetPath) || !fs.existsSync(legacyPath)) return;
+		fs.mkdirSync(path.dirname(targetPath), { recursive: true });
+		fs.copyFileSync(legacyPath, targetPath, fs.constants.COPYFILE_EXCL);
+	} catch {
+		// Opportunistic: a copy race or unwritable XDG dir falls back to a fresh
+		// file at the new path — the pre-adoption behavior.
+	}
+}
+
+/** Get the secret placeholder key path (~/.omp/agent/secret-placeholder.key; XDG default: $XDG_STATE_HOME/omp/secret-placeholder.key). Adopts a legacy key on first XDG resolution. */
+export function getSecretPlaceholderKeyPath(): string {
+	const keyPath = dirs.agentSubdir(undefined, "secret-placeholder.key", "state");
+	adoptLegacyFile(path.join(dirs.agentDir, "secret-placeholder.key"), keyPath);
+	return keyPath;
+}
+
+/** Get the daemon runtime directory for a project (~/.omp/run/daemons/<hash>; XDG default: $XDG_STATE_HOME/omp/run/daemons/<hash>). */
+export function getDaemonRuntimeDir(projectDir: string): string {
+	const key = Bun.hash.wyhash(path.resolve(projectDir)).toString(16).padStart(16, "0");
+	return dirs.rootSubdir(path.join("run", "daemons", key), "state");
+}
+
+/** Get a profile-independent runtime directory for a machine-global daemon service. */
+export function getGlobalDaemonRuntimeDir(service: string): string {
+	if (!/^[a-z0-9][a-z0-9._-]*$/i.test(service)) {
+		throw new Error(`Invalid global daemon service name: ${JSON.stringify(service)}`);
+	}
+	return path.join(getBaseConfigRoot(), "run", "daemons", "global", service);
+}
+
+/** Get the provider in-flight root directory (~/.omp/run/provider-inflight; XDG default: $XDG_STATE_HOME/omp/run/provider-inflight). */
+export function getProviderInFlightRoot(): string {
+	return dirs.rootSubdir(path.join("run", "provider-inflight"), "state");
+}
+
+/** Get the marketplaces registry path (~/.omp/marketplaces.json; XDG default: $XDG_DATA_HOME/omp/marketplaces.json). Adopts a legacy registry on first XDG resolution. */
+export function getMarketplacesRegistryPath(): string {
+	const registryPath = dirs.rootSubdir("marketplaces.json", "data");
+	adoptLegacyFile(path.join(dirs.configRoot, "marketplaces.json"), registryPath);
+	return registryPath;
 }
 
 // =============================================================================

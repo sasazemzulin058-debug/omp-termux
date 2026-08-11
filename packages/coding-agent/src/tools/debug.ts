@@ -1,4 +1,5 @@
 import * as fs from "node:fs/promises";
+import { type } from "@oh-my-pi/omptype";
 import type {
 	AgentTool,
 	AgentToolContext,
@@ -10,7 +11,6 @@ import type {
 import type { ToolExample } from "@oh-my-pi/pi-ai";
 import { type Component, Text } from "@oh-my-pi/pi-tui";
 import { isEnoent, prompt } from "@oh-my-pi/pi-utils";
-import { type } from "arktype";
 import {
 	type DapBreakpointRecord,
 	type DapCapabilities,
@@ -31,6 +31,7 @@ import {
 	type DapThread,
 	type DapVariable,
 	dapSessionManager,
+	getAdapterConfigs,
 	getAvailableAdapters,
 	type LaunchProgramKind,
 	resolveLaunchOverrides,
@@ -50,6 +51,7 @@ import {
 	formatStatusIcon,
 	PREVIEW_LIMITS,
 	replaceTabs,
+	shortenPath,
 	TRUNCATE_LENGTHS,
 	truncateToWidth,
 } from "./render-utils";
@@ -106,9 +108,9 @@ const debugActionSchema = type.enumerated(
 );
 const debugSchema = type({
 	action: debugActionSchema,
-	"program?": type("string").describe("program path"),
+	"program?": type("string").describe("debug target path; Delve accepts Go package directories"),
 	"args?": type("string[]").describe("program arguments"),
-	"adapter?": type("string").describe("debugger adapter (gdb, lldb-dap, debugpy, dlv)"),
+	"adapter?": type("string").describe("configured adapter id (gdb, lldb-dap, debugpy, dlv, rdbg, or dap.json entry)"),
 	cwd: "string?",
 	"file?": type("string").describe("source file"),
 	"line?": type("number").describe("source line"),
@@ -494,7 +496,36 @@ function buildOutcomeText(outcome: DapContinueOutcome, timeoutSec: number, verb:
 
 function getConfiguredAdapters(cwd: string): string {
 	const adapters = getAvailableAdapters(cwd).map(adapter => adapter.name);
-	return adapters.length > 0 ? adapters.join(", ") : "none";
+	const names = adapters.length > 0 ? adapters.join(", ") : "none";
+	return truncateToWidth(replaceTabs(names), TRUNCATE_LENGTHS.LONG);
+}
+
+const ADAPTER_UNAVAILABLE_MESSAGES: Readonly<Record<string, string>> = {
+	debugpy: "adapter 'debugpy' is not available: python not found in PATH",
+	dlv: "adapter 'dlv' is not available: install with 'go install github.com/go-delve/delve/cmd/dlv@latest'",
+	rdbg: "adapter 'rdbg' is not available: install with 'gem install debug'",
+	"js-debug-adapter":
+		"adapter 'js-debug-adapter' is not available: download it from https://github.com/microsoft/vscode-js-debug",
+};
+
+const ADAPTER_CANONICAL_COMMANDS: Readonly<Record<string, string>> = {
+	debugpy: "python",
+	dlv: "dlv",
+	rdbg: "rdbg",
+	"js-debug-adapter": "js-debug-adapter",
+};
+
+function formatAdapterUnavailable(adapterName: string, command: string, cwd: string): string {
+	const displayName = truncateToWidth(replaceTabs(adapterName), TRUNCATE_LENGTHS.SHORT);
+	const canonicalCommand = ADAPTER_CANONICAL_COMMANDS[adapterName] ?? adapterName;
+	if (command !== canonicalCommand) {
+		const displayCommand = truncateToWidth(replaceTabs(shortenPath(command)), TRUNCATE_LENGTHS.CONTENT);
+		return `adapter '${displayName}' is not available: configured command '${displayCommand}' did not resolve. Check the DAP adapter config for this workspace.`;
+	}
+	return (
+		ADAPTER_UNAVAILABLE_MESSAGES[adapterName] ??
+		`adapter '${displayName}' is not available. Installed adapters: ${getConfiguredAdapters(cwd)}`
+	);
 }
 
 async function classifyLaunchProgram(program: string): Promise<LaunchProgramKind> {
@@ -515,7 +546,7 @@ function validateLaunchProgram(
 	if (programKind !== "directory" || adapter.acceptsDirectoryProgram) return;
 	const displayPath = formatPathRelativeToCwd(program, cwd, { trailingSlash: true });
 	throw new ToolError(
-		`launch program resolves to a directory: ${displayPath}. Pass an executable file path, or for Python use adapter "debugpy" with program set to the .py file.`,
+		`launch program resolves to a directory: ${displayPath}. Pass an executable file path or choose an adapter that supports package directories.`,
 	);
 }
 
@@ -583,6 +614,7 @@ function summarizeDebugCall(args: DebugRenderArgs): string {
 }
 
 export const debugToolRenderer = {
+	animatedPartialResult: true,
 	renderCall(args: DebugRenderArgs, _options: RenderResultOptions, theme: Theme): Component {
 		const text = renderStatusLine({ icon: "pending", title: "Debug", description: summarizeDebugCall(args) }, theme);
 		return new Text(text, 0, 0);
@@ -697,7 +729,7 @@ export class DebugTool implements AgentTool<typeof debugSchema, DebugToolDetails
 		_onUpdate?: AgentToolUpdateCallback<DebugToolDetails>,
 		_context?: AgentToolContext,
 	): Promise<AgentToolResult<DebugToolDetails>> {
-		const timeoutSec = clampTimeout("debug", params.timeout);
+		const timeoutSec = clampTimeout("debug", params.timeout, this.session.settings.get("tools.maxTimeout"));
 		const timeoutSignal = AbortSignal.timeout(timeoutSec * 1000);
 		const combinedSignal = signal ? AbortSignal.any([signal, timeoutSignal]) : timeoutSignal;
 		const details: DebugToolDetails = { action: params.action, success: true };
@@ -710,15 +742,16 @@ export class DebugTool implements AgentTool<typeof debugSchema, DebugToolDetails
 				const commandCwd = params.cwd ? resolveToCwd(params.cwd, this.session.cwd) : this.session.cwd;
 				const program = resolveToCwd(params.program, commandCwd);
 				const programKind = await classifyLaunchProgram(program);
-				const adapter = selectLaunchAdapter(program, commandCwd, params.adapter, programKind);
-				if (!adapter) {
-					if (params.adapter === "debugpy") {
-						throw new ToolError("adapter 'debugpy' is not available: python not found in PATH");
-					}
+				const selection = selectLaunchAdapter(program, commandCwd, params.adapter, programKind);
+				if (selection.kind === "unavailable") {
+					throw new ToolError(formatAdapterUnavailable(selection.adapterName, selection.command, commandCwd));
+				}
+				if (selection.kind === "none") {
 					throw new ToolError(
 						`No debugger adapter available. Installed adapters: ${getConfiguredAdapters(commandCwd)}`,
 					);
 				}
+				const { adapter } = selection;
 				validateLaunchProgram(program, commandCwd, programKind, adapter);
 				const extraLaunchArguments = resolveLaunchOverrides(adapter, program, programKind);
 				const snapshot = await dapSessionManager.launch(
@@ -737,8 +770,9 @@ export class DebugTool implements AgentTool<typeof debugSchema, DebugToolDetails
 				const commandCwd = params.cwd ? resolveToCwd(params.cwd, this.session.cwd) : this.session.cwd;
 				const adapter = selectAttachAdapter(commandCwd, params.adapter, params.port);
 				if (!adapter) {
-					if (params.adapter === "debugpy") {
-						throw new ToolError("adapter 'debugpy' is not available: python not found in PATH");
+					if (params.adapter) {
+						const command = getAdapterConfigs(commandCwd)[params.adapter]?.command ?? params.adapter;
+						throw new ToolError(formatAdapterUnavailable(params.adapter, command, commandCwd));
 					}
 					throw new ToolError(
 						`No debugger adapter available. Installed adapters: ${getConfiguredAdapters(commandCwd)}`,

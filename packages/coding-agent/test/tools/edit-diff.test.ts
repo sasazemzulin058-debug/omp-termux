@@ -166,4 +166,14 @@ describe("generateDiffString", () => {
 		expect(contextNumbers).toEqual([...contextNumbers].sort((a, b) => a - b));
 		expect(diffLines.filter(line => line.includes("|  const keep = 2;"))).toEqual([" 3|  const keep = 2;"]);
 	});
+
+	it("detects changes between ill-formed UTF-16 inputs natively", () => {
+		// Native diffs operate directly over UTF-16 code units, so lone
+		// surrogates compare code-unit for code-unit without throwing or
+		// collapsing distinct lines.
+		const result = generateDiffString("a\ud800b", "a\ud801b", 3);
+		const rows = result.diff.split("\n");
+		expect(rows.some(row => row.startsWith("-1|"))).toBe(true);
+		expect(rows.some(row => row.startsWith("+1|"))).toBe(true);
+	});
 });

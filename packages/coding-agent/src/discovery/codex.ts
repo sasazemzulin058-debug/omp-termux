@@ -37,6 +37,7 @@ import {
 	SOURCE_PATHS,
 	scanSkillsFromDir,
 } from "./helpers";
+import { resolvePluginStdioPaths } from "./substitute-plugin-root";
 
 const PROVIDER_ID = "codex";
 const DISPLAY_NAME = "OpenAI Codex";
@@ -86,23 +87,28 @@ async function loadMCPServers(ctx: LoadContext): Promise<LoadResult<MCPServer>> 
 	]);
 
 	const items: MCPServer[] = [];
-	if (userConfig) {
-		const servers = extractMCPServersFromToml(userConfig);
-		for (const [name, config] of Object.entries(servers)) {
-			items.push({
-				name,
-				...config,
-				_source: createSourceMeta(PROVIDER_ID, userConfigPath, "user"),
-			});
-		}
-	}
+	// Capability dedupe is first-wins, including suppressed items claiming their
+	// key. Load project entries first so a project `enabled = false` keeps a
+	// same-named user server disabled.
 	if (projectConfig) {
-		const servers = extractMCPServersFromToml(projectConfig);
-		for (const [name, config] of Object.entries(servers)) {
+		const servers = extractMCPServersFromToml(projectConfig, path.dirname(projectConfigPath));
+		for (const name in servers) {
+			const config = servers[name];
 			items.push({
 				name,
 				...config,
 				_source: createSourceMeta(PROVIDER_ID, projectConfigPath, "project"),
+			});
+		}
+	}
+	if (userConfig) {
+		const servers = extractMCPServersFromToml(userConfig, path.dirname(userConfigPath));
+		for (const name in servers) {
+			const config = servers[name];
+			items.push({
+				name,
+				...config,
+				_source: createSourceMeta(PROVIDER_ID, userConfigPath, "user"),
 			});
 		}
 	}
@@ -124,6 +130,7 @@ async function loadTomlConfig(_ctx: LoadContext, path: string): Promise<Record<s
 
 /** Codex MCP server config format (from config.toml) */
 interface CodexMCPConfig {
+	enabled?: boolean;
 	command?: string;
 	args?: string[];
 	env?: Record<string, string>;
@@ -139,7 +146,10 @@ interface CodexMCPConfig {
 	disabled_tools?: string[];
 }
 
-function extractMCPServersFromToml(toml: Record<string, unknown>): Record<string, Partial<MCPServer>> {
+function extractMCPServersFromToml(
+	toml: Record<string, unknown>,
+	configDir: string,
+): Record<string, Partial<MCPServer>> {
 	// Check for [mcp_servers.*] sections (Codex format)
 	if (!toml.mcp_servers || typeof toml.mcp_servers !== "object") {
 		return {};
@@ -148,11 +158,24 @@ function extractMCPServersFromToml(toml: Record<string, unknown>): Record<string
 	const codexServers = toml.mcp_servers as Record<string, CodexMCPConfig>;
 	const result: Record<string, Partial<MCPServer>> = {};
 
-	for (const [name, config] of Object.entries(codexServers)) {
+	for (const name in codexServers) {
+		const config = codexServers[name];
+		// Root relative cwd/command against the Codex config directory. Codex
+		// spawns the process with the resolved cwd, so a relative command is
+		// resolved by the OS from there — pass "cwd" so e.g. cwd="server",
+		// command="./bin/mcp" resolves to <configDir>/server/bin/mcp.
+		const rooted = resolvePluginStdioPaths({ command: config.command, cwd: config.cwd }, configDir, "cwd");
 		const server: Partial<MCPServer> = {
-			command: config.command,
+			// Carry `enabled: false` through rather than dropping the entry: the
+			// central MCP loader (`loadAllMCPConfigs`) suppresses disabled servers
+			// so they still claim their dedupe key (keeping a same-named,
+			// lower-priority source disabled) and remain overridable via the user
+			// force-enable allowlist. Dropping here would defeat both.
+			...(config.enabled === false && { enabled: false }),
+			...(rooted.command !== undefined && { command: rooted.command }),
 			args: config.args,
 			url: config.url,
+			...(rooted.cwd !== undefined && { cwd: rooted.cwd }),
 		};
 
 		// Build env by merging explicit env and forwarded env_vars
@@ -342,12 +365,20 @@ async function loadHooks(ctx: LoadContext): Promise<LoadResult<Hook>> {
 	const codexDir = getProjectCodexDir(ctx);
 	const projectHooksDir = path.join(codexDir, "hooks");
 
+	// OMP hooks must be named `pre-<tool>.<ts|js>` or `post-<tool>.<ts|js>`.
+	// Files without that prefix are not OMP hooks (e.g. the standalone Codex
+	// hook scripts users keep alongside) — silently dropping the prefix and
+	// defaulting to `pre:<basename>` caused those scripts to be imported as
+	// extension factories and any top-level `process.exit()` killed startup
+	// (#3680).
 	const transformHook =
-		(level: "user" | "project") => (name: string, _content: string, path: string, source: SourceMeta) => {
+		(level: "user" | "project") =>
+		(name: string, _content: string, path: string, source: SourceMeta): Hook | null => {
 			const baseName = name.replace(/\.(ts|js)$/, "");
 			const match = baseName.match(/^(pre|post)-(.+)$/);
-			const hookType = (match?.[1] as "pre" | "post") || "pre";
-			const toolName = match?.[2] || baseName;
+			if (!match) return null;
+			const hookType = match[1] as "pre" | "post";
+			const toolName = match[2];
 			return {
 				name,
 				path,
@@ -359,11 +390,11 @@ async function loadHooks(ctx: LoadContext): Promise<LoadResult<Hook>> {
 		};
 
 	const results = await Promise.all([
-		loadFilesFromDir(ctx, userHooksDir, PROVIDER_ID, "user", {
+		loadFilesFromDir<Hook>(ctx, userHooksDir, PROVIDER_ID, "user", {
 			extensions: ["ts", "js"],
 			transform: transformHook("user"),
 		}),
-		loadFilesFromDir(ctx, projectHooksDir, PROVIDER_ID, "project", {
+		loadFilesFromDir<Hook>(ctx, projectHooksDir, PROVIDER_ID, "project", {
 			extensions: ["ts", "js"],
 			transform: transformHook("project"),
 		}),

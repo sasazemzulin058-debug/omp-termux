@@ -412,7 +412,7 @@ const spacer = new Spacer(2); // 2 empty lines (default: 1)
 
 ### Image
 
-Renders images inline for terminals that support the Kitty graphics protocol (Kitty, Ghostty, WezTerm) or iTerm2 inline images. Falls back to a text placeholder on unsupported terminals.
+Renders images inline for terminals that support the Kitty graphics protocol (Kitty, Ghostty, WezTerm, and Warp on macOS/Linux) or iTerm2 inline images. Falls back to a text placeholder on unsupported terminals.
 
 ```typescript
 interface ImageTheme {
@@ -522,14 +522,14 @@ The TUI works with any object implementing the `Terminal` interface:
 
 ```typescript
 interface Terminal {
-	start(onInput: (data: string) => void, onResize: () => void): void;
+	start(onInput: (data: string) => void, onResize: () => void, onDisconnect?: () => void): void;
 	stop(): void;
 	write(data: string): void;
 	get columns(): number;
 	get rows(): number;
 	moveBy(lines: number): void;
-	hideCursor(): void;
-	showCursor(): void;
+	hideCursor(force?: boolean): void;
+	showCursor(force?: boolean): void;
 	clearLine(): void;
 	clearFromCursor(): void;
 	clearScreen(): void;
@@ -640,7 +640,7 @@ class MyComponent implements Component {
 - `wrapTextWithAnsi()` preserves ANSI codes while word-wrapping and trimming line ends
 
 ```typescript
-import chalk from "chalk";
+import chalk from "@oh-my-pi/pi-utils/chalk";
 
 const styled = chalk.red("Hello") + " " + chalk.blue("World");
 const width = visibleWidth(styled); // 11 (not counting ANSI codes)

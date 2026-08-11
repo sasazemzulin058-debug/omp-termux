@@ -1,8 +1,7 @@
 import { afterEach, describe, expect, it } from "bun:test";
-import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
-import { TempDir } from "@oh-my-pi/pi-utils";
+import { removeWithRetries, TempDir } from "@oh-my-pi/pi-utils";
 
 const tempDirs: TempDir[] = [];
 
@@ -57,9 +56,18 @@ describe("SessionManager cwd adoption on resume", () => {
 		// Simulate a legacy session whose header predates the cwd field.
 		const raw = await Bun.file(fileB).text();
 		const lines = raw.split("\n").filter(Boolean);
-		const header = JSON.parse(lines[0]) as Record<string, unknown>;
+		// The fixed-width title slot is line 0 now; edit the session header itself.
+		const headerIndex = lines.findIndex(line => {
+			try {
+				const parsed = JSON.parse(line) as Record<string, unknown>;
+				return parsed.type === "session";
+			} catch {
+				return false;
+			}
+		});
+		const header = JSON.parse(lines[headerIndex]) as Record<string, unknown>;
 		header.cwd = "";
-		lines[0] = JSON.stringify(header);
+		lines[headerIndex] = JSON.stringify(header);
 		await Bun.write(fileB, `${lines.join("\n")}\n`);
 
 		const launchDir = path.join(projectA, "sessions");
@@ -95,7 +103,7 @@ describe("SessionManager cwd adoption on resume", () => {
 		// The session file survives in `store` (like ~/.omp), but its header cwd
 		// points at a project directory that we then delete.
 		const file = await writeSession(goneProject, store);
-		await fs.rm(goneProject, { recursive: true, force: true });
+		await removeWithRetries(goneProject);
 
 		const launchSessions = path.join(launch, "sessions");
 		const manager = SessionManager.create(launch, launchSessions);
@@ -112,7 +120,7 @@ describe("SessionManager cwd adoption on resume", () => {
 		const store = makeTempDir("@pi-cwd-store-");
 		const goneProject = makeTempDir("@pi-cwd-gone-");
 		const file = await writeSession(goneProject, store);
-		await fs.rm(goneProject, { recursive: true, force: true });
+		await removeWithRetries(goneProject);
 
 		const manager = await SessionManager.open(file, undefined, undefined, { initialCwd: launch });
 

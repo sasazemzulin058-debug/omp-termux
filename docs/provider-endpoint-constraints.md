@@ -19,6 +19,8 @@ Related references:
 - [Providers](./providers.md) — provider availability, credentials, custom providers
 - [Model and Provider Configuration](./models.md) — `models.yml`, routing, and compat fields
 - [Provider streaming internals](./provider-streaming-internals.md) — stream event normalization
+- [Provider compat reference](./provider-compat-reference.md) — every compat flag, reasoning levels, tool handling per provider
+- [Provider quirks](./provider-quirks.md) — per-provider special casings, stream behavior, auth/usage, catalog handling
 - [Adding a provider](./adding-a-provider.md) — catalog/auth wiring for a new provider
 
 ## Baseline rules
@@ -105,10 +107,14 @@ routing, model ids, or usage accounting.
 
 ### Azure OpenAI
 
-- Chat Completions base URL reshapes to
+- Chat Completions reshapes the base URL to
   `/deployments/{deployment}/chat/completions?api-version=...`.
-- Deployment names may differ from model ids through
+- Responses uses `/responses?api-version=...` without a deployment-scoped URL;
+  the deployment name is instead sent as the request's `model`.
+- Both surfaces can map model ids to deployment names through
   `AZURE_OPENAI_DEPLOYMENT_NAME_MAP`.
+- Responses authenticates with the `api-key` header, defaults its API version to
+  `v1`, uses stateless `store: false`, and rejects explicit prompt caching.
 
 ### GitHub Copilot
 

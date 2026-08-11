@@ -10,7 +10,7 @@
 
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { ANTHROPIC_THINKING, mapAnthropicToolChoice } from "../stream";
-import type { Context, Model, ModelSpec, SimpleStreamOptions } from "../types";
+import type { Context, Model, ModelSpec, SimpleStreamOptions, ThinkingControlMode } from "../types";
 import { AssistantMessageEventStream } from "../utils/event-stream";
 import { createProviderErrorMessage } from "./error-message";
 import { streamAnthropic, streamOpenAICompletions } from "./register-builtins";
@@ -29,6 +29,10 @@ export interface OpenAIAnthropicShimConfig {
 	openaiBaseUrl?: string;
 	/** Default API format when caller does not specify one. */
 	defaultFormat: OpenAIAnthropicApiFormat;
+	/** Thinking transport used when this provider's Anthropic endpoint differs from generic budget semantics. */
+	anthropicThinkingMode?: ThinkingControlMode;
+	/** Forward cache-retention and request-metadata options to the selected transport. Default: false. */
+	forwardCacheOptions?: boolean;
 	/** Provider-specific headers (e.g. auth/session) merged ahead of user-supplied headers. */
 	extraHeaders?: () => Record<string, string>;
 }
@@ -67,6 +71,9 @@ export function streamOpenAIAnthropicShim(
 					contextWindow: model.contextWindow,
 					maxTokens: model.maxTokens,
 					reasoning: model.reasoning,
+					...(config.anthropicThinkingMode && model.thinking
+						? { thinking: { ...model.thinking, mode: config.anthropicThinkingMode } }
+						: {}),
 					input: model.input,
 					cost: model.cost,
 				} as ModelSpec<"anthropic-messages">);
@@ -88,13 +95,17 @@ export function streamOpenAIAnthropicShim(
 					maxTokens: options?.maxTokens ?? model.maxTokens ?? undefined,
 					signal: options?.signal,
 					headers: mergedHeaders,
+					cacheRetention: config.forwardCacheOptions ? options?.cacheRetention : undefined,
+					metadata: config.forwardCacheOptions ? options?.metadata : undefined,
 					sessionId: options?.sessionId,
+					promptCacheKey: options?.promptCacheKey,
 					onPayload: options?.onPayload,
 					onResponse: options?.onResponse,
 					onSseEvent: options?.onSseEvent,
 					fetch: options?.fetch,
 					thinkingEnabled,
 					thinkingBudgetTokens: thinkingBudget,
+					reasoning: config.anthropicThinkingMode ? reasoningEffort : undefined,
 					toolChoice: mapAnthropicToolChoice(options?.toolChoice),
 					serviceTier: options?.serviceTier,
 				});
@@ -124,7 +135,10 @@ export function streamOpenAIAnthropicShim(
 					maxTokens: options?.maxTokens ?? model.maxTokens ?? undefined,
 					signal: options?.signal,
 					headers: mergedHeaders,
+					cacheRetention: config.forwardCacheOptions ? options?.cacheRetention : undefined,
+					metadata: config.forwardCacheOptions ? options?.metadata : undefined,
 					sessionId: options?.sessionId,
+					promptCacheKey: options?.promptCacheKey,
 					onPayload: options?.onPayload,
 					onResponse: options?.onResponse,
 					onSseEvent: options?.onSseEvent,

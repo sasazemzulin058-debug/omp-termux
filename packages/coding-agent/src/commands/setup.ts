@@ -1,8 +1,10 @@
 /**
  * Run onboarding setup or install dependencies for optional features.
  */
+
 import { Args, Command, Flags, renderCommandHelp } from "@oh-my-pi/pi-utils/cli";
 import { parseArgs } from "../cli/args";
+import { setupHelp as commandHelp } from "../cli/command-help";
 import { runSetupCommand, type SetupCommandArgs, type SetupComponent } from "../cli/setup-cli";
 import { runRootCommand } from "../main";
 import { initTheme } from "../modes/theme/theme";
@@ -29,8 +31,7 @@ export async function runOnboardingSetup(deps: OnboardingSetupDependencies = {})
 }
 
 export default class Setup extends Command {
-	static description = "Run onboarding setup or install dependencies for optional features";
-
+	static description = commandHelp.description;
 	static args = {
 		component: Args.string({
 			description: "Optional component to install",

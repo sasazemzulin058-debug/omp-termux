@@ -2,6 +2,7 @@ import { popLoopPhase, pushLoopPhase } from "@oh-my-pi/pi-utils";
 import { fuzzyFilter } from "../fuzzy";
 import { getKeybindings } from "../keybindings";
 import { extractPrintableText } from "../keys";
+import { type MouseRoutable, routeSelectListMouse, type SgrMouseEvent } from "../mouse";
 import type { SymbolTheme } from "../symbols";
 import type { Component } from "../tui";
 import { Ellipsis, padding, replaceTabs, truncateToWidth, visibleWidth, wrapTextWithAnsi } from "../utils";
@@ -10,6 +11,8 @@ import { ScrollView } from "./scroll-view";
 const DEFAULT_PRIMARY_COLUMN_WIDTH = 32;
 const PRIMARY_COLUMN_GAP = 2;
 const MIN_DESCRIPTION_WIDTH = 10;
+
+const DEFAULT_CURSOR_SYMBOL = ">";
 
 function sanitizeSingleLine(text: string): string {
 	return replaceTabs(text)
@@ -80,7 +83,8 @@ type SelectItemLayout =
 			spacing: "";
 	  };
 
-export class SelectList implements Component {
+export class SelectList implements Component, MouseRoutable {
+	#maxVisible: number;
 	#filteredItems: ReadonlyArray<SelectItem>;
 	#filterQuery = "";
 	#selectedIndex: number = 0;
@@ -94,11 +98,17 @@ export class SelectList implements Component {
 
 	constructor(
 		private readonly items: ReadonlyArray<SelectItem>,
-		private readonly maxVisible: number,
+		maxVisible: number,
 		private readonly theme: SelectListTheme,
 		private readonly layout: SelectListLayoutOptions = {},
 	) {
+		this.#maxVisible = Math.max(1, Math.trunc(maxVisible));
 		this.#filteredItems = items;
+	}
+
+	/** Refit the visible row budget (hosts clamp the list to available height). */
+	setMaxVisible(rows: number): void {
+		this.#maxVisible = Math.max(1, Math.trunc(rows));
 	}
 
 	setFilter(filter: string): void {
@@ -139,6 +149,10 @@ export class SelectList implements Component {
 		this.onSelect?.(item);
 	}
 
+	routeMouse(event: SgrMouseEvent, line: number, _col: number): void {
+		routeSelectListMouse(this, event, line);
+	}
+
 	invalidate(): void {
 		// No cached state to invalidate currently
 	}
@@ -161,7 +175,7 @@ export class SelectList implements Component {
 		const wrapEnabled = this.layout.wrapDescription === true;
 		// `maxVisible` is the picker's visual row budget. For non-wrap layouts
 		// every item is one row, so the budget matches the original item count.
-		const visualBudget = this.maxVisible;
+		const visualBudget = this.#maxVisible;
 
 		// Compute per-item visual row counts at the conservative width (i.e.
 		// assume the scrollbar column might be reserved). For non-wrap layouts
@@ -249,12 +263,12 @@ export class SelectList implements Component {
 		}
 		// PageUp - jump up by one visible page
 		else if (kb.matches(keyData, "tui.select.pageUp")) {
-			this.#selectedIndex = Math.max(0, this.#selectedIndex - this.maxVisible);
+			this.#selectedIndex = Math.max(0, this.#selectedIndex - this.#maxVisible);
 			this.#notifySelectionChange();
 		}
 		// PageDown - jump down by one visible page
 		else if (kb.matches(keyData, "tui.select.pageDown")) {
-			this.#selectedIndex = Math.min(this.#filteredItems.length - 1, this.#selectedIndex + this.maxVisible);
+			this.#selectedIndex = Math.min(this.#filteredItems.length - 1, this.#selectedIndex + this.#maxVisible);
 			this.#notifySelectionChange();
 		}
 		// Enter
@@ -367,9 +381,8 @@ export class SelectList implements Component {
 		width: number,
 		primaryColumnWidth: number,
 	): SelectItemLayout {
-		const prefix = isSelected
-			? `${this.theme.symbols.cursor} `
-			: padding(visibleWidth(this.theme.symbols.cursor) + 1);
+		const cursor = this.theme.symbols?.cursor ?? DEFAULT_CURSOR_SYMBOL;
+		const prefix = isSelected ? `${cursor} ` : padding(visibleWidth(cursor) + 1);
 		const prefixWidth = visibleWidth(prefix);
 		const descriptionSingleLine = item.description ? sanitizeSingleLine(item.description) : undefined;
 
@@ -453,12 +466,12 @@ export class SelectList implements Component {
 
 	#shouldRenderSearchStatus(): boolean {
 		return (
-			this.layout.overflowSearch !== false && (this.items.length > this.maxVisible || this.#filterQuery.length > 0)
+			this.layout.overflowSearch !== false && (this.items.length > this.#maxVisible || this.#filterQuery.length > 0)
 		);
 	}
 
 	#canEditSearch(): boolean {
-		return this.layout.overflowSearch !== false && this.items.length > this.maxVisible;
+		return this.layout.overflowSearch !== false && this.items.length > this.#maxVisible;
 	}
 
 	#handleSearchInput(keyData: string): boolean {

@@ -15,29 +15,25 @@
  *   chain-state detectors, which regex over `error.message`.
  */
 import { fetchWithRetry, readSseJson, type SseEventObserver } from "@oh-my-pi/pi-utils";
-import { ProviderHttpError } from "../errors";
+import * as AIError from "../error";
+import { OpenAIHttpError } from "../error";
+
+export { OpenAIHttpError };
+
 import type { FetchImpl } from "../types";
 import type { CapturedHttpErrorResponse } from "./http-inspector";
 
 /**
- * Total attempts when the caller has no first-event deadline armed. The
- * removed SDK clients ran `maxRetries: 5`, i.e. 6 requests.
+ * Total attempts (initial + retries). Parity with the removed SDK clients'
+ * `maxRetries: 5`, i.e. 6 requests. Callers arming a first-event watchdog
+ * stay bounded: the watchdog aborts the request `signal`, which
+ * `fetchWithRetry` races on every attempt and every backoff sleep, so
+ * transient 408/429/5xx retries can never extend the caller's deadline.
  */
 const DEFAULT_MAX_ATTEMPTS = 6;
 
 /** Bound the `Error.message` allocation for proxy HTML error pages and the like. */
 const MAX_DETAIL_CHARS = 4096;
-
-/** Non-2xx response from an OpenAI-wire endpoint, with the decoded body attached. */
-export class OpenAIHttpError extends ProviderHttpError {
-	readonly captured: CapturedHttpErrorResponse;
-
-	constructor(message: string, captured: CapturedHttpErrorResponse, code: string | undefined) {
-		super(message, captured.status, { headers: captured.headers, code });
-		this.name = "OpenAIHttpError";
-		this.captured = captured;
-	}
-}
 
 export interface OpenAIStreamRequestInit {
 	url: string;
@@ -46,12 +42,6 @@ export interface OpenAIStreamRequestInit {
 	body: unknown;
 	signal: AbortSignal;
 	fetch?: FetchImpl;
-	/**
-	 * Total attempts (initial + retries). Defaults to {@link DEFAULT_MAX_ATTEMPTS}.
-	 * Pass `1` when a first-event watchdog is armed so retries cannot silently
-	 * extend the caller's deadline (mirrors the old `maxRetries: 0` hint).
-	 */
-	maxAttempts?: number;
 	/** Raw wire-frame observer (`onSseEvent` debug pipeline). */
 	onSseEvent?: SseEventObserver;
 }
@@ -78,7 +68,7 @@ export async function postOpenAIStream<TEvent>(init: OpenAIStreamRequestInit): P
 		body: JSON.stringify(init.body),
 		signal: init.signal,
 		fetch: init.fetch,
-		maxAttempts: init.maxAttempts ?? DEFAULT_MAX_ATTEMPTS,
+		maxAttempts: DEFAULT_MAX_ATTEMPTS,
 		// Bun's native fetch enforces a hard ~300s pre-response timeout (issue #2422).
 		// Cold large-context streams legitimately exceed it; the caller's
 		// `firstEventTimeoutMs`/`AbortSignal` already govern stuck requests.
@@ -88,7 +78,9 @@ export async function postOpenAIStream<TEvent>(init: OpenAIStreamRequestInit): P
 		throw await captureOpenAIHttpError(response);
 	}
 	if (!response.body) {
-		throw new Error(`OpenAI stream response has no body (status ${response.status})`);
+		throw new AIError.ProviderResponseError(`OpenAI stream response has no body (status ${response.status})`, {
+			kind: "envelope",
+		});
 	}
 	return {
 		events: readSseJson<TEvent>(response.body, init.signal, init.onSseEvent),
@@ -98,7 +90,7 @@ export async function postOpenAIStream<TEvent>(init: OpenAIStreamRequestInit): P
 }
 
 /** Decode a non-2xx response into an {@link OpenAIHttpError} without consuming it twice. */
-export async function captureOpenAIHttpError(response: Response): Promise<OpenAIHttpError> {
+export async function captureOpenAIHttpError(response: Response): Promise<AIError.OpenAIHttpError> {
 	let bodyText: string | undefined;
 	let bodyJson: unknown;
 	try {
@@ -117,41 +109,11 @@ export async function captureOpenAIHttpError(response: Response): Promise<OpenAI
 		bodyText,
 		bodyJson,
 	};
-	const { detail, code } = extractErrorDetail(bodyJson, bodyText);
+	const { detail, code } = OpenAIHttpError.parseEnvelope(bodyJson, bodyText);
 	// "status code (no body)" matches the SDK's former APIError phrasing;
 	// `finalizeErrorMessage` keys a repair path on that exact wording.
 	const message = detail
 		? `${response.status} ${detail.length > MAX_DETAIL_CHARS ? detail.slice(0, MAX_DETAIL_CHARS) : detail}`
 		: `${response.status} status code (no body)`;
-	return new OpenAIHttpError(message, captured, code);
-}
-
-/**
- * Pull a human-readable message and machine code out of an OpenAI-style error
- * envelope (`{ error: { message, code, type } }`), tolerating the flat shapes
- * compat hosts return (`{ error: "..." }`, `{ message: "..." }`) and falling
- * back to the raw body text.
- */
-function extractErrorDetail(
-	bodyJson: unknown,
-	bodyText: string | undefined,
-): { detail: string | undefined; code: string | undefined } {
-	if (typeof bodyJson === "object" && bodyJson !== null) {
-		const envelope = bodyJson as { error?: unknown; message?: unknown };
-		const error = envelope.error;
-		if (typeof error === "object" && error !== null) {
-			const { message, code, type } = error as { message?: unknown; code?: unknown; type?: unknown };
-			return {
-				detail: typeof message === "string" && message.length > 0 ? message : bodyText,
-				code: typeof code === "string" ? code : typeof type === "string" ? type : undefined,
-			};
-		}
-		if (typeof error === "string" && error.length > 0) {
-			return { detail: error, code: undefined };
-		}
-		if (typeof envelope.message === "string" && envelope.message.length > 0) {
-			return { detail: envelope.message, code: undefined };
-		}
-	}
-	return { detail: bodyText, code: undefined };
+	return new AIError.OpenAIHttpError(message, captured, code);
 }

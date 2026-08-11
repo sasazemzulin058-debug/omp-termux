@@ -19,7 +19,7 @@
 | Field | Type | Required | Description |
 | --- | --- | --- | --- |
 | `pat` | `string` | Yes | Single AST pattern. The wrapper trims it and rejects empty strings. |
-| `paths` | `string[]` | Yes | One or more files, directories, globs, or internal URLs with backing files. Empty entries are rejected. Globs are forbidden for internal URLs. |
+| `path` | `string` | No | File, directory, glob, internal URL, or fetched web URL to search. Separate multiple roots with `;`. Omitted or empty defaults to `.` (the workspace root). Internal-URL globs are rejected. |
 | `skip` | `number` | No | Match offset. Defaults to `0`, then `Math.floor(...)`; negatives and non-finite values fail. |
 
 Pattern grammar and language support exposed to the model:
@@ -30,7 +30,9 @@ Pattern grammar and language support exposed to the model:
 - Metavariable names must be uppercase and must stand for whole AST nodes, not partial tokens or string fragments.
 - Reusing the same metavariable requires identical code at each occurrence.
 - Patterns must parse as one valid AST node for the inferred target language.
-- Supported canonical languages come from `SupportLang::all_langs()` in `crates/pi-ast/src/language/mod.rs`: `astro`, `bash`, `c`, `cmake`, `cpp`, `csharp`, `dart`, `clojure`, `css`, `diff`, `dockerfile`, `emacs-lisp`, `elixir`, `erlang`, `go`, `graphql`, `haskell`, `hcl`, `html`, `ini`, `java`, `javascript`, `json`, `just`, `julia`, `kotlin`, `lua`, `make`, `markdown`, `nix`, `objc`, `ocaml`, `odin`, `perl`, `php`, `powershell`, `protobuf`, `python`, `r`, `regex`, `ruby`, `rust`, `scala`, `solidity`, `sql`, `starlark`, `svelte`, `swift`, `toml`, `tlaplus`, `tsx`, `typescript`, `verilog`, `vue`, `xml`, `yaml`, `zig`.
+- Supported canonical languages come from `SupportLang::all_langs()` in `crates/pi-ast/src/language/mod.rs`: `astro`, `bash`, `c`, `cmake`, `cpp`, `csharp`, `dart`, `clojure`, `css`, `diff`, `dockerfile`, `emacs-lisp`, `elixir`, `erlang`, `fortran`, `go`, `graphql`, `haskell`, `hcl`, `html`, `ini`, `java`, `javascript`, `json`, `just`, `julia`, `kotlin`, `lua`, `make`, `markdown`, `nix`, `objc`, `ocaml`, `odin`, `php`, `powershell`, `protobuf`, `python`, `r`, `regex`, `ruby`, `rust`, `scala`, `solidity`, `sql`, `starlark`, `svelte`, `swift`, `toml`, `tlaplus`, `tsx`, `typescript`, `verilog`, `vue`, `xml`, `yaml`, `zig`.
+
+`ast_grep` is disabled by default (`astGrep.enabled = false`) and is a discoverable tool when enabled.
 
 ## Outputs
 - Single-shot tool result.
@@ -47,8 +49,8 @@ Pattern grammar and language support exposed to the model:
 - Native ranges (`byteStart`, `byteEnd`, `startLine`, `startColumn`, `endLine`, `endColumn`) exist only inside the native result; the wrapper does not emit them directly to the model.
 
 ## Flow
-1. `AstGrepTool.execute()` validates `pat`, normalizes `skip`, then delegates path resolution to `resolveToolSearchScope()` in `packages/coding-agent/src/tools/path-utils.ts`, which normalizes and rejects empty `paths` entries.
-2. Internal URLs are resolved through the shared `InternalUrlRouter.instance()`; entries without `sourcePath` fail, and internal-URL globs fail early.
+1. `AstGrepTool.execute()` trims and validates `pat`, normalizes `skip`, converts semicolon-delimited `path` to roots (default `.`), then delegates scope resolution to `resolveToolSearchScope()`.
+2. Internal URLs are resolved through the shared router; entries without `sourcePath` and internal-URL globs fail. Readable external URLs are materialized to immutable local files for searching.
 3. For multiple path inputs, `partitionExistingPaths()` drops missing bases only when at least one surviving base remains; if all bases are missing the call fails.
 4. `parseSearchPathPreferringLiteral()` splits a single path into `basePath` plus optional `glob`. `resolveExplicitSearchPaths()` collapses multiple inputs into a common base plus a brace-union glob, or separate `targets` when the common ancestor is not itself one of the requested paths.
 5. The wrapper stats the resolved base path to decide whether output should be grouped as a directory result.
@@ -69,7 +71,7 @@ Pattern grammar and language support exposed to the model:
 - Single file: native path is the file; output is a flat list of rendered match lines.
 - Directory + optional glob: native scan walks the directory, then filters by compiled glob.
 - Multiple explicit paths/globs: wrapper unions them into one synthetic scope or runs per-target native calls when paths only meet at root.
-- Internal URL inputs: only supported when the router can resolve them to a backing file path.
+- Internal URL inputs: supported when the router resolves them to a backing file path. Readable external URLs are materialized to immutable temporary files.
 - Hashline output mode vs plain line-number mode: controlled by `resolveFileDisplayMode()`; hashline mode requires the edit tool and hashline edit mode, and per-file anchors additionally require a successful whole-file snapshot (`recordFileSnapshot()`) — over-cap or unreadable files fall back to plain output.
 
 ## Side Effects
@@ -93,7 +95,7 @@ Pattern grammar and language support exposed to the model:
 - Multi-path union deduplicates identical path inputs before resolution in `resolveExplicitSearchPaths()`.
 
 ## Errors
-- TS wrapper throws `ToolError` for empty patterns, invalid `skip`, empty path entries, external (`http`/`https`/`ftp`/`file`/`ws`/`wss`) URLs, unsupported internal-URL globs, internal URLs without `sourcePath`, and missing paths.
+- TS wrapper throws `ToolError` for empty patterns, invalid `skip`, empty path entries, unsupported internal-URL globs, internal URLs without `sourcePath`, and missing paths. Supported external read URLs are materialized before search rather than rejected.
 - Native code returns hard errors for:
   - unreadable search roots or bad glob compilation,
   - cancellation (`Aborted: Signal`) or timeout (`Aborted: Timeout`).

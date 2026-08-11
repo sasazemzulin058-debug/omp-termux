@@ -62,10 +62,47 @@ export interface MCPStoredOAuthCredential extends OAuthCredential {
 	clientId?: string;
 	clientSecret?: string;
 	resource?: string;
+	/**
+	 * Authorization-server URL (the issuer the grant was minted against). Used
+	 * to filter same-origin resource indicators on refresh: RFC 8414 lets the
+	 * authorize and token endpoints sit on different origins, so refresh
+	 * cannot infer the original auth-server origin from `tokenUrl` alone.
+	 * Unset on legacy credentials minted before issue #3502's fix.
+	 */
+	authorizationUrl?: string;
 }
 
 const DEFAULT_PORT = 3000;
 const CALLBACK_PATH = "/callback";
+
+function hasOAuthScope(scopes: string | null | undefined, scope: string): boolean {
+	return !!scopes && scopes.split(/\s+/).includes(scope);
+}
+
+/**
+ * Trim a DCR failure body / thrown error message to a single, short line the
+ * caller can splice into an error string. `undefined` when nothing salvageable
+ * remains after stripping whitespace.
+ */
+function truncateDetail(raw: string | undefined): string | undefined {
+	if (!raw) return undefined;
+	const firstLine = raw.split(/\r?\n/, 1)[0]?.trim();
+	if (!firstLine) return undefined;
+	return firstLine.length > 200 ? `${firstLine.slice(0, 200)}…` : firstLine;
+}
+
+/**
+ * Read the response body of a rejected DCR request as a short diagnostic
+ * string. Never throws — the caller is already building an error and cannot
+ * afford to trade the actual failure for a "read body" one.
+ */
+async function readRegistrationFailureDetail(response: Response): Promise<string | undefined> {
+	try {
+		return truncateDetail(await response.text());
+	} catch {
+		return undefined;
+	}
+}
 
 function isLoopbackHostname(hostname: string): boolean {
 	return hostname === "localhost" || hostname === "127.0.0.1";
@@ -141,14 +178,44 @@ function resolveCallbackHostname(redirectUri: string | undefined): string | unde
 	return parsed.hostname;
 }
 
+/**
+ * Resolve the client_id MCPOAuthFlow would use without doing any I/O —
+ * either the explicitly configured value or one embedded as a query parameter
+ * in the authorization URL. Returns `undefined` when no client_id is known
+ * statically, which is the trigger for dynamic client registration in
+ * {@link MCPOAuthFlow.#tryRegisterClient}.
+ */
+function staticClientIdFromConfig(config: MCPOAuthConfig): string | undefined {
+	const fromConfig = config.clientId?.trim();
+	if (fromConfig) return fromConfig;
+	try {
+		return new URL(config.authorizationUrl).searchParams.get("client_id") ?? undefined;
+	} catch {
+		return undefined;
+	}
+}
+
 function resolveCallbackOptions(config: MCPOAuthConfig): OAuthCallbackFlowOptions {
 	const redirectUri = resolveRedirectUri(config.redirectUri);
 	validateRedirectConfig(config, redirectUri);
+	// When a client_id is already pinned (config-supplied or embedded in the
+	// authorization URL), it was registered against a specific redirect URI.
+	// Silently advertising a different port at the authorize endpoint would
+	// be rejected by providers like Atlassian (HTTP 500 in the browser, local
+	// flow hangs until the 5-minute timeout), so fail fast instead.
+	//
+	// When no client_id is pinned, MCPOAuthFlow will attempt dynamic client
+	// registration on demand with whichever loopback URI we actually bound —
+	// the provider issues a client_id tied to *that* URI, so the random-port
+	// fallback remains safe for first-install DCR flows whose preferred port
+	// happens to be occupied.
+	const allowPortFallback = staticClientIdFromConfig(config) === undefined;
 	return {
 		preferredPort: resolveCallbackPort(config.callbackPort, redirectUri),
 		callbackPath: resolveCallbackPath(config.callbackPath, redirectUri),
 		callbackHostname: resolveCallbackHostname(redirectUri),
 		redirectUri,
+		allowPortFallback,
 	};
 }
 
@@ -169,11 +236,49 @@ function resolveResourceUri(resource: string | undefined): string | undefined {
 	return trimmed;
 }
 
+interface ResourceIndicatorFilterOptions {
+	/** Strip any resource URL on the same origin as the authorization server. */
+	stripSameOriginResource?: boolean;
+}
+
+/**
+ * Drop a redundant fallback resource indicator relative to {@link serverUrl}.
+ *
+ * Provider-advertised resource indicators are authoritative even when they are
+ * origin-only (`https://gateway.example.com`) or path-scoped same-origin
+ * (`https://gateway.example.com/my-service/mcp`): servers can use either form
+ * as the audience they require for the grant.
+ *
+ * Plane is stricter for OMP-synthesized fallback resources (e.g. using the
+ * configured server URL `https://mcp.plane.so/http/mcp` as `resource`), so
+ * fallback callers opt into `stripSameOriginResource`. Provider-advertised
+ * `oauth.resource` values and authorization-URL `?resource=` values keep the
+ * preserving default.
+ */
+function filterResourceIndicator(
+	resource: string | undefined,
+	serverUrl: string,
+	options: ResourceIndicatorFilterOptions = {},
+): string | undefined {
+	if (!resource) return undefined;
+	try {
+		const origin = new URL(serverUrl).origin;
+		const parsedResource = new URL(resource);
+		if (parsedResource.origin !== origin) return resource;
+		if (options.stripSameOriginResource) return undefined;
+	} catch {
+		// Malformed serverUrl will fail elsewhere; fall through.
+	}
+	return resource;
+}
+
 export interface MCPOAuthConfig {
 	/** Authorization endpoint URL */
 	authorizationUrl: string;
 	/** Token endpoint URL */
 	tokenUrl: string;
+	/** Dynamic client registration endpoint advertised by the authorization server. */
+	registrationUrl?: string;
 	/** Client ID (optional when already embedded in authorization URL) */
 	clientId?: string;
 	/** Client secret (optional for PKCE flows) */
@@ -181,12 +286,10 @@ export interface MCPOAuthConfig {
 	/** OAuth scopes (space-separated) */
 	scopes?: string;
 	/**
-	 * `prompt` parameter for the authorization request. Defaults to `"consent"`
-	 * so the provider always shows its authorize screen instead of silently
-	 * re-approving the browser's current session — without it, reauthorizing to
-	 * switch accounts/workspaces is impossible once a session cookie exists
-	 * (RFC 6749 §3.1 requires servers to ignore the param when unsupported).
-	 * Set to `""` to omit the parameter entirely.
+	 * `prompt` parameter for the authorization request. By default the parameter
+	 * is omitted, matching the reference MCP SDK, except for `offline_access`
+	 * requests where OIDC Core requires `prompt=consent` to issue refresh-token
+	 * access. Set to `""` to omit the parameter entirely.
 	 */
 	prompt?: string;
 	/** Exact redirect URI to advertise to the provider */
@@ -197,6 +300,13 @@ export interface MCPOAuthConfig {
 	callbackPath?: string;
 	/** MCP resource URI for RFC 8707 resource indicators */
 	resource?: string;
+	/**
+	 * True when `resource` was synthesized from the server URL fallback rather
+	 * than advertised by OAuth/protected-resource metadata. Fallback resources
+	 * are stripped when same-origin with the authorization server; advertised
+	 * path-scoped resources are preserved.
+	 */
+	stripSameOriginResource?: boolean;
 	/** Fetch implementation for token exchange and discovery requests. */
 	fetch?: FetchImpl;
 }
@@ -211,6 +321,22 @@ export class MCPOAuthFlow extends OAuthCallbackFlow {
 	#codeVerifier?: string;
 	#fetch: FetchImpl;
 	#resource?: string;
+	/**
+	 * Details of a rejected dynamic client-registration attempt. Populated by
+	 * {@link #tryRegisterClient} when the provider advertises a registration
+	 * endpoint but returns a non-2xx / throws (e.g. Figma's DCR endpoint 403s
+	 * every request because only catalog-approved clients may connect). Reused
+	 * by {@link #missingClientIdError} to explain why the fallback probe now
+	 * requires a manually configured `oauth.clientId`, replacing the opaque
+	 * "OAuth provider requires client_id" message.
+	 */
+	#registrationFailure?: {
+		endpoint: string;
+		/** HTTP status returned by the endpoint; `0` when the request threw. */
+		status: number;
+		/** First line of the response body (or thrown error message), trimmed. */
+		detail?: string;
+	};
 
 	constructor(
 		private config: MCPOAuthConfig,
@@ -219,8 +345,8 @@ export class MCPOAuthFlow extends OAuthCallbackFlow {
 		super(ctrl, resolveCallbackOptions(config));
 		this.#resolvedClientId = this.#resolveClientId(config);
 		this.#fetch = config.fetch ?? ctrl.fetch ?? fetch;
-		this.#resource = resolveResourceUri(
-			config.resource ?? this.#resourceFromAuthorizationUrl(config.authorizationUrl),
+		this.#resource = this.#filterResourceIndicator(
+			resolveResourceUri(config.resource ?? this.#resourceFromAuthorizationUrl(config.authorizationUrl)),
 		);
 	}
 
@@ -246,10 +372,26 @@ export class MCPOAuthFlow extends OAuthCallbackFlow {
 	get resource(): string | undefined {
 		return this.#resource;
 	}
+	/**
+	 * Authorization-server URL the flow used. Persist alongside the credential
+	 * so refresh can filter same-origin resource indicators against the issuer's
+	 * origin even when `tokenUrl` lives on a different origin (RFC 8414 permits
+	 * the split).
+	 */
+	get authorizationUrl(): string {
+		return this.config.authorizationUrl;
+	}
 
 	async generateAuthUrl(state: string, redirectUri: string): Promise<{ url: string; instructions?: string }> {
 		if (!this.#resolvedClientId) {
 			await this.#tryRegisterClient(redirectUri);
+			// `unapproved_client` explicitly establishes that registration cannot
+			// produce the required client id. Other DCR failures stay on the
+			// clientless probe path because they may be transient or caused by
+			// unrelated registration metadata.
+			if (!this.#resolvedClientId && this.#isDefinitiveRegistrationRejection()) {
+				throw this.#missingClientIdError();
+			}
 		}
 
 		const authUrl = new URL(this.config.authorizationUrl);
@@ -265,13 +407,26 @@ export class MCPOAuthFlow extends OAuthCallbackFlow {
 		if (this.config.scopes && !params.get("scope")) {
 			params.set("scope", this.config.scopes);
 		}
-		const prompt = this.config.prompt ?? "consent";
+		const prompt = this.config.prompt ?? (hasOAuthScope(params.get("scope"), "offline_access") ? "consent" : "");
 		if (prompt && !params.get("prompt")) {
 			params.set("prompt", prompt);
 		}
 		const existingResource = params.get("resource")?.trim();
 		if (existingResource) {
-			this.#resource = resolveResourceUri(existingResource);
+			// A resource already embedded in the provider's authorization URL is
+			// provider-authored, not OMP's server-URL fallback. Preserve same-host
+			// values here even when the caller marked its separate
+			// `config.resource` as fallback; gateway-hosted MCP servers can use
+			// origin-only or path-scoped values as the token audience.
+			const filtered = filterResourceIndicator(resolveResourceUri(existingResource), this.config.authorizationUrl);
+			if (filtered) {
+				this.#resource = filtered;
+			} else {
+				// Defensive path for future policy additions: when filtering says
+				// "omit", drop it from both authorize and token requests.
+				params.delete("resource");
+				this.#resource = undefined;
+			}
 		} else if (this.#resource) {
 			params.set("resource", this.#resource);
 		}
@@ -325,6 +480,7 @@ export class MCPOAuthFlow extends OAuthCallbackFlow {
 				"Content-Type": "application/x-www-form-urlencoded",
 			},
 			body: params.toString(),
+			signal: this.ctrl.signal,
 		});
 
 		if (!response.ok) {
@@ -333,11 +489,21 @@ export class MCPOAuthFlow extends OAuthCallbackFlow {
 		}
 
 		const data = (await response.json()) as {
-			access_token: string;
+			access_token?: string;
 			refresh_token?: string;
 			expires_in?: number;
 			token_type?: string;
+			error?: string;
+			error_description?: string;
 		};
+
+		// Some providers (e.g. the Slack Web API) signal failure with HTTP 200 and
+		// an `{ ok: false, error }` body. Accepting such a response would store an
+		// empty access token and only surface `invalid_token` on a later request.
+		if (typeof data.access_token !== "string" || data.access_token.length === 0) {
+			const providerError = data.error_description ?? data.error;
+			throw new Error(`Token exchange returned no access token${providerError ? `: ${providerError}` : ""}`);
+		}
 
 		// Calculate expiry timestamp
 		const expiresIn = data.expires_in ?? 3600; // Default to 1 hour
@@ -378,14 +544,7 @@ export class MCPOAuthFlow extends OAuthCallbackFlow {
 	}
 
 	#resolveClientId(config: MCPOAuthConfig): string | undefined {
-		const fromConfig = config.clientId?.trim();
-		if (fromConfig) return fromConfig;
-
-		try {
-			return new URL(config.authorizationUrl).searchParams.get("client_id") ?? undefined;
-		} catch {
-			return undefined;
-		}
+		return staticClientIdFromConfig(config);
 	}
 	#resourceFromAuthorizationUrl(authorizationUrl: string): string | undefined {
 		try {
@@ -396,30 +555,65 @@ export class MCPOAuthFlow extends OAuthCallbackFlow {
 	}
 
 	/**
+	 * Drop redundant resource indicators for this authorization server.
+	 * Provider-advertised path-scoped values are preserved; fallback server-URL
+	 * values opt into same-origin stripping via `stripSameOriginResource`.
+	 */
+	#filterResourceIndicator(resource: string | undefined): string | undefined {
+		return filterResourceIndicator(resource, this.config.authorizationUrl, {
+			stripSameOriginResource: this.config.stripSameOriginResource,
+		});
+	}
+
+	/**
 	 * Try OAuth dynamic client registration when provider requires a client_id.
+	 *
+	 * Records rejection details on {@link #registrationFailure} so that when
+	 * DCR is intentionally closed (Figma's `mcp:connect` endpoint returns 403 to
+	 * every unlisted client — see https://developers.figma.com/docs/figma-mcp-server/,
+	 * "Only clients listed in the Figma MCP Catalog can connect"), the fallback
+	 * probe surfaces a message that names the endpoint and status instead of
+	 * the historical opaque "OAuth provider requires client_id".
+	 *
+	 * Includes {@link MCPOAuthConfig.scopes} as RFC 7591 `scope` when set so
+	 * providers that bind DCR clients to registered scopes only (e.g. Clerk)
+	 * accept the later authorize request for the same scope set.
 	 */
 	async #tryRegisterClient(redirectUri: string): Promise<void> {
-		const registrationEndpoint = await this.#resolveRegistrationEndpoint();
+		const registrationEndpoint = this.config.registrationUrl ?? (await this.#resolveRegistrationEndpoint());
 		if (!registrationEndpoint) return;
 
 		try {
+			const registrationBody: Record<string, unknown> = {
+				client_name: "oh-my-pi",
+				redirect_uris: [redirectUri],
+				grant_types: ["authorization_code", "refresh_token"],
+				response_types: ["code"],
+				token_endpoint_auth_method: "none",
+				application_type: "native",
+			};
+			const scope = this.config.scopes?.trim();
+			if (scope) {
+				registrationBody.scope = scope;
+			}
 			const response = await this.#fetch(registrationEndpoint, {
 				method: "POST",
 				headers: {
 					"Content-Type": "application/json",
 					Accept: "application/json",
 				},
-				body: JSON.stringify({
-					client_name: "Codex",
-					redirect_uris: [redirectUri],
-					grant_types: ["authorization_code", "refresh_token"],
-					response_types: ["code"],
-					token_endpoint_auth_method: "none",
-					application_type: "native",
-				}),
+				signal: this.ctrl.signal,
+				body: JSON.stringify(registrationBody),
 			});
 
-			if (!response.ok) return;
+			if (!response.ok) {
+				this.#registrationFailure = {
+					endpoint: registrationEndpoint,
+					status: response.status,
+					detail: await readRegistrationFailureDetail(response),
+				};
+				return;
+			}
 
 			const data = (await response.json()) as {
 				client_id?: string;
@@ -432,8 +626,14 @@ export class MCPOAuthFlow extends OAuthCallbackFlow {
 			if (data.client_secret && data.client_secret.trim() !== "") {
 				this.#registeredClientSecret = data.client_secret;
 			}
-		} catch {
-			// Ignore registration failures and continue without client registration.
+		} catch (error) {
+			// Distinguish real transport/parse failures from a benign no-DCR
+			// response so #missingClientIdError can surface what went wrong.
+			this.#registrationFailure = {
+				endpoint: registrationEndpoint,
+				status: 0,
+				detail: error instanceof Error ? truncateDetail(error.message) : undefined,
+			};
 		}
 	}
 
@@ -474,6 +674,7 @@ export class MCPOAuthFlow extends OAuthCallbackFlow {
 			const response = await this.#fetch(wellKnownUrl, {
 				method: "GET",
 				headers: { Accept: "application/json" },
+				signal: this.ctrl.signal,
 			});
 			if (!response.ok) return null;
 			const metadata = (await response.json()) as { registration_endpoint?: string };
@@ -492,11 +693,12 @@ export class MCPOAuthFlow extends OAuthCallbackFlow {
 				method: "GET",
 				redirect: "manual",
 				headers: { Accept: "text/plain,text/html,application/json" },
+				signal: this.ctrl.signal,
 			});
 			if (response.status < 400) return;
 			const body = await response.text();
 			if (/client[_-]?id/i.test(body) && /(required|missing|invalid)/i.test(body)) {
-				throw new Error("OAuth provider requires client_id");
+				throw this.#missingClientIdError();
 			}
 		} catch (error) {
 			if (error instanceof Error && /client[_-]?id/i.test(error.message)) {
@@ -505,6 +707,68 @@ export class MCPOAuthFlow extends OAuthCallbackFlow {
 			// Ignore network/probe failures to avoid blocking flows that still work.
 		}
 	}
+
+	/**
+	 * Whether the provider explicitly rejected this client as unapproved.
+	 *
+	 * HTTP status alone is insufficient: payload errors such as
+	 * `invalid_client_metadata` and `invalid_redirect_uri` do not establish that
+	 * the authorization endpoint requires a client id. Keep those on the
+	 * clientless probe path.
+	 */
+	#isDefinitiveRegistrationRejection(): boolean {
+		const failure = this.#registrationFailure;
+		return failure?.status === 403 && /\bunapproved_client\b/i.test(failure.detail ?? "");
+	}
+
+	/**
+	 * Build the error thrown when the authorize probe confirms the provider
+	 * demands a `client_id`. When dynamic client registration was attempted and
+	 * rejected (e.g. Figma's 403 for unlisted clients), fold the endpoint + HTTP
+	 * status into the message and point the user at the manual `oauth.clientId`
+	 * workaround. Refs issue #4307.
+	 */
+	#missingClientIdError(): Error {
+		const failure = this.#registrationFailure;
+		const manualHint =
+			"Configure `oauth.clientId` (and `oauth.clientSecret` if the flow needs one) on the MCP server entry in mcp.json.";
+		if (!failure) {
+			return new Error(
+				`OAuth provider requires client_id, and no dynamic-client-registration endpoint was advertised. ${manualHint}`,
+			);
+		}
+		const outcome =
+			failure.status > 0
+				? `HTTP ${failure.status}${failure.detail ? ` — ${failure.detail}` : ""}`
+				: failure.detail
+					? `network error — ${failure.detail}`
+					: "network error";
+		return new Error(
+			`OAuth provider requires client_id, and dynamic client registration was rejected ` +
+				`(POST ${failure.endpoint} → ${outcome}). The server likely restricts registration to pre-approved clients. ${manualHint}`,
+		);
+	}
+}
+
+/**
+ * Options for {@link refreshMCPOAuthToken}. Carried via the trailing object
+ * so positional callers keep working.
+ */
+export interface RefreshMCPOAuthTokenOptions {
+	fetch?: FetchImpl;
+	signal?: AbortSignal;
+	/**
+	 * Authorization-server URL the original grant was minted against. Used to
+	 * filter same-origin resource indicators on refresh. Defaults to `tokenUrl`'s
+	 * origin when omitted for legacy credentials.
+	 */
+	authorizationUrl?: string;
+	/**
+	 * True when the refresh `resource` was synthesized from the server URL
+	 * fallback because the credential/auth material carried no resource.
+	 * Preserved advertised resources leave this false/undefined.
+	 */
+	stripSameOriginResource?: boolean;
 }
 
 /**
@@ -516,17 +780,27 @@ export async function refreshMCPOAuthToken(
 	refreshToken: string,
 	clientId?: string,
 	clientSecret?: string,
-	resourceOrOpts?: string | { fetch?: FetchImpl },
-	opts?: { fetch?: FetchImpl },
+	resourceOrOpts?: string | RefreshMCPOAuthTokenOptions,
+	opts?: RefreshMCPOAuthTokenOptions,
 ): Promise<OAuthCredentials> {
-	const fetchImpl: FetchImpl = (typeof resourceOrOpts === "string" ? opts?.fetch : resourceOrOpts?.fetch) ?? fetch;
+	const optsFromTrailing = typeof resourceOrOpts === "string" ? opts : resourceOrOpts;
+	const fetchImpl: FetchImpl = optsFromTrailing?.fetch ?? fetch;
 	const resource = typeof resourceOrOpts === "string" ? resourceOrOpts : undefined;
+	// Filter against the authorization-server origin when known (RFC 8414
+	// permits authorize/token endpoints on separate origins). Fall back to
+	// `tokenUrl` for legacy credentials minted before the issuer was persisted
+	// — same-origin servers (the common case) still match correctly.
+	const filterAnchor = optsFromTrailing?.authorizationUrl ?? tokenUrl;
 	const params = new URLSearchParams({
 		grant_type: "refresh_token",
 		refresh_token: refreshToken,
 	});
 	if (clientId) params.set("client_id", clientId);
-	const resolvedResource = resolveResourceUri(resource);
+	// Drop redundant indicators so refresh stays consistent with the initial
+	// grant; see {@link filterResourceIndicator} for context.
+	const resolvedResource = filterResourceIndicator(resolveResourceUri(resource), filterAnchor, {
+		stripSameOriginResource: optsFromTrailing?.stripSameOriginResource,
+	});
 	if (resolvedResource) params.set("resource", resolvedResource);
 	if (clientSecret) params.set("client_secret", clientSecret);
 
@@ -534,6 +808,7 @@ export async function refreshMCPOAuthToken(
 		method: "POST",
 		headers: { "Content-Type": "application/x-www-form-urlencoded" },
 		body: params.toString(),
+		signal: optsFromTrailing?.signal,
 	});
 
 	if (!response.ok) {

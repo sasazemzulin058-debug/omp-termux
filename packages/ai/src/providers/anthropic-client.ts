@@ -21,7 +21,11 @@
  *   with up to 25% jitter).
  */
 import { scheduler } from "node:timers/promises";
-import { ProviderHttpError } from "../errors";
+import * as AIError from "../error";
+import { AnthropicApiError, AnthropicConnectionError, AnthropicConnectionTimeoutError } from "../error";
+
+export { AnthropicApiError, AnthropicConnectionError, AnthropicConnectionTimeoutError };
+
 import type { FetchImpl } from "../types";
 import type { MessageCreateParamsStreaming } from "./anthropic-wire";
 
@@ -39,6 +43,12 @@ export interface AnthropicRequestOptions {
 	timeout?: number;
 	/** Per-request retry budget override. */
 	maxRetries?: number;
+	/**
+	 * Maximum delay in milliseconds to wait for a server-directed retry. If the
+	 * server's `retry-after` hint exceeds this value, the retry is declined and
+	 * the original error is surfaced. Non-positive values disable the cap. Defaults to 60000.
+	 */
+	maxRetryDelayMs?: number;
 	/** Per-request headers merged after client defaults. */
 	headers?: Record<string, string>;
 }
@@ -70,6 +80,12 @@ export interface AnthropicClientOptions {
 	authToken?: string | null;
 	baseURL?: string | null;
 	maxRetries?: number;
+	/**
+	 * Maximum delay in milliseconds to wait for a server-directed retry. If the
+	 * server's `retry-after` hint exceeds this value, the retry is declined and
+	 * the original error is surfaced. Non-positive values disable the cap. Defaults to 60000.
+	 */
+	maxRetryDelayMs?: number;
 	/** Pre-response timeout in milliseconds. Defaults to 10 minutes. */
 	timeout?: number;
 	defaultHeaders?: Record<string, string>;
@@ -77,42 +93,8 @@ export interface AnthropicClientOptions {
 	fetchOptions?: AnthropicFetchOptions;
 }
 
-/** Non-2xx response from the Anthropic API. */
-export class AnthropicApiError extends ProviderHttpError {
-	declare readonly headers: Headers;
-	readonly requestId: string | null;
-
-	constructor(status: number, message: string, headers: Headers) {
-		super(message, status, { headers });
-		this.name = "AnthropicApiError";
-		this.requestId = headers.get("request-id");
-	}
-
-	static async fromResponse(response: Response): Promise<AnthropicApiError> {
-		const body = await response.text().catch(() => "");
-		const detail = body.trim() || "status code (no body)";
-		return new AnthropicApiError(response.status, `${response.status} ${detail}`, response.headers);
-	}
-}
-
-/** Network-level failure (DNS, TLS, socket reset) after retries were exhausted. */
-export class AnthropicConnectionError extends Error {
-	constructor(cause: unknown) {
-		super("Connection error.", { cause });
-		this.name = "AnthropicConnectionError";
-	}
-}
-
-/** No response headers arrived within the configured request timeout. */
-export class AnthropicConnectionTimeoutError extends Error {
-	constructor() {
-		super("Request timed out.");
-		this.name = "AnthropicConnectionTimeoutError";
-	}
-}
-
 function createAbortError(): Error {
-	return new Error("Request was aborted.");
+	return new AIError.AbortError("Request was aborted.");
 }
 
 /** `x-should-retry` override, then 408/409/429/5xx. */
@@ -121,11 +103,13 @@ function shouldRetryResponse(response: Response): boolean {
 	if (shouldRetryHeader === "true") return true;
 	if (shouldRetryHeader === "false") return false;
 	const status = response.status;
-	return status === 408 || status === 409 || status === 429 || status >= 500;
+	// Canonical transient set (408/429/5xx) plus 409, which Anthropic's client
+	// also retries.
+	return AIError.isTransientStatus(status) || status === 409;
 }
 
 /** Server-suggested delay (`retry-after-ms`, then `retry-after` seconds or HTTP date). */
-export function retryDelayFromHeaders(headers: Headers | undefined): number | undefined {
+export function retryDelayFromHeaders(headers: Pick<Headers, "get"> | undefined): number | undefined {
 	if (!headers) return undefined;
 	const retryAfterMs = headers.get("retry-after-ms");
 	if (retryAfterMs) {
@@ -244,6 +228,7 @@ export class AnthropicMessagesClient implements AnthropicMessagesClientLike {
 		const callerSignal = options?.signal;
 		const timeoutMs = options?.timeout ?? opts.timeout ?? DEFAULT_TIMEOUT_MS;
 		const maxRetries = Math.max(0, options?.maxRetries ?? opts.maxRetries ?? DEFAULT_MAX_RETRIES);
+		const maxRetryDelayMs = options?.maxRetryDelayMs ?? opts.maxRetryDelayMs ?? 60_000;
 		const url = `${opts.baseURL ?? "https://api.anthropic.com"}${path}`;
 		const headers = this.#buildHeaders(options?.headers);
 		const body = JSON.stringify(params);
@@ -260,18 +245,27 @@ export class AnthropicMessagesClient implements AnthropicMessagesClientLike {
 					await this.#backoff(attempt, undefined, callerSignal);
 					continue;
 				}
-				if (error instanceof AnthropicConnectionTimeoutError) throw error;
-				throw new AnthropicConnectionError(error);
+				if (error instanceof AIError.AnthropicConnectionTimeoutError) throw error;
+				throw new AIError.AnthropicConnectionError(error);
 			}
 
 			if (response.ok) return response;
 
 			if (attempt < maxRetries && shouldRetryResponse(response)) {
+				// Bound the server-directed wait: an over-cap `retry-after` declines
+				// the retry and surfaces the original error (status/body/headers
+				// intact) so higher-level recovery can run. A non-positive cap disables enforcement.
+				// Checked before draining the body so `fromResponse` can still read it.
+				const headerDelayMs = retryDelayFromHeaders(response.headers);
+				if (headerDelayMs !== undefined && maxRetryDelayMs > 0 && headerDelayMs > maxRetryDelayMs) {
+					throw await AIError.AnthropicApiError.fromResponse(response, callerSignal);
+				}
 				await response.body?.cancel().catch(() => {});
 				await this.#backoff(attempt, response.headers, callerSignal);
 				continue;
 			}
-			throw await AnthropicApiError.fromResponse(response);
+
+			throw await AIError.AnthropicApiError.fromResponse(response, callerSignal);
 		}
 	}
 
@@ -300,7 +294,7 @@ export class AnthropicMessagesClient implements AnthropicMessagesClientLike {
 				signal: controller.signal,
 			});
 		} catch (error) {
-			if (timedOut && !callerSignal?.aborted) throw new AnthropicConnectionTimeoutError();
+			if (timedOut && !callerSignal?.aborted) throw new AIError.AnthropicConnectionTimeoutError();
 			throw error;
 		} finally {
 			clearTimeout(timer);

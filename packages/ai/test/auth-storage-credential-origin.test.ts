@@ -3,6 +3,7 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { type AuthCredentialStore, AuthStorage, SqliteAuthCredentialStore } from "@oh-my-pi/pi-ai/auth-storage";
+import { removeWithRetries } from "../../utils/src/temp";
 import { withEnv } from "./helpers";
 
 // Clear every env var the providers under test alias, so ambient shell / ~/.env
@@ -30,7 +31,7 @@ describe("AuthStorage.getCredentialOrigin", () => {
 		store = null;
 		auth = null;
 		if (tempDir) {
-			await fs.rm(tempDir, { recursive: true, force: true });
+			await removeWithRetries(tempDir);
 			tempDir = "";
 		}
 	});
@@ -67,14 +68,24 @@ describe("AuthStorage.getCredentialOrigin", () => {
 		});
 	});
 
-	test("a stored api key reports api_key and outranks a co-stored OAuth credential", async () => {
+	test("a stored OAuth credential outranks a co-stored api key", async () => {
 		await withEnv(SUPPRESS_ENV, async () => {
-			// getApiKey() prefers api_key before oauth, so the origin must match.
+			// getApiKey() resolves stored OAuth before a stored api_key, so the origin must match.
 			await auth?.set("openai", [
 				{ type: "oauth", access: "a", refresh: "r", expires: Date.now() + 60_000 },
 				{ type: "api_key", key: "sk-stored" },
 			]);
-			expect(auth?.getCredentialOrigin("openai")).toEqual({ kind: "api_key" });
+			expect(auth?.getCredentialOrigin("openai")).toEqual({ kind: "oauth" });
+		});
+	});
+
+	test("an explicit env var outranks a stored api key", async () => {
+		// Regression: a live env var is the user's current choice and must win over a stored
+		// static api_key (e.g. a stale broker-migrated copy) so `GEMINI_API_KEY` etc. take effect.
+		await withEnv({ ...SUPPRESS_ENV, OPENAI_API_KEY: "sk-env" }, async () => {
+			await auth?.set("openai", [{ type: "api_key", key: "sk-stored" }]);
+			expect(auth?.getCredentialOrigin("openai")).toEqual({ kind: "env", envVar: "OPENAI_API_KEY" });
+			expect(await auth?.getApiKey("openai")).toBe("sk-env");
 		});
 	});
 

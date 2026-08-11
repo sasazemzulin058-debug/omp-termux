@@ -7,6 +7,7 @@
  */
 import { afterEach, beforeAll, describe, expect, it, vi } from "bun:test";
 import type { AssistantMessage } from "@oh-my-pi/pi-ai";
+import { kStreamingPartialJson } from "@oh-my-pi/pi-ai/utils/block-symbols";
 import { resetSettingsForTest, Settings, settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { ToolExecutionComponent } from "@oh-my-pi/pi-coding-agent/modes/components/tool-execution";
 import { EventController } from "@oh-my-pi/pi-coding-agent/modes/controllers/event-controller";
@@ -44,17 +45,19 @@ function createFixture(streamingMessage: AssistantMessage) {
 	const ctx = {
 		isInitialized: true,
 		init: vi.fn(async () => {}),
-		ui: { requestRender: vi.fn() },
+		ui: { requestRender: vi.fn(), requestComponentRender: vi.fn() },
 		settings,
 		statusLine: { invalidate: vi.fn() },
 		updateEditorTopBorder: vi.fn(),
 		streamingComponent: { updateContent: vi.fn(), markTranscriptBlockFinalized: vi.fn() },
 		streamingMessage,
+		transcriptMessageComponents: new WeakMap(),
 		pendingTools,
+		noteDisplayableThinkingContent: vi.fn(() => false),
 		chatContainer: { addChild: vi.fn() },
 		toolOutputExpanded: false,
-		session: { getToolByName: () => undefined },
-		viewSession: { getToolByName: () => undefined },
+		session: { getToolByName: () => undefined, hasBuiltInTool: () => true },
+		viewSession: { getToolByName: () => undefined, hasBuiltInTool: () => true },
 		sessionManager: { getCwd: () => process.cwd() },
 	} as unknown as InteractiveModeContext;
 
@@ -89,26 +92,45 @@ describe("EventController paces streamed tool args", () => {
 		vi.restoreAllMocks();
 	});
 
-	it("reveals partialJson prefixes per frame, then snaps to final args when the JSON closes", async () => {
+	it("reveals the initial slice immediately, then paces growth across message_updates", async () => {
 		await Settings.init({ inMemory: true, cwd: process.cwd() });
 		vi.useFakeTimers();
 		const updateArgsSpy = vi.spyOn(ToolExecutionComponent.prototype, "updateArgs");
 		const content = "x".repeat(400);
 		const target = `{"path":"/tmp/a.ts","content":"${content}"}`;
-		const streaming = makeStreamingMessage([
-			{ type: "toolCall", id: "tc-1", name: "write", arguments: {}, partialJson: target } as never,
-		]);
-		const { controller, pendingTools } = createFixture(streaming);
+		// Seed includes the complete `path` field (closing quote at byte 20) plus
+		// the opening of `content`, so the rendered preview must show the real
+		// path on the very first dispatch.
+		const seed = target.slice(0, 35);
 
-		await dispatch(controller, streaming);
+		// First message_update: only a small slice has arrived. The reveal
+		// MUST surface it as-is (no empty initial frame).
+		const seedStreaming = makeStreamingMessage([
+			{ type: "toolCall", id: "tc-1", name: "write", arguments: {}, [kStreamingPartialJson]: seed },
+		]);
+		const { controller, pendingTools } = createFixture(seedStreaming);
+		await dispatch(controller, seedStreaming);
 		expect(pendingTools.size).toBe(1);
+
+		// Component constructor consumes the initial render args directly; no
+		// updateArgs has been invoked yet, but the seeded prefix is already on
+		// the pending preview.
+		const componentRender = pendingTools.get("tc-1")!.render(80).join("\n");
+		expect(Bun.stripANSI(componentRender)).toContain("/tmp/a.ts");
+
+		// Second message_update: the rest of the payload arrives. The controller
+		// paces the new backlog through reveal ticks.
+		const fullStreaming = makeStreamingMessage([
+			{ type: "toolCall", id: "tc-1", name: "write", arguments: {}, [kStreamingPartialJson]: target },
+		]);
+		await dispatch(controller, fullStreaming);
 
 		for (let i = 0; i < 3; i++) {
 			vi.advanceTimersByTime(STREAMING_REVEAL_FRAME_MS);
 		}
 		const pacedFrames = updateArgsSpy.mock.calls.map(call => call[0] as Record<string, unknown>);
 		expect(pacedFrames.length).toBeGreaterThan(0);
-		let previousLength = 0;
+		let previousLength = seed.length;
 		for (const frame of pacedFrames) {
 			const prefix = frame.__partialJson;
 			if (typeof prefix !== "string") throw new Error("Expected __partialJson string on paced frame");
@@ -144,8 +166,8 @@ describe("EventController paces streamed tool args", () => {
 				id: "tc-1",
 				name: "write",
 				arguments: { path: "/tmp/a.ts" },
-				partialJson: target,
-			} as never,
+				[kStreamingPartialJson]: target,
+			},
 		]);
 		const { controller } = createFixture(streaming);
 
@@ -165,16 +187,17 @@ describe("EventController paces streamed tool args", () => {
 		const content = "y".repeat(50);
 		const target = `{"path":"/tmp/exec.ts","content":"${content}"}`;
 		const streaming = makeStreamingMessage([
-			{ type: "toolCall", id: "tc-1", name: "write", arguments: {}, partialJson: target } as never,
+			{ type: "toolCall", id: "tc-1", name: "write", arguments: {}, [kStreamingPartialJson]: target },
 		]);
 		const { controller, pendingTools } = createFixture(streaming);
 
-		// Args still streaming: the reveal seeds the preview at an empty prefix, so
-		// the write head shows its `…` path placeholder rather than the real path.
+		// Args still streaming, but the reveal now seeds the preview with the
+		// full available partialJson on the very first message_update — so the
+		// path is already visible before the tool starts executing.
 		await dispatch(controller, streaming);
 		const component = pendingTools.get("tc-1");
 		if (!component) throw new Error("expected a pending write component");
-		expect(Bun.stripANSI(component.render(80).join("\n"))).not.toContain("/tmp/exec.ts");
+		expect(Bun.stripANSI(component.render(80).join("\n"))).toContain("/tmp/exec.ts");
 
 		// The closing full-args message_update never arrives (throttled `arguments`
 		// with smoothing off, an owned-dialect projector, or a superseded turn that

@@ -8,6 +8,8 @@ import { Agent } from "@oh-my-pi/pi-agent-core";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import type { ExtensionRunner } from "@oh-my-pi/pi-coding-agent/extensibility/extensions";
+import type { SecretObfuscator } from "@oh-my-pi/pi-coding-agent/secrets/obfuscator";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
@@ -27,6 +29,10 @@ export interface TestSessionOptions {
 	systemPrompt?: string | string[];
 	/** Custom settings overrides */
 	settingsOverrides?: Record<string, unknown>;
+	/** Extension runner to wire into the session (e.g. to stub `session_before_tree`/etc. hooks) */
+	extensionRunner?: ExtensionRunner;
+	/** Secret obfuscator to wire into the session (e.g. to test deobfuscation of persisted tool arguments) */
+	obfuscator?: SecretObfuscator;
 }
 
 /**
@@ -108,6 +114,8 @@ export async function createTestSession(options: TestSessionOptions = {}): Promi
 		sessionManager,
 		settings,
 		modelRegistry,
+		extensionRunner: options.extensionRunner,
+		obfuscator: options.obfuscator,
 	});
 
 	// Must subscribe to enable session persistence

@@ -5,6 +5,7 @@
  */
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { scheduler } from "node:timers/promises";
+import { type } from "@oh-my-pi/omptype";
 import { calculateCost } from "@oh-my-pi/pi-catalog/models";
 import {
 	ANTIGRAVITY_SYSTEM_INSTRUCTION,
@@ -13,8 +14,7 @@ import {
 	getGeminiCliHeaders,
 } from "@oh-my-pi/pi-catalog/wire/gemini-headers";
 import { extractHttpStatusFromError, fetchWithRetry, readSseJson } from "@oh-my-pi/pi-utils";
-import { type } from "arktype";
-import { ProviderHttpError } from "../errors";
+import * as AIError from "../error";
 import type {
 	Api,
 	AssistantMessage,
@@ -30,11 +30,12 @@ import type {
 import { normalizeSystemPrompts } from "../utils";
 import { AssistantMessageEventStream } from "../utils/event-stream";
 import { extractGoogleValidationUrl, formatGoogleValidationRequiredMessage } from "../utils/google-validation";
-import { appendRawHttpRequestDumpFor400, type RawHttpRequestDump } from "../utils/http-inspector";
+import type { RawHttpRequestDump } from "../utils/http-inspector";
 import { armPreResponseTimeout, getStreamFirstEventTimeoutMs } from "../utils/idle-iterator";
 // Refresh is the sole responsibility of AuthStorage (broker-aware, single-flighted);
 // the stream provider trusts the access token threaded through `options.apiKey`.
 import { normalizeSchemaForCCA } from "../utils/schema";
+import { StreamMarkupHealing, type StreamMarkupHealingEvent } from "../utils/stream-markup-healing";
 import type { Content, FunctionCallingConfigMode, ThinkingConfig } from "./google-shared";
 import {
 	convertMessages,
@@ -58,11 +59,6 @@ import {
  * `import { GoogleThinkingLevel } from "./google-gemini-cli"` callers keep working.
  */
 export type { GoogleThinkingLevel };
-
-/** Non-2xx response (or in-stream error chunk) from the Cloud Code Assist API. */
-export class GeminiCliApiError extends ProviderHttpError {
-	override readonly name = "GeminiCliApiError";
-}
 
 function isPlanningLeakPrefix(text: string): boolean {
 	const trimmed = text.trimStart();
@@ -267,6 +263,8 @@ export interface GoogleGeminiCliOptions extends StreamOptions {
 		 */
 		suppress?: { level: GoogleThinkingLevel } | { budget: number };
 	};
+	/** Request that Cloud Code Assist omit human-readable thought summaries while still allowing internal reasoning. */
+	hideThinkingSummary?: boolean;
 	/**
 	 * Upstream wire model id override for collapsed effort-tier variants.
 	 * Serialized as `requestModelId ?? model.requestModelId ?? model.id`.
@@ -345,22 +343,6 @@ function shouldInjectAntigravitySystemInstruction(modelId: string): boolean {
 	return normalized.includes("claude") || normalized.includes("gemini-3");
 }
 
-/**
- * Extract a clean, user-friendly error message from Google API error response.
- * Parses JSON error responses and returns just the message field.
- */
-function extractErrorMessage(errorText: string): string {
-	try {
-		const parsed = JSON.parse(errorText) as { error?: { message?: string } };
-		if (parsed.error?.message) {
-			return parsed.error.message;
-		}
-	} catch {
-		// Not JSON, return as-is
-	}
-	return errorText;
-}
-
 const optionalCredentialString = type("unknown").pipe(raw => {
 	const out = type("string")(raw);
 	return out instanceof type.errors ? undefined : out;
@@ -406,16 +388,16 @@ export function parseGeminiCliCredentials(apiKeyRaw: string): ParsedGeminiCliCre
 	try {
 		rawCredentials = JSON.parse(apiKeyRaw);
 	} catch {
-		throw new Error(invalidCredentialsMessage);
+		throw new AIError.ValidationError(invalidCredentialsMessage);
 	}
 	const parsed = geminiCliCredentialsSchema(rawCredentials);
 	if (parsed instanceof type.errors) {
-		throw new Error(invalidCredentialsMessage);
+		throw new AIError.ValidationError(invalidCredentialsMessage);
 	}
 
 	const projectId = parsed.projectId ?? parsed.project_id;
 	if (parsed.token === undefined || projectId === undefined) {
-		throw new Error(missingCredentialsMessage);
+		throw new AIError.ValidationError(missingCredentialsMessage);
 	}
 
 	const refreshToken = parsed.refreshToken ?? parsed.refresh;
@@ -517,7 +499,7 @@ export const streamGoogleGeminiCli: StreamFunction<"google-gemini-cli"> = (
 	const stream = new AssistantMessageEventStream();
 
 	(async () => {
-		const startTime = Date.now();
+		const startTime = performance.now();
 		let firstTokenTime: number | undefined;
 
 		const output: AssistantMessage = {
@@ -542,7 +524,9 @@ export const streamGoogleGeminiCli: StreamFunction<"google-gemini-cli"> = (
 		try {
 			const apiKeyRaw = options?.apiKey;
 			if (!apiKeyRaw) {
-				throw new Error("Google Cloud Code Assist requires OAuth authentication. Use /login to authenticate.");
+				throw new AIError.ConfigurationError(
+					"Google Cloud Code Assist requires OAuth authentication. Use /login to authenticate.",
+				);
 			}
 
 			const isAntigravity = model.provider === "google-antigravity";
@@ -558,8 +542,9 @@ export const streamGoogleGeminiCli: StreamFunction<"google-gemini-cli"> = (
 				parsedCredentials.expiresAt !== undefined &&
 				Date.now() >= parsedCredentials.expiresAt
 			) {
-				throw new Error(
+				throw new AIError.OAuthError(
 					"OAuth token expired before request — please retry; AuthStorage will refresh on the next attempt.",
+					{ kind: "token-refresh", provider: model.provider },
 				);
 			}
 			const baseUrl = model.baseUrl?.trim();
@@ -646,7 +631,7 @@ export const streamGoogleGeminiCli: StreamFunction<"google-gemini-cli"> = (
 			let lastResponseId: string | undefined;
 			const ensureStarted = () => {
 				if (!started) {
-					if (!firstTokenTime) firstTokenTime = Date.now();
+					if (!firstTokenTime) firstTokenTime = performance.now();
 					stream.push({ type: "start", partial: output });
 					started = true;
 				}
@@ -670,7 +655,10 @@ export const streamGoogleGeminiCli: StreamFunction<"google-gemini-cli"> = (
 
 			const streamResponse = async (activeResponse: Response): Promise<boolean> => {
 				if (!activeResponse.body) {
-					throw new Error("No response body");
+					throw new AIError.ProviderResponseError("No response body", {
+						provider: model.provider,
+						kind: "empty-body",
+					});
 				}
 
 				// Scoped per attempt so a failed/empty retry cannot leak its
@@ -680,21 +668,91 @@ export const streamGoogleGeminiCli: StreamFunction<"google-gemini-cli"> = (
 				let currentBlock: TextContent | ThinkingContent | null = null;
 				const blocks = output.content;
 				const blockIndex = () => blocks.length - 1;
+				const visibleTextHealing = new StreamMarkupHealing({ pattern: "thinking" });
 
 				let isBuffering = false;
 				let textBuffer = "";
 				let bufferedTextSignature: string | undefined;
 
-				const emitVisibleText = (delta: string, thoughtSignature?: string) => {
-					if (!delta || !currentBlock || currentBlock.type !== "text") return;
-					currentBlock.text += delta;
-					currentBlock.textSignature = retainThoughtSignature(currentBlock.textSignature, thoughtSignature);
+				const endCurrentBlock = (): void => {
+					if (!currentBlock) return;
+					pushBlockEndEvent(currentBlock, blockIndex(), output, stream);
+					currentBlock = null;
+				};
+
+				const startTextBlock = (): TextContent => {
+					let block = currentBlock;
+					if (block?.type !== "text") {
+						endCurrentBlock();
+						block = startTextOrThinkingBlock(false, output, stream, ensureStarted);
+						currentBlock = block;
+					}
+					return block;
+				};
+
+				const startThinkingBlock = (): ThinkingContent => {
+					let block = currentBlock;
+					if (block?.type !== "thinking") {
+						endCurrentBlock();
+						block = startTextOrThinkingBlock(true, output, stream, ensureStarted);
+						currentBlock = block;
+					}
+					return block;
+				};
+
+				const emitVisibleText = (delta: string, thoughtSignature?: string): void => {
+					if (!delta) return;
+					const block = startTextBlock();
+					block.text += delta;
+					block.textSignature = retainThoughtSignature(block.textSignature, thoughtSignature);
 					stream.push({
 						type: "text_delta",
 						contentIndex: blockIndex(),
 						delta,
 						partial: output,
 					});
+				};
+
+				const emitVisibleThinking = (delta: string): void => {
+					if (!delta) return;
+					const block = startThinkingBlock();
+					block.thinking += delta;
+					stream.push({
+						type: "thinking_delta",
+						contentIndex: blockIndex(),
+						delta,
+						partial: output,
+					});
+				};
+
+				const emitHealingEvent = (event: StreamMarkupHealingEvent, thoughtSignature?: string): void => {
+					if (event.type === "text") {
+						emitVisibleText(event.text, thoughtSignature);
+					} else if (event.type === "thinking") {
+						emitVisibleThinking(event.thinking);
+					}
+				};
+
+				const feedVisibleText = (delta: string, thoughtSignature?: string): void => {
+					for (const event of visibleTextHealing.feedEvents(delta)) {
+						emitHealingEvent(event, thoughtSignature);
+					}
+				};
+
+				const flushVisibleText = (thoughtSignature?: string): void => {
+					for (const event of visibleTextHealing.flushEvents()) {
+						emitHealingEvent(event, thoughtSignature);
+					}
+				};
+
+				const retainCurrentBlockThoughtSignature = (thoughtSignature: string): void => {
+					const block = currentBlock;
+					if (!block) return;
+					if (block.type === "thinking") {
+						block.thinkingSignature = retainThoughtSignature(block.thinkingSignature, thoughtSignature);
+					} else {
+						block.textSignature = retainThoughtSignature(block.textSignature, thoughtSignature);
+					}
 				};
 
 				for await (const chunk of readSseJson<CloudCodeAssistResponseChunk>(
@@ -706,16 +764,17 @@ export const streamGoogleGeminiCli: StreamFunction<"google-gemini-cli"> = (
 						const detail = chunk.error.message || chunk.error.status || "unknown error";
 						const message = `Cloud Code Assist stream error: ${detail}`;
 						throw typeof chunk.error.code === "number" && chunk.error.code >= 400
-							? new GeminiCliApiError(message, chunk.error.code)
-							: new Error(message);
+							? new AIError.GeminiCliApiError(message, chunk.error.code)
+							: new AIError.ProviderResponseError(message, { provider: model.provider, kind: "runtime" });
 					}
 					const responseData = chunk.response;
 					if (!responseData) continue;
 					if (responseData.responseId) lastResponseId = responseData.responseId;
 					if (!responseData.candidates?.length && responseData.promptFeedback?.blockReason) {
 						const detail = responseData.promptFeedback.blockReasonMessage;
-						throw new Error(
+						throw new AIError.ProviderResponseError(
 							`Request blocked by Google (${responseData.promptFeedback.blockReason})${detail ? `: ${detail}` : ""}`,
+							{ provider: model.provider, kind: "content-blocked" },
 						);
 					}
 
@@ -724,20 +783,12 @@ export const streamGoogleGeminiCli: StreamFunction<"google-gemini-cli"> = (
 						for (const part of candidate.content.parts) {
 							if (part.text !== undefined && part.text !== "") {
 								const isThinking = isThinkingPart(part);
-								if (
-									!currentBlock ||
-									(isThinking && currentBlock.type !== "thinking") ||
-									(!isThinking && currentBlock.type !== "text")
-								) {
-									if (currentBlock) {
-										pushBlockEndEvent(currentBlock, blockIndex(), output, stream);
-									}
-									currentBlock = startTextOrThinkingBlock(isThinking, output, stream, ensureStarted);
-								}
-								if (currentBlock.type === "thinking") {
-									currentBlock.thinking += part.text;
-									currentBlock.thinkingSignature = retainThoughtSignature(
-										currentBlock.thinkingSignature,
+								if (isThinking) {
+									flushVisibleText();
+									const block = startThinkingBlock();
+									block.thinking += part.text;
+									block.thinkingSignature = retainThoughtSignature(
+										block.thinkingSignature,
 										part.thoughtSignature,
 									);
 									stream.push({
@@ -758,45 +809,29 @@ export const streamGoogleGeminiCli: StreamFunction<"google-gemini-cli"> = (
 										textBuffer = part.text;
 										bufferedTextSignature = part.thoughtSignature;
 									} else {
-										emitVisibleText(part.text, part.thoughtSignature);
+										feedVisibleText(part.text, part.thoughtSignature);
 									}
 
 									if (isBuffering) {
 										const buffered = consumePlanningBuffer(textBuffer, toolNames);
 										if (buffered.kind !== "incomplete") {
-											if (buffered.kind === "leak") {
-												sawLeak = true;
-											}
 											const visibleSignature = bufferedTextSignature;
 											isBuffering = false;
 											textBuffer = "";
 											bufferedTextSignature = undefined;
-											emitVisibleText(buffered.visibleText, visibleSignature);
+											feedVisibleText(buffered.visibleText, visibleSignature);
 										}
 									}
 								}
-							} else if (part.text === "" && part.thoughtSignature && currentBlock && !part.functionCall) {
-								if (currentBlock.type === "thinking") {
-									currentBlock.thinkingSignature = retainThoughtSignature(
-										currentBlock.thinkingSignature,
-										part.thoughtSignature,
-									);
-								} else {
-									currentBlock.textSignature = retainThoughtSignature(
-										currentBlock.textSignature,
-										part.thoughtSignature,
-									);
-								}
+							} else if (part.text === "" && part.thoughtSignature && !part.functionCall) {
+								retainCurrentBlockThoughtSignature(part.thoughtSignature);
 							}
 
 							if (part.functionCall) {
-								if (currentBlock) {
-									pushBlockEndEvent(currentBlock, blockIndex(), output, stream);
-									currentBlock = null;
-								}
+								flushVisibleText();
+								endCurrentBlock();
 								isBuffering = false;
 								textBuffer = "";
-
 								const providedId = part.functionCall.id;
 								const needsNewId =
 									!providedId || output.content.some(b => b.type === "toolCall" && b.id === providedId);
@@ -858,26 +893,22 @@ export const streamGoogleGeminiCli: StreamFunction<"google-gemini-cli"> = (
 
 				if (isBuffering && textBuffer !== "") {
 					const buffered = consumePlanningBuffer(textBuffer, toolNames, true);
-					if (buffered.kind === "leak") {
-						sawLeak = true;
-					}
+
 					if (buffered.kind !== "incomplete") {
-						emitVisibleText(buffered.visibleText, bufferedTextSignature);
+						feedVisibleText(buffered.visibleText, bufferedTextSignature);
 					}
 					bufferedTextSignature = undefined;
 					isBuffering = false;
 					textBuffer = "";
 				}
 
-				if (currentBlock) {
-					pushBlockEndEvent(currentBlock, blockIndex(), output, stream);
-				}
+				flushVisibleText(bufferedTextSignature);
+				endCurrentBlock();
 
-				return hasMeaningfulGoogleContent(output) || sawLeak;
+				return hasMeaningfulGoogleContent(output);
 			};
 
 			let receivedContent = false;
-			let sawLeak = false;
 
 			for (let i = 0; i < endpoints.length; i++) {
 				const endpoint = endpoints[i];
@@ -908,7 +939,7 @@ export const streamGoogleGeminiCli: StreamFunction<"google-gemini-cli"> = (
 					}
 
 					if (!response.ok) {
-						if (response.status === 429 || (response.status >= 500 && response.status < 600)) {
+						if (AIError.isTransientStatus(response.status)) {
 							if (!isLastEndpoint) {
 								continue;
 							}
@@ -921,8 +952,8 @@ export const streamGoogleGeminiCli: StreamFunction<"google-gemini-cli"> = (
 									"retry your request",
 									parsedCredentials.email,
 								)
-							: extractErrorMessage(errorText);
-						throw new GeminiCliApiError(
+							: errorText;
+						throw new AIError.GeminiCliApiError(
 							`Cloud Code Assist API error (${response.status}): ${errorMessage}`,
 							response.status,
 							{ headers: response.headers },
@@ -934,7 +965,7 @@ export const streamGoogleGeminiCli: StreamFunction<"google-gemini-cli"> = (
 
 					for (let emptyAttempt = 0; emptyAttempt <= MAX_EMPTY_STREAM_RETRIES; emptyAttempt++) {
 						if (options?.signal?.aborted) {
-							throw new Error("Request was aborted");
+							throw new AIError.AbortError("Request was aborted");
 						}
 
 						if (emptyAttempt > 0) {
@@ -942,11 +973,11 @@ export const streamGoogleGeminiCli: StreamFunction<"google-gemini-cli"> = (
 							try {
 								await scheduler.wait(backoffMs, { signal: options?.signal });
 							} catch {
-								throw new Error("Request was aborted");
+								throw new AIError.AbortError("Request was aborted");
 							}
 
 							if (!requestUrl) {
-								throw new Error("Missing request URL");
+								throw new AIError.ConfigurationError("Missing request URL");
 							}
 
 							currentResponse = await (options?.fetch ?? fetch)(requestUrl, {
@@ -958,7 +989,7 @@ export const streamGoogleGeminiCli: StreamFunction<"google-gemini-cli"> = (
 
 							if (!currentResponse.ok) {
 								const retryErrorText = await currentResponse.text();
-								throw new GeminiCliApiError(
+								throw new AIError.GeminiCliApiError(
 									`Cloud Code Assist API error (${currentResponse.status}): ${retryErrorText}`,
 									currentResponse.status,
 									{ headers: currentResponse.headers },
@@ -967,8 +998,8 @@ export const streamGoogleGeminiCli: StreamFunction<"google-gemini-cli"> = (
 						}
 
 						const streamed = await streamResponse(currentResponse);
-						if (streamed) {
-							receivedContent = true;
+						if (output.stopReason !== "stop" || streamed) {
+							receivedContent = streamed;
 							break;
 						}
 
@@ -977,17 +1008,28 @@ export const streamGoogleGeminiCli: StreamFunction<"google-gemini-cli"> = (
 						}
 					}
 
+					if (output.stopReason === "aborted" || output.stopReason === "error") {
+						throw new AIError.ProviderResponseError(output.errorMessage ?? "An unknown error occurred", {
+							provider: model.provider,
+							kind: "output",
+						});
+					}
+
 					if (!receivedContent) {
-						throw new Error("Cloud Code Assist API returned an empty response");
+						throw new AIError.ProviderResponseError("Cloud Code Assist API returned an empty response", {
+							provider: model.provider,
+							kind: "empty-body",
+						});
 					}
 
 					if (options?.signal?.aborted) {
-						throw new Error("Request was aborted");
+						throw new AIError.AbortError("Request was aborted");
 					}
 
 					if (!sawFinishReason) {
-						throw new Error(
+						throw new AIError.ProviderResponseError(
 							"Cloud Code Assist stream ended without a finish reason (connection dropped or response truncated)",
+							{ provider: model.provider, kind: "incomplete-stream" },
 						);
 					}
 
@@ -1007,37 +1049,38 @@ export const streamGoogleGeminiCli: StreamFunction<"google-gemini-cli"> = (
 					break;
 				} catch (error) {
 					const status = extractHttpStatusFromError(error);
-					if (status === 429 || (status !== undefined && status >= 500 && status < 600)) {
-						if (!isLastEndpoint && !started) {
-							continue;
-						}
+					if (
+						!isLastEndpoint &&
+						!started &&
+						(AIError.isTransientStatus(status) ||
+							(status === undefined &&
+								!(error instanceof AIError.ProviderResponseError && error.kind === "output") &&
+								AIError.retriable(AIError.classify(error))))
+					) {
+						continue;
 					}
 					throw error;
 				}
 			}
 
 			if (output.stopReason === "aborted" || output.stopReason === "error") {
-				throw new Error(output.errorMessage ?? "An unknown error occurred");
+				throw new AIError.ProviderResponseError(output.errorMessage ?? "An unknown error occurred", {
+					provider: model.provider,
+					kind: "output",
+				});
 			}
 
-			output.duration = Date.now() - startTime;
+			output.duration = performance.now() - startTime;
 			if (firstTokenTime) output.ttft = firstTokenTime - startTime;
 			stream.push({ type: "done", reason: output.stopReason, message: output });
 			stream.end();
 		} catch (error) {
-			for (const block of output.content) {
-				if ("index" in block) {
-					delete (block as { index?: number }).index;
-				}
-			}
-			output.stopReason = options?.signal?.aborted ? "aborted" : "error";
-			output.errorStatus = extractHttpStatusFromError(error);
-			output.errorMessage = await appendRawHttpRequestDumpFor400(
-				error instanceof Error ? error.message : JSON.stringify(error),
-				error,
-				rawRequestDump,
-			);
-			output.duration = Date.now() - startTime;
+			const result = await AIError.finalize(error, { api: model.api, signal: options?.signal, rawRequestDump });
+			output.stopReason = result.stopReason;
+			output.errorStatus = result.status;
+			output.errorId = result.id;
+			output.errorMessage = result.message;
+			output.duration = performance.now() - startTime;
 			if (firstTokenTime) output.ttft = firstTokenTime - startTime;
 			stream.push({ type: "error", reason: output.stopReason, error: output });
 			stream.end();
@@ -1207,7 +1250,7 @@ export function buildRequest(
 	// Thinking config
 	if (options.thinking?.enabled && model.reasoning) {
 		generationConfig.thinkingConfig = {
-			includeThoughts: true,
+			includeThoughts: !options.hideThinkingSummary,
 		};
 		// Gemini 3 models use thinkingLevel, older models use thinkingBudget
 		if (options.thinking.level !== undefined) {

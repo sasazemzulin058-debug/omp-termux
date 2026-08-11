@@ -1,8 +1,13 @@
 import { beforeAll, describe, expect, it, vi } from "bun:test";
 import { stripVTControlCharacters } from "node:util";
+import { type } from "@oh-my-pi/omptype";
 import type { AgentToolContext } from "@oh-my-pi/pi-agent-core";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import type { ExtensionUISelectItem } from "@oh-my-pi/pi-coding-agent/extensibility/extensions";
+import type {
+	ExtensionAskDialogQuestion,
+	ExtensionAskDialogResult,
+	ExtensionUISelectItem,
+} from "@oh-my-pi/pi-coding-agent/extensibility/extensions";
 import { getThemeByName, initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { AskTool, askToolRenderer } from "@oh-my-pi/pi-coding-agent/tools/ask";
@@ -20,7 +25,7 @@ function createSession(overrides: Partial<ToolSession> = {}): ToolSession {
 }
 
 function createContext(args: {
-	select: (
+	select?: (
 		prompt: string,
 		options: ExtensionUISelectItem[],
 		dialogOptions?: {
@@ -42,13 +47,18 @@ function createContext(args: {
 		dialogOptions?: { signal?: AbortSignal },
 		editorOptions?: { promptStyle?: boolean },
 	) => Promise<string | undefined>;
+	askDialog?: (
+		questions: ExtensionAskDialogQuestion[],
+		dialogOptions?: any,
+	) => Promise<ExtensionAskDialogResult | undefined>;
 	abort?: () => void;
 }): AgentToolContext {
 	// AgentToolContext includes many runtime fields; tests only need UI + abort behavior.
 	return {
 		hasUI: true,
 		ui: {
-			select: args.select,
+			...(args.select ? { select: args.select } : {}),
+			...(args.askDialog ? { askDialog: args.askDialog } : {}),
 			editor: (
 				title: string,
 				prefill?: string,
@@ -562,6 +572,190 @@ describe("AskTool custom input", () => {
 		expect(result.details?.selectedOptions).toEqual([]);
 		expect(editor).toHaveBeenCalledTimes(1);
 		expect(abort).not.toHaveBeenCalled();
+	});
+	it("keeps question context visible while entering Other custom input", async () => {
+		const tool = new AskTool(createSession());
+		const editor = vi.fn(async (_title: string) => "custom");
+		const questions = [
+			{
+				id: "details",
+				question: "Share details",
+				options: [{ label: "yes" }, { label: "no", description: "Skip the optional detail." }],
+			},
+		];
+		const context = createContext({
+			select: async () => "Other (type your own)",
+			editor,
+		});
+
+		await tool.execute("call-editor-context", { questions }, undefined, undefined, context);
+
+		const title = editor.mock.calls[0]?.[0] ?? "";
+		expect(title).toContain("Share details");
+		expect(title).toContain("yes");
+		expect(title).toContain("no");
+		expect(title).toContain("Skip the optional detail.");
+		expect(title).toContain("Other (type your own)");
+		expect(title).toContain("Enter your response:");
+	});
+
+	it("caps Other editor context for long option lists with long descriptions", async () => {
+		const tool = new AskTool(createSession());
+		const editor = vi.fn(async (_title: string) => "custom");
+		const longDescription = "x".repeat(400);
+		const optionCount = 20;
+		const options = Array.from({ length: optionCount }, (_, i) => ({
+			label: `option-${i}`,
+			description: longDescription,
+		}));
+		const questions = [{ id: "pick", question: "Pick one", options }];
+		const context = createContext({
+			select: async () => "Other (type your own)",
+			editor,
+		});
+
+		await tool.execute("call-editor-cap", { questions }, undefined, undefined, context);
+
+		const title = editor.mock.calls[0]?.[0] ?? "";
+		const lineCount = title.split("\n").length;
+		// Cap is 8 option rows + their (single-line) descriptions + chrome; far below
+		// 20 options × (label + multi-line description) the unbounded path would emit.
+		expect(lineCount).toBeLessThanOrEqual(22);
+		expect(title).toContain("Pick one");
+		expect(title).toContain("option-0");
+		expect(title).toContain("Other (type your own)");
+		expect(title).toContain("more option");
+		expect(title).toContain("Enter your response:");
+		// Descriptions are flattened to a single line and truncated.
+		expect(title).not.toContain("x".repeat(400));
+		// Every option-row description must fit on one line.
+		for (const line of title.split("\n")) {
+			expect(line.length).toBeLessThanOrEqual(160);
+		}
+	});
+
+	it("keeps user-checked options visible in capped multi-select context", async () => {
+		const tool = new AskTool(createSession());
+		const editor = vi.fn(async (_title: string) => "custom");
+		const options = Array.from({ length: 20 }, (_, i) => ({ label: `opt-${i}` }));
+		const questions = [{ id: "pick", question: "Multi pick", options, multi: true }];
+		let call = 0;
+		const context = createContext({
+			select: async (_prompt, opts) => {
+				call += 1;
+				if (call === 1) return selectItemLabel(opts.find(o => selectItemLabel(o) === "opt-12"));
+				if (call === 2) return selectItemLabel(opts.find(o => selectItemLabel(o) === "opt-17"));
+				return "Other (type your own)";
+			},
+			editor,
+		});
+
+		await tool.execute("call-editor-cap-multi", { questions }, undefined, undefined, context);
+
+		const title = editor.mock.calls[0]?.[0] ?? "";
+		// Checked options must survive the window so the user sees what they had
+		// already toggled before switching to Other.
+		expect(title).toContain("opt-12");
+		expect(title).toContain("opt-17");
+		expect(title).toContain("Other (type your own)");
+		expect(title).toContain("more option");
+	});
+
+	it("summarizes excess checked options instead of exceeding the context cap", async () => {
+		const tool = new AskTool(createSession());
+		const editor = vi.fn(async (_title: string) => "custom");
+		const options = Array.from({ length: 20 }, (_, i) => ({ label: `checked-${i}` }));
+		const questions = [{ id: "pick", question: "Pick many", options, multi: true }];
+		let call = 0;
+		const context = createContext({
+			select: async (_prompt, opts) => {
+				if (call < 12) {
+					const label = `checked-${call}`;
+					call += 1;
+					return selectItemLabel(opts.find(o => selectItemLabel(o) === label));
+				}
+				return "Other (type your own)";
+			},
+			editor,
+		});
+
+		await tool.execute("call-editor-cap-many-checked", { questions }, undefined, undefined, context);
+
+		const title = editor.mock.calls[0]?.[0] ?? "";
+		const optionRows = title
+			.split("\n")
+			.filter(line => line.includes("checked-") || line.includes("Other (type your own)"));
+		expect(optionRows.length).toBeLessThanOrEqual(8);
+		expect(title).toContain("Other (type your own)");
+		expect(title).toContain("checked");
+		expect(title).toContain("more option");
+		expect(title).toContain("Enter your response:");
+	});
+
+	it("keeps sparse checked gap markers within the Other title budget", async () => {
+		const tool = new AskTool(createSession());
+		const editor = vi.fn(async (_title: string) => "custom");
+		const checkedLabels = [10, 20, 30, 40, 50, 60].map(i => `opt-${i}`);
+		const options = Array.from({ length: 61 }, (_, i) => ({ label: `opt-${i}` }));
+		const questions = [{ id: "pick", question: "Pick sparse", options, multi: true }];
+		let call = 0;
+		const context = createContext({
+			select: async (_prompt, opts) => {
+				const next = checkedLabels[call++];
+				return next ? selectItemLabel(opts.find(o => selectItemLabel(o) === next)) : "Other (type your own)";
+			},
+			editor,
+		});
+
+		await tool.execute("call-editor-cap-sparse-checked", { questions }, undefined, undefined, context);
+
+		const title = editor.mock.calls[0]?.[0] ?? "";
+		expect(title.split("\n").length).toBeLessThanOrEqual(16);
+		expect(title).toContain("Other (type your own)");
+		expect(title).toContain("more option");
+		expect(title).toContain("Enter your response:");
+	});
+
+	it("enforces total title row budget under narrow terminals", async () => {
+		const originalColumns = process.stdout.columns;
+		// Force an 80-wide terminal so long descriptions would wrap to multiple
+		// rendered rows without per-line width truncation + total row budget.
+		Object.defineProperty(process.stdout, "columns", { value: 80, configurable: true });
+		try {
+			const tool = new AskTool(createSession());
+			const editor = vi.fn(async (_title: string) => "custom");
+			const longDescription = "x".repeat(400);
+			const options = Array.from({ length: 8 }, (_, i) => ({
+				label: `option-${i}`,
+				description: longDescription,
+			}));
+			const questions = [{ id: "pick", question: "Pick one", options }];
+			const context = createContext({
+				select: async () => "Other (type your own)",
+				editor,
+			});
+
+			await tool.execute("call-editor-row-budget", { questions }, undefined, undefined, context);
+
+			const title = editor.mock.calls[0]?.[0] ?? "";
+			const lines = title.split("\n");
+			// 16-row hard budget keeps the input row + hint reachable on 80x24.
+			expect(lines.length).toBeLessThanOrEqual(16);
+			// Every emitted line must fit on a single 80-cell row after truncation.
+			for (const line of lines) {
+				expect(stripAnsi(line).length).toBeLessThanOrEqual(80);
+			}
+			expect(title).toContain("Pick one");
+			expect(title).toContain("Other (type your own)");
+			expect(title).toContain("Enter your response:");
+			expect(title).not.toContain("x".repeat(400));
+		} finally {
+			if (originalColumns === undefined) {
+				Object.defineProperty(process.stdout, "columns", { value: undefined, configurable: true });
+			} else {
+				Object.defineProperty(process.stdout, "columns", { value: originalColumns, configurable: true });
+			}
+		}
 	});
 
 	it("returns to the option selector when custom input is dismissed in single-question flow", async () => {
@@ -1342,5 +1536,159 @@ describe("askToolRenderer malformed call args", () => {
 		expect(text).toContain("Real question");
 		expect(text).toContain("BareString");
 		expect(text).toContain("Proper");
+	});
+});
+
+describe("AskTool rich ask dialog", () => {
+	it("accepts new schema fields (header, preview, note) and maps them into AskToolDetails", async () => {
+		const tool = new AskTool(createSession());
+		const askDialog = vi.fn().mockResolvedValue({
+			kind: "submit",
+			results: [
+				{
+					id: "q1",
+					question: "Q1?",
+					options: ["Option A"],
+					multi: false,
+					selectedOptions: ["Option A"],
+					note: "My Custom Note",
+					timedOut: undefined,
+				},
+			],
+		});
+		const context = createContext({ askDialog });
+
+		const result = await tool.execute(
+			"call-rich-dialog",
+			{
+				questions: [
+					{
+						id: "q1",
+						question: "Q1?",
+						header: "Chip Header",
+						options: [{ label: "Option A", preview: "My Preview" }],
+					},
+				],
+			},
+			undefined,
+			undefined,
+			context,
+		);
+
+		expect(askDialog).toHaveBeenCalledTimes(1);
+		// Check that header and preview were forwarded
+		expect(askDialog.mock.calls[0][0]).toEqual([
+			{
+				id: "q1",
+				question: "Q1?",
+				header: "Chip Header",
+				options: [{ label: "Option A", preview: "My Preview" }],
+			},
+		]);
+
+		// Verify result contains details with note mapping
+		expect(result.details).toEqual({
+			question: "Q1?",
+			options: ["Option A"],
+			multi: false,
+			selectedOptions: ["Option A"],
+			customInput: undefined,
+			note: "My Custom Note",
+			timedOut: undefined,
+		});
+	});
+
+	it("aborts and throws ToolAbortError when askDialog returns undefined", async () => {
+		const tool = new AskTool(createSession());
+		const abort = vi.fn();
+		const askDialog = vi.fn().mockResolvedValue(undefined);
+		const context = createContext({ askDialog, abort });
+
+		await expect(
+			tool.execute(
+				"call-rich-dialog-cancel",
+				{
+					questions: [{ id: "q1", question: "Q1?", options: [{ label: "Option A" }] }],
+				},
+				undefined,
+				undefined,
+				context,
+			),
+		).rejects.toThrow(ToolAbortError);
+
+		expect(abort).toHaveBeenCalledTimes(1);
+	});
+
+	it("returns chat redirect result when askDialog returns kind chat", async () => {
+		const tool = new AskTool(createSession());
+		const abort = vi.fn();
+		const askDialog = vi.fn().mockResolvedValue({ kind: "chat" });
+		const context = createContext({ askDialog, abort });
+
+		const result = await tool.execute(
+			"call-rich-dialog-chat",
+			{
+				questions: [{ id: "q1", question: "Q1?", options: [{ label: "Option A" }] }],
+			},
+			undefined,
+			undefined,
+			context,
+		);
+
+		expect(abort).not.toHaveBeenCalled();
+		expect(result.details).toEqual({ chatRedirect: true, questions: ["Q1?"] });
+		expect(result.content[0]?.type).toBe("text");
+		expect((result.content[0] as { text: string }).text).toContain("chat about this");
+	});
+
+	it("ignores preview and header in degraded select path", async () => {
+		const tool = new AskTool(createSession());
+		const select = vi.fn().mockResolvedValue("Option A");
+		const context = createContext({ select });
+
+		await tool.execute(
+			"call-degraded",
+			{
+				questions: [
+					{
+						id: "q1",
+						question: "Q1?",
+						header: "Chip Header",
+						options: [{ label: "Option A", description: "Desc A", preview: "My Preview" }],
+					},
+				],
+			},
+			undefined,
+			undefined,
+			context,
+		);
+
+		expect(select).toHaveBeenCalledTimes(1);
+		// verify preview/header are NOT forwarded to select options
+		expect(select.mock.calls[0][1]).toEqual([{ label: "Option A", description: "Desc A" }, "Other (type your own)"]);
+	});
+
+	it("rejects reserved-label collision in parameters validation", async () => {
+		const tool = new AskTool(createSession());
+
+		const valid = tool.parameters({
+			questions: [{ id: "q1", question: "Q?", options: [{ label: "ok" }] }],
+		});
+		expect(valid instanceof type.errors).toBe(false);
+
+		const reservedOther = tool.parameters({
+			questions: [{ id: "q1", question: "Q?", options: [{ label: "Other (type your own)" }] }],
+		});
+		expect(reservedOther instanceof type.errors).toBe(true);
+
+		const reservedChat = tool.parameters({
+			questions: [{ id: "q1", question: "Q?", options: [{ label: "Chat about this" }] }],
+		});
+		expect(reservedChat instanceof type.errors).toBe(true);
+
+		const reservedNext = tool.parameters({
+			questions: [{ id: "q1", question: "Q?", options: [{ label: "Next →" }] }],
+		});
+		expect(reservedNext instanceof type.errors).toBe(true);
 	});
 });

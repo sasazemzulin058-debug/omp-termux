@@ -82,7 +82,7 @@ function renderDumpHeader(options: FormatSessionDumpTextOptions, inventoryTools:
 	const hasSystemPromptToolInventory = options.inlineToolDescriptors === true;
 	if (inventoryTools.length > 0 && !hasSystemPromptToolInventory) {
 		lines.push("## Available Tools\n");
-		lines.push(renderToolInventory(inventoryTools, model?.id ?? ""));
+		lines.push(renderToolInventory(inventoryTools));
 		lines.push("\n");
 	}
 

@@ -4,7 +4,7 @@
  * and options.
  */
 
-import { type } from "arktype";
+import { type } from "@oh-my-pi/omptype";
 import type {
 	ContentBlockParam,
 	ImageBlockParam,
@@ -135,12 +135,17 @@ export const userMessageSchema = type({
 	content: type("string").or(userContentBlockSchema.array()),
 });
 
+export const systemMessageSchema = type({
+	role: "'system'",
+	content: type("string").or(systemBlockSchema.array()),
+});
+
 export const assistantMessageSchema = type({
 	role: "'assistant'",
 	content: type("string").or(assistantContentBlockSchema.array()),
 });
 
-export const messageSchema = userMessageSchema.or(assistantMessageSchema);
+export const messageSchema = userMessageSchema.or(assistantMessageSchema).or(systemMessageSchema);
 
 // ─── Tools ─────────────────────────────────────────────────────────────────
 

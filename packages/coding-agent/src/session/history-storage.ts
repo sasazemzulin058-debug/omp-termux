@@ -1,7 +1,7 @@
 import { Database, type Statement } from "bun:sqlite";
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { getHistoryDbPath, logger } from "@oh-my-pi/pi-utils";
+import { AsyncDrain, getDbBusyTimeoutMs, getHistoryDbPath, logger } from "@oh-my-pi/pi-utils";
 
 export interface HistoryEntry {
 	id: number;
@@ -28,39 +28,6 @@ function escapeLikePattern(text: string): string {
 	return text.replace(/[\\%_]/g, "\\$&");
 }
 
-class AsyncDrain<T> {
-	#queue?: T[];
-	#promise = Promise.resolve();
-
-	constructor(readonly delayMs: number = 0) {}
-
-	push(value: T, hnd: (values: T[]) => Promise<void> | void): Promise<void> {
-		let queue = this.#queue;
-		if (!queue) {
-			this.#queue = queue = [];
-			const { promise, resolve, reject } = Promise.withResolvers<void>();
-			const exec = (): void => {
-				try {
-					if (this.#queue === queue) {
-						this.#queue = undefined;
-					}
-					resolve(hnd(queue!));
-				} catch (error) {
-					reject(error);
-				}
-			};
-			if (this.delayMs > 0) {
-				setTimeout(exec, this.delayMs);
-			} else {
-				queueMicrotask(exec);
-			}
-			this.#promise = promise;
-		}
-		queue.push(value);
-		return this.#promise;
-	}
-}
-
 export class HistoryStorage {
 	#db: Database;
 	static #instance?: HistoryStorage;
@@ -84,7 +51,9 @@ export class HistoryStorage {
 		this.#db = new Database(dbPath);
 
 		// Install the busy handler BEFORE any lock-taking statement. See #2421.
-		this.#db.run("PRAGMA busy_timeout = 5000");
+		// Headless hosts bound the wait so lock contention cannot freeze the
+		// protocol loop for the full interactive timeout.
+		this.#db.run(`PRAGMA busy_timeout = ${getDbBusyTimeoutMs()}`);
 
 		const hasFts = this.#db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='history_fts'").get();
 		this.#db.run(`

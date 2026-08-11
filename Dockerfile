@@ -34,10 +34,18 @@ ENV BUN_INSTALL=/opt/bun \
     PATH=/opt/bun/bin:/usr/local/cargo/bin:/usr/local/bin:/usr/bin:/bin \
     CARGO_TERM_COLOR=never
 
+# clang/libclang-dev: bindgen for pipewire-sys/libspa-sys (Linux desktop capture);
+# cmake/make/ninja-build: audiopus_sys builds bundled libopus via CMake.
+# bazelisk: hermetic bazel launcher for the native addon build (17.1.5+).
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
         curl ca-certificates pkg-config libssl-dev unzip git \
-    && rm -rf /var/lib/apt/lists/*
+        clang libclang-dev cmake make ninja-build \
+    && rm -rf /var/lib/apt/lists/* \
+    && curl -fsSL -o /usr/local/bin/bazelisk \
+        "https://github.com/bazelbuild/bazelisk/releases/download/v1.25.0/bazelisk-linux-$(dpkg --print-architecture)" \
+    && chmod +x /usr/local/bin/bazelisk \
+    && ln -s /usr/local/bin/bazelisk /usr/local/bin/bazel
 
 RUN curl -fsSL https://bun.sh/install | bash -s "bun-v${BUN_VERSION}" \
     && /opt/bun/bin/bun --version
@@ -184,9 +192,9 @@ RUN bun install --frozen-lockfile --ignore-scripts
 # hoisted node_modules that `bun install` just produced.
 COPY . /pi/
 
-# Regenerate the docs index that `--ignore-scripts` skipped above. The root
-# package.json's `prepare` script normally handles this on a vanilla install.
-RUN bun --cwd=packages/coding-agent run generate-docs-index
+# Regenerate the tool views that `--ignore-scripts` skipped above. The root
+# package.json's `prepare` script normally handles these on a vanilla install.
+RUN bun --cwd=packages/coding-agent run gen:tool-views
 
 ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/omp"]
 CMD ["--help"]

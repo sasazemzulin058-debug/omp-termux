@@ -18,6 +18,7 @@ Boundary rule: the TUI engine is message-agnostic. It only knows `Component.rend
 ## Implementation files
 
 - [`packages/coding-agent/src/modes/interactive-mode.ts`](../packages/coding-agent/src/modes/interactive-mode.ts)
+- [`packages/coding-agent/src/modes/session-teardown.ts`](../packages/coding-agent/src/modes/session-teardown.ts)
 - [`packages/coding-agent/src/modes/controllers/event-controller.ts`](../packages/coding-agent/src/modes/controllers/event-controller.ts)
 - [`packages/coding-agent/src/modes/controllers/input-controller.ts`](../packages/coding-agent/src/modes/controllers/input-controller.ts)
 - [`packages/coding-agent/src/modes/components/custom-editor.ts`](../packages/coding-agent/src/modes/components/custom-editor.ts)
@@ -69,6 +70,22 @@ A forced render (`requestRender(true)`) queues a viewport repaint or explicit se
 
 This prevents partial escape chunks from being misinterpreted as normal keypresses.
 
+### Shutdown and terminal handoff
+
+Exit from double `Ctrl+C`, empty-editor `Ctrl+D`, `/exit`, and postmortem signals converges on a promise-memoized session teardown. The first caller wins: it snapshots the editor draft, calls `beginDispose()` synchronously, attempts to save the draft, and then disposes the session. A draft-save failure is logged but does not skip disposal; later keypress or signal callers await the same promise and cannot double-run shutdown.
+
+Interactive shutdown then follows this ownership order:
+
+1. `InteractiveMode` stops live commands and transient controllers, displays the closing status, and awaits session disposal before handing the terminal back.
+2. It drains in-flight Kitty input for up to one second so release sequences do not leak into the parent shell.
+3. It disposes the run-state title/spinner state and restores the prior terminal title before stopping the UI.
+4. `TUI.stop()` leaves resize/fullscreen alternate-screen state, purges image/probe state, stops watchdog and render/resize timers, positions and forcibly restores the cursor, then delegates to `ProcessTerminal.stop()`.
+5. `ProcessTerminal.stop()` restores real stderr and terminal modes, disables keyboard/mouse/appearance protocols, clears probes and timers, destroys `StdinBuffer`, removes stdin/stdout listeners, pauses stdin, and restores its previous raw-mode state.
+
+Terminal disconnects mark the terminal dead and stop interactive rendering. Cleanup still removes owned state, but raw-mode restoration errors are suppressed only for that dead-terminal case because there is no live TTY left to restore.
+
+Suspend is distinct from exit: `Ctrl+Z` stops the TUI to release terminal modes, sends `SIGTSTP`, and retains the session. Its one-shot `SIGCONT` handler starts the TUI again and forces a repaint; it does not run session teardown or terminal handoff to a parent shell.
+
 ## Input routing and focus model
 
 Input path:
@@ -99,23 +116,27 @@ Routing details:
 
 This keeps key parsing/editor mechanics in `packages/tui` and mode semantics in coding-agent controllers.
 
-## Render loop and the append-only contract
+## Render loop and the default append-only contract
 
 `TUI.requestRender()` coalesces render requests and rate-limits ordinary frames:
 
-- forced renders (`requestRender(true, ...)`) schedule an immediate frame and force a full window rewrite; with `clearScrollback`, they trigger a destructive full paint (ED3 outside multiplexers)
-- ordinary renders schedule through `#scheduleRender()` and respect `TUI.#MIN_RENDER_INTERVAL_MS`
+- forced renders (`requestRender(true, ...)`) schedule an immediate full-window rewrite; `clearScrollback` requests the destructive replay path
+- ordinary renders use a 30fps base cadence plus adaptive backpressure derived from the previous frame's cost
 - repeated requests while a render is pending collapse into the same scheduled frame
-- `requestComponentRender(component)` requests on behalf of a single self-contained change (spinner frame, blink): when every request in the coalesced frame is component-scoped and the frame is quiet (no resize, overlays, inline images, forced repaint, or root-list change), compose re-renders only the root subtrees containing the requesting components and reuses every other root child's previous rows and seam report; any unsafe condition or concurrent full request downgrades to a full compose
+- `requestComponentRender(component)` scopes composition to affected root subtrees when geometry and renderer state are safe; otherwise it downgrades to a full compose
+- `requestDirectWrite(component)` can rewrite one quiet, visible, fixed-height component segment immediately (used by loader-style animation); overlays, images, cursor markers, geometry changes, committed segments, or other unsafe state fall back to `requestComponentRender`
 
 `#doRender()` pipeline:
 
-1. Render root component tree, collecting the commit-boundary seam (`NativeScrollbackLiveRegion`) from the children.
-2. Advance the append-only ledger: `windowTop = max(committedRows, frame.length - height)`, commit chunk = settled rows crossing the window top (never past the seam).
-3. Extract and strip `CURSOR_MARKER`, normalize lines, slice the visible window, composite overlays into the window slice (screen coordinates; overlays freeze commits).
-4. Emit one of: gesture-driven full paint (initial / session replace / resize), scroll-append (chunk rows only), in-window row diff, or seam rewrite (chunk + full window).
+1. Render the root component tree, collecting the first `NativeScrollbackLiveRegion` boundary and its optional pinned policy.
+2. Audit the already committed raw prefix for structural shifts; an insertion/deletion re-anchors commits at the first changed row so stale history may duplicate but new content is not lost.
+3. Advance the append-only ledger. Rows before the live boundary are exact/final; mutable rows that scroll above the window normally commit as frozen snapshots, while a pinned live region stays viewport-local.
+4. Extract and strip `CURSOR_MARKER`, normalize lines, slice the visible window, and composite overlays into that screen-coordinate window slice (overlays freeze commits).
+5. Emit one of: gesture-driven or divergence-rebuild full paint, scroll-append, in-window row diff, or seam rewrite.
 
-Native scrollback always equals the committed frame prefix — rows enter history exactly once, in order, when the seam says they are final. There are no viewport probes and no deferred reconciliation; see [`tui-core-renderer.md`](./tui-core-renderer.md).
+By default, native scrollback is append-only: committed frame rows are never rewritten. Exact rows enter history after the component seam declares them final; an unpinned mutable row that scrolls off is recorded as the snapshot that was visible at commit time. There are no viewport-position probes or deferred reconciliation; see [`tui-core-renderer.md`](./tui-core-renderer.md).
+
+The opt-in `tui.scrollbackRebuild` setting (default `false`) changes how a committed-prefix divergence is repaired. When finalized content replaces a scrolled-off preview, or a frame collapses into already committed rows, a direct terminal session clears native scrollback with ED3 and replays the current frame so the stale and final forms do not both remain. Multiplexer sessions never take this destructive path and retain the append/repair-below fallback. `PI_TUI_SCROLLBACK_REBUILD=1` initializes the low-level `TUI` flag, but `InteractiveMode` then applies the configured `tui.scrollbackRebuild` value; the setting is therefore the effective control in coding-agent.
 
 Render writes use synchronized output mode (`CSI ? 2026 h/l`) when enabled; capability detection, DECRQM, or `PI_NO_SYNC_OUTPUT` can disable the wrappers while leaving autowrap discipline on.
 
@@ -168,7 +189,7 @@ Status lane ownership:
 
 Loader behavior:
 
-- `Loader` advances its spinner every 80ms (animated message colorizers redraw at ~30fps) and requests a component-scoped render each frame (`requestComponentRender`), so idle spinner ticks repaint without re-walking the transcript.
+- `Loader` advances its spinner every 80ms (animated message colorizers redraw at ~30fps) and uses the direct-write path for quiet fixed-height frames, with automatic fallback to a component-scoped render when direct rewriting is unsafe.
 - Escape cancels an in-progress auto-compaction, handoff generation, or auto-retry: the editor's single `onEscape` handler dispatches on live session state (`isCompacting`/`isGeneratingHandoff`/`isRetrying`) and calls the matching abort method, rather than swapping the handler.
 - On end/cancel paths, controllers stop/clear the loader components.
 
@@ -217,8 +238,8 @@ Event-driven updates:
 
 Throttled/debounced paths:
 
-- TUI rendering is tick-debounced (`requestRender` coalescing).
-- Loader animation is interval-driven (80ms spinner advance; ~30fps when the message colorizer is animated), each frame requesting a component-scoped render.
+- TUI rendering uses a 30fps base cadence, coalescing, and adaptive backpressure from render cost.
+- Loader animation is interval-driven (80ms spinner advance; ~30fps when the message colorizer is animated), using direct writes when safe and component-scoped renders otherwise.
 - Editor autocomplete updates (inside `Editor`) use debounce timers, reducing recompute churn during typing.
 
 The runtime therefore mixes event-driven state transitions with bounded render cadence to keep interactivity responsive without repaint storms.

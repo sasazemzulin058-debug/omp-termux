@@ -8,7 +8,10 @@
 //! - Ellipsis decoded lazily
 //! - truncateToWidth returns the original `JsString` when possible
 
-use std::cell::RefCell;
+use std::{
+	cell::RefCell,
+	sync::atomic::{AtomicU8, Ordering},
+};
 
 use napi::{JsString, bindgen_prelude::*};
 use napi_derive::napi;
@@ -20,6 +23,7 @@ const MIN_TAB_WIDTH: u32 = 1;
 const MAX_TAB_WIDTH: u32 = 16;
 pub const DEFAULT_TAB_WIDTH: usize = 3;
 const ESC: u16 = 0x1b;
+const OSC8_CLOSE: [u16; 6] = [ESC, b']' as u16, b'8' as u16, b';' as u16, b';' as u16, 0x07];
 
 #[inline]
 fn clamp_tab_width_for_ops(width: u32) -> usize {
@@ -234,6 +238,42 @@ impl AnsiState {
 	}
 }
 
+#[derive(Default)]
+struct WrapState {
+	sgr:       AnsiState,
+	hyperlink: Option<Vec<u16>>,
+}
+
+impl WrapState {
+	#[inline]
+	const fn new() -> Self {
+		Self { sgr: AnsiState::new(), hyperlink: None }
+	}
+
+	#[inline]
+	fn apply_ansi_u16(&mut self, seq: &[u16]) {
+		if is_sgr_u16(seq) {
+			self.sgr.apply_sgr_u16(&seq[2..seq.len() - 1]);
+		} else if let Some(uri) = osc8_uri_u16(seq) {
+			if uri.is_empty() {
+				self.hyperlink = None;
+			} else {
+				let hyperlink = self.hyperlink.get_or_insert_default();
+				hyperlink.clear();
+				hyperlink.extend_from_slice(seq);
+			}
+		}
+	}
+
+	#[inline]
+	fn write_restore_u16(&self, out: &mut Vec<u16>) {
+		self.sgr.write_restore_u16(out);
+		if let Some(hyperlink) = &self.hyperlink {
+			out.extend_from_slice(hyperlink);
+		}
+	}
+}
+
 #[inline]
 fn write_color_u16(out: &mut Vec<u16>, color: ColorVal, base: u32, first: &mut bool) {
 	if color == COLOR_NONE {
@@ -365,8 +405,30 @@ fn ansi_seq_len_u16(data: &[u16], pos: usize) -> Option<usize> {
 }
 
 #[inline]
-fn is_sgr_u16(seq: &[u16]) -> bool {
+const fn is_sgr_u16(seq: &[u16]) -> bool {
 	seq.len() >= 3 && seq[1] == b'[' as u16 && *seq.last().unwrap() == b'm' as u16
+}
+
+#[inline]
+fn osc8_uri_u16(seq: &[u16]) -> Option<&[u16]> {
+	if seq.len() < OSC8_CLOSE.len()
+		|| seq[0] != ESC
+		|| seq[1] != b']' as u16
+		|| seq[2] != b'8' as u16
+		|| seq[3] != b';' as u16
+	{
+		return None;
+	}
+
+	let body_end = if seq.last() == Some(&0x07_u16) {
+		seq.len() - 1
+	} else if seq.ends_with(&[ESC, b'\\' as u16]) {
+		seq.len() - 2
+	} else {
+		return None;
+	};
+	let uri_start = seq[4..body_end].iter().position(|&u| u == b';' as u16)? + 5;
+	Some(&seq[uri_start..body_end])
 }
 
 struct Osc66Info<'a> {
@@ -529,34 +591,91 @@ const fn ascii_cell_width_u16(u: u16, tab_width: usize) -> usize {
 	}
 }
 
-const MACOS_HANGUL_COMPAT_JAMO_WIDTH: usize = 1;
+const HANGUL_COMPAT_JAMO_NARROW_WIDTH: usize = 1;
 
-#[inline]
-const fn is_macos_hangul_compat_jamo(c: char) -> bool {
-	let cp = c as u32;
-	cfg!(target_os = "macos") && cp >= 0x3131 && cp <= 0x318e
+/// Runtime override for Hangul Compatibility Jamo (U+3131..=U+318E) cell width.
+///   0 = unset → platform default (macOS: narrow 1 cell; otherwise UAX#11)
+///   1 = force narrow (1 cell)
+///   2 = force wide (2 cells)
+///   3 = force Unicode width (no correction)
+/// The actual width is decided by the *client* terminal, not the host OS, so it
+/// is resolved at runtime from the terminal identity (see packages/tui
+/// terminal.ts) and pushed here through
+/// `set_hangul_compat_jamo_width_override`.
+static HANGUL_COMPAT_JAMO_WIDTH_OVERRIDE: AtomicU8 = AtomicU8::new(0);
+
+#[napi]
+pub fn set_hangul_compat_jamo_width_override(value: u8) {
+	HANGUL_COMPAT_JAMO_WIDTH_OVERRIDE.store(value, Ordering::Relaxed);
 }
 
 #[inline]
-fn apply_macos_hangul_compat_jamo_delta(width: usize, c: char) -> usize {
-	if !is_macos_hangul_compat_jamo(c) {
+const fn is_hangul_compat_jamo(c: char) -> bool {
+	let cp = c as u32;
+	cp >= 0x3131 && cp <= 0x318e
+}
+
+/// Effective target cell width for Compatibility Jamo, or `None` to follow the
+/// Unicode width (no correction). Reads the runtime override, falling back to
+/// the compile-time platform default when unset.
+#[inline]
+fn hangul_compat_jamo_target_width() -> Option<usize> {
+	match HANGUL_COMPAT_JAMO_WIDTH_OVERRIDE.load(Ordering::Relaxed) {
+		1 => Some(1),
+		2 => Some(2),
+		3 => None,
+		_ => {
+			if cfg!(target_os = "macos") {
+				Some(HANGUL_COMPAT_JAMO_NARROW_WIDTH)
+			} else {
+				None
+			}
+		},
+	}
+}
+
+#[inline]
+fn apply_hangul_compat_jamo_delta(width: usize, c: char) -> usize {
+	if !is_hangul_compat_jamo(c) {
 		return width;
 	}
+	let Some(target) = hangul_compat_jamo_target_width() else {
+		return width;
+	};
 	let unicode_width = UnicodeWidthChar::width(c).unwrap_or(0);
-	if unicode_width > MACOS_HANGUL_COMPAT_JAMO_WIDTH {
-		width.saturating_sub(unicode_width - MACOS_HANGUL_COMPAT_JAMO_WIDTH)
+	// The zero-width filler (U+3164 HANGUL FILLER) is an invisible placeholder.
+	// The target is set for *visible* jamo, so only the narrow correction
+	// (target 1) applies to the filler; a wide terminal renders it at its
+	// Unicode width (0), not the wide target. Never widen a
+	// zero-width jamo past the narrow correction.
+	if unicode_width == 0 && target > 1 {
+		return width;
+	}
+	if unicode_width > target {
+		width.saturating_sub(unicode_width - target)
 	} else {
-		width.saturating_add(MACOS_HANGUL_COMPAT_JAMO_WIDTH - unicode_width)
+		width.saturating_add(target - unicode_width)
 	}
 }
 
 #[inline]
 fn char_width_corrected(c: char) -> Option<usize> {
-	// Hangul Compatibility Jamo U+3131..=U+318E render as 1 cell on macOS
-	// terminals (Ghostty, Terminal.app, iTerm2), but follow UAX#11 at 2
-	// cells on WezTerm and most Linux terminals. Only force 1 on macOS.
-	if is_macos_hangul_compat_jamo(c) {
-		return Some(MACOS_HANGUL_COMPAT_JAMO_WIDTH);
+	// Hangul Compatibility Jamo U+3131..=U+318E render as 1 cell on some
+	// terminals (Terminal.app, iTerm2) but follow UAX#11 at 2 cells on others
+	// (Ghostty, most Linux terminals). The width is resolved at runtime from the
+	// terminal identity and applied through the override; absent an override we
+	// fall back to the compile-time platform default.
+	if is_hangul_compat_jamo(c)
+		&& let Some(target) = hangul_compat_jamo_target_width()
+	{
+		// Zero-width filler (U+3164): only the narrow correction applies — a
+		// wide terminal renders it at its Unicode width (0), not the effective
+		// wide target set for visible jamo. See apply_hangul_compat_jamo_delta.
+		let unicode_width = UnicodeWidthChar::width(c).unwrap_or(0);
+		if unicode_width == 0 && target > 1 {
+			return Some(unicode_width);
+		}
+		return Some(target);
 	}
 	UnicodeWidthChar::width(c)
 }
@@ -575,14 +694,12 @@ fn grapheme_width_str(g: &str, tab_width: usize) -> usize {
 	}
 	// Multi-char grapheme: keep UnicodeWidthStr as the source of truth for
 	// sequence-level width rules (VS16 emoji presentation, keycaps, ZWJ emoji,
-	// CRLF, script ligatures). A per-char sum is not equivalent. On macOS,
-	// apply only the same local Compatibility Jamo delta that
-	// char_width_corrected applies to standalone code points.
+	// CRLF, script ligatures). A per-char sum is not equivalent. Apply only the
+	// same local Compatibility Jamo delta that char_width_corrected applies to
+	// standalone code points; the delta is a no-op when no correction is active.
 	let mut width = UnicodeWidthStr::width(g);
-	if cfg!(target_os = "macos") {
-		for c in g.chars() {
-			width = apply_macos_hangul_compat_jamo_delta(width, c);
-		}
+	for c in g.chars() {
+		width = apply_hangul_compat_jamo_delta(width, c);
 	}
 	width
 }
@@ -794,43 +911,44 @@ fn flush_pending_ansi(
 // ============================================================================
 
 #[inline]
-fn write_active_codes(state: &AnsiState, out: &mut Vec<u16>) {
-	if !state.is_empty() {
-		state.write_restore_u16(out);
+fn write_active_codes(state: &WrapState, out: &mut Vec<u16>) {
+	state.write_restore_u16(out);
+}
+
+#[inline]
+fn write_hyperlink_close(state: &WrapState, out: &mut Vec<u16>) {
+	if state.hyperlink.is_some() {
+		out.extend_from_slice(&OSC8_CLOSE);
 	}
 }
 
 #[inline]
-fn write_line_end_reset(state: &AnsiState, out: &mut Vec<u16>) {
-	let has_underline = state.attrs & ATTR_UNDERLINE != 0;
-	let has_strike = state.attrs & ATTR_STRIKE != 0;
-	if !has_underline && !has_strike {
-		return;
-	}
-
-	out.extend_from_slice(&[ESC, b'[' as u16]);
-	if has_underline {
-		out.extend_from_slice(&[b'2' as u16, b'4' as u16]);
-		if has_strike {
-			out.push(b';' as u16);
+fn write_line_end_reset(state: &WrapState, out: &mut Vec<u16>) {
+	let has_underline = state.sgr.attrs & ATTR_UNDERLINE != 0;
+	let has_strike = state.sgr.attrs & ATTR_STRIKE != 0;
+	if has_underline || has_strike {
+		out.extend_from_slice(&[ESC, b'[' as u16]);
+		if has_underline {
+			out.extend_from_slice(&[b'2' as u16, b'4' as u16]);
+			if has_strike {
+				out.push(b';' as u16);
+			}
 		}
+		if has_strike {
+			out.extend_from_slice(&[b'2' as u16, b'9' as u16]);
+		}
+		out.push(b'm' as u16);
 	}
-	if has_strike {
-		out.extend_from_slice(&[b'2' as u16, b'9' as u16]);
-	}
-	out.push(b'm' as u16);
+	write_hyperlink_close(state, out);
 }
 
-fn update_state_from_text(data: &[u16], state: &mut AnsiState) {
+fn update_state_from_text(data: &[u16], state: &mut WrapState) {
 	let mut i = 0usize;
 	while i < data.len() {
 		if data[i] == ESC
 			&& let Some(seq_len) = ansi_seq_len_u16(data, i)
 		{
-			let seq = &data[i..i + seq_len];
-			if is_sgr_u16(seq) {
-				state.apply_sgr_u16(&seq[2..seq_len - 1]);
-			}
+			state.apply_ansi_u16(&data[i..i + seq_len]);
 			i += seq_len;
 			continue;
 		}
@@ -919,7 +1037,7 @@ fn break_long_word(
 	word: &[u16],
 	width: usize,
 	tab_width: usize,
-	state: &mut AnsiState,
+	state: &mut WrapState,
 ) -> SmallVec<[Vec<u16>; 4]> {
 	let mut lines = SmallVec::<[Vec<u16>; 4]>::new();
 	let mut current_line = Vec::<u16>::new();
@@ -946,9 +1064,7 @@ fn break_long_word(
 				continue;
 			}
 			current_line.extend_from_slice(seq);
-			if is_sgr_u16(seq) {
-				state.apply_sgr_u16(&seq[2..seq_len - 1]);
-			}
+			state.apply_ansi_u16(seq);
 			i += seq_len;
 			continue;
 		}
@@ -1012,14 +1128,18 @@ fn wrap_single_line(line: &[u16], width: usize, tab_width: usize) -> SmallVec<[V
 	}
 
 	if visible_width_u16(line, tab_width) <= width {
-		return smallvec![line.to_vec()];
+		let mut only = line.to_vec();
+		let mut state = WrapState::new();
+		update_state_from_text(line, &mut state);
+		write_hyperlink_close(&state, &mut only);
+		return smallvec![only];
 	}
 
 	let tokens = split_into_tokens_with_ansi(line);
 	let mut wrapped = SmallVec::<[Vec<u16>; 4]>::new();
 	let mut current_line = Vec::<u16>::new();
 	let mut current_width = 0usize;
-	let mut state = AnsiState::new();
+	let mut state = WrapState::new();
 
 	for token in tokens {
 		let token_width = visible_width_u16(&token, tab_width);
@@ -1066,6 +1186,7 @@ fn wrap_single_line(line: &[u16], width: usize, tab_width: usize) -> SmallVec<[V
 	}
 
 	if !current_line.is_empty() {
+		write_hyperlink_close(&state, &mut current_line);
 		wrapped.push(current_line);
 	}
 
@@ -1090,7 +1211,7 @@ fn wrap_text_with_ansi_impl(
 	}
 
 	let mut result = SmallVec::<[Vec<u16>; 4]>::new();
-	let mut state = AnsiState::new();
+	let mut state = WrapState::new();
 	let mut line_start = 0usize;
 
 	for i in 0..=text.len() {

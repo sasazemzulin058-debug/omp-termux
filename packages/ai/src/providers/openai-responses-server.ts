@@ -9,13 +9,17 @@
  * Inverse direction (source-of-truth for item shapes): ../../providers/openai-responses.ts
  */
 
-import { logger } from "@oh-my-pi/pi-utils";
-import { type } from "arktype";
+import { type } from "@oh-my-pi/omptype";
+import { logger, structuredCloneJSON } from "@oh-my-pi/pi-utils";
 import { resolvePromptCacheKey } from "../auth-gateway/http";
 import type { AuthGatewayStreamControl, AuthGatewayParsedRequest as ParsedRequest } from "../auth-gateway/types";
+import * as AIError from "../error";
 import type {
 	AssistantMessage,
 	AssistantMessageEventStream,
+	ComputerAction,
+	ComputerSafetyCheck,
+	ComputerScreenshotRef,
 	Context,
 	Message,
 	TextContent,
@@ -24,6 +28,8 @@ import type {
 	ToolCall,
 } from "../types";
 import {
+	type OpenAIResponsesComputerCallItem,
+	type OpenAIResponsesComputerCallOutputItem,
 	type OpenAIResponsesFunctionCallItem,
 	type OpenAIResponsesFunctionCallOutputItem,
 	type OpenAIResponsesInputContent,
@@ -32,13 +38,36 @@ import {
 	type OpenAIResponsesTool,
 	openaiResponsesRequestSchema,
 } from "./openai-responses-server-schema";
+import { encodeTextSignatureV1, parseTextSignature } from "./openai-shared";
 
 export type { ParsedRequest };
 
 // ─── narrow guards ──────────────────────────────────────────────────────────
 
+const OPENAI_RESPONSE_INCLUDES: Record<NonNullable<ParsedRequest["options"]["include"]>[number], true> = {
+	"file_search_call.results": true,
+	"web_search_call.results": true,
+	"web_search_call.action.sources": true,
+	"message.input_image.image_url": true,
+	"computer_call_output.output.image_url": true,
+	"code_interpreter_call.outputs": true,
+	"reasoning.encrypted_content": true,
+	"message.output_text.logprobs": true,
+};
+
+function isOpenAIResponseInclude(value: unknown): value is keyof typeof OPENAI_RESPONSE_INCLUDES {
+	return typeof value === "string" && value in OPENAI_RESPONSE_INCLUDES;
+}
+
 function isReasoningEffort(value: unknown): value is NonNullable<ParsedRequest["options"]["reasoning"]> {
-	return value === "minimal" || value === "low" || value === "medium" || value === "high" || value === "xhigh";
+	return (
+		value === "minimal" ||
+		value === "low" ||
+		value === "medium" ||
+		value === "high" ||
+		value === "xhigh" ||
+		value === "max"
+	);
 }
 
 function isServiceTier(value: unknown): value is NonNullable<ParsedRequest["options"]["serviceTier"]> {
@@ -49,8 +78,43 @@ function isObj(v: unknown): v is Record<string, unknown> {
 	return typeof v === "object" && v !== null && !Array.isArray(v);
 }
 
+const UNSUPPORTED_EXPLICIT_PROMPT_CACHE_MESSAGE =
+	"openai-responses: prompt_cache_options and prompt_cache_breakpoint are unsupported by this auth-gateway route; use /v1/pi/stream with options.promptCache instead";
+
+function hasUnsupportedExplicitPromptCacheFields(body: unknown): boolean {
+	if (!isObj(body)) return false;
+	if ("prompt_cache_options" in body || "prompt_cache_breakpoint" in body) return true;
+	if (!Array.isArray(body.input)) return false;
+
+	return body.input.some(item => {
+		if (!isObj(item)) return false;
+		if ("prompt_cache_breakpoint" in item) return true;
+		return Array.isArray(item.content) && item.content.some(part => isObj(part) && "prompt_cache_breakpoint" in part);
+	});
+}
+
+function rejectUnsupportedExplicitPromptCacheFields(body: unknown): void {
+	if (hasUnsupportedExplicitPromptCacheFields(body)) {
+		throw new AIError.ValidationError(UNSUPPORTED_EXPLICIT_PROMPT_CACHE_MESSAGE);
+	}
+}
+
 function asString(v: unknown): string | undefined {
 	return typeof v === "string" ? v : undefined;
+}
+
+type AssistantItemPhase = "commentary" | "final_answer";
+type MessageSignature = { id: string; phase?: AssistantItemPhase };
+
+function parseAssistantItemPhase(value: unknown): AssistantItemPhase | undefined {
+	return value === "commentary" || value === "final_answer" ? value : undefined;
+}
+
+function messageTextSignature(id: unknown, phase: unknown): string | undefined {
+	const parsedPhase = parseAssistantItemPhase(phase);
+	if (typeof id === "string" && id.length > 0) return encodeTextSignatureV1(id, parsedPhase);
+	if (!parsedPhase) return undefined;
+	return encodeTextSignatureV1(makeMsgId(), parsedPhase);
 }
 
 // ─── id helpers ─────────────────────────────────────────────────────────────
@@ -82,8 +146,6 @@ function makeCustomCallId(): string {
 // ─── once-only warnings ─────────────────────────────────────────────────────
 // Module-scoped so we don't spam logs once per turn.
 
-let warnedImageNotSupported = false;
-let warnedFileNotSupported = false;
 let warnedReasoningSummaryLevel = false;
 
 // ─── inbound parser helpers ─────────────────────────────────────────────────
@@ -99,15 +161,11 @@ function extractReasoningTextFromItem(item: OpenAIResponsesReasoningItem): strin
 type InputBlockUnion =
 	| { type: "input_text"; text: string }
 	| { type: "text"; text: string }
-	| { type: "input_image"; detail?: "auto" | "low" | "high"; image_url?: string; file_id?: string }
-	| { type: "input_file"; file_id?: string; filename?: string; file_data?: string };
+	| { type: "input_image"; detail?: "auto" | "low" | "high" | "original"; image_url?: string; file_id?: string }
+	| { type: "input_file"; file_id?: string; filename?: string; file_data?: string; file_url?: string };
 
-/**
- * Walk an input message's content array and produce pi-ai's `TextContent[]`.
- * `input_image`/`input_file` blocks become bracketed text placeholders since
- * pi-ai's `ImageContent` only carries inline base64 data and we have no
- * resolver for OpenAI `image_url` / `file_id` references. Logs once per kind.
- */
+/** Walk an input message's content array and retain only text for the generic view.
+ * Native image/file references are preserved on the message provider payload. */
 function inputContentParts(blocks: OpenAIResponsesInputContent[] | string | undefined): string | TextContent[] {
 	if (typeof blocks === "string") return blocks;
 	if (!blocks) return [];
@@ -116,26 +174,6 @@ function inputContentParts(blocks: OpenAIResponsesInputContent[] | string | unde
 		const block = raw as InputBlockUnion;
 		if (block.type === "input_text" || block.type === "text") {
 			parts.push({ type: "text", text: block.text });
-		} else if (block.type === "input_image") {
-			if (!warnedImageNotSupported) {
-				warnedImageNotSupported = true;
-				logger.warn("openai-responses-server: input_image dropped (no pi-ai bridge for image_url/file_id)", {
-					hasUrl: typeof block.image_url === "string",
-					hasFileId: typeof block.file_id === "string",
-				});
-			}
-			const ref = block.image_url ?? block.file_id ?? "?";
-			parts.push({ type: "text", text: `[image: ${ref}]` });
-		} else if (block.type === "input_file") {
-			if (!warnedFileNotSupported) {
-				warnedFileNotSupported = true;
-				logger.warn("openai-responses-server: input_file dropped (no pi-ai bridge for file_id/file_data)", {
-					hasFileId: typeof block.file_id === "string",
-					hasFileData: typeof block.file_data === "string",
-				});
-			}
-			const ref = block.file_id ?? block.filename ?? "?";
-			parts.push({ type: "text", text: `[file: ${ref}]` });
 		}
 	}
 	return parts.length === 1 ? parts[0].text : parts;
@@ -146,20 +184,27 @@ type OutputBlockUnion =
 	| { type: "text"; text: string }
 	| { type: "refusal"; refusal: string };
 
-function outputTextOf(blocks: OpenAIResponsesOutputContent[] | string | undefined): TextContent[] {
-	if (typeof blocks === "string") return blocks.length > 0 ? [{ type: "text", text: blocks }] : [];
+function outputTextOf(
+	blocks: OpenAIResponsesOutputContent[] | string | undefined,
+	message?: { id?: unknown; phase?: unknown },
+): TextContent[] {
+	const textSignature = messageTextSignature(message?.id, message?.phase);
+	const textContent = (text: string): TextContent =>
+		textSignature ? { type: "text", text, textSignature } : { type: "text", text };
+	if (typeof blocks === "string") return blocks.length > 0 ? [textContent(blocks)] : [];
 	if (!blocks) return [];
-	const out: TextContent[] = [];
+	const parts: string[] = [];
 	for (const raw of blocks) {
 		const block = raw as OutputBlockUnion;
 		if (block.type === "output_text" || block.type === "text") {
-			out.push({ type: "text", text: block.text });
+			parts.push(block.text);
 		} else if (block.type === "refusal") {
 			// Preserve the refusal reason so history replay still carries it.
-			out.push({ type: "text", text: `[refusal: ${block.refusal}]` });
+			parts.push(`[refusal: ${block.refusal}]`);
 		}
 	}
-	return out;
+	const text = parts.join("");
+	return text.length > 0 ? [textContent(text)] : [];
 }
 
 // The schema accepts a much wider tool_choice union than the SDK type so the
@@ -174,6 +219,7 @@ type ParsedToolChoice =
 			type:
 				| "web_search_preview"
 				| "file_search"
+				| "computer"
 				| "computer_use_preview"
 				| "code_interpreter"
 				| "image_generation"
@@ -185,12 +231,9 @@ function mapToolChoice(value: ParsedToolChoice | undefined): ParsedRequest["opti
 	if (value === undefined) return undefined;
 	if (value === "auto" || value === "none" || value === "required") return value;
 	if ("type" in value) {
-		// `custom` (codex apply_patch) and `function` both resolve to the same
-		// pi-ai shape: pi-ai's dispatcher matches `Tool.name` AND `customWireName`,
-		// so passing the wire name works for either.
 		if (value.type === "function" || value.type === "custom") return { name: value.name };
-		// Hosted tools + allowed_tools — we don't surface these to pi-ai; fall
-		// back to letting the model pick a tool freely.
+		if (value.type === "computer") return { type: "computer" };
+		// Other hosted tools + allowed_tools are not surfaced to pi-ai.
 		return "auto";
 	}
 	return undefined;
@@ -200,6 +243,15 @@ function buildTools(tools: Array<OpenAIResponsesTool | { type: string }> | undef
 	if (!tools) return undefined;
 	const out: Tool[] = [];
 	for (const t of tools) {
+		if (t.type === "computer") {
+			out.push({
+				name: "computer",
+				description: "",
+				parameters: {} as Tool["parameters"],
+				native: { type: "computer" },
+			});
+			continue;
+		}
 		// Skip non-function tools (web_search, file_search, …).
 		if (t.type !== "function") continue;
 		const fn = t as Extract<OpenAIResponsesTool, { type: "function" }>;
@@ -264,9 +316,10 @@ export function parseRequest(body: unknown, headers?: Headers): ParsedRequest {
 	// client signals a cache identity outside the body — see the
 	// `resolvePromptCacheKey` call further down.
 
+	rejectUnsupportedExplicitPromptCacheFields(body);
 	const data = openaiResponsesRequestSchema(body);
 	if (data instanceof type.errors) {
-		throw new Error(`openai-responses: ${data.summary}`);
+		throw new AIError.ValidationError(`openai-responses: ${data.summary}`);
 	}
 
 	const now = Date.now();
@@ -287,22 +340,49 @@ export function parseRequest(body: unknown, headers?: Headers): ParsedRequest {
 				const msg = item as {
 					role?: string;
 					content?: OpenAIResponsesInputContent[] | OpenAIResponsesOutputContent[] | string;
+					id?: unknown;
+					phase?: unknown;
 				};
 				switch (msg.role) {
 					case "system": {
-						const text = inputContentParts(msg.content as OpenAIResponsesInputContent[] | string | undefined);
-						const flat = typeof text === "string" ? text : text.map(p => p.text).join("");
-						if (flat.length > 0) systemPrompt.push(flat);
+						const content = inputContentParts(msg.content as OpenAIResponsesInputContent[] | string | undefined);
+						const flat = typeof content === "string" ? content : content.map(part => part.text).join("");
+						const hasNativeRefs =
+							Array.isArray(msg.content) &&
+							msg.content.some(part => part.type === "input_image" || part.type === "input_file");
+						if (hasNativeRefs) {
+							messages.push({
+								role: "developer",
+								content,
+								providerPayload: {
+									type: "openaiResponsesHistory",
+									items: [structuredCloneJSON(item) as unknown as Record<string, unknown>],
+									dt: true,
+								},
+								timestamp: now,
+							});
+						} else if (flat.length > 0) {
+							systemPrompt.push(flat);
+						}
 						break;
 					}
 					case "user":
 					case "developer": {
 						const content = inputContentParts(msg.content as OpenAIResponsesInputContent[] | string | undefined);
-						messages.push({ role: msg.role, content, timestamp: now });
+						const nativeItem = structuredCloneJSON(item) as unknown as Record<string, unknown>;
+						messages.push({
+							role: msg.role,
+							content,
+							providerPayload: { type: "openaiResponsesHistory", items: [nativeItem], dt: true },
+							timestamp: now,
+						});
 						break;
 					}
 					case "assistant": {
-						const parts = outputTextOf(msg.content as OpenAIResponsesOutputContent[] | string | undefined);
+						const parts = outputTextOf(msg.content as OpenAIResponsesOutputContent[] | string | undefined, {
+							id: msg.id,
+							phase: msg.phase,
+						});
 						messages.push({
 							role: "assistant",
 							content: parts,
@@ -345,7 +425,9 @@ export function parseRequest(body: unknown, headers?: Headers): ParsedRequest {
 					const parsedArgs: unknown = JSON.parse(argsRaw);
 					args = isObj(parsedArgs) ? parsedArgs : {};
 				} catch {
-					throw new Error(`openai-responses: function_call ${call.call_id} has invalid JSON arguments`);
+					throw new AIError.ValidationError(
+						`openai-responses: function_call ${call.call_id} has invalid JSON arguments`,
+					);
 				}
 				const toolCall: ToolCall = {
 					type: "toolCall",
@@ -373,6 +455,26 @@ export function parseRequest(body: unknown, headers?: Headers): ParsedRequest {
 				ensureAssistantPlaceholder(messages, data.model, now).content.push(toolCall);
 				continue;
 			}
+			if (effectiveType === "computer_call") {
+				const call = item as OpenAIResponsesComputerCallItem;
+				const actions = (
+					call.actions?.length ? call.actions : call.action ? [call.action] : []
+				) as ComputerAction[];
+				const toolCall: ToolCall = {
+					type: "toolCall",
+					id: call.call_id,
+					name: "computer",
+					arguments: { actions },
+					providerMetadata: {
+						type: "computer",
+						providerItemId: call.id,
+						actions,
+						pendingSafetyChecks: call.pending_safety_checks as ComputerSafetyCheck[],
+					},
+				};
+				ensureAssistantPlaceholder(messages, data.model, now).content.push(toolCall);
+				continue;
+			}
 			if (effectiveType === "function_call_output") {
 				const output = item as OpenAIResponsesFunctionCallOutputItem;
 				const toolName = findToolNameById(messages, output.call_id);
@@ -388,6 +490,23 @@ export function parseRequest(body: unknown, headers?: Headers): ParsedRequest {
 					toolName,
 					content: [{ type: "text", text }],
 					isError: false,
+					timestamp: now,
+				});
+				continue;
+			}
+			if (effectiveType === "computer_call_output") {
+				const output = item as OpenAIResponsesComputerCallOutputItem;
+				messages.push({
+					role: "toolResult",
+					toolCallId: output.call_id,
+					toolName: findToolNameById(messages, output.call_id) || "computer",
+					content: [],
+					isError: output.status === "failed",
+					providerMetadata: {
+						type: "computer",
+						screenshot: output.output as ComputerScreenshotRef,
+						acknowledgedSafetyChecks: (output.acknowledged_safety_checks ?? []) as ComputerSafetyCheck[],
+					},
 					timestamp: now,
 				});
 				continue;
@@ -450,6 +569,7 @@ export function parseRequest(body: unknown, headers?: Headers): ParsedRequest {
 	if (data.presence_penalty !== undefined) options.presencePenalty = data.presence_penalty;
 	if (data.frequency_penalty !== undefined) options.frequencyPenalty = data.frequency_penalty;
 	if (data.parallel_tool_calls !== undefined) options.parallelToolCalls = data.parallel_tool_calls;
+	if (Array.isArray(data.include)) options.include = data.include.filter(isOpenAIResponseInclude);
 	const cacheKey = resolvePromptCacheKey(body, headers);
 	if (cacheKey !== undefined) options.promptCacheKey = cacheKey;
 	if (data.previous_response_id !== undefined) options.previousResponseId = data.previous_response_id;
@@ -500,6 +620,7 @@ type MessageOutputItem = {
 	role: "assistant";
 	status: "completed";
 	content: Array<{ type: "output_text"; text: string; annotations: never[] }>;
+	phase?: AssistantItemPhase;
 };
 
 type FunctionCallOutputItem = {
@@ -520,7 +641,21 @@ type CustomToolCallOutputItem = {
 	status: "completed";
 };
 
-type OutputItem = ReasoningOutputItem | MessageOutputItem | FunctionCallOutputItem | CustomToolCallOutputItem;
+type ComputerCallOutputItem = {
+	type: "computer_call";
+	id: string;
+	call_id: string;
+	actions: ComputerAction[];
+	pending_safety_checks: ComputerSafetyCheck[];
+	status: "completed" | "in_progress" | "incomplete";
+};
+
+type OutputItem =
+	| ReasoningOutputItem
+	| MessageOutputItem
+	| FunctionCallOutputItem
+	| CustomToolCallOutputItem
+	| ComputerCallOutputItem;
 
 type ResponseStatus = "completed" | "in_progress" | "failed" | "incomplete";
 
@@ -528,6 +663,10 @@ function responseStatusForStopReason(message: AssistantMessage): ResponseStatus 
 	if (message.stopReason === "length") return "incomplete";
 	if (message.stopReason === "error" || message.stopReason === "aborted") return "failed";
 	return "completed";
+}
+
+function incompleteDetailsForStatus(status: ResponseStatus): { reason: "max_output_tokens" } | null {
+	return status === "incomplete" ? { reason: "max_output_tokens" } : null;
 }
 
 function buildReasoningItem(part: ThinkingContent): ReasoningOutputItem {
@@ -591,23 +730,32 @@ function wireCallId(id: string): string {
 function buildOutputItems(message: AssistantMessage): OutputItem[] {
 	const out: OutputItem[] = [];
 	let pendingMessage: MessageOutputItem | null = null;
+	let pendingMessageSignature: { id: string; phase?: AssistantItemPhase } | undefined;
 	const flushMessage = () => {
 		if (pendingMessage) {
 			out.push(pendingMessage);
 			pendingMessage = null;
+			pendingMessageSignature = undefined;
 		}
 	};
 
 	for (const part of message.content) {
 		if (part.type === "text") {
+			const signature = parseTextSignature(part.textSignature);
+			const sameSignature =
+				!pendingMessage ||
+				(pendingMessageSignature?.id === signature?.id && pendingMessageSignature?.phase === signature?.phase);
+			if (!sameSignature) flushMessage();
 			if (!pendingMessage) {
 				pendingMessage = {
 					type: "message",
-					id: makeMsgId(),
+					id: signature?.id ?? makeMsgId(),
 					role: "assistant",
 					status: "completed",
 					content: [],
+					...(signature?.phase ? { phase: signature.phase } : {}),
 				};
+				pendingMessageSignature = signature;
 			}
 			pendingMessage.content.push({ type: "output_text", text: part.text, annotations: [] });
 		} else if (part.type === "thinking") {
@@ -615,8 +763,20 @@ function buildOutputItems(message: AssistantMessage): OutputItem[] {
 			out.push(buildReasoningItem(part));
 		} else if (part.type === "toolCall") {
 			flushMessage();
+			if (part.providerMetadata?.type === "computer") {
+				out.push({
+					type: "computer_call",
+					id: part.providerMetadata.providerItemId,
+					call_id: wireCallId(part.id),
+					actions: part.providerMetadata.actions,
+					pending_safety_checks: part.providerMetadata.pendingSafetyChecks,
+					status: "completed",
+				});
+				continue;
+			}
 			if (part.customWireName) {
-				const rawInput = typeof part.arguments?.input === "string" ? (part.arguments.input as string) : "";
+				const input = part.arguments?.input;
+				const rawInput = typeof input === "string" ? input : "";
 				out.push({
 					type: "custom_tool_call",
 					id: part.thoughtSignature ?? makeCustomCallId(),
@@ -670,7 +830,7 @@ function buildResponseEnvelope(
 		model: requestedModelId,
 		output: items,
 		usage,
-		...(status === "incomplete" ? { incomplete_details: { reason: "max_output_tokens" } } : {}),
+		incomplete_details: incompleteDetailsForStatus(status),
 		...(status === "failed" ? { error: { message: message.errorMessage ?? "response failed" } } : {}),
 	};
 }
@@ -698,6 +858,7 @@ interface OpenMessage {
 	contentIndex: number;
 	currentPartText: string;
 	content: Array<{ type: "output_text"; text: string; annotations: never[] }>;
+	signature?: MessageSignature;
 }
 interface OpenReasoning {
 	kind: "reasoning";
@@ -716,7 +877,16 @@ interface OpenFunctionCall {
 	/** Set when the underlying ToolCall is a custom-tool emission. */
 	customWireName?: string;
 }
-type OpenItem = OpenMessage | OpenReasoning | OpenFunctionCall;
+interface OpenComputerCall {
+	kind: "computer_call";
+	itemId: string;
+	outputIndex: number;
+	contentIndex: number;
+	callId: string;
+	actions: ComputerAction[];
+	pendingSafetyChecks: ComputerSafetyCheck[];
+}
+type OpenItem = OpenMessage | OpenReasoning | OpenFunctionCall | OpenComputerCall;
 
 function sseEvent(name: string, data: unknown): string {
 	return `event: ${name}\ndata: ${JSON.stringify(data)}\n\n`;
@@ -751,9 +921,17 @@ export function encodeStream(
 			let createdAt = Math.floor(Date.now() / 1000);
 			let outputIndex = 0;
 			const state: { open: OpenItem | null } = { open: null };
-			const openFunctionCalls = new Map<number, OpenFunctionCall>();
+			const openToolCalls = new Map<number, OpenFunctionCall | OpenComputerCall>();
+			const openItemsByContentIndex = new Map<number, OpenItem>();
 			const finishedItems: OutputItem[] = [];
 			const allocateOutputIndex = (): number => outputIndex++;
+			const removeOpenItem = (item: OpenItem): void => {
+				for (const [contentIndex, candidate] of openItemsByContentIndex) {
+					if (candidate === item) openItemsByContentIndex.delete(contentIndex);
+				}
+			};
+			const openItemForContentIndex = (contentIndex: number): OpenItem | null =>
+				openItemsByContentIndex.get(contentIndex) ?? null;
 
 			const responseSnapshot = (status: ResponseStatus, output: OutputItem[] | []) => ({
 				id: responseId,
@@ -763,17 +941,19 @@ export function encodeStream(
 				model: requestedModelId,
 				output,
 				usage: null,
+				incomplete_details: incompleteDetailsForStatus(status),
 			});
 
-			const openMessage = (): OpenMessage => {
+			const openMessage = (signature: MessageSignature | undefined, sourceContentIndex: number): OpenMessage => {
 				const itemOutputIndex = allocateOutputIndex();
-				const itemId = makeMsgId();
+				const itemId = signature?.id ?? makeMsgId();
 				const item = {
 					type: "message" as const,
 					id: itemId,
-					status: "in_progress",
+					status: "in_progress" as const,
 					role: "assistant" as const,
 					content: [] as Array<{ type: "output_text"; text: string; annotations: never[] }>,
+					...(signature?.phase ? { phase: signature.phase } : {}),
 				};
 				emit("response.output_item.added", { output_index: itemOutputIndex, item });
 				const next: OpenMessage = {
@@ -783,8 +963,10 @@ export function encodeStream(
 					contentIndex: 0,
 					currentPartText: "",
 					content: [],
+					...(signature ? { signature } : {}),
 				};
 				state.open = next;
+				openItemsByContentIndex.set(sourceContentIndex, next);
 				return next;
 			};
 
@@ -798,9 +980,6 @@ export function encodeStream(
 					summary: [] as Array<{ type: "summary_text"; text: string }>,
 				};
 				emit("response.output_item.added", { output_index: itemOutputIndex, item });
-				// Open the summary part. Real OpenAI streams summary text in the
-				// canonical `reasoning_summary_*` lifecycle; pi-ai's own decoder
-				// reads `summary[].text` from the eventual `output_item.done`.
 				emit("response.reasoning_summary_part.added", {
 					item_id: itemId,
 					output_index: itemOutputIndex,
@@ -808,14 +987,42 @@ export function encodeStream(
 					part: { type: "summary_text", text: "" },
 				});
 				const next: OpenReasoning = { kind: "reasoning", itemId, outputIndex: itemOutputIndex, reasoningText: "" };
+				openItemsByContentIndex.set(contentIndex, next);
 				state.open = next;
 				return next;
 			};
-
-			const openToolCall = (partial: AssistantMessage, contentIndex: number): OpenFunctionCall => {
+			const openToolCall = (
+				partial: AssistantMessage,
+				contentIndex: number,
+			): OpenFunctionCall | OpenComputerCall => {
 				const itemOutputIndex = allocateOutputIndex();
 				const part = partial.content[contentIndex];
 				const tc = part && part.type === "toolCall" ? part : undefined;
+				if (tc?.providerMetadata?.type === "computer") {
+					const metadata = tc.providerMetadata;
+					const item = {
+						type: "computer_call" as const,
+						id: metadata.providerItemId,
+						call_id: wireCallId(tc.id),
+						actions: metadata.actions,
+						pending_safety_checks: metadata.pendingSafetyChecks,
+						status: "in_progress" as const,
+					};
+					emit("response.output_item.added", { output_index: itemOutputIndex, item });
+					const next: OpenComputerCall = {
+						kind: "computer_call",
+						itemId: metadata.providerItemId,
+						outputIndex: itemOutputIndex,
+						contentIndex,
+						callId: wireCallId(tc.id),
+						actions: metadata.actions,
+						pendingSafetyChecks: metadata.pendingSafetyChecks,
+					};
+					openToolCalls.set(contentIndex, next);
+					openItemsByContentIndex.set(contentIndex, next);
+					state.open = next;
+					return next;
+				}
 				const customWireName: string | undefined =
 					tc && typeof tc.customWireName === "string" && tc.customWireName.length > 0
 						? tc.customWireName
@@ -852,9 +1059,26 @@ export function encodeStream(
 					argsText: "",
 					...(isCustom ? { customWireName } : {}),
 				};
-				openFunctionCalls.set(contentIndex, next);
+				openToolCalls.set(contentIndex, next);
+				openItemsByContentIndex.set(contentIndex, next);
 				state.open = next;
 				return next;
+			};
+
+			const closeComputerCall = (call: OpenComputerCall): void => {
+				const item: ComputerCallOutputItem = {
+					type: "computer_call",
+					id: call.itemId,
+					call_id: call.callId,
+					actions: call.actions,
+					pending_safety_checks: call.pendingSafetyChecks,
+					status: "completed",
+				};
+				emit("response.output_item.done", { output_index: call.outputIndex, item });
+				finishedItems.push(item);
+				openToolCalls.delete(call.contentIndex);
+				removeOpenItem(call);
+				if (state.open === call) state.open = null;
 			};
 
 			const closeFunctionCall = (call: OpenFunctionCall): void => {
@@ -896,58 +1120,49 @@ export function encodeStream(
 						status: "completed",
 					});
 				}
-				openFunctionCalls.delete(call.contentIndex);
+				openToolCalls.delete(call.contentIndex);
+				removeOpenItem(call);
 				if (state.open === call) state.open = null;
 			};
 
-			const closeOpen = () => {
-				if (!state.open) return;
-				if (state.open.kind === "message") {
+			const closeOpen = (target: OpenItem | null = state.open): void => {
+				if (!target) return;
+				if (target.kind === "message") {
 					const item = {
-						type: "message",
-						id: state.open.itemId,
-						status: "completed",
-						role: "assistant",
-						content: state.open.content,
+						type: "message" as const,
+						id: target.itemId,
+						status: "completed" as const,
+						role: "assistant" as const,
+						content: target.content,
+						...(target.signature?.phase ? { phase: target.signature.phase } : {}),
 					};
-					emit("response.output_item.done", { output_index: state.open.outputIndex, item });
-					finishedItems.push({
-						type: "message",
-						id: state.open.itemId,
-						role: "assistant",
-						status: "completed",
-						content: state.open.content,
-					});
-					state.open = null;
-				} else if (state.open.kind === "reasoning") {
-					const summary = [{ type: "summary_text" as const, text: state.open.reasoningText ?? "" }];
-					const item = {
-						type: "reasoning",
-						id: state.open.itemId,
-						summary,
-					};
-					emit("response.output_item.done", { output_index: state.open.outputIndex, item });
-					finishedItems.push({
-						type: "reasoning",
-						id: state.open.itemId,
-						summary,
-					});
-					state.open = null;
+					emit("response.output_item.done", { output_index: target.outputIndex, item });
+					finishedItems.push(item);
+					removeOpenItem(target);
+					if (state.open === target) state.open = null;
+				} else if (target.kind === "reasoning") {
+					const summary = [{ type: "summary_text" as const, text: target.reasoningText ?? "" }];
+					const item = { type: "reasoning" as const, id: target.itemId, summary };
+					emit("response.output_item.done", { output_index: target.outputIndex, item });
+					finishedItems.push(item);
+					removeOpenItem(target);
+					if (state.open === target) state.open = null;
+				} else if (target.kind === "computer_call") {
+					closeComputerCall(target);
 				} else {
-					closeFunctionCall(state.open);
+					closeFunctionCall(target);
 				}
 			};
 
-			const closeOpenFunctionCalls = (): void => {
-				for (const call of [...openFunctionCalls.values()]) {
-					closeFunctionCall(call);
-				}
+			const closeAllOpenItems = (): void => {
+				const openItems = new Set(openItemsByContentIndex.values());
+				if (state.open) openItems.add(state.open);
+				for (const item of openItems) closeOpen(item);
 			};
 
-			const functionCallForEvent = (contentIndex: number): OpenFunctionCall | undefined => {
-				const byIndex = openFunctionCalls.get(contentIndex);
-				if (byIndex) return byIndex;
-				return state.open?.kind === "function_call" ? state.open : undefined;
+			const toolCallForEvent = (contentIndex: number): OpenFunctionCall | OpenComputerCall | undefined => {
+				const item = openItemForContentIndex(contentIndex);
+				return item?.kind === "function_call" || item?.kind === "computer_call" ? item : undefined;
 			};
 			let finalMessage: AssistantMessage | undefined;
 			let failureMessage: AssistantMessage | undefined;
@@ -970,26 +1185,39 @@ export function encodeStream(
 						}
 						case "text_start": {
 							let cur: OpenMessage;
-							if (state.open && state.open.kind === "message") {
-								// continue same message item, new content part
-								cur = state.open;
+							const textBlock = ev.partial.content[ev.contentIndex];
+							const signature =
+								textBlock?.type === "text" ? parseTextSignature(textBlock.textSignature) : undefined;
+							const existing = [...new Set(openItemsByContentIndex.values())].find(candidate => {
+								if (candidate.kind !== "message") return false;
+								return (
+									(!signature && !candidate.signature) ||
+									(signature !== undefined &&
+										candidate.signature?.id === signature.id &&
+										candidate.signature.phase === signature.phase)
+								);
+							}) as OpenMessage | undefined;
+							if (existing) {
+								cur = existing;
 								cur.currentPartText = "";
+								openItemsByContentIndex.set(ev.contentIndex, cur);
+								state.open = cur;
 							} else {
-								if (state.open && state.open.kind !== "function_call") closeOpen();
-								cur = openMessage();
+								cur = openMessage(signature, ev.contentIndex);
 							}
-							const part = { type: "output_text", text: "", annotations: [] as never[] };
+							const contentPart = { type: "output_text", text: "", annotations: [] as never[] };
 							emit("response.content_part.added", {
 								item_id: cur.itemId,
 								output_index: cur.outputIndex,
 								content_index: cur.contentIndex,
-								part,
+								part: contentPart,
 							});
 							break;
 						}
 						case "text_delta": {
-							if (state.open?.kind !== "message") break;
-							const cur: OpenMessage = state.open;
+							const item = openItemForContentIndex(ev.contentIndex);
+							if (item?.kind !== "message") break;
+							const cur = item;
 							cur.currentPartText += ev.delta;
 							emit("response.output_text.delta", {
 								item_id: cur.itemId,
@@ -1004,8 +1232,9 @@ export function encodeStream(
 							break;
 						}
 						case "text_end": {
-							if (state.open?.kind !== "message") break;
-							const cur: OpenMessage = state.open;
+							const item = openItemForContentIndex(ev.contentIndex);
+							if (item?.kind !== "message") break;
+							const cur = item;
 							const text = ev.content ?? cur.currentPartText;
 							emit("response.output_text.done", {
 								item_id: cur.itemId,
@@ -1026,13 +1255,13 @@ export function encodeStream(
 							break;
 						}
 						case "thinking_start": {
-							if (state.open && state.open.kind !== "function_call") closeOpen();
 							openReasoning(ev.partial, ev.contentIndex);
 							break;
 						}
 						case "thinking_delta": {
-							if (state.open?.kind !== "reasoning") break;
-							const cur: OpenReasoning = state.open;
+							const item = openItemForContentIndex(ev.contentIndex);
+							if (item?.kind !== "reasoning") break;
+							const cur = item;
 							cur.reasoningText += ev.delta;
 							emit("response.reasoning_summary_text.delta", {
 								item_id: cur.itemId,
@@ -1043,8 +1272,9 @@ export function encodeStream(
 							break;
 						}
 						case "thinking_end": {
-							if (state.open?.kind !== "reasoning") break;
-							const cur: OpenReasoning = state.open;
+							const item = openItemForContentIndex(ev.contentIndex);
+							if (item?.kind !== "reasoning") break;
+							const cur = item;
 							const text = ev.content ?? cur.reasoningText;
 							cur.reasoningText = text;
 							emit("response.reasoning_summary_text.done", {
@@ -1059,17 +1289,16 @@ export function encodeStream(
 								summary_index: 0,
 								part: { type: "summary_text", text },
 							});
-							closeOpen();
+							closeOpen(cur);
 							break;
 						}
 						case "toolcall_start": {
-							if (state.open && state.open.kind !== "function_call") closeOpen();
 							openToolCall(ev.partial, ev.contentIndex);
 							break;
 						}
 						case "toolcall_delta": {
-							const cur = functionCallForEvent(ev.contentIndex);
-							if (!cur) break;
+							const cur = toolCallForEvent(ev.contentIndex);
+							if (!cur || cur.kind === "computer_call") break;
 							cur.argsText += ev.delta;
 							if (cur.customWireName) {
 								emit("response.custom_tool_call_input.delta", {
@@ -1087,13 +1316,23 @@ export function encodeStream(
 							break;
 						}
 						case "toolcall_end": {
-							const cur = functionCallForEvent(ev.contentIndex);
+							const cur = toolCallForEvent(ev.contentIndex);
 							if (!cur) break;
-							// Promote possibly-late info from the canonical ToolCall.
 							const tc = ev.toolCall;
+							if (cur.kind === "computer_call") {
+								cur.callId = wireCallId(tc.id);
+								if (tc.providerMetadata?.type === "computer") {
+									cur.itemId = tc.providerMetadata.providerItemId;
+									cur.actions = tc.providerMetadata.actions;
+									cur.pendingSafetyChecks = tc.providerMetadata.pendingSafetyChecks;
+								}
+								closeComputerCall(cur);
+								break;
+							}
+							// Promote possibly-late info from the canonical ToolCall.
 							if (tc.customWireName && !cur.customWireName) cur.customWireName = tc.customWireName;
 							if (tc.thoughtSignature) cur.itemId = tc.thoughtSignature;
-							cur.callId = tc.id;
+							cur.callId = wireCallId(tc.id);
 							cur.name = cur.customWireName ?? tc.name;
 							if (cur.customWireName) {
 								// Custom tool: raw input string. Streamed deltas accumulated
@@ -1136,8 +1375,7 @@ export function encodeStream(
 				}
 
 				if (failureMessage) {
-					closeOpenFunctionCalls();
-					if (state.open) closeOpen();
+					closeAllOpenItems();
 					controller.enqueue(
 						encoder.encode(
 							sseEvent("response.failed", {
@@ -1155,8 +1393,7 @@ export function encodeStream(
 					return;
 				}
 
-				closeOpenFunctionCalls();
-				if (state.open) closeOpen();
+				closeAllOpenItems();
 				const message = finalMessage ?? ((await events.result().catch(() => null)) as AssistantMessage | null);
 
 				// Build the canonical output from the final message so non-streaming
@@ -1183,7 +1420,7 @@ export function encodeStream(
 								model: requestedModelId,
 								output: items,
 								usage,
-								...(status === "incomplete" ? { incomplete_details: { reason: "max_output_tokens" } } : {}),
+								incomplete_details: incompleteDetailsForStatus(status),
 								...(status === "failed"
 									? { error: { message: message?.errorMessage ?? "response failed" } }
 									: {}),
@@ -1208,6 +1445,7 @@ export function encodeStream(
 									model: requestedModelId,
 									output: [],
 									error: { message: err instanceof Error ? err.message : String(err) },
+									incomplete_details: null,
 								},
 							}),
 						),

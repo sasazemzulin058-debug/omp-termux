@@ -66,6 +66,17 @@ describe("retainToolRenderer", () => {
 		const rendered = lines(retainToolRenderer.renderCall(args, { expanded: false, isPartial: true }, uiTheme));
 		expect(rendered.filter(line => line.includes(bullet))).toHaveLength(3);
 	});
+
+	it("ignores transient non-array items while the call streams", async () => {
+		const uiTheme = await theme();
+		const bullet = uiTheme.format.bullet;
+		const rendered = lines(
+			retainToolRenderer.renderCall({ items: "[" }, { expanded: false, isPartial: true }, uiTheme),
+		);
+
+		expect(rendered[0]).toContain("Retain");
+		expect(rendered.some(line => line.includes(bullet))).toBe(false);
+	});
 });
 
 describe("recallToolRenderer", () => {

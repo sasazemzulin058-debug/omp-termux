@@ -3,9 +3,10 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { type AssistantMessageEventStream, clearCustomApis, getCustomApi } from "@oh-my-pi/pi-ai";
+import { getOAuthProvider } from "@oh-my-pi/pi-ai/oauth";
 import { ModelRegistry, type ProviderConfigInput } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
-import { Snowflake } from "@oh-my-pi/pi-utils";
+import { removeSyncWithRetries, Snowflake } from "@oh-my-pi/pi-utils";
 
 describe("ModelRegistry runtime source cleanup", () => {
 	let tempDir: string;
@@ -37,7 +38,7 @@ describe("ModelRegistry runtime source cleanup", () => {
 		clearCustomApis();
 		authStorage.close();
 		if (tempDir && fs.existsSync(tempDir)) {
-			fs.rmSync(tempDir, { recursive: true, force: true });
+			removeSyncWithRetries(tempDir);
 		}
 	});
 
@@ -62,5 +63,42 @@ describe("ModelRegistry runtime source cleanup", () => {
 		expect(registry.find("runtime-provider", "runtime-model")).toBeUndefined();
 		expect(registry.authStorage.hasAuth("runtime-provider")).toBe(false);
 		expect(getCustomApi("custom-runtime-cleanup-api")).toBeUndefined();
+	});
+
+	test("unregisterProvider removes only the named provider and its login entry", () => {
+		const registry = new ModelRegistry(authStorage, modelsJsonPath);
+		registry.registerProvider(
+			"runtime-provider",
+			{
+				baseUrl: "https://runtime.example.com/v1",
+				apiKey: "RUNTIME_KEY",
+				api: "custom-runtime-cleanup-api",
+				streamSimple,
+				models: [baseModel],
+				oauth: {
+					name: "Runtime Provider",
+					login: async () => "runtime-token",
+				},
+			},
+			sourceId,
+		);
+		registry.registerProvider(
+			"peer-provider",
+			{
+				baseUrl: "https://peer.example.com/v1",
+				apiKey: "PEER_KEY",
+				api: "openai-completions",
+				models: [{ ...baseModel, id: "peer-model" }],
+			},
+			sourceId,
+		);
+
+		expect(getOAuthProvider("runtime-provider")).toBeDefined();
+		registry.unregisterProvider("runtime-provider");
+
+		expect(registry.find("runtime-provider", "runtime-model")).toBeUndefined();
+		expect(registry.authStorage.hasAuth("runtime-provider")).toBe(false);
+		expect(getOAuthProvider("runtime-provider")).toBeUndefined();
+		expect(registry.find("peer-provider", "peer-model")).toBeDefined();
 	});
 });

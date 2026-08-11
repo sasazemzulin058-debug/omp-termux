@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
-import { type Component, CURSOR_MARKER, TUI } from "@oh-my-pi/pi-tui";
+import { type Component, CURSOR_MARKER, type Focusable, type OverlayFocusOwner, TUI } from "@oh-my-pi/pi-tui";
 import { VirtualTerminal } from "./virtual-terminal";
 
 class LineComponent implements Component {
@@ -64,6 +64,54 @@ class CursorOnlyComponent implements Component {
 	}
 }
 
+class FocusedMutableOverlay implements Component, Focusable {
+	focused = false;
+	#text: string;
+
+	constructor(text: string) {
+		this.#text = text;
+	}
+
+	setText(text: string): void {
+		this.#text = text;
+	}
+
+	invalidate(): void {
+		// No cached state
+	}
+
+	render(_width: number): string[] {
+		return [`${this.#text}${this.focused ? CURSOR_MARKER : ""}`];
+	}
+}
+
+class OverlayFocusDelegator implements Component, OverlayFocusOwner {
+	#text: string;
+
+	constructor(
+		text: string,
+		private readonly ownedFocusTarget: Component,
+	) {
+		this.#text = text;
+	}
+
+	setText(text: string): void {
+		this.#text = text;
+	}
+
+	ownsOverlayFocusTarget(component: Component): boolean {
+		return component === this.ownedFocusTarget;
+	}
+
+	invalidate(): void {
+		// No cached state
+	}
+
+	render(_width: number): string[] {
+		return [this.#text];
+	}
+}
+
 function buildRows(count: number): string[] {
 	return Array.from({ length: count }, (_v, i) => `row-${i}`);
 }
@@ -125,7 +173,7 @@ describe("TUI overlays", () => {
 		// A resize on Warp takes the in-place path (no ED3), so neutralize the
 		// ambient terminal identity to keep the direct-terminal resize/scrollback
 		// assertions below deterministic on any dev machine.
-		for (const key of ["TERM_PROGRAM", "PI_TUI_RESIZE_IN_PLACE"]) {
+		for (const key of ["TERM_PROGRAM", "PI_TUI_RESIZE_IN_PLACE", "HERDR_ENV"]) {
 			savedTerminalEnv[key] = Bun.env[key];
 			delete Bun.env[key];
 		}
@@ -157,6 +205,52 @@ describe("TUI overlays", () => {
 
 		// The scroll buffer should stay small; we should not have printed hundreds/thousands of blank lines.
 		expect(term.getScrollBuffer().length).toBeLessThan(200);
+	});
+
+	it("keeps the native viewport anchored when an overlay repaint follows a focused cursor below the frame tail", async () => {
+		const term = new VirtualTerminal(24, 6, 100);
+		const tui = new TUI(term, true);
+		const base = new MutableContentComponent(buildRows(8));
+		const cursorOverlay = new FocusedMutableOverlay("overlay-cursor");
+		const statusOverlay = new OverlayFocusDelegator("status-before", cursorOverlay);
+		tui.addChild(base);
+
+		try {
+			tui.start();
+			await flushRender(term);
+
+			tui.showOverlay(cursorOverlay, { row: 5, col: 0, width: 16 });
+			tui.showOverlay(statusOverlay, { row: 0, col: 0, width: 16 });
+			tui.setFocus(cursorOverlay);
+			tui.requestRender();
+			await flushRender(term);
+
+			base.setLines(["base-0", "base-1"]);
+			tui.requestRender();
+			await flushRender(term);
+			expect(term.getCursor().row).toBe(5);
+
+			const before = term.getBufferPosition();
+			const beforeScrollBufferLength = term.getScrollBuffer().length;
+
+			statusOverlay.setText("status-after");
+			tui.requestRender();
+			await flushRender(term);
+
+			expect(term.getBufferPosition()).toEqual(before);
+			expect(term.getScrollBuffer()).toHaveLength(beforeScrollBufferLength);
+			expect(term.getViewport().map(line => line.trimEnd())).toEqual([
+				"status-after",
+				"base-1",
+				"",
+				"",
+				"",
+				"overlay-cursor",
+			]);
+			expect(term.getCursor().row).toBe(5);
+		} finally {
+			tui.stop();
+		}
 	});
 
 	it("clamps tall overlays without an explicit maxHeight to the available rows", async () => {

@@ -102,6 +102,9 @@ const EXTENSION_LANG: Record<string, readonly [string, string]> = {
 	md: ["markdown", "markdown"],
 	markdown: ["markdown", "markdown"],
 	mdx: ["markdown", "markdown"],
+	mdc: ["markdown", "markdown"],
+	mkd: ["markdown", "markdown"],
+	mdown: ["markdown", "markdown"],
 	rst: ["restructuredtext", "restructuredtext"],
 	adoc: ["asciidoc", "asciidoc"],
 	tex: ["latex", "latex"],
@@ -202,9 +205,6 @@ function lspExtensionKey(filePath: string): string {
  * Language id for syntax highlighting and UI (icons, read tool), or undefined if unknown.
  */
 export function getLanguageFromPath(filePath: string): string | undefined {
-	const pair = EXTENSION_LANG[themeExtensionKey(filePath)];
-	if (pair) return pair[0];
-
 	const baseName = path.basename(filePath).toLowerCase();
 	if (baseName.startsWith(".env.")) return "env";
 	if (baseName === "dockerfile" || baseName.startsWith("dockerfile.") || baseName === "containerfile") {
@@ -214,7 +214,14 @@ export function getLanguageFromPath(filePath: string): string | undefined {
 	if (baseName === "justfile") return "just";
 	if (baseName === "cmakelists.txt") return "cmake";
 
+	const pair = EXTENSION_LANG[themeExtensionKey(filePath)];
+	if (pair) return pair[0];
+
 	return undefined;
+}
+
+export function isMarkdownPath(filePath: string): boolean {
+	return getLanguageFromPath(filePath) === "markdown";
 }
 
 /**

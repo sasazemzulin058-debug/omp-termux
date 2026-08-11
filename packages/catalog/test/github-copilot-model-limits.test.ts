@@ -6,6 +6,7 @@ import { Effort } from "@oh-my-pi/pi-catalog/effort";
 import { createModelManager } from "@oh-my-pi/pi-catalog/model-manager";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { githubCopilotModelManagerOptions } from "@oh-my-pi/pi-catalog/provider-models/openai-compat";
+import type { ModelSpec } from "@oh-my-pi/pi-catalog/types";
 
 function getHeaderValue(headers: unknown, key: string): string | undefined {
 	if (!headers) return undefined;
@@ -55,6 +56,21 @@ async function discoverCopilotModels(
 	const models = await options.fetchDynamicModels?.();
 	expect(models).not.toBeNull();
 	return { models: models ?? [], fetchMock, requestApiVersions };
+}
+
+function cachedCopilotCompletionModel(id: string, name: string): ModelSpec<"openai-completions"> {
+	return {
+		id,
+		name,
+		api: "openai-completions",
+		provider: "github-copilot",
+		baseUrl: "https://api.githubcopilot.com",
+		reasoning: true,
+		input: ["text"],
+		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+		contextWindow: 256_000,
+		maxTokens: 128_000,
+	};
 }
 
 describe("github copilot model limits mapping", () => {
@@ -303,6 +319,119 @@ describe("github copilot model limits mapping", () => {
 		// not the OpenAI global reference (1050k).
 		expect(model?.contextWindow).toBe(272_000);
 	});
+	it("routes mai-code models to the openai-responses endpoint (#5612)", async () => {
+		// Copilot's /chat/completions rejects mai-* models with
+		// `unsupported_api_for_model` (400); they are served only via /responses.
+		const { models } = await discoverCopilotModels({
+			data: [
+				{
+					id: "mai-code-1-flash-picker",
+					name: "MAI-Code-1-Flash",
+				},
+			],
+		});
+
+		const model = models.find(candidate => candidate.id === "mai-code-1-flash-picker");
+		expect(model).toBeDefined();
+		expect(model?.api).toBe("openai-responses");
+	});
+	it("routes grok-4.5 to the openai-responses endpoint (#7096)", async () => {
+		const { models } = await discoverCopilotModels({
+			data: [
+				{
+					id: "grok-4.5",
+					name: "Grok 4.5",
+				},
+			],
+		});
+
+		const model = models.find(candidate => candidate.id === "grok-4.5");
+		expect(model).toBeDefined();
+		expect(model?.api).toBe("openai-responses");
+	});
+	for (const migration of [
+		{ id: "mai-code-1-flash-picker", name: "MAI-Code-1-Flash" },
+		{ id: "grok-4.5", name: "Grok 4.5" },
+	]) {
+		it(`refreshes a cached ${migration.name} completion route after the endpoint migration`, async () => {
+			const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), `pi-ai-copilot-${migration.id}-cache-`));
+			const cacheDbPath = path.join(tempDir, "models.db");
+			const cacheProviderId = `github-copilot-${migration.id}-cache-test`;
+			try {
+				const oldManager = createModelManager({
+					providerId: "github-copilot",
+					cacheProviderId,
+					cacheDbPath,
+					fetchDynamicModels: async () => [cachedCopilotCompletionModel(migration.id, migration.name)],
+				});
+				await oldManager.refresh("online");
+
+				const fetchMock = vi.fn(async () => {
+					return new Response(
+						JSON.stringify({
+							data: [{ id: migration.id, name: migration.name }],
+						}),
+						{
+							status: 200,
+							headers: { "Content-Type": "application/json" },
+						},
+					);
+				});
+				const manager = createModelManager({
+					...githubCopilotModelManagerOptions({ apiKey: "copilot-test-key", fetch: fetchMock }),
+					cacheProviderId,
+					cacheDbPath,
+				});
+				const { models } = await manager.refresh("online-if-uncached");
+				const model = models.find(candidate => candidate.id === migration.id);
+
+				expect(fetchMock).toHaveBeenCalledTimes(1);
+				expect(model?.api).toBe("openai-responses");
+			} finally {
+				await fs.rm(tempDir, { recursive: true, force: true });
+			}
+		});
+	}
+	it("drops cached Grok 4.5 context variants when the migration refresh fails", async () => {
+		const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "pi-ai-copilot-grok-variant-cache-"));
+		const cacheDbPath = path.join(tempDir, "models.db");
+		const cacheProviderId = "github-copilot-grok-variant-cache-test";
+		try {
+			const oldManager = createModelManager({
+				providerId: "github-copilot",
+				cacheProviderId,
+				cacheDbPath,
+				fetchDynamicModels: async () => [
+					cachedCopilotCompletionModel("grok-4.5", "Grok 4.5"),
+					{
+						...cachedCopilotCompletionModel("grok-4.5-1m", "Grok 4.5 (1M)"),
+						requestModelId: "grok-4.5",
+						contextWindow: 500_000,
+					},
+				],
+			});
+			await oldManager.refresh("online");
+
+			const fetchMock = vi.fn(async () => new Response(null, { status: 503 }));
+			const manager = createModelManager({
+				...githubCopilotModelManagerOptions({ apiKey: "copilot-test-key", fetch: fetchMock }),
+				cacheProviderId,
+				cacheDbPath,
+			});
+			const { models } = await manager.refresh("online-if-uncached");
+
+			expect(fetchMock).toHaveBeenCalledTimes(1);
+			// The bundled catalog now ships a responses-route grok-4.5, so the id
+			// resurfaces from the bundle after the failed refresh. The migration
+			// contract is that the stale cached COMPLETIONS route never comes
+			// back — and the cached long-context variant has no bundled entry,
+			// so it stays dropped.
+			expect(models.find(candidate => candidate.id === "grok-4.5")?.api).toBe("openai-responses");
+			expect(models.find(candidate => candidate.id === "grok-4.5-1m")).toBeUndefined();
+		} finally {
+			await fs.rm(tempDir, { recursive: true, force: true });
+		}
+	});
 });
 
 /**
@@ -421,6 +550,28 @@ describe("github copilot tiered context windows", () => {
 		expect(variant?.cost).toEqual({ input: 4, output: 18, cacheRead: 0.4, cacheWrite: 0 });
 	});
 
+	it("prices the base model from its default tier", async () => {
+		const { models } = await discoverCopilotModels({
+			data: [
+				tieredCopilotEntry({
+					id: "gpt-5.6-luna",
+					name: "GPT-5.6 Luna",
+					window: 1_050_000,
+					maxOutput: 50_000,
+					defaultContextMax: 200_000,
+					longContextMax: 1_000_000,
+					defaultPrices: { input: 20, output: 120, cache: 2 },
+					longPrices: { input: 40, output: 180, cache: 4 },
+				}),
+			],
+		});
+
+		const base = models.find(candidate => candidate.id === "gpt-5.6-luna");
+		expect(base?.cost).toMatchObject({ input: 0.2, output: 1.2, cacheRead: 0.02 });
+		const variant = models.find(candidate => candidate.id === "gpt-5.6-luna-1m");
+		expect(variant?.cost).toMatchObject({ input: 0.4, output: 1.8, cacheRead: 0.04 });
+	});
+
 	it("keeps legacy tier-capped responses unchanged and synthesizes no variant", async () => {
 		const { models } = await discoverCopilotModels({
 			data: [
@@ -513,5 +664,232 @@ describe("github copilot tiered context windows", () => {
 		expect(served).toHaveLength(1);
 		expect(served[0]?.contextWindow).toBe(999_000);
 		expect(served[0]?.requestModelId).toBeUndefined();
+	});
+});
+
+describe("github copilot vision endpoint policy", () => {
+	const businessApiKey = JSON.stringify({
+		token: "ghu_business_token",
+		apiEndpoint: "https://api.business.githubcopilot.com",
+	});
+	const enterpriseApiKey = JSON.stringify({
+		token: "ghu_enterprise_token",
+		enterpriseUrl: "ghe.example.com",
+	});
+
+	it("keeps vision when discovery resolves to the business endpoint and upstream reports it", async () => {
+		const { models } = await discoverCopilotModels(
+			{
+				data: [
+					tieredCopilotEntry({
+						id: "claude-sonnet-4.6",
+						name: "Claude Sonnet 4.6",
+						window: 200_000,
+						maxOutput: 32_000,
+						vision: true,
+					}),
+				],
+			},
+			businessApiKey,
+			"https://api.business.githubcopilot.com",
+			"ghu_business_token",
+		);
+		const model = models.find(candidate => candidate.id === "claude-sonnet-4.6");
+		expect(model?.baseUrl).toBe("https://api.business.githubcopilot.com");
+		expect(model?.input).toEqual(["text", "image"]);
+	});
+
+	it("keeps vision when discovery resolves to an enterprise host and upstream reports it", async () => {
+		const { models } = await discoverCopilotModels(
+			{
+				data: [
+					tieredCopilotEntry({
+						id: "claude-sonnet-4.6",
+						name: "Claude Sonnet 4.6",
+						window: 200_000,
+						maxOutput: 32_000,
+						vision: true,
+					}),
+				],
+			},
+			enterpriseApiKey,
+			"https://copilot-api.ghe.example.com",
+			"ghu_enterprise_token",
+		);
+		const model = models.find(candidate => candidate.id === "claude-sonnet-4.6");
+		expect(model?.baseUrl).toBe("https://copilot-api.ghe.example.com");
+		expect(model?.input).toEqual(["text", "image"]);
+	});
+
+	it("maps explicit upstream vision false to text-only on non-personal Copilot endpoints", async () => {
+		for (const endpoint of [
+			{
+				apiKey: businessApiKey,
+				baseUrl: "https://api.business.githubcopilot.com",
+				token: "ghu_business_token",
+			},
+			{
+				apiKey: enterpriseApiKey,
+				baseUrl: "https://copilot-api.ghe.example.com",
+				token: "ghu_enterprise_token",
+			},
+		]) {
+			const { models } = await discoverCopilotModels(
+				{
+					data: [
+						tieredCopilotEntry({
+							id: "claude-sonnet-4.6",
+							name: "Claude Sonnet 4.6",
+							window: 200_000,
+							maxOutput: 32_000,
+							vision: false,
+						}),
+					],
+				},
+				endpoint.apiKey,
+				endpoint.baseUrl,
+				endpoint.token,
+			);
+			const model = models.find(candidate => candidate.id === "claude-sonnet-4.6");
+			expect(model?.baseUrl).toBe(endpoint.baseUrl);
+			expect(model?.input).toEqual(["text"]);
+		}
+	});
+
+	it("maps omitted upstream vision to text-only on non-personal Copilot endpoints", async () => {
+		for (const endpoint of [
+			{
+				apiKey: businessApiKey,
+				baseUrl: "https://api.business.githubcopilot.com",
+				token: "ghu_business_token",
+			},
+			{
+				apiKey: enterpriseApiKey,
+				baseUrl: "https://copilot-api.ghe.example.com",
+				token: "ghu_enterprise_token",
+			},
+		]) {
+			const { models } = await discoverCopilotModels(
+				{
+					data: [
+						tieredCopilotEntry({
+							id: "claude-sonnet-4.6",
+							name: "Claude Sonnet 4.6",
+							window: 200_000,
+							maxOutput: 32_000,
+						}),
+					],
+				},
+				endpoint.apiKey,
+				endpoint.baseUrl,
+				endpoint.token,
+			);
+			const model = models.find(candidate => candidate.id === "claude-sonnet-4.6");
+			expect(model?.baseUrl).toBe(endpoint.baseUrl);
+			expect(model?.input).toEqual(["text"]);
+		}
+	});
+
+	it("keeps vision on the canonical personal Copilot endpoint", async () => {
+		const { models } = await discoverCopilotModels({
+			data: [
+				tieredCopilotEntry({
+					id: "claude-sonnet-4.6",
+					name: "Claude Sonnet 4.6",
+					window: 200_000,
+					maxOutput: 32_000,
+					vision: true,
+				}),
+			],
+		});
+		const model = models.find(candidate => candidate.id === "claude-sonnet-4.6");
+		expect(model?.baseUrl).toBe("https://api.githubcopilot.com");
+		expect(model?.input).toEqual(["text", "image"]);
+	});
+
+	it("keeps explicit upstream vision false text-only through the personal endpoint manager merge", async () => {
+		const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "pi-ai-copilot-vision-"));
+		try {
+			const fetchMock = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+				const url = typeof input === "string" ? input : input.toString();
+				expect(url).toBe("https://api.githubcopilot.com/models");
+				expect(init?.method).toBe("GET");
+				expect(getHeaderValue(init?.headers, "Authorization")).toBe("Bearer copilot-test-key");
+				return new Response(
+					JSON.stringify({
+						data: [
+							tieredCopilotEntry({
+								id: "claude-sonnet-4.6",
+								name: "Claude Sonnet 4.6",
+								window: 200_000,
+								maxOutput: 32_000,
+								vision: false,
+							}),
+						],
+					}),
+					{ status: 200, headers: { "Content-Type": "application/json" } },
+				);
+			});
+
+			const bundled = getBundledModel("github-copilot", "claude-sonnet-4.6");
+			expect(bundled?.input).toEqual(["text", "image"]);
+
+			const options = githubCopilotModelManagerOptions({ apiKey: "copilot-test-key", fetch: fetchMock });
+			const manager = createModelManager({
+				...options,
+				cacheDbPath: path.join(tempDir, "models.db"),
+			});
+			const { models } = await manager.refresh("online");
+			const model = models.find(candidate => candidate.id === "claude-sonnet-4.6");
+			expect(model?.baseUrl).toBe("https://api.githubcopilot.com");
+			expect(model?.input).toEqual(["text"]);
+		} finally {
+			await fs.rm(tempDir, { recursive: true, force: true });
+		}
+	});
+
+	it("keeps the merged Model image-capable when business discovery confirms a vision-capable bundled reference", async () => {
+		// Bundled `claude-sonnet-4.6` ships with `input=['text','image']`.
+		// Discovery against the business host confirms the same upstream vision
+		// capability; the full manager merge must preserve image input instead
+		// of downgrading solely because the baseUrl is non-personal.
+		const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "pi-ai-copilot-vision-"));
+		try {
+			const fetchMock = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+				const url = typeof input === "string" ? input : input.toString();
+				expect(url).toBe("https://api.business.githubcopilot.com/models");
+				expect(getHeaderValue(init?.headers, "Authorization")).toBe("Bearer ghu_business_token");
+				return new Response(
+					JSON.stringify({
+						data: [
+							tieredCopilotEntry({
+								id: "claude-sonnet-4.6",
+								name: "Claude Sonnet 4.6",
+								window: 200_000,
+								maxOutput: 32_000,
+								vision: true,
+							}),
+						],
+					}),
+					{ status: 200, headers: { "Content-Type": "application/json" } },
+				);
+			});
+
+			const bundled = getBundledModel("github-copilot", "claude-sonnet-4.6");
+			expect(bundled?.input).toEqual(["text", "image"]);
+			expect(bundled?.baseUrl).toBe("https://api.githubcopilot.com");
+
+			const options = githubCopilotModelManagerOptions({ apiKey: businessApiKey, fetch: fetchMock });
+			const manager = createModelManager({
+				...options,
+				cacheDbPath: path.join(tempDir, "models.db"),
+			});
+			const { models } = await manager.refresh("online");
+			const model = models.find(candidate => candidate.id === "claude-sonnet-4.6");
+			expect(model?.baseUrl).toBe("https://api.business.githubcopilot.com");
+			expect(model?.input).toEqual(["text", "image"]);
+		} finally {
+			await fs.rm(tempDir, { recursive: true, force: true });
+		}
 	});
 });

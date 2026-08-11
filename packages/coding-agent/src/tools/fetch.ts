@@ -7,7 +7,6 @@ import type { FetchImpl, ImageContent, TextContent } from "@oh-my-pi/pi-ai";
 import { htmlToMarkdown } from "@oh-my-pi/pi-natives";
 import { type Component, Text } from "@oh-my-pi/pi-tui";
 import { $which, ptree, truncate } from "@oh-my-pi/pi-utils";
-import { LRUCache } from "lru-cache/raw";
 import type { Settings } from "../config/settings";
 import { readEditableNotebookText } from "../edit/notebook";
 import type { RenderResultOptions } from "../extensibility/custom-tools/types";
@@ -19,6 +18,7 @@ import { renderStatusLine, urlHyperlink } from "../tui";
 import { CachedOutputBlock, markFramedBlockComponent } from "../tui/output-block";
 import { webpExclusionForModel } from "../utils/image-loading";
 import { formatDimensionNote, resizeImage } from "../utils/image-resize";
+import { CONVERTIBLE_EXTENSIONS } from "../utils/markit";
 import { ensureTool } from "../utils/tools-manager";
 import { type ArchiveFormat, listArchiveRoot, sniffArchiveFormat } from "../utils/zip";
 import { extractWithParallel, findParallelApiKey, getParallelExtractContent } from "../web/parallel";
@@ -27,7 +27,7 @@ import { finalizeOutput, loadPage, looksLikeHtml, MAX_BYTES, MAX_OUTPUT_CHARS } 
 import { convertWithMarkit, fetchBinary } from "../web/scrapers/utils";
 import { applyListLimit } from "./list-limit";
 import { formatStyledArtifactReference, type OutputMeta } from "./output-meta";
-import { type LineRange, parseLineRanges } from "./path-utils";
+import { isReadableUrlPath, type LineRange, parseLineRanges } from "./path-utils";
 import { formatBytes, formatExpandHint, getDomain, replaceTabs } from "./render-utils";
 import { listTables, looksLikeSqlite, renderTableList } from "./sqlite-reader";
 import { ToolAbortError, ToolError } from "./tool-errors";
@@ -39,20 +39,16 @@ import { clampTimeout } from "./tool-timeouts";
 // =============================================================================
 
 const FETCH_DEFAULT_MAX_LINES = 300;
-// Convertible document types handled by markit.
+// MIME types markit can convert — one per registered converter (pdf, docx,
+// pptx, xlsx, epub). Legacy `application/msword`, `application/vnd.ms-*`, and
+// `application/rtf` are intentionally absent: markit has no converter for them.
 const CONVERTIBLE_MIMES = new Set([
 	"application/pdf",
-	"application/msword",
-	"application/vnd.ms-powerpoint",
-	"application/vnd.ms-excel",
 	"application/vnd.openxmlformats-officedocument.wordprocessingml.document",
 	"application/vnd.openxmlformats-officedocument.presentationml.presentation",
 	"application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-	"application/rtf",
 	"application/epub+zip",
 ]);
-
-const CONVERTIBLE_EXTENSIONS = new Set([".pdf", ".doc", ".docx", ".ppt", ".pptx", ".xls", ".xlsx", ".rtf", ".epub"]);
 
 const NOTEBOOK_MIMES = new Set(["application/x-ipynb+json"]);
 const NOTEBOOK_EXTENSIONS = new Set([".ipynb"]);
@@ -143,10 +139,6 @@ function normalizeUrl(url: string): string {
 		return `https://${url}`;
 	}
 	return url;
-}
-
-export function isReadableUrlPath(value: string): boolean {
-	return /^https?:\/\/?/i.test(value) || /^www\./i.test(value);
 }
 
 // URL line selectors mirror the file form: `:50`, `:50-100`, `:50+150`, `:5-10,20-30`, `:raw`,
@@ -524,7 +516,7 @@ function cleanFeedText(text: string): string {
  * Parse RSS/Atom feed to markdown
  */
 async function parseFeedToMarkdown(content: string, maxItems = 10): Promise<string> {
-	const { parseHTML } = await import("linkedom");
+	const { parseHTML } = await import("@oh-my-pi/pi-utils/dom");
 	try {
 		const doc = parseHTML(content).document;
 
@@ -1557,76 +1549,80 @@ export interface ReadUrlToolDetails {
 	meta?: OutputMeta;
 }
 
-interface ReadUrlCacheEntry {
+interface ReadUrlEntry {
 	artifactId?: string;
+	artifactPath?: string;
 	details: ReadUrlToolDetails;
 	image?: FetchImagePayload;
 	output: string;
+	content: string;
 }
 
-const READ_URL_CACHE_MAX_ENTRIES = 100;
-const readUrlCache = new LRUCache<string, ReadUrlCacheEntry>({ max: READ_URL_CACHE_MAX_ENTRIES });
-
-function getReadUrlCacheKey(session: ToolSession, requestedUrl: string, raw: boolean): string {
-	const scope = session.getSessionFile() ?? session.cwd;
-	return `${scope}::${raw ? "raw" : "rendered"}::${normalizeUrl(requestedUrl)}`;
-}
-
-async function readArtifactOutput(session: ToolSession, artifactId: string): Promise<string | null> {
+async function findArtifactPath(session: ToolSession, artifactId: string): Promise<string | null> {
 	const artifactsDir = session.getArtifactsDir?.();
 	if (!artifactsDir) return null;
 
 	try {
 		const files = await fs.readdir(artifactsDir);
 		const match = files.find(file => file.startsWith(`${artifactId}.`));
-		if (!match) return null;
-		return await Bun.file(path.join(artifactsDir, match)).text();
+		return match ? path.join(artifactsDir, match) : null;
 	} catch {
 		return null;
 	}
 }
 
-async function materializeReadUrlCacheEntry(
+async function persistReadUrlArtifact(
 	session: ToolSession,
-	entry: ReadUrlCacheEntry,
-): Promise<ReadUrlCacheEntry | null> {
+	output: string,
+): Promise<{ id?: string; path?: string } | undefined> {
+	const artifact = await session.allocateOutputArtifact?.("read");
+	if (!artifact?.path) return undefined;
+	await Bun.write(artifact.path, output);
+	return artifact;
+}
+
+async function ensureReadUrlArtifact(session: ToolSession, entry: ReadUrlEntry): Promise<ReadUrlEntry> {
+	if (entry.artifactId && entry.artifactPath) return entry;
 	if (entry.artifactId) {
-		const artifactOutput = await readArtifactOutput(session, entry.artifactId);
-		if (artifactOutput !== null) {
-			return { ...entry, output: artifactOutput };
-		}
+		const artifactPath = await findArtifactPath(session, entry.artifactId);
+		if (artifactPath) return { ...entry, artifactPath };
 	}
-
-	return entry.output.length > 0 ? entry : null;
+	const artifact = await persistReadUrlArtifact(session, entry.output);
+	return artifact?.id ? { ...entry, artifactId: artifact.id, artifactPath: artifact.path } : entry;
 }
 
-async function persistReadUrlArtifact(session: ToolSession, output: string): Promise<string | undefined> {
-	const { path: artifactPath, id } = (await session.allocateOutputArtifact?.("read")) ?? {};
-	if (!artifactPath) return undefined;
-	await Bun.write(artifactPath, output);
-	return id;
+function readUrlContentExtension(finalUrl: string): string {
+	try {
+		const ext = getFilenameExtensionHint(new URL(finalUrl).pathname);
+		return ext && /^\.[a-z0-9][a-z0-9+.-]{0,15}$/i.test(ext) ? ext : ".txt";
+	} catch {
+		return ".txt";
+	}
 }
 
-async function ensureReadUrlCacheArtifact(session: ToolSession, entry: ReadUrlCacheEntry): Promise<ReadUrlCacheEntry> {
-	if (entry.artifactId) return entry;
-	const artifactId = await persistReadUrlArtifact(session, entry.output);
-	return artifactId ? { ...entry, artifactId } : entry;
+async function materializeReadUrlContent(session: ToolSession, entry: ReadUrlEntry, raw: boolean): Promise<string> {
+	const root = session.getArtifactsDir?.();
+	if (!root) {
+		throw new ToolError("Cannot search URL output because this session cannot materialize read artifacts.");
+	}
+	const dir = path.join(root, "url-search");
+	await fs.mkdir(dir, { recursive: true });
+	const hash = Bun.hash(`${raw ? "raw" : "rendered"}:${entry.details.finalUrl}`).toString(36);
+	const contentPath = path.join(dir, `${hash}${readUrlContentExtension(entry.details.finalUrl)}`);
+	await Bun.write(contentPath, entry.content);
+	return contentPath;
 }
 
-function cacheReadUrlEntry(session: ToolSession, requestedUrl: string, raw: boolean, entry: ReadUrlCacheEntry): void {
-	readUrlCache.set(getReadUrlCacheKey(session, requestedUrl, raw), entry);
-	readUrlCache.set(getReadUrlCacheKey(session, entry.details.finalUrl, raw), entry);
-}
-
-async function buildReadUrlCacheEntry(
+/** Fetch and render a URL for a read or search operation. */
+export async function fetchReadUrl(
 	session: ToolSession,
 	params: { path: string; raw?: boolean },
 	signal?: AbortSignal,
 	options?: { ensureArtifact?: boolean },
-): Promise<ReadUrlCacheEntry> {
+): Promise<ReadUrlEntry> {
 	const { path: url, raw = false } = params;
 
-	const effectiveTimeout = clampTimeout("fetch", 30);
+	const effectiveTimeout = clampTimeout("fetch", 30, session.settings.get("tools.maxTimeout"));
 
 	if (signal?.aborted) {
 		throw new ToolAbortError();
@@ -1644,10 +1640,11 @@ async function buildReadUrlCacheEntry(
 		webpExclusionForModel(session.getActiveModel?.()),
 	);
 	const output = buildUrlReadOutput(result, result.content);
-	const artifactId = options?.ensureArtifact ? await persistReadUrlArtifact(session, output) : undefined;
+	const artifact = options?.ensureArtifact ? await persistReadUrlArtifact(session, output) : undefined;
 
 	return {
-		artifactId,
+		artifactId: artifact?.id,
+		artifactPath: artifact?.path,
 		details: {
 			kind: "url",
 			url: result.url,
@@ -1659,31 +1656,22 @@ async function buildReadUrlCacheEntry(
 		},
 		image: result.image,
 		output,
+		content: result.content,
 	};
 }
 
-export async function loadReadUrlCacheEntry(
+/** Materialize rendered URL body text to a local file for tools that require filesystem paths. */
+export async function materializeReadUrlToFile(
 	session: ToolSession,
 	params: { path: string; raw?: boolean },
 	signal?: AbortSignal,
-	options?: { ensureArtifact?: boolean; preferCached?: boolean },
-): Promise<ReadUrlCacheEntry> {
-	const raw = params.raw ?? false;
-	const cached = readUrlCache.get(getReadUrlCacheKey(session, params.path, raw));
-	if (options?.preferCached && cached) {
-		const prepared = options.ensureArtifact ? await ensureReadUrlCacheArtifact(session, cached) : cached;
-		const materialized = await materializeReadUrlCacheEntry(session, prepared);
-		if (materialized) {
-			cacheReadUrlEntry(session, params.path, raw, materialized);
-			return materialized;
-		}
+): Promise<{ path: string; details: ReadUrlToolDetails }> {
+	if (!session.settings.get("fetch.enabled")) {
+		throw new ToolError("URL reads are disabled by settings.");
 	}
-
-	const fresh = await buildReadUrlCacheEntry(session, params, signal, {
-		ensureArtifact: options?.ensureArtifact,
-	});
-	cacheReadUrlEntry(session, params.path, raw, fresh);
-	return fresh;
+	const entry = await fetchReadUrl(session, params, signal);
+	const contentPath = await materializeReadUrlContent(session, entry, params.raw ?? false);
+	return { path: contentPath, details: entry.details };
 }
 
 function buildUrlReadOutput(result: FetchRenderResult, content: string): string {
@@ -1704,36 +1692,35 @@ export async function executeReadUrl(
 	params: { path: string; raw?: boolean },
 	signal?: AbortSignal,
 ): Promise<AgentToolResult<ReadUrlToolDetails>> {
-	let cacheEntry = await loadReadUrlCacheEntry(session, params, signal, { preferCached: true });
-	const truncation = truncateHead(cacheEntry.output, {
+	let entry = await fetchReadUrl(session, params, signal);
+	const truncation = truncateHead(entry.output, {
 		maxBytes: DEFAULT_MAX_BYTES,
 		maxLines: FETCH_DEFAULT_MAX_LINES,
 	});
 	const needsArtifact = truncation.truncated;
-	if (needsArtifact && !cacheEntry.artifactId) {
-		cacheEntry = await ensureReadUrlCacheArtifact(session, cacheEntry);
-		cacheReadUrlEntry(session, params.path, params.raw ?? false, cacheEntry);
+	if (needsArtifact && !entry.artifactId) {
+		entry = await ensureReadUrlArtifact(session, entry);
 	}
-	const output = needsArtifact ? truncation.content : cacheEntry.output;
+	const output = needsArtifact ? truncation.content : entry.output;
 	const details: ReadUrlToolDetails = {
-		...cacheEntry.details,
-		truncated: Boolean(cacheEntry.details.truncated || needsArtifact),
+		...entry.details,
+		truncated: Boolean(entry.details.truncated || needsArtifact),
 	};
 
 	const contentBlocks: Array<TextContent | ImageContent> = [{ type: "text", text: output }];
-	if (cacheEntry.image) {
-		contentBlocks.push({ type: "image", data: cacheEntry.image.data, mimeType: cacheEntry.image.mimeType });
+	if (entry.image) {
+		contentBlocks.push({ type: "image", data: entry.image.data, mimeType: entry.image.mimeType });
 	}
 
 	const resultBuilder = toolResult(details).content(contentBlocks).sourceUrl(details.finalUrl);
 	if (needsArtifact) {
-		resultBuilder.truncation(truncation, { direction: "head", artifactId: cacheEntry.artifactId });
-	} else if (cacheEntry.details.truncated) {
-		const outputLines = cacheEntry.output.split("\n").length;
-		const outputBytes = Buffer.byteLength(cacheEntry.output, "utf-8");
+		resultBuilder.truncation(truncation, { direction: "head", artifactId: entry.artifactId });
+	} else if (entry.details.truncated) {
+		const outputLines = entry.output.split("\n").length;
+		const outputBytes = Buffer.byteLength(entry.output, "utf-8");
 		const totalBytes = Math.max(outputBytes + 1, MAX_OUTPUT_CHARS + 1);
 		const totalLines = outputLines + 1;
-		resultBuilder.truncationFromText(cacheEntry.output, {
+		resultBuilder.truncationFromText(entry.output, {
 			direction: "tail",
 			totalLines,
 			totalBytes,

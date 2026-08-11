@@ -76,6 +76,9 @@ describe("emergencyTerminalRestore alt-screen gating", () => {
 
 		const restored = writes.join("");
 		expect(restored).not.toContain("\x1b[?1049l");
+		expect(restored).toContain("\x1b[?1006l");
+		expect(restored).toContain("\x1b[?1003l");
+		expect(restored).toContain("\x1b[?1000l");
 		// Still performs the blind restore itself (cursor visibility proves the branch ran).
 		expect(restored).toContain("\x1b[?25h");
 	});
@@ -87,7 +90,13 @@ describe("emergencyTerminalRestore alt-screen gating", () => {
 
 		writes.length = 0;
 		emergencyTerminalRestore();
-		expect(writes.join("")).toContain("\x1b[?1049l");
+		const firstRestore = writes.join("");
+		expect(firstRestore).toContain("\x1b[?1049l");
+		const altExit = firstRestore.indexOf("\x1b[?1049l");
+		expect(firstRestore.indexOf("\x1b[<u", altExit + 1)).toBeGreaterThan(altExit);
+		expect(firstRestore).toContain("\x1b[?1006l");
+		expect(firstRestore).toContain("\x1b[?1003l");
+		expect(firstRestore).toContain("\x1b[?1000l");
 
 		// State was consumed: a second restore must not leave the (now main) buffer again.
 		writes.length = 0;
@@ -99,12 +108,39 @@ describe("emergencyTerminalRestore alt-screen gating", () => {
 		const inactive = startCapturedTerminal();
 		inactive.writes.length = 0;
 		emergencyTerminalRestore(); // activeTerminal set, alt screen never entered
-		expect(inactive.writes.join("")).not.toContain("\x1b[?1049l");
+		const inactiveRestore = inactive.writes.join("");
+		expect(inactiveRestore).not.toContain("\x1b[?1049l");
+		expect(inactiveRestore).toContain("\x1b[?1006l");
+		expect(inactiveRestore).toContain("\x1b[?1003l");
+		expect(inactiveRestore).toContain("\x1b[?1000l");
 
 		const active = startCapturedTerminal();
 		setAltScreenActive(true);
 		active.writes.length = 0;
 		emergencyTerminalRestore();
-		expect(active.writes.join("")).toContain("\x1b[?1049l");
+		const activeRestore = active.writes.join("");
+		expect(activeRestore).toContain("\x1b[?1049l");
+		expect(activeRestore).toContain("\x1b[?1006l");
+		expect(activeRestore).toContain("\x1b[?1003l");
+		expect(activeRestore).toContain("\x1b[?1000l");
+	});
+	it("pops keyboard enhancement frames on both screens when crashing from a fullscreen overlay", () => {
+		const { terminal, writes } = startCapturedTerminal();
+		process.stdin.emit("data", "\x1b[?0u");
+		expect(terminal.kittyEnableSequence).toBe("\x1b[>5u");
+
+		terminal.write(`\x1b[?1049h${terminal.kittyEnableSequence}`);
+		setAltScreenActive(true);
+		writes.length = 0;
+
+		emergencyTerminalRestore();
+
+		const restored = writes.join("");
+		const altPop = restored.indexOf("\x1b[<u");
+		const altExit = restored.indexOf("\x1b[?1049l");
+		const mainPop = restored.indexOf("\x1b[<u", altExit + 1);
+		expect(altPop).toBeGreaterThanOrEqual(0);
+		expect(altPop).toBeLessThan(altExit);
+		expect(mainPop).toBeGreaterThan(altExit);
 	});
 });

@@ -3,7 +3,8 @@
  * Uses different OAuth credentials than google-gemini-cli for access to additional models.
  */
 import { getAntigravityUserAgent } from "@oh-my-pi/pi-catalog/wire/gemini-headers";
-import { runGoogleOAuthLogin } from "./google-oauth-shared";
+import * as AIError from "../../error";
+import { oauthFetch, runGoogleOAuthLogin, throwIfLoginCancelled } from "./google-oauth-shared";
 import type { OAuthController, OAuthCredentials } from "./types";
 
 const decode = (s: string) => atob(s);
@@ -73,23 +74,29 @@ async function onboardProjectWithRetries(
 	endpoint: string,
 	headers: Record<string, string>,
 	onboardBody: { tierId: string; metadata: typeof ANTIGRAVITY_LOAD_CODE_ASSIST_METADATA },
+	signal: AbortSignal | undefined,
 	onProgress?: (message: string) => void,
 ): Promise<string> {
 	for (let attempt = 1; attempt <= PROJECT_ONBOARD_MAX_ATTEMPTS; attempt += 1) {
 		if (attempt > 1) {
 			onProgress?.(`Waiting for project provisioning (attempt ${attempt}/${PROJECT_ONBOARD_MAX_ATTEMPTS})...`);
+			throwIfLoginCancelled(signal);
 			await Bun.sleep(PROJECT_ONBOARD_INTERVAL_MS);
 		}
 
-		const onboardResponse = await fetch(`${endpoint}/v1internal:onboardUser`, {
-			method: "POST",
-			headers,
-			body: JSON.stringify(onboardBody),
-		});
+		throwIfLoginCancelled(signal);
+		const onboardResponse = await oauthFetch(
+			`${endpoint}/v1internal:onboardUser`,
+			{ method: "POST", headers, body: JSON.stringify(onboardBody) },
+			{ provider: "google-antigravity", signal },
+		);
 
 		if (!onboardResponse.ok) {
 			const errorText = await onboardResponse.text();
-			throw new Error(`onboardUser failed: ${onboardResponse.status} ${onboardResponse.statusText}: ${errorText}`);
+			throw new AIError.OAuthError(
+				`onboardUser failed: ${onboardResponse.status} ${onboardResponse.statusText}: ${errorText}`,
+				{ kind: "provisioning", provider: "google-antigravity", status: onboardResponse.status },
+			);
 		}
 
 		const operation = (await onboardResponse.json()) as LongRunningOperationResponse;
@@ -103,12 +110,17 @@ async function onboardProjectWithRetries(
 		}
 	}
 
-	throw new Error(
+	throw new AIError.OAuthError(
 		`onboardUser did not return a provisioned project id after ${PROJECT_ONBOARD_MAX_ATTEMPTS} attempts`,
+		{ kind: "provisioning", provider: "google-antigravity" },
 	);
 }
 
-async function discoverProject(accessToken: string, onProgress?: (message: string) => void): Promise<string> {
+async function discoverProject(
+	accessToken: string,
+	onProgress?: (message: string) => void,
+	signal?: AbortSignal,
+): Promise<string> {
 	const headers = {
 		Authorization: `Bearer ${accessToken}`,
 		"Content-Type": "application/json",
@@ -118,17 +130,25 @@ async function discoverProject(accessToken: string, onProgress?: (message: strin
 	onProgress?.("Checking for existing project...");
 	const endpoint = CLOUD_CODE_ENDPOINT;
 	try {
-		const loadResponse = await fetch(`${endpoint}/v1internal:loadCodeAssist`, {
-			method: "POST",
-			headers,
-			body: JSON.stringify({
-				metadata: ANTIGRAVITY_LOAD_CODE_ASSIST_METADATA,
-			}),
-		});
+		throwIfLoginCancelled(signal);
+		const loadResponse = await oauthFetch(
+			`${endpoint}/v1internal:loadCodeAssist`,
+			{
+				method: "POST",
+				headers,
+				body: JSON.stringify({
+					metadata: ANTIGRAVITY_LOAD_CODE_ASSIST_METADATA,
+				}),
+			},
+			{ provider: "google-antigravity", signal },
+		);
 
 		if (!loadResponse.ok) {
 			const errorText = await loadResponse.text();
-			throw new Error(`loadCodeAssist failed: ${loadResponse.status} ${loadResponse.statusText}: ${errorText}`);
+			throw new AIError.OAuthError(
+				`loadCodeAssist failed: ${loadResponse.status} ${loadResponse.statusText}: ${errorText}`,
+				{ kind: "discovery", status: loadResponse.status },
+			);
 		}
 
 		const loadPayload = (await loadResponse.json()) as LoadCodeAssistPayload;
@@ -143,17 +163,22 @@ async function discoverProject(accessToken: string, onProgress?: (message: strin
 			tierId,
 			metadata: ANTIGRAVITY_LOAD_CODE_ASSIST_METADATA,
 		};
-		const provisionedProject = await onboardProjectWithRetries(endpoint, headers, onboardBody, onProgress);
+		const provisionedProject = await onboardProjectWithRetries(endpoint, headers, onboardBody, signal, onProgress);
 		return provisionedProject;
 	} catch (error) {
-		throw new Error(
+		if (error instanceof AIError.LoginCancelledError || error instanceof AIError.OAuthError) {
+			throw error;
+		}
+		throw new AIError.OAuthError(
 			`Could not discover or provision an Antigravity project. ${error instanceof Error ? error.message : String(error)}`,
+			{ kind: "discovery", provider: "google-antigravity", cause: error },
 		);
 	}
 }
 
 export async function loginAntigravity(ctrl: OAuthController): Promise<OAuthCredentials> {
 	return runGoogleOAuthLogin(ctrl, {
+		provider: "google-antigravity",
 		clientId: CLIENT_ID,
 		clientSecret: CLIENT_SECRET,
 		authUrl: AUTH_URL,
@@ -182,7 +207,7 @@ export async function refreshAntigravityToken(refreshToken: string, projectId: s
 
 	if (!response.ok) {
 		const error = await response.text();
-		throw new Error(`Antigravity token refresh failed: ${error}`);
+		throw new AIError.OAuthError(`Antigravity token refresh failed: ${error}`, { kind: "token-refresh" });
 	}
 
 	const data = (await response.json()) as {

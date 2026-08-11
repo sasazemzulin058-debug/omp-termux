@@ -1,4 +1,4 @@
-import { describe, expect, it } from "bun:test";
+import { describe, expect, it, vi } from "bun:test";
 import { streamAzureOpenAIResponses } from "@oh-my-pi/pi-ai/providers/azure-openai-responses";
 import { streamOpenAICompletions } from "@oh-my-pi/pi-ai/providers/openai-completions";
 import { streamOpenAIResponses } from "@oh-my-pi/pi-ai/providers/openai-responses";
@@ -465,13 +465,12 @@ describe("OpenAI-family first-event timeouts", () => {
 
 		expect(result.stopReason).toBe("error");
 		expect(result.errorMessage).toBe("OpenAI responses stream stalled while waiting for the next event");
-		expect(result.content as unknown[]).toEqual([
+		expect(JSON.parse(JSON.stringify(result.content))).toEqual([
 			{
 				type: "toolCall",
 				id: "call_stalled|fc_stalled",
 				name: "todo",
 				arguments: {},
-				partialJson: "",
 			},
 		]);
 	});
@@ -706,6 +705,53 @@ describe("OpenAI-family first-event timeouts", () => {
 		]);
 	});
 
+	it("accepts response.done with a completed response as an OpenAI responses terminal event", async () => {
+		const completedResponse = createSseResponse([
+			{ type: "response.created", response: { id: "resp_done" } },
+			{
+				type: "response.output_item.added",
+				item: { type: "message", id: "msg_done", role: "assistant", status: "in_progress", content: [] },
+			},
+			{ type: "response.content_part.added", part: { type: "output_text", text: "" } },
+			{ type: "response.output_text.delta", delta: "Hello done" },
+			{
+				type: "response.output_item.done",
+				item: {
+					type: "message",
+					id: "msg_done",
+					role: "assistant",
+					status: "completed",
+					content: [{ type: "output_text", text: "Hello done" }],
+				},
+			},
+			{
+				type: "response.done",
+				response: {
+					id: "resp_done",
+					status: "completed",
+					usage: {
+						input_tokens: 3,
+						output_tokens: 2,
+						total_tokens: 5,
+					},
+				},
+			},
+		]);
+		const fetch: FetchImpl = () => Promise.resolve(completedResponse);
+		const result = await streamOpenAIResponses(openAIResponsesModel, baseContext(), {
+			apiKey: "test-key",
+			fetch,
+		}).result();
+
+		expect(result.errorMessage).toBeUndefined();
+		expect(result.stopReason).toBe("stop");
+		expect(result.content as unknown[]).toContainEqual({
+			type: "text",
+			text: "Hello done",
+			textSignature: '{"v":1,"id":"msg_done"}',
+		});
+	});
+
 	it("errors when Azure OpenAI responses stream closes without a terminal response event", async () => {
 		const incompleteResponse = createSseResponse([
 			{ type: "response.created", response: { id: "resp_incomplete_azure" } },
@@ -814,5 +860,87 @@ describe("OpenAI-family first-event timeouts", () => {
 
 		expect(result.stopReason).toBe("error");
 		expect(result.errorMessage).toBe("OpenAI responses stream stalled while waiting for the next event");
+	});
+
+	it("honors streamFirstEventTimeoutMs from model.compat for OpenAI responses streams", async () => {
+		const customResponsesModel: Model<"openai-responses"> = buildModel({
+			id: "slow-first-event",
+			name: "Slow First Event",
+			api: "openai-responses",
+			provider: "custom",
+			baseUrl: "https://example.com/v1",
+			reasoning: false,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 128000,
+			maxTokens: 16384,
+			compat: { streamFirstEventTimeoutMs: 20, streamIdleTimeoutMs: 5 },
+		});
+		const fetchMock = createDelayedFetch(30, createOpenAIResponsesSuccessResponse);
+
+		const result = await streamOpenAIResponses(customResponsesModel, baseContext(), {
+			apiKey: "test-key",
+			fetch: fetchMock,
+		}).result();
+
+		expect(result.stopReason).toBe("error");
+		expect(result.errorMessage).toBe("OpenAI responses stream timed out while waiting for the first event");
+	});
+
+	it("keeps a local first-event disable after SSE headers arrive", async () => {
+		vi.useFakeTimers();
+		const localResponsesModel: Model<"openai-responses"> = buildModel({
+			id: "slow-local-prefill",
+			name: "Slow Local Prefill",
+			api: "openai-responses",
+			provider: "llama.cpp",
+			baseUrl: "http://127.0.0.1:8080/v1",
+			reasoning: false,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 200000,
+			maxTokens: 16384,
+			compat: { streamFirstEventTimeoutMs: 0, streamIdleTimeoutMs: 20 },
+		});
+		const responseBody = new Uint8Array(await createOpenAIResponsesSuccessResponse().arrayBuffer());
+		const bodyRead = Promise.withResolvers<void>();
+		const releaseBody = Promise.withResolvers<void>();
+		const fetchMock: FetchImpl = () => {
+			const body = new ReadableStream<Uint8Array>(
+				{
+					async pull(controller) {
+						bodyRead.resolve();
+						await releaseBody.promise;
+						controller.enqueue(responseBody);
+						controller.close();
+					},
+				},
+				{ highWaterMark: 0 },
+			);
+			return Promise.resolve(
+				new Response(body, {
+					status: 200,
+					headers: { "content-type": "text/event-stream" },
+				}),
+			);
+		};
+
+		try {
+			const resultPromise = streamOpenAIResponses(localResponsesModel, baseContext(), {
+				apiKey: "test-key",
+				fetch: fetchMock,
+			}).result();
+			await bodyRead.promise;
+			for (let i = 0; i < 10; i++) await Promise.resolve();
+
+			expect(vi.getTimerCount()).toBe(0);
+			releaseBody.resolve();
+			const result = await resultPromise;
+			expect(result.stopReason).toBe("stop");
+			expect(getFirstTextContent(result)).toMatchObject({ type: "text", text: "Hello delayed" });
+		} finally {
+			releaseBody.resolve();
+			vi.useRealTimers();
+		}
 	});
 });

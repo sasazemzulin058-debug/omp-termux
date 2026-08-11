@@ -89,25 +89,3 @@ describe("resolveOpenAIResponsesCompat supportsDeveloperRole", () => {
 		expect(buildOpenAIResponsesCompat(model).supportsDeveloperRole).toBe(true);
 	});
 });
-
-describe("buildOpenAIResponsesCompat requiresJuiceZeroHack", () => {
-	it("auto-detects GPT-5-family model names case-insensitively", () => {
-		const model = { provider: "openai", name: "GPT-5 Mini", baseUrl: "https://api.openai.com/v1" };
-		expect(buildOpenAIResponsesCompat(model).requiresJuiceZeroHack).toBe(true);
-	});
-
-	it("stays off for non-GPT-5 model names", () => {
-		const model = { provider: "openai", name: "o4-mini", baseUrl: "https://api.openai.com/v1" };
-		expect(buildOpenAIResponsesCompat(model).requiresJuiceZeroHack).toBe(false);
-	});
-
-	it("honors an explicit compat override on a GPT-5 model", () => {
-		const model = {
-			provider: "openai",
-			name: "GPT-5 Mini",
-			baseUrl: "https://api.openai.com/v1",
-			compat: { requiresJuiceZeroHack: false },
-		};
-		expect(buildOpenAIResponsesCompat(model).requiresJuiceZeroHack).toBe(false);
-	});
-});

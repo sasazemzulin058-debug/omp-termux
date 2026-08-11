@@ -1,16 +1,25 @@
 /**
  * Extension runner - executes extensions and manages their lifecycle.
  */
-import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
+import type {
+	AgentMessage,
+	AgentTool,
+	AgentToolContext,
+	AgentToolResult,
+	AgentToolUpdateCallback,
+} from "@oh-my-pi/pi-agent-core";
 import type { CredentialDisabledEvent, ImageContent, Model, ProviderResponseMetadata } from "@oh-my-pi/pi-ai";
 import type { KeyId } from "@oh-my-pi/pi-tui";
 import { logger } from "@oh-my-pi/pi-utils";
 import type { ModelRegistry } from "../../config/model-registry";
 import type { Settings } from "../../config/settings";
+import type { LocalProtocolOptions } from "../../internal-urls/local-protocol";
 import type { MemoryRuntimeContext } from "../../memory-backend";
 import { type Theme, theme } from "../../modes/theme/theme";
+import type { AsyncJobSnapshot } from "../../session/agent-session";
 import type { SessionManager } from "../../session/session-manager";
 import type { BranchHandler, NavigateTreeHandler, NewSessionHandler } from "../session-handler-types";
+import { ManagedTimers } from "./managed-timers";
 import { createExtensionModelQuery } from "./model-api";
 import type {
 	AfterProviderResponseEvent,
@@ -35,8 +44,10 @@ import type {
 	ExtensionRuntime,
 	ExtensionShortcut,
 	ExtensionUIContext,
+	ExtensionUIDialogOptions,
 	InputEvent,
 	InputEventResult,
+	McpNotificationEvent,
 	MessageRenderer,
 	RegisteredCommand,
 	RegisteredTool,
@@ -70,6 +81,10 @@ export type ExtensionErrorListener = (error: ExtensionError) => void;
 export const EXTENSION_HANDLER_TIMEOUT_MS = 30_000;
 let extensionHandlerTimeoutMs = EXTENSION_HANDLER_TIMEOUT_MS;
 
+function throwUnsupportedServiceTierAction(): never {
+	throw new Error("This extension host does not support service-tier actions");
+}
+
 export function testSetExtensionHandlerTimeoutMs(timeoutMs: number): void {
 	extensionHandlerTimeoutMs = timeoutMs;
 }
@@ -97,8 +112,127 @@ function handlerTimeoutForEvent(eventType: string): number {
 }
 
 const EXTENSION_HANDLER_TIMEOUT = Symbol("extensionHandlerTimeout");
+const EXTENSION_HANDLER_ABORTED = Symbol("extensionHandlerAborted");
+
+function attachHandlerSignal(
+	dialogOptions: ExtensionUIDialogOptions | undefined,
+	handlerSignal: AbortSignal,
+): ExtensionUIDialogOptions {
+	if (!dialogOptions) return { signal: handlerSignal };
+	if (!dialogOptions.signal) return { ...dialogOptions, signal: handlerSignal };
+	if (dialogOptions.signal === handlerSignal) return dialogOptions;
+	return { ...dialogOptions, signal: AbortSignal.any([dialogOptions.signal, handlerSignal]) };
+}
+
+function createHandlerUIContext(ui: ExtensionUIContext, handlerSignal: AbortSignal): ExtensionUIContext {
+	const askDialog = ui.askDialog;
+	const dialogMethods = {
+		select: (title, options, dialogOptions) =>
+			ui.select(title, options, attachHandlerSignal(dialogOptions, handlerSignal)),
+		confirm: (title, message, dialogOptions) =>
+			ui.confirm(title, message, attachHandlerSignal(dialogOptions, handlerSignal)),
+		input: (title, placeholder, dialogOptions) =>
+			ui.input(title, placeholder, attachHandlerSignal(dialogOptions, handlerSignal)),
+		askDialog: askDialog
+			? (questions, dialogOptions) =>
+					askDialog.call(ui, questions, attachHandlerSignal(dialogOptions, handlerSignal))
+			: undefined,
+		editor: (title, prefill, dialogOptions, editorOptions) =>
+			ui.editor(title, prefill, attachHandlerSignal(dialogOptions, handlerSignal), editorOptions),
+	} satisfies Pick<ExtensionUIContext, "select" | "confirm" | "input" | "askDialog" | "editor">;
+	const delegatedMethods = new Map<PropertyKey, unknown>();
+
+	return new Proxy(ui, {
+		get(target, property) {
+			if (Object.hasOwn(dialogMethods, property)) {
+				return Reflect.get(dialogMethods, property, dialogMethods);
+			}
+			const cached = delegatedMethods.get(property);
+			if (cached) return cached;
+			const value: unknown = Reflect.get(target, property, target);
+			if (typeof value !== "function") return value;
+			const delegated: unknown = value.bind(target);
+			delegatedMethods.set(property, delegated);
+			return delegated;
+		},
+	});
+}
+
+/**
+ * Scope `ctx` to a single handler run without spreading it: `{ ...ctx }` would
+ * snapshot live accessors (notably the `model` getter), so a handler calling
+ * `pi.setModel()` and then reading `ctx.model` would see a stale model.
+ * Prototype delegation keeps every getter live while overriding `ui`.
+ */
+function createHandlerContext(ctx: ExtensionContext, handlerSignal: AbortSignal): ExtensionContext {
+	const scoped: ExtensionContext = Object.create(ctx);
+	Object.defineProperty(scoped, "ui", {
+		value: createHandlerUIContext(ctx.ui, handlerSignal),
+		enumerable: true,
+		configurable: true,
+	});
+	return scoped;
+}
+
+/**
+ * Race `work` against a `timeoutMs` budget and optional cancellation signal,
+ * clearing the timer and abort listener as soon as one branch settles.
+ *
+ * We deliberately avoid `Bun.sleep(timeoutMs).then(...)` here: that leaves an
+ * uncancellable timer registered with the event loop, so every successful
+ * handler race leaks a timer that keeps the process alive until the deadline
+ * fires — up to the default 30s cap, which stalls non-interactive CLI exit
+ * after any subscribed `tool_call`/`tool_result` handler runs (issue #3948
+ * review, `chatgpt-codex-connector[bot]`). `setTimeout` returns a handle we
+ * can `clearTimeout` on the winning branch.
+ */
+async function raceHandlerWithTimeout<T>(
+	work: (handlerSignal: AbortSignal) => Promise<T> | T,
+	timeoutMs: number,
+	signal?: AbortSignal,
+): Promise<T | typeof EXTENSION_HANDLER_TIMEOUT | typeof EXTENSION_HANDLER_ABORTED> {
+	if (signal?.aborted) return EXTENSION_HANDLER_ABORTED;
+
+	const timeoutController = new AbortController();
+	const handlerSignal = signal ? AbortSignal.any([signal, timeoutController.signal]) : timeoutController.signal;
+	const { promise: interruptPromise, resolve: resolveInterrupt } = Promise.withResolvers<
+		typeof EXTENSION_HANDLER_TIMEOUT | typeof EXTENSION_HANDLER_ABORTED
+	>();
+	const onAbort = () => resolveInterrupt(EXTENSION_HANDLER_ABORTED);
+	signal?.addEventListener("abort", onAbort, { once: true });
+	const timer = setTimeout(() => {
+		timeoutController.abort(new DOMException(`Handler timed out after ${timeoutMs}ms`, "TimeoutError"));
+		resolveInterrupt(EXTENSION_HANDLER_TIMEOUT);
+	}, timeoutMs);
+	try {
+		if (signal?.aborted) return EXTENSION_HANDLER_ABORTED;
+		const workPromise = Promise.resolve(work(handlerSignal));
+		const result = await Promise.race([workPromise, interruptPromise]);
+		if (result === EXTENSION_HANDLER_TIMEOUT) {
+			await Promise.race([
+				workPromise.then(
+					() => undefined,
+					() => undefined,
+				),
+				Bun.sleep(0),
+			]);
+		}
+		return result;
+	} finally {
+		clearTimeout(timer);
+		signal?.removeEventListener("abort", onAbort);
+	}
+}
 
 const MAX_PENDING_CREDENTIAL_DISABLED = 32;
+
+/**
+ * Buffer cap for `mcp_notification` events received before {@link ExtensionRunner.initialize}
+ * has run. Sized to match the manager-side buffer in `MCPManager.NOTIFICATION_BUFFER_CAP` so
+ * the two layers can't drop different amounts of the same burst — the pipe drains, or it
+ * spills, but it does so consistently at both ends. Drop-oldest under pressure.
+ */
+const MAX_PENDING_MCP_NOTIFICATIONS = 100;
 
 /**
  * Events handled by the generic emit() method.
@@ -151,17 +285,22 @@ export type SwitchSessionHandler = (sessionPath: string) => Promise<{ cancelled:
 export type ShutdownHandler = () => void;
 
 /**
- * Helper function to emit session_shutdown event to extensions.
- * Returns true if the event was emitted, false if there were no handlers.
+ * Emit `session_shutdown` and clear timers owned by an extension runner.
+ *
+ * Returns whether any shutdown handlers were present. Timer cleanup runs even
+ * when a handler fails so extension background work cannot outlive its host.
  */
 export async function emitSessionShutdownEvent(extensionRunner: ExtensionRunner | undefined): Promise<boolean> {
-	if (extensionRunner?.hasHandlers("session_shutdown")) {
+	if (!extensionRunner) return false;
+	try {
+		if (!extensionRunner.hasHandlers("session_shutdown")) return false;
 		await extensionRunner.emit({
 			type: "session_shutdown",
 		});
 		return true;
+	} finally {
+		extensionRunner.clearManagedTimers();
 	}
-	return false;
 }
 
 const noOpUIContext: ExtensionUIContext = {
@@ -181,6 +320,7 @@ const noOpUIContext: ExtensionUIContext = {
 	pasteToEditor: () => {},
 	getEditorText: () => "",
 	editor: async () => undefined,
+	addAutocompleteProvider: () => {},
 	setEditorComponent: () => {},
 	get theme() {
 		return theme;
@@ -203,6 +343,7 @@ export class ExtensionRunner {
 	#getContextUsageFn: () => ContextUsage | undefined = () => undefined;
 	#compactFn: (instructionsOrOptions?: string | CompactOptions) => Promise<void> = async () => {};
 	#getSystemPromptFn: () => string[] = () => [];
+	#getAsyncJobSnapshotFn: () => AsyncJobSnapshot | null = () => null;
 	#newSessionHandler: NewSessionHandler = async () => ({ cancelled: false });
 	#branchHandler: BranchHandler = async () => ({ cancelled: false });
 	#navigateTreeHandler: NavigateTreeHandler = async () => ({ cancelled: false });
@@ -221,17 +362,151 @@ export class ExtensionRunner {
 	 */
 	#pendingCredentialDisabled: CredentialDisabledEvent[] = [];
 
+	/**
+	 * Buffer for `mcp_notification` events received via {@link emitMcpNotification} before
+	 * {@link initialize} has run. Two-layer race: `MCPManager` also buffers frames until
+	 * its first `addNotificationListener` subscriber attaches, but the sdk.ts bridge is
+	 * registered inside `createAgentSession` — BEFORE the mode controller calls
+	 * `ExtensionRunner.initialize()`. Without this second buffer, the manager's drain
+	 * arrives at the bridge → the bridge calls `emitMcpNotification` → the runner drops
+	 * the frame because `#initialized === false`, and the frame evaporates a second time.
+	 * Bounded at {@link MAX_PENDING_MCP_NOTIFICATIONS}; oldest entries are dropped under
+	 * pressure. Drained in {@link initialize} once the runtime/UI context is wired.
+	 */
+	#pendingMcpNotifications: Array<Omit<McpNotificationEvent, "type">> = [];
+
+	/**
+	 * Timers scheduled by extensions through the sanctioned `ctx.setInterval` /
+	 * `ctx.setTimeout` helpers. Callbacks run with the same isolation as handler
+	 * dispatch — a throw is logged and routed through {@link onError} instead of
+	 * escaping to the process `uncaughtException` handler and tearing down the
+	 * whole session (issue #5664). Handles are `unref`'d and every outstanding
+	 * timer is cleared on session teardown via {@link clearManagedTimers}.
+	 */
+	#managedTimers = new ManagedTimers((event, error, stack) =>
+		this.emitError({ extensionPath: "<timer>", event, error, stack }),
+	);
+	/**
+	 * Dedup markers for `tool_call` emission, keyed `${toolCallId}:${toolName}`.
+	 * The agent loop emits `tool_call` at arg-prep time (before scheduling and
+	 * `tool_execution_start`) via the session's `beforeToolCall` wiring; the
+	 * marker tells `ExtensionToolWrapper.execute` not to emit a second event for
+	 * the same dispatch. Keyed by call id + tool name because a nested xd://
+	 * device dispatch reuses the model's toolCallId under a different tool name
+	 * and must still emit its own event. Bounded: markers for calls whose
+	 * execute path never runs (policy deny, validation failure) would otherwise
+	 * accumulate for the session's lifetime.
+	 */
+	#emittedToolCalls = new Set<string>();
+
+	/** Records that the loop already emitted `tool_call` for this dispatch. */
+	markToolCallEmitted(toolCallId: string, toolName: string): void {
+		if (this.#emittedToolCalls.size >= 512) {
+			const oldest = this.#emittedToolCalls.values().next().value;
+			if (oldest !== undefined) this.#emittedToolCalls.delete(oldest);
+		}
+		this.#emittedToolCalls.add(`${toolCallId}:${toolName}`);
+	}
+
+	/** Consumes a {@link markToolCallEmitted} marker; true when the loop already emitted. */
+	consumeToolCallEmitted(toolCallId: string, toolName: string): boolean {
+		return this.#emittedToolCalls.delete(`${toolCallId}:${toolName}`);
+	}
+
+	/**
+	 * Resolves a tool NAME to its native built-in implementation (the pre-extension-override,
+	 * unwrapped tool) plus a factory for the `AgentToolContext` that native tool expects, or
+	 * undefined when no native built-in of that name exists. Set by the SDK; backs same-tool
+	 * `invokeTool`. The context factory is the same one the agent loop uses for tool execution, so a
+	 * delegated native call sees the ordinary session tool context (ui, cwd, snapshot state, etc.).
+	 */
+	#nativeToolResolver?: (name: string) => { tool: AgentTool; makeContext: () => AgentToolContext } | undefined;
+
+	/** Wires the native-tool resolver used by {@link invokeNativeTool}. */
+	setNativeToolResolver(
+		resolve: (name: string) => { tool: AgentTool; makeContext: () => AgentToolContext } | undefined,
+	): void {
+		this.#nativeToolResolver = resolve;
+	}
+
+	/** Whether a native built-in of `name` is available to delegate to. */
+	hasNativeTool(name: string): boolean {
+		return this.#nativeToolResolver?.(name) !== undefined;
+	}
+
+	/**
+	 * Run the native built-in of `name` with `params` and return its result — the delegation target
+	 * of a same-tool `ctx.invokeTool`. Calls the unwrapped native `execute` directly with the loop's
+	 * ordinary tool context, so it inherits the caller's already-granted approval (the caller is the
+	 * same tool) rather than re-running the gate. `depth` guards a wrapper that recurses into itself;
+	 * it is per call chain (threaded from the caller), not session-global, so concurrent independent
+	 * delegations do not interfere.
+	 */
+	async invokeNativeTool<TDetails = unknown>(
+		name: string,
+		params: Record<string, unknown>,
+		options?: {
+			signal?: AbortSignal;
+			onUpdate?: AgentToolUpdateCallback<TDetails>;
+			depth?: number;
+			/**
+			 * The caller tool's own context. Reused for the native call so metadata the native tool
+			 * reads — `toolCall` (write/edit LSP batch flushing) and provider metadata /
+			 * `providerSafetyApproved` (computer) — is preserved. Falls back to a fresh session tool
+			 * context only when the caller had none.
+			 */
+			callerContext?: AgentToolContext;
+		},
+	): Promise<AgentToolResult<TDetails>> {
+		const resolved = this.#nativeToolResolver?.(name);
+		if (!resolved) throw new Error(`invokeTool: no native built-in named "${name}" to delegate to`);
+		const depth = options?.depth ?? 0;
+		if (depth >= 8) {
+			throw new Error(`invokeTool: delegation depth exceeded 8 (recursive invokeTool for "${name}"?)`);
+		}
+		const toolCallId = `invoke-${name}-${Date.now().toString(36)}-${depth}`;
+		return (await resolved.tool.execute(
+			toolCallId,
+			params as never,
+			options?.signal,
+			options?.onUpdate as never,
+			options?.callerContext ?? resolved.makeContext(),
+		)) as AgentToolResult<TDetails>;
+	}
+
 	constructor(
 		private readonly extensions: Extension[],
 		private readonly runtime: ExtensionRuntime,
-		private readonly cwd: string,
+		/** Ignored: `cwd` is always read live via the `cwd` getter below, not cached here. */
+		_initialCwd: string,
 		private readonly sessionManager: SessionManager,
 		private readonly modelRegistry: ModelRegistry,
 		getMemory?: () => MemoryRuntimeContext | undefined,
 		private readonly settings?: Settings,
+		private readonly localProtocolOptions?: LocalProtocolOptions,
+		getAsyncJobSnapshot?: () => AsyncJobSnapshot | null,
 	) {
 		this.#uiContext = noOpUIContext;
 		this.#getMemoryFn = getMemory;
+		this.#getAsyncJobSnapshotFn = getAsyncJobSnapshot ?? (() => null);
+	}
+
+	/**
+	 * Live session directory, not a session-start snapshot: `/move`
+	 * (`SessionManager.moveTo()`) relocates the owning session by updating
+	 * `sessionManager`'s own `#cwd`, not a process-global. Reading it here
+	 * via the getter — instead of caching the constructor-time value in a
+	 * field — keeps every `ExtensionContext` built below in sync with this
+	 * session's actual, current directory. Deliberately `sessionManager.getCwd()`
+	 * rather than `getProjectDir()`: the latter is a single process-wide value
+	 * that only the interactive TUI's `/move` handler happens to also update
+	 * (`InteractiveModeContext#applyCwdChange`) — an SDK/ACP host running
+	 * several concurrent sessions each with their own `cwd` (see
+	 * `CreateAgentSessionOptions.cwd`) must never have one session's move
+	 * leak into another's `ctx.cwd` by reading a shared global.
+	 */
+	get cwd(): string {
+		return this.sessionManager.getCwd();
 	}
 
 	initialize(
@@ -251,8 +526,16 @@ export class ExtensionRunner {
 		this.runtime.setModel = actions.setModel;
 		this.runtime.getThinkingLevel = actions.getThinkingLevel;
 		this.runtime.setThinkingLevel = actions.setThinkingLevel;
+		this.runtime.getServiceTiers = actions.getServiceTiers ?? throwUnsupportedServiceTierAction;
+		this.runtime.setServiceTier = actions.setServiceTier ?? throwUnsupportedServiceTierAction;
 		this.runtime.getSessionName = actions.getSessionName;
 		this.runtime.setSessionName = actions.setSessionName;
+		this.runtime.registerProvider = (name, config, sourceId) => {
+			this.modelRegistry.registerProvider(name, config, sourceId);
+		};
+		this.runtime.unregisterProvider = name => {
+			this.modelRegistry.unregisterProvider(name);
+		};
 
 		// Context actions (required)
 		this.#getModel = contextActions.getModel;
@@ -292,6 +575,23 @@ export class ExtensionRunner {
 				});
 			}
 		});
+
+		// Drain events buffered by emitMcpNotification() before initialize ran, using the
+		// same deferred-microtask ordering as the credential-disabled drain above so any
+		// onError listener registered synchronously after initialize() still catches
+		// handler errors during flush.
+		const pendingMcp = this.#pendingMcpNotifications.splice(0);
+		queueMicrotask(() => {
+			for (const event of pendingMcp) {
+				this.emit({ type: "mcp_notification", ...event }).catch((error: unknown) => {
+					logger.warn("mcp_notification handler threw during initialize flush", {
+						server: event.server,
+						method: event.method,
+						error: error instanceof Error ? error.message : String(error),
+					});
+				});
+			}
+		});
 	}
 
 	/**
@@ -319,7 +619,35 @@ export class ExtensionRunner {
 		await this.emit({ type: "credential_disabled", ...event });
 	}
 
+	/**
+	 * Forward an MCP server notification to extension handlers.
+	 *
+	 * If {@link initialize} has not yet run, the notification is buffered and replayed
+	 * once initialize wires the runtime/UI context. Matches the credential-disabled
+	 * deferral above: the sdk.ts bridge registers `MCPManager.addNotificationListener`
+	 * inside `createAgentSession` — BEFORE the mode controller calls `initialize()` on
+	 * this runner — so notification frames drained by the manager (either fresh
+	 * arrivals or replay from its own startup buffer) can reach us pre-init. Without
+	 * this buffer they would evaporate for a second time here.
+	 *
+	 * Bounded at {@link MAX_PENDING_MCP_NOTIFICATIONS}; oldest entries drop under
+	 * pressure. Never throws; per-handler errors are routed through {@link onError}
+	 * via {@link emit}'s normal isolation.
+	 */
+	async emitMcpNotification(event: Omit<McpNotificationEvent, "type">): Promise<void> {
+		if (!this.#initialized) {
+			if (this.#pendingMcpNotifications.length >= MAX_PENDING_MCP_NOTIFICATIONS) {
+				this.#pendingMcpNotifications.shift();
+			}
+			this.#pendingMcpNotifications.push(event);
+			return;
+		}
+		await this.emit({ type: "mcp_notification", ...event });
+	}
+
+	/** Emits a session stop pass that can be cancelled with the active settle signal. */
 	async emitSessionStop(event: Omit<SessionStopEvent, "type">): Promise<SessionStopEventResult | undefined> {
+		if (event.signal.aborted) return undefined;
 		return await this.emit({ type: "session_stop", ...event });
 	}
 
@@ -492,12 +820,33 @@ export class ExtensionRunner {
 		return undefined;
 	}
 
-	createContext(): ExtensionContext {
-		const getModel = this.#getModel;
+	/**
+	 * Creates an extension context, optionally scoped to a provider request model.
+	 *
+	 * `delegation` wires the same-tool `ctx.invokeTool` for a re-registered built-in: when `toolName`
+	 * names an existing native built-in, the context carries an `invokeTool` that runs it (see
+	 * {@link invokeNativeTool}). The rest inherits the wrapper's own call so a bare
+	 * `ctx.invokeTool(params)` behaves like the outer call — `context` preserves `toolCall`/provider
+	 * metadata, `signal`/`onUpdate` default to the wrapper's own channels so aborting the outer tool
+	 * call stops the native one and native progress still streams, and `depth` bounds recursion per
+	 * call chain. Explicit options passed to `invokeTool` override the inherited `signal`/`onUpdate`.
+	 */
+	createContext(
+		model?: Model,
+		delegation?: {
+			toolName: string;
+			depth?: number;
+			context?: AgentToolContext;
+			signal?: AbortSignal;
+			onUpdate?: AgentToolUpdateCallback;
+		},
+	): ExtensionContext {
+		const getModel = model ? () => model : this.#getModel;
 		return {
 			ui: this.#uiContext,
 			getContextUsage: () => this.#getContextUsageFn(),
 			compact: instructionsOrOptions => this.#compactFn(instructionsOrOptions),
+			getAsyncJobSnapshot: () => this.#getAsyncJobSnapshotFn(),
 			hasUI: this.hasUI(),
 			cwd: this.cwd,
 			sessionManager: this.sessionManager,
@@ -511,7 +860,23 @@ export class ExtensionRunner {
 			hasPendingMessages: () => this.#hasPendingMessagesFn(),
 			shutdown: () => this.#shutdownHandler(),
 			getSystemPrompt: () => this.#getSystemPromptFn(),
+			localProtocolOptions: this.localProtocolOptions,
 			memory: this.#getMemoryFn?.(),
+			setInterval: (callback, ms, ...args) => this.#managedTimers.setInterval(callback, ms, ...args),
+			setTimeout: (callback, ms, ...args) => this.#managedTimers.setTimeout(callback, ms, ...args),
+			clearTimer: timer => this.#managedTimers.clear(timer),
+			invokeTool:
+				delegation !== undefined && this.hasNativeTool(delegation.toolName)
+					? (params, options) =>
+							this.invokeNativeTool(delegation.toolName, params, {
+								// Inherit the wrapper's own channels so a bare `ctx.invokeTool(params)` aborts
+								// and streams with the outer call. Explicit options win.
+								signal: options?.signal ?? delegation.signal,
+								onUpdate: options?.onUpdate ?? delegation.onUpdate,
+								depth: (delegation.depth ?? 0) + 1,
+								callerContext: delegation.context,
+							})
+					: undefined,
 		};
 	}
 
@@ -520,6 +885,16 @@ export class ExtensionRunner {
 	 */
 	shutdown(): void {
 		this.#shutdownHandler();
+	}
+
+	/**
+	 * Clear every timer scheduled through `ctx.setInterval` / `ctx.setTimeout`.
+	 * Called during session teardown so extension background work does not
+	 * outlive the session (a self-scheduling interval would otherwise keep
+	 * firing against a disposed session).
+	 */
+	clearManagedTimers(): void {
+		this.#managedTimers.clearAll();
 	}
 
 	createCommandContext(): ExtensionCommandContext {
@@ -554,11 +929,18 @@ export class ExtensionRunner {
 		ext: Extension,
 		timeoutMs: number,
 	): Promise<TResult | undefined> {
+		const signal =
+			event.type === "session_stop" && "signal" in event && event.signal instanceof AbortSignal
+				? event.signal
+				: undefined;
+		if (signal?.aborted) return undefined;
 		try {
-			const handlerResult = await Promise.race([
-				Promise.resolve(handler(event, ctx)),
-				Bun.sleep(timeoutMs).then(() => EXTENSION_HANDLER_TIMEOUT),
-			]);
+			const handlerResult = await raceHandlerWithTimeout(
+				handlerSignal => handler(event, createHandlerContext(ctx, handlerSignal)),
+				timeoutMs,
+				signal,
+			);
+			if (handlerResult === EXTENSION_HANDLER_ABORTED) return undefined;
 			if (handlerResult === EXTENSION_HANDLER_TIMEOUT) {
 				const error = `handler timed out after ${timeoutMs}ms`;
 				logger.warn("Extension handler timed out", {
@@ -693,8 +1075,24 @@ export class ExtensionRunner {
 		};
 	}
 
+	/**
+	 * Emit a `tool_call` event to every subscribed extension before the tool executes.
+	 *
+	 * Each handler is bounded by `extensionHandlerTimeoutMs` (default 30s). This
+	 * matches the timeout policy already applied to `emitToolResult` and every
+	 * other handler routed through `#runHandlerWithTimeout`; without it a single
+	 * hung extension (unresolved `await`, network call with no timeout) would
+	 * park `ExtensionToolWrapper.execute` indefinitely and freeze tool
+	 * dispatch — see issue #3948.
+	 *
+	 * On-timeout policy: **fail-closed** (return `{ block: true }`). This is
+	 * symmetric with the existing error path below and safer for a
+	 * pre-execution gate — an unresponsive extension MUST NOT be treated as
+	 * silent consent to run the tool.
+	 */
 	async emitToolCall(event: ToolCallEvent): Promise<ToolCallEventResult | undefined> {
 		const ctx = this.createContext();
+		const timeoutMs = extensionHandlerTimeoutMs;
 		let result: ToolCallEventResult | undefined;
 
 		for (const ext of this.extensions) {
@@ -703,7 +1101,28 @@ export class ExtensionRunner {
 
 			for (const handler of handlers) {
 				try {
-					const handlerResult = await handler(event, ctx);
+					const handlerResult = await raceHandlerWithTimeout(
+						handlerSignal => handler(event, createHandlerContext(ctx, handlerSignal)),
+						timeoutMs,
+					);
+
+					if (handlerResult === EXTENSION_HANDLER_TIMEOUT) {
+						const error = `handler timed out after ${timeoutMs}ms`;
+						logger.warn("Extension handler timed out", {
+							extensionPath: ext.path,
+							event: "tool_call",
+							timeoutMs,
+						});
+						this.emitError({
+							extensionPath: ext.path,
+							event: "tool_call",
+							error,
+						});
+						return {
+							block: true,
+							reason: `Extension ${ext.path} timed out after ${timeoutMs}ms`,
+						};
+					}
 
 					if (handlerResult) {
 						result = handlerResult as ToolCallEventResult;
@@ -878,8 +1297,9 @@ export class ExtensionRunner {
 		return currentMessages;
 	}
 
-	async emitBeforeProviderRequest(payload: unknown): Promise<BeforeProviderRequestEventResult> {
-		const ctx = this.createContext();
+	/** Runs request payload hooks with the model used for that provider request. */
+	async emitBeforeProviderRequest(payload: unknown, model?: Model): Promise<BeforeProviderRequestEventResult> {
+		const ctx = this.createContext(model);
 		let currentPayload = payload;
 
 		for (const ext of this.extensions) {

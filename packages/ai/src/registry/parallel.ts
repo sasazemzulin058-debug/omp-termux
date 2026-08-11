@@ -1,4 +1,5 @@
-import type { OAuthController, OAuthLoginCallbacks } from "./oauth/types";
+import { createApiKeyLogin } from "./api-key-login";
+import type { OAuthLoginCallbacks } from "./oauth/types";
 import type { ProviderDefinition } from "./types";
 
 const AUTH_URL = "https://platform.parallel.ai/settings?tab=api-keys";
@@ -9,32 +10,14 @@ const AUTH_URL = "https://platform.parallel.ai/settings?tab=api-keys";
  * Opens browser to the API keys page, prompts the user to paste their API key,
  * and returns the API key directly.
  */
-export async function loginParallel(options: OAuthController): Promise<string> {
-	if (!options.onPrompt) {
-		throw new Error("Parallel login requires onPrompt callback");
-	}
-
-	options.onAuth?.({
-		url: AUTH_URL,
-		instructions: "Copy your Parallel API key from the Parallel settings page.",
-	});
-
-	const apiKey = await options.onPrompt({
-		message: "Paste your Parallel API key",
-		placeholder: "sk_...",
-	});
-
-	if (options.signal?.aborted) {
-		throw new Error("Login cancelled");
-	}
-
-	const trimmed = apiKey.trim();
-	if (!trimmed) {
-		throw new Error("API key is required");
-	}
-
-	return trimmed;
-}
+export const loginParallel = createApiKeyLogin({
+	providerLabel: "Parallel",
+	authUrl: AUTH_URL,
+	instructions: "Copy your Parallel API key from the Parallel settings page.",
+	promptMessage: "Paste your Parallel API key",
+	placeholder: "sk_...",
+	validation: null,
+});
 
 export const parallelProvider = {
 	id: "parallel",

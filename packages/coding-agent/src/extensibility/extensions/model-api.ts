@@ -25,7 +25,7 @@ export function createExtensionModelQuery(
 	return {
 		list: () => modelRegistry.getAvailable(),
 		current: () => getModel(),
-		// resolveModelRoleValue expands a role alias (`pi/slow`) to its full configured
+		// resolveModelRoleValue expands a role alias (`@slow`) to its full configured
 		// priority list and tries each pattern — the same path core selection uses — so a
 		// fallback model lower in the list still resolves. Plain model strings pass through
 		// as a single pattern.
@@ -33,9 +33,7 @@ export function createExtensionModelQuery(
 			resolveModelRoleValue(spec, modelRegistry.getAvailable(), {
 				settings,
 				matchPreferences: getModelMatchPreferences(settings),
-				modelRegistry,
 			}).model,
-		family: (model: Model<Api>): string =>
-			modelFamilyToken(modelRegistry.getCanonicalId(model) ?? model.id) || model.provider.toLowerCase(),
+		family: (model: Model<Api>): string => modelFamilyToken(model.id) || model.provider.toLowerCase(),
 	};
 }

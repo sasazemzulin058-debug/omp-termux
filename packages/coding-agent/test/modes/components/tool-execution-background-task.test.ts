@@ -10,7 +10,7 @@ function progressEntry(description: string): AgentProgress {
 	return {
 		index: 0,
 		id: "Anna",
-		agent: "explore",
+		agent: "scout",
 		agentSource: "bundled",
 		status: "running",
 		task: "investigate the auth flow",
@@ -49,7 +49,7 @@ function finalSnapshot(output: string): {
 	const result: SingleResult = {
 		index: 0,
 		id: "Anna",
-		agent: "explore",
+		agent: "scout",
 		agentSource: "bundled",
 		task: "investigate the auth flow",
 		exitCode: 0,
@@ -88,25 +88,28 @@ describe("ToolExecutionComponent detached task freeze", () => {
 
 	function makeComponent(live: () => boolean) {
 		const requestRender = vi.fn();
-		const ui = { requestRender } as unknown as TUI;
+		const requestComponentRender = vi.fn();
+		const ui = { requestRender, requestComponentRender } as unknown as TUI;
 		const component = new ToolExecutionComponent(
 			"task",
-			{ agent: "explore", id: "Anna", description: "scout auth", assignment: "investigate the auth flow" },
+			{ agent: "scout", id: "Anna", description: "scout auth", assignment: "investigate the auth flow" },
 			{ liveRegion: { isBlockInLiveRegion: () => live() } },
 			undefined,
 			ui,
 		);
-		return { component, requestRender };
+		return { component, requestRender, requestComponentRender };
 	}
 
 	it("does not drive redraws while live and keeps progress bytes static", () => {
 		vi.useFakeTimers();
-		const { component, requestRender } = makeComponent(() => true);
+		const { component, requestRender, requestComponentRender } = makeComponent(() => true);
 
 		component.updateResult(asyncSnapshot("scouting the auth flow"), true);
 		requestRender.mockClear();
+		requestComponentRender.mockClear();
 		vi.advanceTimersByTime(500);
 		expect(requestRender).not.toHaveBeenCalled();
+		expect(requestComponentRender).not.toHaveBeenCalled();
 
 		vi.spyOn(Date, "now").mockReturnValue(1_000);
 		const frameA = component.render(100).join("\n");

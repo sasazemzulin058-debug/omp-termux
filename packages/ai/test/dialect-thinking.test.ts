@@ -97,6 +97,38 @@ describe("gemini thinking fence (```thinking … ```)", () => {
 		expect(visibleText(events)).not.toContain("```thinking");
 	});
 
+	for (const charByChar of [false, true]) {
+		const mode = charByChar ? "character stream" : "whole chunk";
+
+		it(`keeps nested Markdown fences inside thinking in ${mode}`, () => {
+			const input = "```thinking\nPlan:\n```rs\nfn main() {}\n```\nThen decide.\n```Visible after";
+			const events = scan("gemini", input, { charByChar });
+			expect(thinkingText(events)).toBe("Plan:\n```rs\nfn main() {}\n```\nThen decide.\n");
+			expect(visibleText(events)).toBe("Visible after");
+			expect(thinkingBoundaries(events)).toBe(1);
+			expect(thinkingEndCount(events)).toBe(1);
+			expect(visibleText(events)).not.toContain("fn main");
+		});
+	}
+
+	for (const { suffix, visible } of [
+		{ suffix: "Visible after", visible: "Visible after" },
+		{ suffix: " after", visible: " after" },
+		{ suffix: "Done", visible: "Done" },
+	]) {
+		for (const charByChar of [false, true]) {
+			const mode = charByChar ? "character stream" : "whole chunk";
+
+			it(`treats inline close plus ${JSON.stringify(suffix)} as visible reply in ${mode}`, () => {
+				const events = scan("gemini", `\`\`\`thinking\nplan\n\`\`\`${suffix}`, { charByChar });
+				expect(thinkingText(events)).toBe("plan\n");
+				expect(visibleText(events)).toBe(visible);
+				expect(thinkingBoundaries(events)).toBe(1);
+				expect(thinkingEndCount(events)).toBe(1);
+			});
+		}
+	}
+
 	it("round-trips renderThinking through the scanner", () => {
 		const rendered = getDialectDefinition("gemini").renderThinking("reasoning");
 		expect(rendered).toBe("```thinking\nreasoning\n```");
@@ -164,29 +196,6 @@ describe("kimi think tags (<think>…</think>)", () => {
 	});
 });
 
-describe("pi native thinking channel (¤…¤)", () => {
-	it("routes ¤ to thinking, keeping it out of the reply and calls", () => {
-		const events = scan("pi", "¤reasoning¤§foo x=1\n");
-		expect(thinkingText(events)).toBe("reasoning");
-		expect(callNames(events)).toEqual([{ name: "foo", arguments: { x: 1 } }]);
-		expect(visibleText(events)).not.toContain("¤");
-	});
-
-	it("round-trips renderThinking through the scanner", () => {
-		const rendered = getDialectDefinition("pi").renderThinking("reasoning");
-		expect(rendered).toBe("¤\nreasoning\n¤");
-		const events = scan("pi", `${rendered}visible`);
-		expect(thinkingText(events).trim()).toBe("reasoning");
-		expect(visibleText(events)).toBe("visible");
-	});
-
-	it("treats ¤ as plain text when parseThinking is disabled", () => {
-		const events = scan("pi", "¤x¤answer", { options: { parseThinking: false } });
-		expect(thinkingBoundaries(events)).toBe(0);
-		expect(visibleText(events)).toContain("¤x¤");
-	});
-});
-
 describe("every dialect round-trips thinking (no missing thinking element)", () => {
 	const dialects: Dialect[] = [
 		"anthropic",
@@ -197,7 +206,6 @@ describe("every dialect round-trips thinking (no missing thinking element)", () 
 		"harmony",
 		"hermes",
 		"kimi",
-		"pi",
 		"qwen3",
 		"xml",
 	];
@@ -223,7 +231,6 @@ describe("unterminated thinking at stream end", () => {
 		{ dialect: "gemma", input: "<|channel>thought\npartial" },
 		{ dialect: "glm", input: "<think>partial" },
 		{ dialect: "kimi", input: "<think>partial" },
-		{ dialect: "pi", input: "¤partial" },
 		{ dialect: "qwen3", input: "<think>partial" },
 	];
 

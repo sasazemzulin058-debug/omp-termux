@@ -1,9 +1,9 @@
 // Terminal-event contracts for `processResponsesStream`:
 //
 // 1. `response.incomplete` is a terminal frame (max_output_tokens / content
-//    filter truncation). It must populate usage and map to stopReason
-//    "length" — previously it was ignored entirely, so truncated responses
-//    reported stopReason "stop" with zero usage and no cost.
+//    filter truncation). It must populate usage and normally map to stopReason
+//    "length", while a fully streamed function call remains executable as
+//    "toolUse".
 // 2. `response.output_item.done` for a custom_tool_call must persist the final
 //    input on the stored content block and drop the transient `partialJson`
 //    accumulation buffer, mirroring the function_call branch.
@@ -120,6 +120,448 @@ describe("processResponsesStream: terminal events", () => {
 		expect(output.content).toEqual([expect.objectContaining({ type: "text", text: "Hello, trunc" })]);
 	});
 
+	test("promotes max-output incomplete function calls with strict-complete arguments", async () => {
+		const output = makeOutput();
+		const stream = { push: () => {}, end: () => {} } as never;
+
+		await processResponsesStream(
+			makeStream([
+				{
+					type: "response.output_item.added",
+					output_index: 0,
+					item: {
+						type: "function_call",
+						id: "fc_complete",
+						call_id: "call_complete",
+						name: "read",
+						arguments: "",
+					},
+				},
+				{
+					type: "response.function_call_arguments.delta",
+					output_index: 0,
+					item_id: "fc_complete",
+					delta: '{"path":"complete.txt"} \n\t',
+				},
+				{
+					type: "response.incomplete",
+					response: {
+						id: "resp_complete_call",
+						status: "incomplete",
+						incomplete_details: { reason: "max_output_tokens" },
+					},
+				},
+			]),
+			output,
+			stream,
+			makeModel(),
+		);
+
+		expect(output.stopReason).toBe("toolUse");
+		expect(output.content).toHaveLength(1);
+		const block = output.content[0];
+		if (block?.type !== "toolCall") throw new Error("expected a toolCall block");
+		expect(block.arguments).toEqual({ path: "complete.txt" });
+	});
+
+	test("keeps max-output incomplete function calls at length when only output_item.done closes arguments", async () => {
+		const output = makeOutput();
+		const stream = { push: () => {}, end: () => {} } as never;
+
+		await processResponsesStream(
+			makeStream([
+				{
+					type: "response.output_item.added",
+					output_index: 0,
+					item: {
+						type: "function_call",
+						id: "fc_closed",
+						call_id: "call_closed",
+						name: "read",
+						arguments: "",
+					},
+				},
+				{
+					type: "response.function_call_arguments.delta",
+					output_index: 0,
+					item_id: "fc_closed",
+					delta: '{"path":"closed.txt"}',
+				},
+				{
+					type: "response.output_item.done",
+					output_index: 0,
+					item: {
+						type: "function_call",
+						id: "fc_closed",
+						call_id: "call_closed",
+						name: "read",
+						arguments: '{"path":"closed.txt"}',
+					},
+				},
+				{
+					type: "response.incomplete",
+					response: {
+						id: "resp_closed_call",
+						status: "incomplete",
+						incomplete_details: { reason: "max_output_tokens" },
+					},
+				},
+			]),
+			output,
+			stream,
+			makeModel(),
+		);
+
+		expect(output.stopReason).toBe("length");
+		expect(output.content).toEqual([
+			expect.objectContaining({ type: "toolCall", arguments: { path: "closed.txt" } }),
+		]);
+	});
+
+	test("promotes max-output incomplete custom tool calls closed by input done", async () => {
+		const output = makeOutput();
+		const stream = { push: () => {}, end: () => {} } as never;
+		const patch = "*** Begin Patch\n*** End Patch";
+
+		await processResponsesStream(
+			makeStream([
+				{
+					type: "response.output_item.added",
+					output_index: 0,
+					item: {
+						type: "custom_tool_call",
+						id: "ctc_closed",
+						call_id: "call_custom_closed",
+						name: "apply_patch",
+						input: "",
+					},
+				},
+				{
+					type: "response.custom_tool_call_input.delta",
+					output_index: 0,
+					item_id: "ctc_closed",
+					delta: patch,
+				},
+				{
+					type: "response.custom_tool_call_input.done",
+					output_index: 0,
+					item_id: "ctc_closed",
+					input: patch,
+				},
+				{
+					type: "response.incomplete",
+					response: {
+						id: "resp_closed_custom",
+						status: "incomplete",
+						incomplete_details: { reason: "max_output_tokens" },
+					},
+				},
+			]),
+			output,
+			stream,
+			makeModel(),
+		);
+
+		expect(output.stopReason).toBe("toolUse");
+		expect(output.content).toEqual([
+			expect.objectContaining({ type: "toolCall", customWireName: "apply_patch", arguments: { input: patch } }),
+		]);
+	});
+
+	test("keeps max-output incomplete custom tools at length when only output_item.done closes input", async () => {
+		const output = makeOutput();
+		const stream = { push: () => {}, end: () => {} } as never;
+		const patch = "*** Begin Patch\n*** End Patch";
+
+		await processResponsesStream(
+			makeStream([
+				{
+					type: "response.output_item.added",
+					output_index: 0,
+					item: {
+						type: "custom_tool_call",
+						id: "ctc_output_done",
+						call_id: "call_custom_output_done",
+						name: "apply_patch",
+						input: "",
+					},
+				},
+				{
+					type: "response.output_item.done",
+					output_index: 0,
+					item: {
+						type: "custom_tool_call",
+						id: "ctc_output_done",
+						call_id: "call_custom_output_done",
+						name: "apply_patch",
+						input: patch,
+					},
+				},
+				{
+					type: "response.incomplete",
+					response: {
+						id: "resp_output_done_custom",
+						status: "incomplete",
+						incomplete_details: { reason: "max_output_tokens" },
+					},
+				},
+			]),
+			output,
+			stream,
+			makeModel(),
+		);
+
+		expect(output.stopReason).toBe("length");
+		expect(output.content).toEqual([
+			expect.objectContaining({ type: "toolCall", customWireName: "apply_patch", arguments: { input: patch } }),
+		]);
+	});
+
+	test("keeps max-output incomplete turns at length when any function call has a JSON prefix", async () => {
+		const output = makeOutput();
+		const stream = { push: () => {}, end: () => {} } as never;
+
+		await processResponsesStream(
+			makeStream([
+				{
+					type: "response.output_item.added",
+					output_index: 0,
+					item: {
+						type: "function_call",
+						id: "fc_first",
+						call_id: "call_first",
+						name: "read",
+						arguments: "",
+					},
+				},
+				{
+					type: "response.function_call_arguments.delta",
+					output_index: 0,
+					item_id: "fc_first",
+					delta: '{"path":"complete.txt"}',
+				},
+				{
+					type: "response.output_item.added",
+					output_index: 1,
+					item: {
+						type: "function_call",
+						id: "fc_second",
+						call_id: "call_second",
+						name: "read",
+						arguments: "",
+					},
+				},
+				{
+					type: "response.function_call_arguments.delta",
+					output_index: 1,
+					item_id: "fc_second",
+					delta: '{"path":"truncated.txt"',
+				},
+				{
+					type: "response.incomplete",
+					response: {
+						id: "resp_truncated_call",
+						status: "incomplete",
+						incomplete_details: { reason: "max_output_tokens" },
+					},
+				},
+			]),
+			output,
+			stream,
+			makeModel(),
+		);
+
+		expect(output.stopReason).toBe("length");
+	});
+
+	test("keeps max-output incomplete unfinished custom-tool input at length", async () => {
+		const output = makeOutput();
+		const stream = { push: () => {}, end: () => {} } as never;
+
+		await processResponsesStream(
+			makeStream([
+				{
+					type: "response.output_item.added",
+					output_index: 0,
+					item: {
+						type: "function_call",
+						id: "fc_with_custom",
+						call_id: "call_with_custom",
+						name: "read",
+						arguments: "",
+					},
+				},
+				{
+					type: "response.function_call_arguments.delta",
+					output_index: 0,
+					item_id: "fc_with_custom",
+					delta: '{"path":"complete.txt"}',
+				},
+				{
+					type: "response.output_item.added",
+					output_index: 1,
+					item: {
+						type: "custom_tool_call",
+						id: "ctc_unfinished",
+						call_id: "call_unfinished",
+						name: "apply_patch",
+						input: "",
+					},
+				},
+				{
+					type: "response.custom_tool_call_input.delta",
+					output_index: 1,
+					item_id: "ctc_unfinished",
+					delta: "*** Begin Patch",
+				},
+				{
+					type: "response.incomplete",
+					response: {
+						id: "resp_unfinished_custom",
+						status: "incomplete",
+						incomplete_details: { reason: "max_output_tokens" },
+					},
+				},
+			]),
+			output,
+			stream,
+			makeModel(),
+		);
+
+		expect(output.stopReason).toBe("length");
+		const customCall = output.content.find(block => block.type === "toolCall" && block.customWireName !== undefined);
+		expect(customCall).toEqual(
+			expect.objectContaining({
+				type: "toolCall",
+				customWireName: "apply_patch",
+				arguments: { input: "*** Begin Patch" },
+			}),
+		);
+	});
+
+	for (const testCase of [
+		{
+			name: "absent terminal content preserves streamed text",
+			deltas: ["Hello", " world"],
+			expectedText: "Hello world",
+		},
+		{
+			name: "empty terminal content preserves streamed text",
+			deltas: ["Hello", " world"],
+			terminalContent: [],
+			expectedText: "Hello world",
+		},
+		{
+			name: "identical terminal text is not appended to streamed text",
+			deltas: ["Same text"],
+			terminalContent: [{ type: "output_text", text: "Same text", annotations: [] }],
+			expectedText: "Same text",
+		},
+		{
+			name: "terminal text replaces streamed text",
+			deltas: ["draft text"],
+			terminalContent: [{ type: "output_text", text: "final text", annotations: [] }],
+			expectedText: "final text",
+		},
+		{
+			name: "explicit empty terminal text clears streamed text",
+			deltas: ["draft text"],
+			terminalContent: [{ type: "output_text", text: "", annotations: [] }],
+			expectedText: "",
+		},
+		{
+			name: "terminal refusal replaces streamed text",
+			deltas: ["draft text"],
+			terminalContent: [{ type: "refusal", refusal: "I cannot help with that." }],
+			expectedText: "I cannot help with that.",
+		},
+	]) {
+		test(`finalizes message text when ${testCase.name}`, async () => {
+			const output = makeOutput();
+			const emitted: EmittedEvent[] = [];
+			const stream = { push: (e: unknown) => emitted.push(e as EmittedEvent), end: () => {} } as never;
+			const doneItem =
+				"terminalContent" in testCase
+					? {
+							type: "message",
+							id: "msg_1",
+							role: "assistant",
+							status: "completed",
+							content: testCase.terminalContent,
+						}
+					: { type: "message", id: "msg_1", role: "assistant", status: "completed" };
+
+			await processResponsesStream(
+				makeStream([
+					{
+						type: "response.output_item.added",
+						output_index: 0,
+						item: { type: "message", id: "msg_1", role: "assistant", status: "in_progress", content: [] },
+					},
+					...testCase.deltas.map(delta => ({
+						type: "response.output_text.delta",
+						output_index: 0,
+						item_id: "msg_1",
+						delta,
+					})),
+					{ type: "response.output_item.done", output_index: 0, item: doneItem },
+					{ type: "response.completed", response: { id: "resp_done", status: "completed" } },
+				]),
+				output,
+				stream,
+				makeModel(),
+			);
+
+			expect(output.content).toEqual([expect.objectContaining({ type: "text", text: testCase.expectedText })]);
+			const end = emitted.find(e => e.type === "text_end");
+			expect(end?.content).toBe(testCase.expectedText);
+		});
+	}
+
+	test("keeps separate message output items from concatenating", async () => {
+		const output = makeOutput();
+		const emitted: EmittedEvent[] = [];
+		const stream = { push: (e: unknown) => emitted.push(e as EmittedEvent), end: () => {} } as never;
+
+		await processResponsesStream(
+			makeStream([
+				{
+					type: "response.output_item.added",
+					output_index: 0,
+					item: { type: "message", id: "msg_1", role: "assistant", status: "in_progress", content: [] },
+				},
+				{ type: "response.output_text.delta", output_index: 0, item_id: "msg_1", delta: "First" },
+				{
+					type: "response.output_item.done",
+					output_index: 0,
+					item: { type: "message", id: "msg_1", role: "assistant", status: "completed", content: [] },
+				},
+				{
+					type: "response.output_item.added",
+					output_index: 1,
+					item: { type: "message", id: "msg_2", role: "assistant", status: "in_progress", content: [] },
+				},
+				{ type: "response.output_text.delta", output_index: 1, item_id: "msg_2", delta: "Second" },
+				{
+					type: "response.output_item.done",
+					output_index: 1,
+					item: { type: "message", id: "msg_2", role: "assistant", status: "completed", content: [] },
+				},
+				{ type: "response.completed", response: { id: "resp_done", status: "completed" } },
+			]),
+			output,
+			stream,
+			makeModel(),
+		);
+
+		const textBlocks = output.content.filter(block => block.type === "text");
+		expect(textBlocks.map(block => block.text)).toEqual(["First", "Second"]);
+		expect(emitted.filter(e => e.type === "text_end").map(e => [e.contentIndex, e.content])).toEqual([
+			[0, "First"],
+			[1, "Second"],
+		]);
+	});
+
 	test("persists final custom tool input on the block and drops the accumulation buffer", async () => {
 		const output = makeOutput();
 		const emitted: EmittedEvent[] = [];
@@ -161,7 +603,7 @@ describe("processResponsesStream: terminal events", () => {
 		if (block?.type !== "toolCall") throw new Error("expected a toolCall block");
 		expect(block.customWireName).toBe("apply_patch");
 		expect(block.arguments).toEqual({ input: patch });
-		expect("partialJson" in block).toBe(false);
+		expect((block as unknown as Record<string, unknown>).partialJson).toBeUndefined();
 
 		const end = emitted.find(e => e.type === "toolcall_end") as
 			| { toolCall: { arguments: Record<string, unknown> } }
@@ -277,6 +719,41 @@ describe("processResponsesStream: lost output_item.added recovery", () => {
 		expect(end?.content).toBe("Recovered text");
 	});
 
+	test("normalizes a completed native image generation call into visible assistant content", async () => {
+		const output = makeOutput();
+		const emitted: EmittedEvent[] = [];
+		const stream = { push: (event: unknown) => emitted.push(event as EmittedEvent), end: () => {} } as never;
+		const data = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=";
+
+		await processResponsesStream(
+			makeStream([
+				{
+					type: "response.output_item.done",
+					output_index: 0,
+					item: {
+						type: "image_generation_call",
+						id: "ig_1",
+						status: "completed",
+						result: data,
+					},
+				},
+				{ type: "response.completed", response: { id: "resp_image", status: "completed" } },
+			]),
+			output,
+			stream,
+			makeModel(),
+		);
+
+		expect(output.content).toEqual([{ type: "image", data, mimeType: "image/png" }]);
+		const end = emitted.find(event => event.type === "image_end");
+		expect(end).toEqual({
+			type: "image_end",
+			contentIndex: 0,
+			content: { type: "image", data, mimeType: "image/png" },
+			partial: output,
+		});
+	});
+
 	test("routes reasoning finalization by output_index when item ids are absent", async () => {
 		const output = makeOutput();
 		const stream = { push: () => {}, end: () => {} } as never;
@@ -288,7 +765,13 @@ describe("processResponsesStream: lost output_item.added recovery", () => {
 				{
 					type: "response.output_item.done",
 					output_index: 0,
-					item: { type: "reasoning", summary: [{ type: "summary_text", text: "first" }] },
+					item: {
+						type: "reasoning",
+						summary: [
+							{ type: "summary_text", text: "Plan" },
+							{ type: "summary_text", text: "Planning details" },
+						],
+					},
 				},
 				{
 					type: "response.output_item.done",
@@ -305,10 +788,53 @@ describe("processResponsesStream: lost output_item.added recovery", () => {
 		expect(output.content).toHaveLength(2);
 		const [first, second] = output.content;
 		if (first?.type !== "thinking" || second?.type !== "thinking") throw new Error("expected thinking blocks");
-		expect(first.thinking).toBe("first");
+		expect(first.thinking).toBe("Plan\n\nPlanning details");
 		expect(second.thinking).toBe("second");
 		expect(first.thinkingSignature).toBeDefined();
 		expect(second.thinkingSignature).toBeDefined();
+	});
+
+	test("preserves streamed reasoning when the done item has no summary text", async () => {
+		const output = makeOutput();
+		const stream = { push: () => {}, end: () => {} } as never;
+
+		await processResponsesStream(
+			makeStream([
+				{
+					type: "response.output_item.added",
+					output_index: 0,
+					item: { type: "reasoning", id: "rs_1", summary: [] },
+				},
+				{
+					type: "response.reasoning_summary_part.added",
+					output_index: 0,
+					item_id: "rs_1",
+					summary_index: 0,
+					part: { type: "summary_text", text: "" },
+				},
+				{
+					type: "response.reasoning_summary_text.delta",
+					output_index: 0,
+					item_id: "rs_1",
+					summary_index: 0,
+					delta: "streamed thinking",
+				},
+				{
+					type: "response.output_item.done",
+					output_index: 0,
+					item: { type: "reasoning", id: "rs_1", summary: [] },
+				},
+				{ type: "response.completed", response: { id: "resp_reasoning", status: "completed" } },
+			]),
+			output,
+			stream,
+			makeModel(),
+		);
+
+		const block = output.content[0];
+		if (block?.type !== "thinking") throw new Error("expected a thinking block");
+		expect(block.thinking).toBe("streamed thinking");
+		expect(block.thinkingSignature).toBeDefined();
 	});
 
 	test("treats content_filter incomplete responses as errors, not length", async () => {

@@ -1,8 +1,12 @@
-import { afterEach, describe, expect, it, vi } from "bun:test";
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "bun:test";
 import { streamOpenAIResponses } from "@oh-my-pi/pi-ai/providers/openai-responses";
+import { configureCredentialRedaction } from "@oh-my-pi/pi-ai/providers/transform-messages";
 import type { Context, FetchImpl, Model, ModelSpec } from "@oh-my-pi/pi-ai/types";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
+
+beforeAll(() => configureCredentialRedaction(true));
+afterAll(() => configureCredentialRedaction(false));
 
 // Non-reasoning model on api.openai.com (canonical path)
 const gpt4oMiniModel = getBundledModel("openai", "gpt-4o-mini") as Model<"openai-responses">;
@@ -84,6 +88,16 @@ describe("openai-responses system prompt routing", () => {
 			expect(body.instructions).toBe("Primary prompt.\n\nSecondary prompt.");
 			const input = body.input as Array<{ role: string; content: string }>;
 			expect(input.every(m => m.role !== "system")).toBe(true);
+		});
+
+		it("redacts sensitive credentials in instructions", async () => {
+			const context: Context = {
+				systemPrompt: ["Token: gho_************************************"],
+				messages: [{ role: "user", content: "hi", timestamp: Date.now() }],
+			};
+			const body = await captureRequestBody(gpt4oMiniModel, context);
+
+			expect(body.instructions).toBe("Token: [github_token_redacted]");
 		});
 
 		it("omits instructions field when there is no system prompt", async () => {

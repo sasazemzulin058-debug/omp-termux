@@ -54,6 +54,7 @@ function makeModel(
 		provider?: string;
 		input?: ("text" | "image")[];
 		api?: "anthropic-messages" | "google-generative-ai";
+		baseUrl?: string;
 	} = {},
 ) {
 	return buildModel({
@@ -61,7 +62,7 @@ function makeModel(
 		name: "Test Model",
 		api: overrides.api ?? "anthropic-messages",
 		provider: overrides.provider ?? "anthropic",
-		baseUrl: "https://example.invalid",
+		baseUrl: overrides.baseUrl ?? "https://example.invalid",
 		reasoning: false,
 		input: overrides.input ?? ["text", "image"],
 		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
@@ -98,6 +99,32 @@ describe("SnapcompactInlineTransformer", () => {
 		);
 		const context = makeContext();
 		expect(await transformer.transform(context, makeModel({ input: ["text"] }))).toBe(context);
+	});
+
+	it("treats Copilot business/enterprise endpoints as vision-capable when the model input includes image", async () => {
+		const transformer = new SnapcompactInlineTransformer(
+			withTestShape({ renderSystemPrompt: "all", renderToolResults: true }),
+		);
+		for (const baseUrl of ["https://api.business.githubcopilot.com", "https://copilot-api.ghe.example.com"]) {
+			const context = makeContext();
+			const model = makeModel({
+				provider: "github-copilot",
+				baseUrl,
+				input: ["text", "image"],
+			});
+			expect(
+				estimateInlineSavings({
+					options: withTestShape({ renderSystemPrompt: "all", renderToolResults: true }),
+					model,
+					systemPrompt: context.systemPrompt ?? [],
+					messages: context.messages,
+				}).visionCapable,
+			).toBe(true);
+
+			const result = await transformer.transform(context, model);
+			expect(result).not.toBe(context);
+			expect(imageCount(result)).toBeGreaterThan(0);
+		}
 	});
 
 	it("images large historical tool results, keeping small and most-recent ones as text", async () => {
@@ -246,7 +273,7 @@ describe("SnapcompactInlineTransformer", () => {
 		const longContext = denseText(3000);
 		const context: Context = {
 			systemPrompt: [
-				`Core instructions.\n\n<context>\nYou MUST follow the context files below for all tasks:\n<file path="AGENTS.md">\n${longContext}\n</file>\n</context>\n\nToday is 2026-06-12.`,
+				`Core instructions.\n\n<repo-rules>\nYou MUST follow the context files below for all tasks:\n<file path="AGENTS.md">\n${longContext}\n</file>\n</repo-rules>\n\nToday is 2026-06-12.`,
 				"Final system block.",
 			],
 			messages: [userMessage("do the thing")],
@@ -256,7 +283,6 @@ describe("SnapcompactInlineTransformer", () => {
 		expect(result.systemPrompt).toHaveLength(2);
 		expect(result.systemPrompt![0]).toContain("Core instructions.");
 		expect(result.systemPrompt![0]).toContain("Today is 2026-06-12.");
-		expect(result.systemPrompt![0]).toContain("Loaded context-file instructions were moved");
 		expect(result.systemPrompt![0]).not.toContain(longContext);
 		expect(result.systemPrompt![1]).toBe("Final system block.");
 

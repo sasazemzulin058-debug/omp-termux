@@ -1,6 +1,6 @@
 import type { Effort } from "@oh-my-pi/pi-catalog/effort";
 import { toFirepassWireModelId, toFireworksWireModelId } from "@oh-my-pi/pi-catalog/fireworks-model-id";
-import { isGlm52ReasoningEffortModelId } from "@oh-my-pi/pi-catalog/identity";
+import { isGlm52ReasoningEffortModelId, isKimiK3ModelId } from "@oh-my-pi/pi-catalog/identity";
 import { getSupportedEfforts } from "@oh-my-pi/pi-catalog/model-thinking";
 import { calculateCost } from "@oh-my-pi/pi-catalog/models";
 import type {
@@ -13,21 +13,38 @@ import type {
 	ResolvedOpenAISharedCompat,
 	VercelGatewayRouting,
 } from "@oh-my-pi/pi-catalog/types";
+import { parseAlibabaTokenPlanCredential } from "@oh-my-pi/pi-catalog/wire/alibaba-token-plan";
+import {
+	COREWEAVE_PROJECT_HEADER,
+	coreWeaveProjectHeaders,
+	hasCoreWeaveProjectHeader,
+	removeBlankCoreWeaveProjectHeaders,
+} from "@oh-my-pi/pi-catalog/wire/coreweave";
 import { parseGitHubCopilotApiKey } from "@oh-my-pi/pi-catalog/wire/github-copilot";
-import { $env, extractHttpStatusFromError, logger, structuredCloneJSON } from "@oh-my-pi/pi-utils";
+import {
+	$env,
+	classifyJsonPrefix,
+	extractHttpStatusFromError,
+	logger,
+	parseImageMetadata,
+	parseStreamingJson,
+	parseStreamingJsonThrottled,
+	stringifyJson,
+	structuredCloneJSON,
+} from "@oh-my-pi/pi-utils";
+import * as AIError from "../error";
 import {
 	type Api,
 	type AssistantMessage,
 	type CacheRetention,
+	type ComputerAction,
+	type ComputerToolCallMetadata,
 	type Context,
 	type ImageContent,
 	type Message,
 	type MessageAttribution,
 	type Model,
 	OPENAI_MAX_OUTPUT_TOKENS,
-	type Provider,
-	type ResolvedServiceTier,
-	resolveServiceTier,
 	type ServiceTier,
 	type StopReason,
 	type StreamOptions,
@@ -38,18 +55,35 @@ import {
 	type Tool,
 	type ToolCall,
 	type ToolResultMessage,
+	type Usage,
 } from "../types";
+
+export type { OpenAIPromptCacheOptions } from "../types";
+
 import {
 	getOpenAIResponsesHistoryItems,
 	getOpenAIResponsesHistoryPayload,
 	normalizeResponsesToolCallId,
 	normalizeSystemPrompts,
 	resolveCacheRetention,
+	sanitizeOpenAIResponsesAssistantFallbackItemsForReplay,
+	sanitizeOpenAIResponsesAssistantHistoryItemsForReplay,
 	sanitizeOpenAIResponsesHistoryItemsForReplay,
+	stripUnpairedOpenAIResponsesComputerReasoningIdsForReplay,
 } from "../utils";
+import {
+	clearStreamingPartialJson,
+	kStreamingArgumentsDone,
+	kStreamingLastParseLen,
+	kStreamingPartialJson,
+} from "../utils/block-symbols";
 import type { AssistantMessageEventStream } from "../utils/event-stream";
+import {
+	escapeHarmonyControlTokens,
+	escapeHarmonyControlTokensInJson,
+	isHarmonyDialectModel,
+} from "../utils/harmony-leak";
 import type { CapturedHttpErrorResponse } from "../utils/http-inspector";
-import { parseStreamingJson, parseStreamingJsonThrottled } from "../utils/json-parse";
 import { getOpenRouterHeaders } from "../utils/openrouter-headers";
 import { isForcedToolChoice } from "../utils/tool-choice";
 import {
@@ -58,7 +92,10 @@ import {
 	resolveGitHubCopilotBaseUrl,
 } from "./github-copilot-headers";
 import type { ChatCompletionCreateParamsStreaming } from "./openai-chat-wire";
+import type { InputItem } from "./openai-codex/request-transformer";
 import type {
+	Response as OpenAIResponse,
+	ResponseComputerToolCall,
 	ResponseContentPartAddedEvent,
 	ResponseCreateParamsStreaming,
 	ResponseCustomToolCall,
@@ -66,6 +103,7 @@ import type {
 	ResponseInput,
 	ResponseInputContent,
 	ResponseInputImage,
+	ResponseInputItem,
 	ResponseInputText,
 	ResponseOutputItem,
 	ResponseOutputMessage,
@@ -75,6 +113,16 @@ import type {
 } from "./openai-responses-wire";
 import { transformMessages } from "./transform-messages";
 import { joinTextWithImagePlaceholder, NON_VISION_IMAGE_PLACEHOLDER, partitionVisionContent } from "./vision-guard";
+
+/**
+ * Keyless-provider sentinel. Custom providers configured with `auth: none`
+ * (models.yml) have no credential, so the coding-agent resolves their API key
+ * to this literal instead of a real secret. Providers must treat it as "no
+ * credential" and suppress any credential-bearing header (e.g. `Authorization:
+ * Bearer …`) rather than forwarding the sentinel on the wire. See #6188; the
+ * google-vertex and amazon-bedrock transports apply the same guard inline.
+ */
+export const NO_AUTH_SENTINEL = "N/A";
 
 export interface OpenAIModelIdentity {
 	provider: string;
@@ -100,7 +148,8 @@ export interface OpenAIRequestSetupModel extends OpenAIModelIdentity {
 	compat?: Pick<ResolvedOpenAISharedCompat, "promptCacheSessionHeader">;
 }
 
-export interface OpenAIResponsesCacheOptions {
+/** Cache identity controls shared by OpenAI-family transports. */
+export interface OpenAICacheOptions {
 	cacheRetention?: CacheRetention;
 	sessionId?: string;
 	promptCacheKey?: string;
@@ -141,6 +190,25 @@ function resolveSakanaRequestBaseUrl(): string | undefined {
 	return normalizeSakanaRequestBaseUrl($env.SAKANA_BASE_URL) ?? normalizeSakanaRequestBaseUrl($env.FUGU_BASE_URL);
 }
 
+function applyCoreWeaveProjectHeader(headers: Record<string, string>): void {
+	removeBlankCoreWeaveProjectHeaders(headers);
+	if (hasCoreWeaveProjectHeader(headers)) {
+		return;
+	}
+	const projectHeaders = coreWeaveProjectHeaders($env);
+	if (projectHeaders) {
+		headers[COREWEAVE_PROJECT_HEADER] = projectHeaders[COREWEAVE_PROJECT_HEADER];
+	}
+}
+
+function setHeaderIfAbsent(headers: Record<string, string>, name: string, value: string): void {
+	const normalizedName = name.toLowerCase();
+	for (const existingName in headers) {
+		if (existingName.toLowerCase() === normalizedName) return;
+	}
+	headers[name] = value;
+}
+
 export function resolveOpenAIRequestSetup(
 	model: OpenAIRequestSetupModel,
 	options: OpenAIRequestSetupOptions,
@@ -148,7 +216,8 @@ export function resolveOpenAIRequestSetup(
 	let apiKey = options.apiKey;
 	if (!apiKey) {
 		if (!$env.OPENAI_API_KEY) {
-			throw new Error(
+			throw new AIError.MissingApiKeyError(
+				undefined,
 				"OpenAI API key is required. Set OPENAI_API_KEY environment variable or pass it as an argument.",
 			);
 		}
@@ -160,6 +229,9 @@ export function resolveOpenAIRequestSetup(
 		Object.assign(headers, getOpenRouterHeaders());
 	}
 	Object.assign(headers, options.extraHeaders);
+	if (model.provider === "coreweave") {
+		applyCoreWeaveProjectHeader(headers);
+	}
 	if (options.prependHeaders) {
 		headers = { ...options.prependHeaders(), ...headers };
 	}
@@ -196,6 +268,19 @@ export function resolveOpenAIRequestSetup(
 		baseUrl = resolveGitHubCopilotBaseUrl(model.baseUrl, rawApiKey) ?? model.baseUrl;
 	}
 
+	if (model.provider === "alibaba-token-plan") {
+		// Require an explicitly resolved Token Plan credential. The generic
+		// `$env.OPENAI_API_KEY` fallback above matches the broad `sk-*` token
+		// grammar and would otherwise be sent to QwenCloud as bearer material.
+		if (!options.apiKey) {
+			throw new AIError.MissingApiKeyError("alibaba-token-plan");
+		}
+		const credential = parseAlibabaTokenPlanCredential(rawApiKey);
+		if (!credential) throw new AIError.ConfigurationError("Invalid QwenCloud Token Plan credential");
+		apiKey = credential.token;
+		if (credential.baseUrl) baseUrl = credential.baseUrl;
+	}
+
 	if (options.alibabaCodingPlanAuth && model.provider === "alibaba-coding-plan") {
 		try {
 			const parsed = JSON.parse(rawApiKey);
@@ -219,31 +304,36 @@ export function resolveOpenAIRequestSetup(
 	}
 
 	if (options.openAISessionId && model.provider === "openai") {
-		headers.session_id ??= options.openAISessionId;
-		headers["x-client-request-id"] ??= options.openAISessionId;
+		setHeaderIfAbsent(headers, "session_id", options.openAISessionId);
+		setHeaderIfAbsent(headers, "x-client-request-id", options.openAISessionId);
 	}
 	if (options.promptCacheSessionId && model.compat?.promptCacheSessionHeader) {
-		headers[model.compat.promptCacheSessionHeader] ??= options.promptCacheSessionId;
+		setHeaderIfAbsent(headers, model.compat.promptCacheSessionHeader, options.promptCacheSessionId);
 	}
 
 	if (options.defaultBaseUrl !== undefined) {
 		baseUrl = baseUrl ?? ($env.OPENAI_BASE_URL?.trim() || options.defaultBaseUrl);
 	}
 	const requestHeaders = { ...headers };
-	headers.Authorization ??= `Bearer ${apiKey}`;
+	// A keyless provider (`auth: none` in models.yml) resolves to the `N/A`
+	// sentinel rather than a real key. Injecting `Authorization: Bearer N/A`
+	// breaks custom endpoints that authenticate via their own headers (e.g.
+	// `headers.x-api-key`) and reject the bogus bearer — mirror the sentinel
+	// guards in google-vertex / amazon-bedrock and send no Authorization here
+	// (#6188). A caller-supplied Authorization in `model.headers` still wins.
+	if (apiKey !== NO_AUTH_SENTINEL) {
+		headers.Authorization ??= `Bearer ${apiKey}`;
+	}
 	return { copilotPremiumRequests, baseUrl, headers, query, requestHeaders };
 }
 
 export function applyOpenAIServiceTier(
-	params: { service_tier?: ResolvedServiceTier | "auto" | "default" | null | undefined },
+	params: { service_tier?: ServiceTier | null | undefined },
 	serviceTier: ServiceTier | null | undefined,
-	provider: Provider | undefined,
+	model: Pick<Model, "provider" | "api" | "id">,
 ): void {
-	if (!shouldSendServiceTier(serviceTier, provider)) return;
-	const resolved = resolveServiceTier(serviceTier, provider);
-	if (resolved === "flex" || resolved === "scale" || resolved === "priority") {
-		params.service_tier = resolved;
-	}
+	if (!shouldSendServiceTier(serviceTier, model)) return;
+	params.service_tier = serviceTier;
 }
 
 /**
@@ -281,10 +371,7 @@ export function applyOpenAIResponsesServiceTierCost(
 	// The response echo is authoritative when present (OpenAI may downgrade a
 	// requested priority/flex turn to default under load); only fall back to the
 	// requested tier when the response omits the echo entirely.
-	const served =
-		typeof responseServiceTier === "string"
-			? responseServiceTier
-			: resolveServiceTier(requestServiceTier, model.provider);
+	const served = typeof responseServiceTier === "string" ? responseServiceTier : (requestServiceTier ?? undefined);
 	const multiplier = getOpenAIResponsesServiceTierCostMultiplier(served);
 	if (multiplier === 1) return;
 	usage.cost.input *= multiplier;
@@ -292,6 +379,29 @@ export function applyOpenAIResponsesServiceTierCost(
 	usage.cost.cacheRead *= multiplier;
 	usage.cost.cacheWrite *= multiplier;
 	usage.cost.total = usage.cost.input + usage.cost.output + usage.cost.cacheRead + usage.cost.cacheWrite;
+}
+
+/** Reconcile token-price estimates with OpenRouter's authoritative account charge. */
+export function applyOpenRouterReportedCost(model: Pick<Model, "provider">, usage: Usage, rawUsage: unknown): void {
+	if (model.provider !== "openrouter" || typeof rawUsage !== "object" || rawUsage === null) return;
+	const reportedCost = Reflect.get(rawUsage, "cost");
+	if (typeof reportedCost !== "number" || !Number.isFinite(reportedCost) || reportedCost < 0) return;
+
+	const estimatedCost = usage.cost.total;
+	if (Number.isFinite(estimatedCost) && estimatedCost > 0) {
+		const scale = reportedCost / estimatedCost;
+		usage.cost.input *= scale;
+		usage.cost.output *= scale;
+		usage.cost.cacheRead *= scale;
+		usage.cost.cacheWrite *= scale;
+	} else {
+		// Keep legacy component-only aggregators additive when catalog pricing is unavailable.
+		usage.cost.input = reportedCost;
+		usage.cost.output = 0;
+		usage.cost.cacheRead = 0;
+		usage.cost.cacheWrite = 0;
+	}
+	usage.cost.total = reportedCost;
 }
 
 export interface OpenAIUsageAccountingInput {
@@ -311,6 +421,7 @@ export interface OpenAIUsageAccounting {
 	cacheWrite: number;
 	totalTokens: number;
 	reasoningTokens?: number;
+	orchestration?: Usage["orchestration"];
 }
 
 export function calculateOpenAIUsageAccounting(accounting: OpenAIUsageAccountingInput): OpenAIUsageAccounting {
@@ -333,7 +444,8 @@ export function calculateOpenAIUsageAccounting(accounting: OpenAIUsageAccounting
 	};
 }
 
-export function normalizeOpenAIResponsesPromptCacheKey(sessionId: string | undefined): string | undefined {
+/** Normalize a cache identity to the wire limit accepted by OpenAI-family providers. */
+export function normalizeOpenAIPromptCacheKey(sessionId: string | undefined): string | undefined {
 	return normalizeOpenAIStableId(sessionId, 64, "pc_");
 }
 
@@ -341,20 +453,21 @@ export function normalizeOpenRouterResponsesSessionId(sessionId: string | undefi
 	return normalizeOpenAIStableId(sessionId, 256, "session_");
 }
 
-export function getOpenAIResponsesPromptCacheKey(options: OpenAIResponsesCacheOptions | undefined): string | undefined {
+/** Resolve a prompt-cache identity, falling back to the provider session unless caching is disabled. */
+export function getOpenAIPromptCacheKey(options: OpenAICacheOptions | undefined): string | undefined {
 	if (resolveCacheRetention(options?.cacheRetention) === "none") return undefined;
-	return normalizeOpenAIResponsesPromptCacheKey(options?.promptCacheKey ?? options?.sessionId);
+	return normalizeOpenAIPromptCacheKey(options?.promptCacheKey ?? options?.sessionId);
 }
 
 export function getOpenAIResponsesRoutingSessionId(
-	options: Pick<OpenAIResponsesCacheOptions, "cacheRetention" | "sessionId"> | undefined,
+	options: Pick<OpenAICacheOptions, "cacheRetention" | "sessionId"> | undefined,
 ): string | undefined {
 	if (resolveCacheRetention(options?.cacheRetention) === "none") return undefined;
-	return normalizeOpenAIResponsesPromptCacheKey(options?.sessionId);
+	return normalizeOpenAIPromptCacheKey(options?.sessionId);
 }
 
 export function getOpenRouterResponsesSessionId(
-	options: Pick<OpenAIResponsesCacheOptions, "cacheRetention" | "sessionId"> | undefined,
+	options: Pick<OpenAICacheOptions, "cacheRetention" | "sessionId"> | undefined,
 ): string | undefined {
 	if (resolveCacheRetention(options?.cacheRetention) === "none") return undefined;
 	return normalizeOpenRouterResponsesSessionId(options?.sessionId);
@@ -509,7 +622,7 @@ export function resolveOpenAIOutputTokenParam(
 
 export interface OpenAIGatewayRoutingParams {
 	provider?: OpenRouterRouting;
-	providerOptions?: { gateway?: { only?: string[]; order?: string[] } };
+	providerOptions?: { gateway?: Pick<VercelGatewayRouting, "only" | "order" | "caching"> };
 }
 
 export interface OpenAIGatewayRoutingCompat {
@@ -521,26 +634,68 @@ export interface OpenAIGatewayRoutingCompat {
 
 /**
  * Apply gateway routing preferences to the request body. OpenRouter routes via
- * the top-level `provider` field; the Vercel AI Gateway routes via
- * `providerOptions.gateway`. Both Chat Completions and Responses call this; the
- * Vercel branch is inert for Responses, whose resolved compat never sets
- * `isVercelGatewayHost`.
+ * the top-level `provider` field; the Vercel AI Gateway routes Chat
+ * Completions through `providerOptions.gateway`.
  */
 export function applyOpenAIGatewayRouting(
 	params: OpenAIGatewayRoutingParams,
 	compat: OpenAIGatewayRoutingCompat,
+	cacheEnabled = true,
 ): void {
 	if (compat.isOpenRouterHost && compat.openRouterRouting) {
 		params.provider = compat.openRouterRouting;
 	}
 	if (compat.isVercelGatewayHost && compat.vercelGatewayRouting) {
 		const routing = compat.vercelGatewayRouting;
-		if (routing.only || routing.order) {
-			const gatewayOptions: { only?: string[]; order?: string[] } = {};
+		if (routing.only || routing.order || (cacheEnabled && routing.caching)) {
+			const gatewayOptions: Pick<VercelGatewayRouting, "only" | "order" | "caching"> = {};
 			if (routing.only) gatewayOptions.only = routing.only;
 			if (routing.order) gatewayOptions.order = routing.order;
+			if (cacheEnabled && routing.caching) gatewayOptions.caching = routing.caching;
 			params.providerOptions = { gateway: gatewayOptions };
 		}
+	}
+}
+
+export interface VercelResponsesCacheParams {
+	caching?: "auto";
+	cache_anchor_items?: number;
+	cache_ttl?: "5m" | "1h";
+	providerOptions?: { gateway?: Pick<VercelGatewayRouting, "only" | "order"> };
+}
+
+export interface VercelResponsesCacheCompat {
+	isVercelGatewayHost: boolean;
+	vercelGatewayRouting?: VercelGatewayRouting;
+}
+
+/**
+ * Apply Vercel AI Gateway's Responses-only automatic cache controls and
+ * provider routing. Cache settings are top-level Responses fields, while
+ * `only` and `order` remain under `providerOptions.gateway`.
+ */
+export function applyVercelResponsesCacheControls(
+	params: VercelResponsesCacheParams,
+	compat: VercelResponsesCacheCompat,
+	cacheRetention: CacheRetention = "short",
+): void {
+	const routing = compat.vercelGatewayRouting;
+	if (!compat.isVercelGatewayHost) return;
+
+	if (routing?.only || routing?.order) {
+		const gateway: Pick<VercelGatewayRouting, "only" | "order"> = {};
+		if (routing.only) gateway.only = routing.only;
+		if (routing.order) gateway.order = routing.order;
+		params.providerOptions = { gateway };
+	}
+
+	if (cacheRetention === "none" || routing?.caching !== "auto") return;
+
+	params.caching = "auto";
+	if (routing.cacheAnchorItems !== undefined) params.cache_anchor_items = routing.cacheAnchorItems;
+	// A configured 1h TTL is capped by resolved retention; default and short intentionally omit it.
+	if (routing.cacheTtl !== undefined && (routing.cacheTtl !== "1h" || cacheRetention === "long")) {
+		params.cache_ttl = routing.cacheTtl;
 	}
 }
 
@@ -583,12 +738,13 @@ export type OpenAICompletionsParams = Omit<ChatCompletionCreateParamsStreaming, 
 	top_k?: number;
 	min_p?: number;
 	repetition_penalty?: number;
-	thinking?: { type: "enabled" | "disabled"; keep?: "all" };
+	thinking?: { type: "enabled" | "disabled"; effort?: string; keep?: "all" };
 	enable_thinking?: boolean;
-	chat_template_kwargs?: { enable_thinking: boolean };
+	preserve_thinking?: boolean;
+	chat_template_kwargs?: { enable_thinking?: boolean; preserve_thinking?: boolean };
 	reasoning?: { effort?: string } | { enabled: false };
 	reasoning_effort?: string | null;
-	service_tier?: ResolvedServiceTier;
+	service_tier?: ServiceTier;
 	tool_stream?: boolean;
 	provider?: OpenAICompat["openRouterRouting"];
 	providerOptions?: { gateway?: { only?: string[]; order?: string[] } };
@@ -596,7 +752,7 @@ export type OpenAICompletionsParams = Omit<ChatCompletionCreateParamsStreaming, 
 
 /** Reasoning-relevant slice of caller options the Chat Completions dialect dispatch reads. */
 export interface ChatCompletionsReasoningOptions {
-	reasoning?: "minimal" | "low" | "medium" | "high" | "xhigh";
+	reasoning?: "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
 	disableReasoning?: boolean;
 }
 
@@ -659,13 +815,19 @@ export interface OpenAICompatPolicy {
 	};
 }
 
-function mapOpenAIReasoningEffort(
+/**
+ * Map a user-facing effort to the provider wire value: explicit compat
+ * override first, then the model's baked `thinking.effortMap`, else identity.
+ * Shared by the chat-completions/Responses policy resolver and the Codex
+ * request transformer.
+ */
+export function mapOpenAIReasoningEffort(
 	model: Pick<Model, "thinking">,
-	compat: OpenAICompatPolicyCompat,
+	compat: { reasoningEffortMap?: Partial<Record<Effort, string>> } | undefined,
 	effort: string,
 ): string {
 	const level = effort as Effort;
-	return compat.reasoningEffortMap?.[level] ?? model.thinking?.effortMap?.[level] ?? effort;
+	return compat?.reasoningEffortMap?.[level] ?? model.thinking?.effortMap?.[level] ?? effort;
 }
 
 function isImplicitDisableWhenNotRequested(disableMode: OpenAIReasoningDisableMode): boolean {
@@ -737,7 +899,7 @@ export function resolveOpenAICompatPolicy<TApi extends Api>(
 	) {
 		const minEffort = getSupportedEfforts(model)[0];
 		if (minEffort === undefined) {
-			throw new Error(`Model ${model.provider}/${model.id} has no supported reasoning efforts`);
+			throw new AIError.ConfigurationError(`Model ${model.provider}/${model.id} has no supported reasoning efforts`);
 		}
 		wireEffort = mapOpenAIReasoningEffort(model, compat, minEffort);
 	}
@@ -813,6 +975,50 @@ function encodeChatCompletionsDisabledReasoning(
 }
 
 export function applyChatCompletionsCompatPolicy(params: OpenAICompletionsParams, policy: OpenAICompatPolicy): void {
+	// `preserve_thinking` is a chat-template HISTORY knob, not a per-turn
+	// thinking switch — it controls whether OLDER assistant turns render
+	// with `<think>...</think>` on Qwen3.6+. Emit it BEFORE the reasoning
+	// state branches and EVERY early-return below, because the wire shape
+	// must carry the kwarg in three cases the auto-detected
+	// `qwenPreserveThinking` flag covers but `reasoning.enabled` does not:
+	//
+	// 1. Discovered local Qwen models. `discoverOpenAICompatibleModels`
+	//    stamps `reasoning: false` on every spec built from a generic
+	//    `/v1/models` endpoint (the upstream doesn't advertise the
+	//    capability), so `model.reasoning === false` → `reasoning.enabled
+	//    === false`, the body wouldn't otherwise see the kwarg, and the
+	//    encoder's `replayReasoningContent` branch would keep shipping
+	//    `reasoning_content` only for the template to strip `<think>` from
+	//    older turns anyway. Exactly the #3528 / #3541 symptom on every
+	//    discovered Qwen build.
+	// 2. Caller-disabled reasoning. The slot's KV cache still holds prior
+	//    `<think>...</think>` tokens from earlier thinking turns; the
+	//    template must keep rendering them or cache invalidates at the
+	//    first historic `<think>`.
+	// 3. Forced-tool-choice / DeepSeek-style auto-disable. Same reasoning
+	//    as (2) — historic thinking blocks have to survive history replay
+	//    even when the current turn cannot think.
+	//
+	// Non-Qwen templates ignore the parameter (jinja `is defined` check
+	// silently no-ops), so emitting it unconditionally for the Qwen-family
+	// + local-cache compat flag is safe.
+	if (policy.compat.qwenPreserveThinking) {
+		// Mirror the dialect split that gates `enable_thinking`. The
+		// `qwen` dialect rides the top-level field (the only place
+		// llama.cpp's `--jinja` hook AND Alibaba Cloud Model Studio's
+		// compatible-mode look) while the `qwen-chat-template` dialect
+		// (NVIDIA NIM, vLLM/SGLang's chat-template-kwargs path) MUST
+		// ride only the kwargs copy — NIM's request schema is
+		// `additionalProperties: false` and rejects every unknown
+		// top-level field, the very reason `enable_thinking` is
+		// route-split this way (#2299, see `catalog/src/compat/openai.ts`
+		// thinkingFormat comment).
+		if (policy.compat.thinkingFormat === "qwen") {
+			params.preserve_thinking = true;
+		}
+		params.chat_template_kwargs = { ...params.chat_template_kwargs, preserve_thinking: true };
+	}
+
 	const reasoning = policy.reasoning;
 	if ((!reasoning.modelSupported && !reasoning.disabled) || !reasoning.supportsParams) return;
 	if (reasoning.enabled) {
@@ -821,6 +1027,11 @@ export function applyChatCompletionsCompatPolicy(params: OpenAICompletionsParams
 				if (reasoning.wireEffort === "none") {
 					encodeChatCompletionsDisabledReasoning(params, reasoning.disableMode);
 					return;
+				}
+				if (reasoning.dialect === "kimi" && reasoning.wireEffort !== undefined) {
+					params.thinking = { type: "enabled", effort: reasoning.wireEffort };
+					if (policy.compat.thinkingKeep) params.thinking.keep = policy.compat.thinkingKeep;
+					break;
 				}
 				params.thinking = { type: "enabled" };
 				if (policy.compat.thinkingKeep) params.thinking.keep = policy.compat.thinkingKeep;
@@ -832,7 +1043,10 @@ export function applyChatCompletionsCompatPolicy(params: OpenAICompletionsParams
 				params.enable_thinking = true;
 				break;
 			case "qwen-template-false":
-				params.chat_template_kwargs = { enable_thinking: true };
+				// Spread so the `preserve_thinking` kwarg hoisted above
+				// survives the merge — a bare `{ enable_thinking: true }`
+				// would clobber it.
+				params.chat_template_kwargs = { ...params.chat_template_kwargs, enable_thinking: true };
 				break;
 			case "openrouter-enabled-false":
 				if (reasoning.wireEffort !== undefined) {
@@ -900,16 +1114,38 @@ function isZaiReasoningEffortDialect(model: Model<"openai-completions">, compat:
 }
 
 /**
- * Output-token clamp for the Z.AI/GLM-5.2 reasoning dialect: these hosts accept
- * the full model window on reasoning turns, so clamp to the model cap. Returns
- * `undefined` for every other model, leaving {@link resolveOpenAIOutputTokenParam}
- * on its default `OPENAI_MAX_OUTPUT_TOKENS` clamp.
+ * Provider-specific Chat Completions output clamp.
+ *
+ * Most OpenAI-compatible endpoints retain the conservative 64k ceiling from
+ * {@link resolveOpenAIOutputTokenParam}. Z.AI/GLM-5.2 reasoning and native
+ * Moonshot K3 explicitly accept their full advertised model caps, so those
+ * routes clamp to `model.maxTokens` instead.
  */
-export function resolveZaiReasoningOutputClamp(
+export function resolveOpenAICompletionsOutputClamp(
 	model: Model<"openai-completions">,
 	compat: ResolvedOpenAICompat,
 ): number | undefined {
-	return isZaiReasoningEffortDialect(model, compat) ? (model.maxTokens ?? OPENAI_MAX_OUTPUT_TOKENS) : undefined;
+	if (isZaiReasoningEffortDialect(model, compat)) {
+		return model.maxTokens ?? OPENAI_MAX_OUTPUT_TOKENS;
+	}
+	if (model.provider === "moonshot" && isKimiK3ModelId(model.id)) {
+		return model.maxTokens ?? OPENAI_MAX_OUTPUT_TOKENS;
+	}
+	return undefined;
+}
+
+/**
+ * Provider-specific Responses API output clamp.
+ *
+ * Meta documents a 131,072-token output limit for Muse Spark 1.1, so native
+ * Meta requests may use the model's full advertised cap instead of the
+ * conservative 64k OpenAI-compatible default.
+ */
+export function resolveOpenAIResponsesOutputClamp(model: Pick<Model, "provider" | "maxTokens">): number | undefined {
+	if (model.provider === "meta") {
+		return model.maxTokens ?? OPENAI_MAX_OUTPUT_TOKENS;
+	}
+	return undefined;
 }
 
 /**
@@ -947,21 +1183,46 @@ export function isCompiledGrammarTooLargeStrictError(
 	);
 }
 
+interface StrictToolsRetryContext {
+	model: OpenAIModelIdentity;
+	strictToolsApplied: boolean;
+	tools: Tool[] | undefined;
+}
+
+/** Decide whether an OpenAI-family request should retry once with non-strict tools. */
 export function shouldRetryWithoutStrictTools(
 	error: unknown,
 	capturedErrorResponse: CapturedHttpErrorResponse | undefined,
-	strictToolsApplied: boolean,
-	tools: Tool[] | undefined,
+	context: StrictToolsRetryContext,
 ): boolean {
+	const { model, strictToolsApplied, tools } = context;
 	if (!tools || tools.length === 0 || !strictToolsApplied) return false;
 	const status = extractHttpStatusFromError(error) ?? capturedErrorResponse?.status;
 	if (status !== 400 && status !== 422) return false;
+	const errorMessage = error instanceof Error ? error.message.trim() : "";
 	const messageParts = [error instanceof Error ? error.message : undefined, capturedErrorResponse?.bodyText]
 		.filter((value): value is string => typeof value === "string" && value.trim().length > 0)
 		.join("\n");
-	return /wrong_api_format|mixed values for 'strict'|tool[s]?\b.*strict|\bstrict\b.*tool|tool parameters? schema|invalid schema for function/i.test(
-		messageParts,
-	);
+	if (
+		/wrong_api_format|mixed values for 'strict'|tool[s]?\b.*strict|\bstrict\b.*tool|tool parameters? schema|invalid schema for function|structured[_ -]?outputs?\b[^\n]*(?:not (?:supported|available|enabled)|unsupported)|(?:not support|unsupported)[^\n]*structured[_ -]?outputs?\b/i.test(
+			messageParts,
+		)
+	) {
+		return true;
+	}
+	if (model.provider !== "openrouter" || !/^(?:400\s+)?Provider returned error$/i.test(errorMessage)) return false;
+	const body = capturedErrorResponse?.bodyJson;
+	if (body && typeof body === "object" && "error" in body) {
+		const errorBody = body.error;
+		if (errorBody && typeof errorBody === "object" && "metadata" in errorBody) {
+			const metadata = errorBody.metadata;
+			if (metadata && typeof metadata === "object" && "raw" in metadata) {
+				const raw = metadata.raw;
+				if (typeof raw === "string" ? raw.trim().length > 0 : raw != null) return false;
+			}
+		}
+	}
+	return true;
 }
 
 function normalizeOpenAIStableId(value: string | undefined, maxLength: number, hashPrefix: string): string | undefined {
@@ -976,6 +1237,7 @@ export const OPENAI_RESPONSES_PROGRESS_EVENT_TYPES: ReadonlySet<string> = new Se
 	"response.output_item.added",
 	"response.reasoning_summary_part.added",
 	"response.reasoning_summary_text.delta",
+	"response.reasoning_summary_text.done",
 	"response.reasoning_summary_part.done",
 	"response.reasoning_text.delta",
 	"response.content_part.added",
@@ -1053,17 +1315,32 @@ export function normalizeResponsesToolCallIdForTransform(
 	return `${normalized.callId}|${normalized.itemId}`;
 }
 
+type ResponsesToolCallKind = "function" | "custom" | "computer";
+
+function responsesToolCallKind(type: unknown): ResponsesToolCallKind | undefined {
+	if (type === "function_call") return "function";
+	if (type === "custom_tool_call") return "custom";
+	if (type === "computer_call") return "computer";
+	return undefined;
+}
+
+function responsesToolOutputKind(type: unknown): ResponsesToolCallKind | undefined {
+	if (type === "function_call_output") return "function";
+	if (type === "custom_tool_call_output") return "custom";
+	if (type === "computer_call_output") return "computer";
+	return undefined;
+}
+function responseInputCallId(item: ResponseInput[number]): string | undefined {
+	if (!("call_id" in item)) return undefined;
+	return typeof item.call_id === "string" ? item.call_id : undefined;
+}
+
 export function collectKnownCallIds(messages: ResponseInput): Set<string> {
 	const knownCallIds = new Set<string>();
 	for (const item of messages) {
-		if (item.type === "function_call" && typeof item.call_id === "string") {
-			knownCallIds.add(item.call_id);
-		} else if (
-			(item as { type?: string }).type === "custom_tool_call" &&
-			typeof (item as { call_id?: string }).call_id === "string"
-		) {
-			knownCallIds.add((item as { call_id: string }).call_id);
-		}
+		if (responsesToolCallKind(item.type) === undefined) continue;
+		const callId = responseInputCallId(item);
+		if (callId) knownCallIds.add(callId);
 	}
 	return knownCallIds;
 }
@@ -1072,14 +1349,22 @@ export function collectKnownCallIds(messages: ResponseInput): Set<string> {
 export function collectCustomCallIds(messages: ResponseInput): Set<string> {
 	const customCallIds = new Set<string>();
 	for (const item of messages) {
-		if (
-			(item as { type?: string }).type === "custom_tool_call" &&
-			typeof (item as { call_id?: string }).call_id === "string"
-		) {
-			customCallIds.add((item as { call_id: string }).call_id);
-		}
+		if (item.type !== "custom_tool_call") continue;
+		const callId = responseInputCallId(item);
+		if (callId) customCallIds.add(callId);
 	}
 	return customCallIds;
+}
+
+/** Scan replay items for call_ids that were originally native computer calls. */
+export function collectComputerCallIds(messages: ResponseInput): Set<string> {
+	const computerCallIds = new Set<string>();
+	for (const item of messages) {
+		if (item.type !== "computer_call") continue;
+		const callId = responseInputCallId(item);
+		if (callId) computerCallIds.add(callId);
+	}
+	return computerCallIds;
 }
 
 /**
@@ -1106,32 +1391,23 @@ export function collectCustomCallIds(messages: ResponseInput): Set<string> {
  * codex provider — issue #1351 / regression of #472.
  */
 export function repairOrphanResponsesToolOutputs(input: ResponseInput): ResponseInput {
-	const knownCallIds = new Set<string>();
-	for (const item of input) {
-		const t = (item as { type?: string }).type;
-		const callId = (item as { call_id?: unknown }).call_id;
-		if (typeof callId !== "string") continue;
-		if (t === "function_call" || t === "custom_tool_call") knownCallIds.add(callId);
-	}
-	let hasOrphan = false;
-	for (const item of input) {
-		const t = (item as { type?: string }).type;
-		if (t !== "function_call_output" && t !== "custom_tool_call_output") continue;
-		const callId = (item as { call_id?: unknown }).call_id;
-		if (typeof callId === "string" && !knownCallIds.has(callId)) {
-			hasOrphan = true;
-			break;
+	const precedingCalls = new Set<string>();
+	let repaired: ResponseInput | undefined;
+	for (let index = 0; index < input.length; index++) {
+		const item = input[index];
+		const callKind = responsesToolCallKind(item.type);
+		const callId = responseInputCallId(item);
+		if (callKind && callId) precedingCalls.add(`${callKind}\0${callId}`);
+
+		const outputKind = responsesToolOutputKind(item.type);
+		if (!outputKind || !callId || precedingCalls.has(`${outputKind}\0${callId}`)) {
+			repaired?.push(item);
+			continue;
 		}
-	}
-	if (!hasOrphan) return input;
-	return input.map(item => {
-		const t = (item as { type?: string }).type;
-		if (t !== "function_call_output" && t !== "custom_tool_call_output") return item;
-		const record = item as { call_id?: unknown; output?: unknown; name?: unknown };
-		const callId = record.call_id;
-		if (typeof callId !== "string" || knownCallIds.has(callId)) return item;
-		const toolName = typeof record.name === "string" && record.name.length > 0 ? record.name : "tool";
-		const rawOutput = record.output;
+
+		if (!repaired) repaired = input.slice(0, index);
+		const toolName = outputKind === "computer" ? "computer" : "tool";
+		const rawOutput = "output" in item ? item.output : undefined;
 		let text: string;
 		if (typeof rawOutput === "string") text = rawOutput;
 		else if (rawOutput == null) text = "";
@@ -1144,12 +1420,13 @@ export function repairOrphanResponsesToolOutputs(input: ResponseInput): Response
 		}
 		const ORPHAN_OUTPUT_LIMIT = 16_000;
 		if (text.length > ORPHAN_OUTPUT_LIMIT) text = `${text.slice(0, ORPHAN_OUTPUT_LIMIT)}\n...[truncated]`;
-		return {
+		repaired.push({
 			type: "message",
 			role: "assistant",
 			content: `[Orphan ${toolName} result; call_id=${callId}]: ${text}`,
-		} as ResponseInput[number];
-	});
+		} as ResponseInput[number]);
+	}
+	return repaired ?? input;
 }
 
 /** Placeholder output for a tool call whose result is absent from the input. */
@@ -1171,33 +1448,43 @@ const ORPHAN_TOOL_CALL_PLACEHOLDER =
  * {@link repairOrphanResponsesToolOutputs}.
  */
 export function repairOrphanResponsesToolCalls(input: ResponseInput): ResponseInput {
-	const outputCallIds = new Set<string>();
-	for (const item of input) {
-		const t = (item as { type?: string }).type;
-		if (t !== "function_call_output" && t !== "custom_tool_call_output") continue;
-		const callId = (item as { call_id?: unknown }).call_id;
-		if (typeof callId === "string") outputCallIds.add(callId);
+	const laterOutputs = new Set<string>();
+	const orphanIndexes = new Set<number>();
+	for (let index = input.length - 1; index >= 0; index--) {
+		const item = input[index];
+		const callId = responseInputCallId(item);
+		const outputKind = responsesToolOutputKind(item.type);
+		if (outputKind && callId) laterOutputs.add(`${outputKind}\0${callId}`);
+
+		const callKind = responsesToolCallKind(item.type);
+		if (callKind && callId && !laterOutputs.has(`${callKind}\0${callId}`)) orphanIndexes.add(index);
 	}
-	let hasOrphan = false;
-	for (const item of input) {
-		const t = (item as { type?: string }).type;
-		if (t !== "function_call" && t !== "custom_tool_call") continue;
-		const callId = (item as { call_id?: unknown }).call_id;
-		if (typeof callId === "string" && !outputCallIds.has(callId)) {
-			hasOrphan = true;
-			break;
-		}
-	}
-	if (!hasOrphan) return input;
+	if (orphanIndexes.size === 0) return input;
+
 	const repaired: ResponseInput = [];
-	for (const item of input) {
+	for (let index = 0; index < input.length; index++) {
+		const item = input[index];
+		if (!orphanIndexes.has(index)) {
+			repaired.push(item);
+			continue;
+		}
+		const kind = responsesToolCallKind(item.type);
+		const callId = responseInputCallId(item);
+		if (!kind || !callId) {
+			repaired.push(item);
+			continue;
+		}
+		if (kind === "computer") {
+			repaired.push({
+				type: "message",
+				role: "assistant",
+				content: `[Computer call interrupted before a screenshot was recorded; call_id=${callId}]`,
+			} as ResponseInput[number]);
+			continue;
+		}
 		repaired.push(item);
-		const t = (item as { type?: string }).type;
-		if (t !== "function_call" && t !== "custom_tool_call") continue;
-		const callId = (item as { call_id?: unknown }).call_id;
-		if (typeof callId !== "string" || outputCallIds.has(callId)) continue;
 		repaired.push({
-			type: t === "custom_tool_call" ? "custom_tool_call_output" : "function_call_output",
+			type: kind === "custom" ? "custom_tool_call_output" : "function_call_output",
 			call_id: callId,
 			output: ORPHAN_TOOL_CALL_PLACEHOLDER,
 		} as ResponseInput[number]);
@@ -1223,16 +1510,24 @@ export function convertResponsesInputContent(
 	content: string | Array<TextContent | ImageContent>,
 	supportsImages: boolean,
 	supportsImageDetailOriginal: boolean,
+	escapeControlTokens = false,
 ): ResponseInputContent[] | undefined {
 	if (typeof content === "string") {
 		if (content.trim().length === 0) return undefined;
-		return [{ type: "input_text", text: content.toWellFormed() } satisfies ResponseInputText];
+		const text = content.toWellFormed();
+		return [
+			{
+				type: "input_text",
+				text: escapeControlTokens ? escapeHarmonyControlTokens(text) : text,
+			} satisfies ResponseInputText,
+		];
 	}
 
 	const { textBlocks, imageBlocks, omittedImages } = partitionVisionContent(content, supportsImages);
 	const normalizedContent: ResponseInputContent[] = [];
 	for (const item of textBlocks) {
-		const text = item.text.toWellFormed();
+		const raw = item.text.toWellFormed();
+		const text = escapeControlTokens ? escapeHarmonyControlTokens(raw) : raw;
 		if (text.trim().length === 0) continue;
 		normalizedContent.push({
 			type: "input_text",
@@ -1255,6 +1550,76 @@ export function convertResponsesInputContent(
 	return normalizedContent.length > 0 ? normalizedContent : undefined;
 }
 
+/**
+ * Map freeform custom-tool wire names back to the internal tool name for
+ * providers that only accept function_call / function_call_output.
+ * Built once per request; `apply_patch` → `edit` is the OMP default.
+ */
+function buildCustomToolWireNameMap(tools: readonly Tool[] | undefined): ReadonlyMap<string, string> | undefined {
+	if (!tools?.length) return undefined;
+	const map = new Map<string, string>();
+	for (const tool of tools) {
+		if (tool.customWireName) map.set(tool.customWireName, tool.name);
+	}
+	return map.size > 0 ? map : undefined;
+}
+
+function resolveReplayCustomToolName(wireName: string, wireNameMap: ReadonlyMap<string, string> | undefined): string {
+	return wireNameMap?.get(wireName) ?? (wireName === "apply_patch" ? "edit" : wireName);
+}
+
+/**
+ * Downgrade OpenAI-only custom tool items when the target model does not
+ * advertise freeform custom tools (`applyPatchToolType === "freeform"`).
+ * No-op (returns the same array reference) when freeform is supported.
+ */
+function adaptResponsesReplayItemsForModel(
+	input: ResponseInput,
+	supportsCustomToolCalls: boolean,
+	wireNameMap: ReadonlyMap<string, string> | undefined,
+	supportsComputerUse: boolean,
+): ResponseInput {
+	if (supportsCustomToolCalls && supportsComputerUse) return input;
+
+	let changed = false;
+	const adapted: ResponseInput = [];
+	for (const item of input) {
+		if (!supportsCustomToolCalls && item.type === "custom_tool_call") {
+			changed = true;
+			adapted.push({
+				type: "function_call",
+				...(item.id ? { id: item.id } : {}),
+				call_id: item.call_id,
+				name: resolveReplayCustomToolName(item.name, wireNameMap),
+				arguments: JSON.stringify({ input: item.input }),
+				...(item.namespace ? { namespace: item.namespace } : {}),
+			});
+			continue;
+		}
+		if (!supportsCustomToolCalls && item.type === "custom_tool_call_output") {
+			changed = true;
+			adapted.push({
+				type: "function_call_output",
+				call_id: item.call_id,
+				output: item.output,
+			});
+			continue;
+		}
+		if (!supportsComputerUse && (item.type === "computer_call" || item.type === "computer_call_output")) {
+			changed = true;
+			const callId = responseInputCallId(item) ?? "unknown";
+			adapted.push({
+				type: "message",
+				role: "assistant",
+				content: `[Previous computer ${item.type === "computer_call" ? "call" : "result"}; call_id=${callId}]: ${stringifyJson(item) ?? ""}`,
+			} as ResponseInput[number]);
+			continue;
+		}
+		adapted.push(item);
+	}
+	return changed ? adapted : input;
+}
+
 export interface BuildResponsesInputOptions<TApi extends Api> {
 	model: Model<TApi>;
 	context: Context;
@@ -1268,6 +1633,79 @@ export interface BuildResponsesInputOptions<TApi extends Api> {
 	includeThinkingSignatures?: boolean;
 	developerStringContent?: boolean;
 	repairOrphanOutputs?: boolean;
+	/** Preserve assistant message item IDs from text signatures during fallback replay. */
+	preserveAssistantMessageIds?: boolean;
+}
+
+/**
+ * Escape reserved Harmony control tokens in the free-text fields of replayed
+ * Responses input items: user/developer/system text, tool-result output,
+ * assistant message text, and tool-call payloads.
+ *
+ * Tool-call items are covered deliberately. The original #6913 fix skipped
+ * model-owned items on the theory that they carry no client data — but a model
+ * legitimately writing *about* Harmony samples `<|channel|>` etc. into its own
+ * `function_call.arguments`, and a full-transcript replay (stale or blocked
+ * previous_response_id, provider fallback) feeds those bytes back as input,
+ * which gpt-5.x reject with invalid_prompt / "Request blocked", permanently
+ * poisoning the session. `arguments` is a JSON document, so it uses
+ * {@link escapeHarmonyControlTokensInJson} to stay parseable. Reasoning items
+ * are left untouched: `encrypted_content` is opaque and plaintext summaries
+ * are never rendered back into the prompt.
+ *
+ * Native history replay pushes stored `providerPayload` items straight onto the
+ * wire, bypassing {@link convertResponsesInputContent}; without this a stored
+ * `input_text` carrying `<|channel|>analysis` still reaches gpt-5.x raw (#6913).
+ * Callers gate on {@link isHarmonyDialectModel}. Items are copied, not mutated.
+ */
+export function escapeReplayedControlTokens(items: ResponseInput): ResponseInput {
+	return items.map(item => {
+		if (item.type === "function_call_output" || item.type === "custom_tool_call_output") {
+			return typeof item.output === "string" ? { ...item, output: escapeHarmonyControlTokens(item.output) } : item;
+		}
+		if (item.type === "function_call") {
+			return typeof item.arguments === "string"
+				? { ...item, arguments: escapeHarmonyControlTokensInJson(item.arguments) }
+				: item;
+		}
+		if (item.type === "custom_tool_call") {
+			return typeof item.input === "string" ? { ...item, input: escapeHarmonyControlTokens(item.input) } : item;
+		}
+		// EasyInputMessage may omit `type` (`{ role, content }`); the responses
+		// server persists it verbatim, so treat missing type as a message too.
+		const isTypedMessage = item.type === "message" || item.type === undefined;
+		if (!isTypedMessage || !("role" in item) || !("content" in item)) return item;
+		if (item.role === "assistant") {
+			// Assistant output text is model-owned but equally capable of carrying
+			// control tokens as data. `status` discriminates ResponseOutputMessage.
+			if ("status" in item && Array.isArray(item.content)) {
+				return {
+					...item,
+					content: item.content.map(part =>
+						part.type === "output_text"
+							? { ...part, text: escapeHarmonyControlTokens(part.text) }
+							: part.type === "refusal"
+								? { ...part, refusal: escapeHarmonyControlTokens(part.refusal) }
+								: part,
+					),
+				};
+			}
+			return item;
+		}
+		const content = item.content;
+		if (typeof content === "string") {
+			return { ...item, content: escapeHarmonyControlTokens(content) };
+		}
+		if (Array.isArray(content)) {
+			return {
+				...item,
+				content: content.map(part =>
+					part.type === "input_text" ? { ...part, text: escapeHarmonyControlTokens(part.text) } : part,
+				),
+			};
+		}
+		return item;
+	});
 }
 
 export function buildResponsesInput<TApi extends Api>(options: BuildResponsesInputOptions<TApi>): ResponseInput {
@@ -1277,8 +1715,18 @@ export function buildResponsesInput<TApi extends Api>(options: BuildResponsesInp
 		messages.push({ role: options.systemRole as "system" | "developer", content: systemPrompt });
 	}
 
+	// Compat is resolved by the catalog (e.g. Copilot / xai-oauth reject
+	// `detail: "original"`). Do not re-branch on provider id here.
+	const supportsImageDetailOriginal = options.supportsImageDetailOriginal;
+	// Freeform custom tools (`custom_tool_call`) only when the catalog says so;
+	// same gate as tool conversion (`applyPatchToolType === "freeform"`).
+	const supportsCustomToolCalls = options.model.applyPatchToolType === "freeform";
+	const customToolWireNameMap = supportsCustomToolCalls
+		? undefined
+		: buildCustomToolWireNameMap(options.context.tools);
 	let knownCallIds = new Set<string>();
 	const customCallIds = new Set<string>();
+	const computerCallIds = new Set<string>();
 	const transformedMessages = transformMessages(
 		options.context.messages,
 		options.model,
@@ -1287,6 +1735,11 @@ export function buildResponsesInput<TApi extends Api>(options: BuildResponsesInp
 	const filterReasoning = <T extends { type?: string }>(items: T[]): T[] =>
 		options.nativeHistory?.filterReasoning ? items.filter(item => item?.type !== "reasoning") : items;
 	const includeThinkingSignatures = options.includeThinkingSignatures ?? options.nativeHistory?.replay ?? true;
+	// Harmony-server models (gpt-5.x) reject requests whose input data reproduces
+	// reserved control-token spellings; escape the transport copy of untrusted
+	// user/tool text so ordinary docs, code, or grep results cannot poison the
+	// session (#6913). The persisted transcript is never touched.
+	const escapeControlTokens = isHarmonyDialectModel(options.model);
 
 	let msgIndex = 0;
 	for (const msg of transformedMessages) {
@@ -1304,77 +1757,150 @@ export function buildResponsesInput<TApi extends Api>(options: BuildResponsesInp
 				}) ??
 					false);
 			if (historyItems && shouldReplayPayloadItems) {
-				messages.push(...sanitizeOpenAIResponsesHistoryItemsForReplay(filterReasoning(historyItems)));
+				const sanitizedItems = sanitizeOpenAIResponsesHistoryItemsForReplay(filterReasoning(historyItems), {
+					supportsImageDetailOriginal,
+					supportsComputerUse: options.model.supportsComputerUse === true,
+				});
+				const replayItems = adaptResponsesReplayItemsForModel(
+					sanitizedItems,
+					supportsCustomToolCalls,
+					customToolWireNameMap,
+					options.model.supportsComputerUse === true,
+				);
+				messages.push(...(escapeControlTokens ? escapeReplayedControlTokens(replayItems) : replayItems));
 				knownCallIds = collectKnownCallIds(messages);
 				for (const id of collectCustomCallIds(messages)) customCallIds.add(id);
+				for (const id of collectComputerCallIds(messages)) computerCallIds.add(id);
 				msgIndex++;
 				continue;
 			}
 			const content = convertResponsesInputContent(
 				msg.content,
 				options.model.input.includes("image"),
-				options.supportsImageDetailOriginal,
+				supportsImageDetailOriginal,
+				escapeControlTokens,
 			);
 			if (!content) continue;
+			const developerText =
+				options.developerStringContent && msg.role === "developer" && typeof msg.content === "string"
+					? msg.content.toWellFormed()
+					: undefined;
 			messages.push({
 				role: "user",
 				content:
-					options.developerStringContent && msg.role === "developer" && typeof msg.content === "string"
-						? msg.content.toWellFormed()
+					developerText !== undefined
+						? escapeControlTokens
+							? escapeHarmonyControlTokens(developerText)
+							: developerText
 						: content,
 			});
 		} else if (msg.role === "assistant") {
 			const assistantMsg = msg as AssistantMessage;
+			// Providers replay stale native items even when the current request has
+			// disabled native replay (cold session state, filter policy). Consult
+			// the payload sanitizer directly so hidden-empty turns are recognized
+			// on both the warm and cold paths.
 			const providerPayload =
-				options.nativeHistory?.replay &&
-				assistantMsg.api === options.model.api &&
-				assistantMsg.model === options.model.id
+				assistantMsg.api === options.model.api && assistantMsg.model === options.model.id
 					? getOpenAIResponsesHistoryPayload(
 							assistantMsg.providerPayload,
 							options.model.provider,
 							assistantMsg.provider,
 						)
 					: undefined;
+			const nativeReplayEnabled = options.nativeHistory?.replay === true;
 			const historyItems = providerPayload?.items;
+			let suppressHiddenEmptyFallback = false;
 			if (historyItems) {
-				const sanitizedHistoryItems = sanitizeOpenAIResponsesHistoryItemsForReplay(filterReasoning(historyItems));
-				if (providerPayload?.dt) {
-					messages.push(...sanitizedHistoryItems);
-				} else {
-					messages.splice(0, messages.length, ...sanitizedHistoryItems);
+				const rawSanitizedHistoryItems = sanitizeOpenAIResponsesAssistantHistoryItemsForReplay(
+					filterReasoning(historyItems),
+					{
+						supportsImageDetailOriginal,
+						supportsComputerUse: options.model.supportsComputerUse === true,
+					},
+				);
+				const sanitizedHistoryItems = rawSanitizedHistoryItems
+					? adaptResponsesReplayItemsForModel(
+							rawSanitizedHistoryItems,
+							supportsCustomToolCalls,
+							customToolWireNameMap,
+							options.model.supportsComputerUse === true,
+						)
+					: undefined;
+				if (nativeReplayEnabled && sanitizedHistoryItems) {
+					// Model-owned replay items can carry reserved control-token
+					// spellings as data (the model writing *about* Harmony); escape the
+					// transport copy just like client turns.
+					const wireItems = escapeControlTokens
+						? escapeReplayedControlTokens(sanitizedHistoryItems)
+						: sanitizedHistoryItems;
+					if (providerPayload?.dt) {
+						messages.push(...wireItems);
+					} else {
+						messages.splice(0, messages.length, ...wireItems);
+						customCallIds.clear();
+						computerCallIds.clear();
+					}
+					knownCallIds = collectKnownCallIds(messages);
+					for (const id of collectCustomCallIds(messages)) customCallIds.add(id);
+					for (const id of collectComputerCallIds(messages)) computerCallIds.add(id);
+					msgIndex++;
+					continue;
 				}
-				knownCallIds = collectKnownCallIds(messages);
-				for (const id of collectCustomCallIds(messages)) customCallIds.add(id);
-				msgIndex++;
-				continue;
+				if (!sanitizedHistoryItems) suppressHiddenEmptyFallback = true;
 			}
 
-			const outputItems = convertResponsesAssistantMessage(
+			const convertedOutputItems = convertResponsesAssistantMessage(
 				assistantMsg,
 				options.model,
 				msgIndex,
 				knownCallIds,
-				includeThinkingSignatures,
+				suppressHiddenEmptyFallback ? false : includeThinkingSignatures,
 				customCallIds,
+				options.preserveAssistantMessageIds,
+				supportsCustomToolCalls,
+				customToolWireNameMap,
+				computerCallIds,
 			);
+			const outputItems = suppressHiddenEmptyFallback
+				? sanitizeOpenAIResponsesAssistantFallbackItemsForReplay(convertedOutputItems)
+				: convertedOutputItems;
 			if (outputItems.length === 0) continue;
-			messages.push(...outputItems);
+			messages.push(...(escapeControlTokens ? escapeReplayedControlTokens(outputItems) : outputItems));
 		} else if (msg.role === "toolResult") {
 			appendResponsesToolResultMessages(
 				messages,
 				msg,
 				options.model,
 				options.strictResponsesPairing,
-				options.supportsImageDetailOriginal,
+				supportsImageDetailOriginal,
 				knownCallIds,
 				customCallIds,
+				supportsCustomToolCalls,
+				computerCallIds,
 			);
 		}
 		msgIndex++;
 	}
 
 	const withRepairedOutputs = options.repairOrphanOutputs ? repairOrphanResponsesToolOutputs(messages) : messages;
-	return repairOrphanResponsesToolCalls(withRepairedOutputs);
+	const withRepairedCalls = repairOrphanResponsesToolCalls(withRepairedOutputs);
+	return stripUnpairedOpenAIResponsesComputerReasoningIdsForReplay(withRepairedCalls);
+}
+
+type ResponsesReplayAssistantMessage = Omit<ResponseOutputMessage, "id"> & { id?: string };
+
+function parseResponseReasoningReplayItem(signature: string | undefined): ResponseReasoningItem | undefined {
+	if (!signature) return undefined;
+	try {
+		const parsed = JSON.parse(signature) as unknown;
+		if (!parsed || typeof parsed !== "object") return undefined;
+		if (!("type" in parsed) || parsed.type !== "reasoning") return undefined;
+		if (!("id" in parsed) || typeof parsed.id !== "string") return undefined;
+		return parsed as ResponseReasoningItem;
+	} catch {
+		return undefined;
+	}
 }
 
 export function convertResponsesAssistantMessage<TApi extends Api>(
@@ -1384,9 +1910,19 @@ export function convertResponsesAssistantMessage<TApi extends Api>(
 	knownCallIds: Set<string>,
 	includeThinkingSignatures = true,
 	customCallIds?: Set<string>,
+	preserveMessageIds = false,
+	supportsCustomToolCalls = true,
+	customToolWireNameMap?: ReadonlyMap<string, string>,
+	computerCallIds?: Set<string>,
 ): ResponseInput {
 	const outputItems: ResponseInput = [];
 	let unsignedTextBlocks = 0;
+	const hasReplayableReasoningItem =
+		includeThinkingSignatures &&
+		assistantMsg.stopReason !== "error" &&
+		assistantMsg.content.some(
+			block => block.type === "thinking" && parseResponseReasoningReplayItem(block.thinkingSignature) !== undefined,
+		);
 	const isDifferentModel =
 		assistantMsg.model !== model.id && assistantMsg.provider === model.provider && assistantMsg.api === model.api;
 
@@ -1395,14 +1931,8 @@ export function convertResponsesAssistantMessage<TApi extends Api>(
 			if (!includeThinkingSignatures) {
 				continue;
 			}
-			if (block.thinkingSignature) {
-				try {
-					outputItems.push(JSON.parse(block.thinkingSignature) as ResponseReasoningItem);
-				} catch {
-					// Legacy/corrupt persisted signature — skip the reasoning item
-					// rather than failing the whole request build.
-				}
-			}
+			const reasoningItem = parseResponseReasoningReplayItem(block.thinkingSignature);
+			if (reasoningItem) outputItems.push(reasoningItem);
 			continue;
 		}
 
@@ -1410,21 +1940,30 @@ export function convertResponsesAssistantMessage<TApi extends Api>(
 			const parsedSignature = parseTextSignature(block.textSignature);
 			let msgId = parsedSignature?.id;
 			if (!msgId) {
-				// Distinct ids per unsigned block: several text blocks in one message
-				// (cross-provider replay downgrades thinking → text) must not share an id.
-				msgId = unsignedTextBlocks === 0 ? `msg_${msgIndex}` : `msg_${msgIndex}_${unsignedTextBlocks}`;
-				unsignedTextBlocks += 1;
+				if (hasReplayableReasoningItem) {
+					// Distinct ids per unsigned block: several text blocks in one message
+					// (cross-provider replay downgrades thinking → text) must not share an id.
+					msgId = unsignedTextBlocks === 0 ? `msg_${msgIndex}` : `msg_${msgIndex}_${unsignedTextBlocks}`;
+					unsignedTextBlocks += 1;
+				}
+			} else if (!preserveMessageIds && !hasReplayableReasoningItem) {
+				// Without the matching reasoning item the server rejects replayed
+				// item ids (#4173) — drop them regardless of shape, including
+				// legacy plain-string signatures that would otherwise fall into
+				// the >64-char hash branch and fabricate a bogus msg_ id.
+				msgId = undefined;
 			} else if (msgId.length > 64) {
 				msgId = `msg_${Bun.hash(msgId).toString(36)}`;
 			}
-			outputItems.push({
+			const messageItem: ResponsesReplayAssistantMessage = {
 				type: "message",
 				role: "assistant",
 				content: [{ type: "output_text", text: block.text.toWellFormed(), annotations: [] }],
 				status: "completed",
-				id: msgId,
-				phase: parsedSignature?.phase,
-			} satisfies ResponseOutputMessage);
+				...(msgId ? { id: msgId } : {}),
+				...(parsedSignature?.phase ? { phase: parsedSignature.phase } : {}),
+			};
+			outputItems.push(messageItem as ResponseInput[number]);
 			continue;
 		}
 
@@ -1432,36 +1971,86 @@ export function convertResponsesAssistantMessage<TApi extends Api>(
 			continue;
 		}
 
+		if (block.providerMetadata?.type === "computer") {
+			if (model.supportsComputerUse !== true) {
+				const callId = normalizeResponsesToolCallId(block.id, "ctc").callId;
+				outputItems.push({
+					type: "message",
+					role: "assistant",
+					content: `[Previous computer call; call_id=${callId}]: ${stringifyJson(block.providerMetadata.actions) ?? ""}`,
+				} as ResponseInput[number]);
+				continue;
+			}
+			const normalized = normalizeResponsesToolCallId(block.id, "ctc");
+			knownCallIds.add(normalized.callId);
+			computerCallIds?.add(normalized.callId);
+			outputItems.push({
+				type: "computer_call",
+				id: block.providerMetadata.providerItemId,
+				call_id: normalized.callId,
+				actions: structuredCloneJSON(block.providerMetadata.actions),
+				pending_safety_checks: structuredCloneJSON(block.providerMetadata.pendingSafetyChecks),
+				status: "completed",
+			} as ResponseInput[number]);
+			continue;
+		}
 		const normalized = normalizeResponsesToolCallId(block.id, block.customWireName ? "ctc" : "fc");
 		let itemId: string | undefined = normalized.itemId;
-		if (isDifferentModel && (itemId?.startsWith("fc_") || itemId?.startsWith("fcr_") || itemId?.startsWith("ctc_"))) {
+		if (
+			!hasReplayableReasoningItem &&
+			(itemId?.startsWith("fc_") || itemId?.startsWith("fcr_") || itemId?.startsWith("ctc_"))
+		) {
+			itemId = undefined;
+		} else if (
+			isDifferentModel &&
+			(itemId?.startsWith("fc_") || itemId?.startsWith("fcr_") || itemId?.startsWith("ctc_"))
+		) {
 			itemId = undefined;
 		}
 		knownCallIds.add(normalized.callId);
-		if (block.customWireName) {
+		if (block.customWireName && supportsCustomToolCalls) {
 			const rawInput = typeof block.arguments?.input === "string" ? block.arguments.input : "";
 			customCallIds?.add(normalized.callId);
 			outputItems.push({
 				type: "custom_tool_call",
-				id: itemId,
+				...(itemId ? { id: itemId } : {}),
 				call_id: normalized.callId,
 				name: block.customWireName,
 				input: rawInput,
 			} as ResponseInput[number]);
 			continue;
 		}
+		const functionName =
+			block.customWireName && !supportsCustomToolCalls
+				? resolveReplayCustomToolName(block.customWireName, customToolWireNameMap)
+				: block.name;
 		outputItems.push({
 			type: "function_call",
-			id: itemId,
+			...(itemId ? { id: itemId } : {}),
 			call_id: normalized.callId,
-			name: block.name,
-			arguments: JSON.stringify(block.arguments),
+			name: functionName,
+			arguments: stringifyJson(block.arguments) ?? "null",
 		});
 	}
 
 	return outputItems;
 }
 
+const syntheticToolImageMessages = new WeakSet<object>();
+
+function insertResponsesToolOutput(messages: ResponseInput, output: ResponseInput[number]): void {
+	let index = messages.length;
+	while (index > 0) {
+		const previous = messages[index - 1];
+		if (typeof previous !== "object" || previous === null || !syntheticToolImageMessages.has(previous)) {
+			break;
+		}
+		index -= 1;
+	}
+	messages.splice(index, 0, output);
+}
+
+/** Appends one tool result while keeping consecutive outputs ahead of its synthetic image messages. */
 export function appendResponsesToolResultMessages<TApi extends Api>(
 	messages: ResponseInput,
 	toolResult: ToolResultMessage,
@@ -1470,6 +2059,8 @@ export function appendResponsesToolResultMessages<TApi extends Api>(
 	supportsImageDetailOriginal: boolean,
 	knownCallIds: ReadonlySet<string>,
 	customCallIds?: ReadonlySet<string>,
+	supportsCustomToolCalls = true,
+	computerCallIds?: ReadonlySet<string>,
 ): void {
 	const supportsImages = model.input.includes("image");
 	const textResult = toolResult.content
@@ -1479,13 +2070,59 @@ export function appendResponsesToolResultMessages<TApi extends Api>(
 	const hasImages = toolResult.content.some((block): block is ImageContent => block.type === "image");
 	const omittedImages = hasImages && !supportsImages;
 	const normalized = normalizeResponsesToolCallId(toolResult.toolCallId);
-	const output = (
+	// "(see attached image)" is only truthful when the result actually carries
+	// images (they ride as a separate user message on the Responses API). A
+	// genuinely empty text result (empty file read, silent tool) must stay
+	// empty — the placeholder sent models chasing an attachment that never
+	// existed.
+	const rawOutput = (
 		omittedImages
 			? joinTextWithImagePlaceholder(textResult, true)
 			: textResult.length > 0
 				? textResult
-				: "(see attached image)"
+				: hasImages
+					? "(see attached image)"
+					: ""
 	).toWellFormed();
+	// Harmony-server models reject reserved control-token spellings even as tool
+	// data; escape the transport copy so a grep/read result cannot poison the
+	// session (#6913). Covers every downstream branch that consumes `output`.
+	const output = isHarmonyDialectModel(model) ? escapeHarmonyControlTokens(rawOutput) : rawOutput;
+	if (toolResult.providerMetadata?.type === "computer" && model.supportsComputerUse !== true) {
+		messages.push({
+			type: "message",
+			role: "assistant",
+			content: `[Previous computer result; call_id=${normalized.callId}]: ${stringifyJson(toolResult.providerMetadata.screenshot) ?? ""}`,
+		} as ResponseInput[number]);
+		return;
+	}
+	if (computerCallIds?.has(normalized.callId)) {
+		if (toolResult.providerMetadata?.type !== "computer") {
+			const limit = 16_000;
+			const noteText = output.length > limit ? `${output.slice(0, limit)}\n...[truncated]` : output;
+			messages.push({
+				type: "message",
+				role: "assistant",
+				content: `[Computer tool failed before a screenshot was produced; call_id=${normalized.callId}]: ${noteText}`,
+			} as ResponseInput[number]);
+			return;
+		}
+		if (strictResponsesPairing && !knownCallIds.has(normalized.callId)) {
+			messages.push({
+				type: "message",
+				role: "assistant",
+				content: `[Orphan computer result; call_id=${normalized.callId}]`,
+			} as ResponseInput[number]);
+			return;
+		}
+		insertResponsesToolOutput(messages, {
+			type: "computer_call_output",
+			call_id: normalized.callId,
+			output: structuredCloneJSON(toolResult.providerMetadata.screenshot),
+			acknowledged_safety_checks: structuredCloneJSON(toolResult.providerMetadata.acknowledgedSafetyChecks),
+		} as ResponseInput[number]);
+		return;
+	}
 	if (strictResponsesPairing && !knownCallIds.has(normalized.callId)) {
 		// Strict backends (Azure, Copilot) reject unpaired outputs outright, but
 		// silently dropping the result loses information the model needs. Fold it
@@ -1499,14 +2136,14 @@ export function appendResponsesToolResultMessages<TApi extends Api>(
 		} as ResponseInput[number]);
 		return;
 	}
-	if (customCallIds?.has(normalized.callId)) {
-		messages.push({
+	if (supportsCustomToolCalls && customCallIds?.has(normalized.callId)) {
+		insertResponsesToolOutput(messages, {
 			type: "custom_tool_call_output",
 			call_id: normalized.callId,
 			output,
 		} as ResponseInput[number]);
 	} else {
-		messages.push({
+		insertResponsesToolOutput(messages, {
 			type: "function_call_output",
 			call_id: normalized.callId,
 			output,
@@ -1529,7 +2166,9 @@ export function appendResponsesToolResultMessages<TApi extends Api>(
 			} satisfies ResponseInputImage);
 		}
 	}
-	messages.push({ role: "user", content: contentParts });
+	const imageMessage = { role: "user", content: contentParts } satisfies ResponseInput[number];
+	syntheticToolImageMessages.add(imageMessage);
+	messages.push(imageMessage);
 }
 
 /**
@@ -1543,7 +2182,7 @@ export function appendResponsesToolResultMessages<TApi extends Api>(
  * Codex uses the open item's recorded index) so the emitted stream events match
  * each decoder's existing behavior byte-for-byte.
  */
-type ResponsesToolCallBlock = ToolCall & { partialJson: string; lastParseLen?: number };
+type ResponsesToolCallBlock = ToolCall & { [kStreamingPartialJson]: string; [kStreamingLastParseLen]?: number };
 
 export function appendReasoningSummaryPart(
 	item: ResponseReasoningItem,
@@ -1551,6 +2190,78 @@ export function appendReasoningSummaryPart(
 ): void {
 	item.summary = item.summary || [];
 	item.summary.push(part);
+}
+
+/**
+ * Response-global accumulator for the sequential-cutoff summary contract.
+ *
+ * Summary indices are cumulative across ALL reasoning items in a response:
+ * each new reasoning item replays the previous item's last completed section
+ * (`.done` at index N-1) before streaming its own, and replay-only items may
+ * add nothing new. Folding per item would re-emit every replayed section, so
+ * the canonical summary and the emitted text span items and live here.
+ */
+export interface SequentialCutoffSummaryState {
+	/** Latest full text per response-global summary index. */
+	summary: ResponseReasoningItem["summary"];
+	/** Canonical summary text already emitted as thinking deltas across all blocks. */
+	emitted: string;
+}
+
+export function createSequentialCutoffSummaryState(): SequentialCutoffSummaryState {
+	return { summary: [], emitted: "" };
+}
+
+// Sequential-cutoff streams may repeat the full canonical summary as later parts.
+function foldReasoningSummary(parts: ResponseReasoningItem["summary"] | undefined): string {
+	if (!parts) return "";
+	let canonical = "";
+	for (const part of parts) {
+		const text = part.text;
+		if (!text || text === canonical) continue;
+		const extendsCanonical = text.startsWith(canonical) && text[canonical.length] === "\n";
+		canonical = !canonical || extendsCanonical ? text : `${canonical}\n\n${text}`;
+	}
+	return canonical;
+}
+
+/** Chooses final reasoning text without making sequential-cutoff results disagree with emitted deltas. */
+export function finalizeReasoningThinking(
+	item: ResponseReasoningItem,
+	streamedThinking: string,
+	cutoff?: SequentialCutoffSummaryState,
+): string {
+	if (cutoff) return finalizeCutoffReasoningThinking(item, streamedThinking, cutoff);
+	const summaryThinking = item.summary?.map(part => part.text).join("\n\n") ?? "";
+	if (summaryThinking) return summaryThinking;
+	const contentThinking = item.content?.[0]?.type === "reasoning_text" ? (item.content[0].text ?? "") : "";
+	return contentThinking || streamedThinking || "";
+}
+
+function finalizeCutoffReasoningThinking(
+	item: ResponseReasoningItem,
+	streamedThinking: string,
+	cutoff: SequentialCutoffSummaryState,
+): string {
+	// The block's streamed deltas are authoritative: final text must never
+	// disagree with what delta consumers already rendered.
+	if (streamedThinking) return streamedThinking;
+	const summaryThinking = foldReasoningSummary(item.summary);
+	if (summaryThinking) {
+		// The done payload carries the response-cumulative summary. Emit only
+		// what no earlier block already emitted; replay-only items finalize empty.
+		if (cutoff.emitted.startsWith(summaryThinking)) return "";
+		if (!cutoff.emitted || summaryThinking.startsWith(cutoff.emitted)) {
+			const suffix = summaryThinking.slice(cutoff.emitted.length).replace(/^\n+/, "");
+			// Adopt the payload as canonical so later items cannot replay this text.
+			cutoff.summary = item.summary?.map(part => ({ ...part })) ?? [];
+			cutoff.emitted = summaryThinking;
+			return suffix;
+		}
+		// Diverged from streamed text — the deltas already shown win.
+		return "";
+	}
+	return item.content?.[0]?.type === "reasoning_text" ? (item.content[0].text ?? "") : "";
 }
 
 export function appendReasoningSummaryTextDelta(
@@ -1582,6 +2293,42 @@ export function appendReasoningSummaryPartDone(
 	block.thinking += "\n\n";
 	lastPart.text += "\n\n";
 	stream.push({ type: "thinking_delta", contentIndex, delta: "\n\n", partial: output });
+}
+
+/**
+ * Applies an atomic `response.reasoning_summary_text.done` snapshot.
+ *
+ * Sequential-cutoff summary indices are response-global: later reasoning items
+ * replay earlier sections, resend the accumulated summary as one part, or
+ * complete without new sections. The canonical summary is rebuilt in `state`
+ * (spanning items) and only its append-only suffix is emitted into the current
+ * block. Divergent corrections stay buffered until finalization so delta
+ * consumers never receive suffixes based on unseen replacement text.
+ */
+export function applyReasoningSummaryDone(
+	state: SequentialCutoffSummaryState,
+	block: ThinkingContent,
+	text: string,
+	summaryIndex: number,
+	stream: AssistantMessageEventStream,
+	output: AssistantMessage,
+	contentIndex: number,
+): void {
+	while (state.summary.length <= summaryIndex) {
+		state.summary.push({ type: "summary_text", text: "" });
+	}
+	state.summary[summaryIndex].text = text;
+	const after = foldReasoningSummary(state.summary);
+	if (!after.startsWith(state.emitted)) return;
+	let delta = after.slice(state.emitted.length);
+	if (!delta) return;
+	state.emitted = after;
+	// A fresh block starts a new section: drop the inter-section separator so
+	// each thinking block stands alone.
+	if (!block.thinking) delta = delta.replace(/^\n+/, "");
+	if (!delta) return;
+	block.thinking += delta;
+	stream.push({ type: "thinking_delta", contentIndex, delta, partial: output });
 }
 
 export function appendMessageContentPart(
@@ -1622,6 +2369,11 @@ export function appendMessageTextDelta(
 	}
 	stream.push({ type: "text_delta", contentIndex, delta, partial: output });
 }
+/** Chooses final message text while treating non-empty terminal content as authoritative. */
+export function finalizeMessageText(item: ResponseOutputMessage, streamedText: string): string {
+	if (!item.content?.length) return streamedText || "";
+	return item.content.map(part => (part.type === "output_text" ? (part.text ?? "") : (part.refusal ?? ""))).join("");
+}
 
 export function accumulateToolCallArgumentsDelta(
 	block: ResponsesToolCallBlock,
@@ -1630,11 +2382,11 @@ export function accumulateToolCallArgumentsDelta(
 	output: AssistantMessage,
 	contentIndex: number,
 ): void {
-	block.partialJson += delta;
-	const throttled = parseStreamingJsonThrottled(block.partialJson, block.lastParseLen ?? 0);
+	block[kStreamingPartialJson] += delta;
+	const throttled = parseStreamingJsonThrottled(block[kStreamingPartialJson], block[kStreamingLastParseLen] ?? 0);
 	if (throttled) {
 		block.arguments = throttled.value;
-		block.lastParseLen = throttled.parsedLen;
+		block[kStreamingLastParseLen] = throttled.parsedLen;
 	}
 	stream.push({ type: "toolcall_delta", contentIndex, delta, partial: output });
 }
@@ -1646,10 +2398,9 @@ export function accumulateToolCallArgumentsDelta(
  * drops the transient accumulation fields.
  */
 export function finalizeToolCallArgumentsDone(block: ResponsesToolCallBlock, args: string): void {
-	block.partialJson = args;
-	block.arguments = parseStreamingJson(block.partialJson);
-	delete (block as { partialJson?: string }).partialJson;
-	delete (block as { lastParseLen?: number }).lastParseLen;
+	block[kStreamingPartialJson] = args;
+	block.arguments = parseStreamingJson(block[kStreamingPartialJson]);
+	clearStreamingPartialJson(block);
 }
 
 export function accumulateCustomToolCallInputDelta(
@@ -1659,23 +2410,34 @@ export function accumulateCustomToolCallInputDelta(
 	output: AssistantMessage,
 	contentIndex: number,
 ): void {
-	block.partialJson += delta;
-	block.arguments = { input: block.partialJson };
+	block[kStreamingPartialJson] += delta;
+	block.arguments = { input: block[kStreamingPartialJson] };
 	stream.push({ type: "toolcall_delta", contentIndex, delta, partial: output });
 }
 
 export function finalizeCustomToolCallInputDone(block: ResponsesToolCallBlock, input: string): void {
-	block.partialJson = input;
 	block.arguments = { input };
+}
+
+type OpenAIResponsesTerminalStreamEvent =
+	| Extract<ResponseStreamEvent, { type: "response.completed" | "response.incomplete" }>
+	| { type: "response.done"; response?: Partial<OpenAIResponse> };
+
+function getOpenAIResponsesTerminalEvent(event: ResponseStreamEvent): OpenAIResponsesTerminalStreamEvent | undefined {
+	const type = (event as { type?: unknown }).type;
+	return type === "response.completed" || type === "response.incomplete" || type === "response.done"
+		? (event as OpenAIResponsesTerminalStreamEvent)
+		: undefined;
 }
 
 export interface ProcessResponsesStreamOptions {
 	onFirstToken?: () => void;
 	onOutputItemDone?: (item: ResponseOutputItem) => void;
 	/**
-	 * Called when a terminal `response.completed` or `response.incomplete` event
-	 * is successfully processed. Only invoked on the successful-completion path;
-	 * thrown failure (`response.failed`) and cancellation paths never call this.
+	 * Called when a terminal `response.completed`, `response.incomplete`, or
+	 * `response.done` event is successfully processed. Only invoked on the
+	 * successful-completion path; thrown failure (`response.failed`) and
+	 * cancellation paths never call this.
 	 * Used by callers to detect premature stream closure (i.e. the stream ended
 	 * without a recognized terminal event).
 	 */
@@ -1687,6 +2449,36 @@ export interface ProcessResponsesStreamOptions {
 	requestServiceTier?: ServiceTier;
 }
 
+export function computerCallMetadata(item: ResponseComputerToolCall): ComputerToolCallMetadata {
+	const actions = item.actions?.length ? item.actions : item.action ? [item.action] : [];
+	return {
+		type: "computer",
+		providerItemId: item.id,
+		actions: structuredCloneJSON(actions) as ComputerAction[],
+		pendingSafetyChecks: structuredCloneJSON(item.pending_safety_checks ?? []),
+	};
+}
+
+/** Append a native Responses image result and emit its completion event. */
+export function appendResponsesImageResult(
+	output: AssistantMessage,
+	stream: AssistantMessageEventStream,
+	result: string,
+): void {
+	const image: ImageContent = {
+		type: "image",
+		data: result,
+		mimeType: parseImageMetadata(Buffer.from(result, "base64"))?.mimeType ?? "image/png",
+	};
+	output.content.push(image);
+	stream.push({
+		type: "image_end",
+		contentIndex: output.content.length - 1,
+		content: image,
+		partial: output,
+	});
+}
+
 export async function processResponsesStream<TApi extends Api>(
 	openaiStream: AsyncIterable<ResponseStreamEvent>,
 	output: AssistantMessage,
@@ -1694,9 +2486,18 @@ export async function processResponsesStream<TApi extends Api>(
 	model: Model<TApi>,
 	options?: ProcessResponsesStreamOptions,
 ): Promise<void> {
-	type StreamingToolCallBlock = ToolCall & { partialJson: string; lastParseLen?: number; argumentsDone?: boolean };
+	type StreamingToolCallBlock = ToolCall & {
+		[kStreamingPartialJson]: string;
+		[kStreamingLastParseLen]?: number;
+		[kStreamingArgumentsDone]?: boolean;
+	};
 	interface StreamingItem {
-		item: ResponseReasoningItem | ResponseOutputMessage | ResponseFunctionToolCall | ResponseCustomToolCall;
+		item:
+			| ResponseReasoningItem
+			| ResponseOutputMessage
+			| ResponseFunctionToolCall
+			| ResponseCustomToolCall
+			| ResponseComputerToolCall;
 		block: ThinkingContent | TextContent | StreamingToolCallBlock;
 	}
 
@@ -1757,6 +2558,58 @@ export async function processResponsesStream<TApi extends Api>(
 	};
 	const hasOpenItemKey = (event: { output_index?: number; item_id?: string }): boolean =>
 		typeof event.output_index === "number" || event.item_id !== undefined;
+	const startsJsonObjectDelta = (delta: unknown): boolean => {
+		if (typeof delta !== "string") return false;
+		for (let index = 0; index < delta.length; index++) {
+			const code = delta.charCodeAt(index);
+			if (code === 0x09 || code === 0x0a || code === 0x0d || code === 0x20) continue;
+			return code === 0x7b;
+		}
+		return false;
+	};
+	const shouldAdvanceIdentifierlessFunctionDelta = (
+		event: { output_index?: number; item_id?: string; delta?: unknown },
+		candidate: StreamingItem,
+	): boolean => {
+		const delta = event.delta;
+		if (
+			hasOpenItemKey(event) ||
+			typeof delta !== "string" ||
+			!startsJsonObjectDelta(delta) ||
+			candidate.item.type !== "function_call" ||
+			candidate.block.type !== "toolCall"
+		) {
+			return false;
+		}
+		const partial = candidate.block[kStreamingPartialJson];
+		if (partial.trim().length === 0) return false;
+		// A `{`-starting identifierless delta is ambiguous: the opening of a new
+		// sibling call, or continuation bytes inside the candidate's own argument
+		// JSON (`{"command":"echo ` + `{1..3}"}`). Advance only when the candidate
+		// cannot absorb the delta: its buffer is already one complete JSON value,
+		// already unsalvageable (lossy hosts abandon buffers mid-string, leaving
+		// raw control characters strict JSON forbids), or the concatenation would
+		// break it. Otherwise the delta is a legal continuation and must stay.
+		const state = classifyJsonPrefix(partial);
+		if (state !== "prefix") return true;
+		return classifyJsonPrefix(partial + delta) === "invalid";
+	};
+	const hasLaterUnfinishedFunctionCall = (start: number): boolean => {
+		for (let index = start + 1; index < openItemsInOrder.length; index++) {
+			const candidate = openItemsInOrder[index];
+			if (
+				candidate?.item.type === "function_call" &&
+				candidate.block.type === "toolCall" &&
+				!candidate.block[kStreamingArgumentsDone]
+			) {
+				return true;
+			}
+		}
+		return false;
+	};
+
+	let identifierlessFunctionDeltaTarget: StreamingItem | undefined;
+
 	const lookupOpenToolCallAlias = (
 		event: { output_index?: number; item_id?: string },
 		type: "function_call" | "custom_tool_call",
@@ -1785,17 +2638,42 @@ export async function processResponsesStream<TApi extends Api>(
 	const lookupOpenFunctionCallItem = (event: {
 		output_index?: number;
 		item_id?: string;
+		delta?: unknown;
 	}): StreamingItem | undefined => {
 		if (hasOpenItemKey(event)) return lookupOpenToolCallAlias(event, "function_call");
-		for (const candidate of openItemsInOrder) {
+		const canContinuePreviousIdentifierlessDelta = typeof event.delta === "string";
+		if (canContinuePreviousIdentifierlessDelta && identifierlessFunctionDeltaTarget) {
+			const targetIndex = openItemsInOrder.indexOf(identifierlessFunctionDeltaTarget);
+			const target = targetIndex >= 0 ? openItemsInOrder[targetIndex] : undefined;
+			if (
+				target?.item.type === "function_call" &&
+				target.block.type === "toolCall" &&
+				!target.block[kStreamingArgumentsDone]
+			) {
+				const shouldAdvanceFromTarget =
+					shouldAdvanceIdentifierlessFunctionDelta(event, target) && hasLaterUnfinishedFunctionCall(targetIndex);
+				if (!shouldAdvanceFromTarget) return target;
+			} else {
+				identifierlessFunctionDeltaTarget = undefined;
+			}
+		}
+		let skippedStartedCandidate = false;
+		for (let index = 0; index < openItemsInOrder.length; index++) {
+			const candidate = openItemsInOrder[index]!;
 			if (
 				candidate.item.type === "function_call" &&
 				candidate.block.type === "toolCall" &&
-				!candidate.block.argumentsDone
+				!candidate.block[kStreamingArgumentsDone]
 			) {
+				if (shouldAdvanceIdentifierlessFunctionDelta(event, candidate) && hasLaterUnfinishedFunctionCall(index)) {
+					skippedStartedCandidate = true;
+					continue;
+				}
+				if (canContinuePreviousIdentifierlessDelta) identifierlessFunctionDeltaTarget = candidate;
 				return candidate;
 			}
 		}
+		if (skippedStartedCandidate && startsJsonObjectDelta(event.delta)) return undefined;
 		return lastOpenItem?.item.type === "function_call" ? lastOpenItem : undefined;
 	};
 	const closeOpenItem = (
@@ -1820,6 +2698,7 @@ export async function processResponsesStream<TApi extends Api>(
 			const index = openItemsInOrder.indexOf(entry);
 			if (index >= 0) openItemsInOrder.splice(index, 1);
 		}
+		if (entry && identifierlessFunctionDeltaTarget === entry) identifierlessFunctionDeltaTarget = undefined;
 		if (entry && lastOpenItem === entry) lastOpenItem = null;
 	};
 	const contentIndexOf = (block: ThinkingContent | TextContent | StreamingToolCallBlock): number =>
@@ -1828,6 +2707,7 @@ export async function processResponsesStream<TApi extends Api>(
 	let sawFirstToken = false;
 
 	for await (const event of openaiStream) {
+		const terminalEvent = getOpenAIResponsesTerminalEvent(event);
 		if (event.type === "response.created") {
 			output.responseId = event.response.id;
 		} else if (event.type === "response.output_item.added") {
@@ -1842,7 +2722,11 @@ export async function processResponsesStream<TApi extends Api>(
 				registerOpenItem(event.output_index, item.id, { item, block });
 				stream.push({ type: "thinking_start", contentIndex: contentIndexOf(block), partial: output });
 			} else if (item.type === "message") {
-				const block: TextContent = { type: "text", text: "" };
+				const block: TextContent = {
+					type: "text",
+					text: "",
+					textSignature: encodeTextSignatureV1(item.id, item.phase ?? undefined),
+				};
 				output.content.push(block);
 				registerOpenItem(event.output_index, item.id, { item, block });
 				stream.push({ type: "text_start", contentIndex: contentIndexOf(block), partial: output });
@@ -1852,7 +2736,7 @@ export async function processResponsesStream<TApi extends Api>(
 					id: encodeResponsesToolCallId(item.call_id, item.id),
 					name: item.name,
 					arguments: {},
-					partialJson: item.arguments || "",
+					[kStreamingPartialJson]: item.arguments || "",
 				};
 				output.content.push(block);
 				registerOpenItem(
@@ -1862,6 +2746,18 @@ export async function processResponsesStream<TApi extends Api>(
 					item.call_id,
 					prefixedFunctionCallItemKey(item.call_id),
 				);
+				stream.push({ type: "toolcall_start", contentIndex: contentIndexOf(block), partial: output });
+			} else if (item.type === "computer_call") {
+				const block: StreamingToolCallBlock = {
+					type: "toolCall",
+					id: encodeResponsesToolCallId(item.call_id, item.id),
+					name: "computer",
+					arguments: {},
+					providerMetadata: computerCallMetadata(item),
+					[kStreamingPartialJson]: "",
+				};
+				output.content.push(block);
+				registerOpenItem(event.output_index, item.id, { item, block }, item.call_id);
 				stream.push({ type: "toolcall_start", contentIndex: contentIndexOf(block), partial: output });
 			} else if (item.type === "custom_tool_call") {
 				const block: StreamingToolCallBlock = {
@@ -1876,7 +2772,7 @@ export async function processResponsesStream<TApi extends Api>(
 					customWireName: item.name,
 					// Custom tools stream a raw string, but we reuse `partialJson` as the
 					// accumulation buffer so later code that inspects the field still works.
-					partialJson: item.input ?? "",
+					[kStreamingPartialJson]: item.input ?? "",
 				};
 				output.content.push(block);
 				registerOpenItem(
@@ -1959,7 +2855,7 @@ export async function processResponsesStream<TApi extends Api>(
 			const entry = lookupOpenFunctionCallItem(event);
 			if (entry?.item.type === "function_call" && entry.block.type === "toolCall") {
 				finalizeToolCallArgumentsDone(entry.block, event.arguments);
-				entry.block.argumentsDone = true;
+				entry.block[kStreamingArgumentsDone] = true;
 			}
 		} else if (event.type === "response.custom_tool_call_input.delta") {
 			const entry = lookupOpenToolCallAlias(event, "custom_tool_call");
@@ -1970,6 +2866,7 @@ export async function processResponsesStream<TApi extends Api>(
 			const entry = lookupOpenToolCallAlias(event, "custom_tool_call");
 			if (entry?.item.type === "custom_tool_call" && entry.block.type === "toolCall") {
 				finalizeCustomToolCallInputDone(entry.block, event.input);
+				entry.block[kStreamingArgumentsDone] = true;
 			}
 		} else if (event.type === "response.output_item.done") {
 			const item = structuredCloneJSON(event.item);
@@ -1979,12 +2876,6 @@ export async function processResponsesStream<TApi extends Api>(
 					? lookupOpenItem({ output_index: event.output_index, item_id: item.id ?? item.call_id })
 					: lookupOpenItem({ output_index: event.output_index, item_id: item.id });
 			if (item.type === "reasoning") {
-				const thinking =
-					item.summary?.length > 0
-						? item.summary.map(part => part.text).join("\n\n")
-						: item.content?.[0]?.type === "reasoning_text"
-							? (item.content[0].text ?? "")
-							: "";
 				// Prefer the routed entry; the bare itemId find misroutes when ids are
 				// absent (`undefined === undefined` matches the FIRST thinking block) and
 				// misses entirely when the done-event id drifts from the added-event id.
@@ -1995,21 +2886,19 @@ export async function processResponsesStream<TApi extends Api>(
 								| ThinkingContent
 								| undefined);
 				if (reasoningBlock) {
-					reasoningBlock.thinking = thinking;
+					reasoningBlock.thinking = finalizeReasoningThinking(item, reasoningBlock.thinking);
 					reasoningBlock.thinkingSignature = JSON.stringify(item);
 					stream.push({
 						type: "thinking_end",
 						contentIndex: contentIndexOf(reasoningBlock),
-						content: thinking,
+						content: reasoningBlock.thinking,
 						partial: output,
 					});
 				}
 				closeOpenItem(event.output_index, item.id, entry);
 			} else if (item.type === "message") {
 				const block = entry?.block.type === "text" ? entry.block : undefined;
-				const text = item.content
-					.map(part => (part.type === "output_text" ? (part.text ?? "") : (part.refusal ?? "")))
-					.join("");
+				const text = finalizeMessageText(item, block?.text ?? "");
 				const textSignature = encodeTextSignatureV1(item.id, item.phase ?? undefined);
 				let contentIndex: number;
 				if (block) {
@@ -2027,11 +2916,13 @@ export async function processResponsesStream<TApi extends Api>(
 				closeOpenItem(event.output_index, item.id, entry);
 			} else if (item.type === "function_call") {
 				const block = entry?.block.type === "toolCall" ? entry.block : undefined;
-				const args = block?.argumentsDone
+				const args = block?.[kStreamingArgumentsDone]
 					? block.arguments
-					: block?.partialJson
-						? parseStreamingJson(block.partialJson)
-						: parseStreamingJson(item.arguments || "{}");
+					: item.arguments
+						? parseStreamingJson(item.arguments)
+						: block?.[kStreamingPartialJson]
+							? parseStreamingJson(block[kStreamingPartialJson])
+							: parseStreamingJson("{}");
 				const toolCall: ToolCall = {
 					type: "toolCall",
 					id: encodeResponsesToolCallId(item.call_id, item.id),
@@ -2045,9 +2936,7 @@ export async function processResponsesStream<TApi extends Api>(
 					// leaving block.arguments stale (often `{}`); the emitted toolCall
 					// and the persisted block must agree.
 					block.arguments = args;
-					delete (block as { partialJson?: string }).partialJson;
-					delete (block as { lastParseLen?: number }).lastParseLen;
-					delete (block as { argumentsDone?: boolean }).argumentsDone;
+					clearStreamingPartialJson(block);
 					contentIndex = contentIndexOf(block);
 				} else {
 					// `output_item.added` never arrived (lossy proxy) — synthesize the
@@ -2058,9 +2947,30 @@ export async function processResponsesStream<TApi extends Api>(
 				}
 				closeOpenItem(event.output_index, item.id, entry, item.call_id, prefixedFunctionCallItemKey(item.call_id));
 				stream.push({ type: "toolcall_end", contentIndex, toolCall, partial: output });
+			} else if (item.type === "computer_call") {
+				const block = entry?.block.type === "toolCall" ? entry.block : undefined;
+				const toolCall: ToolCall = {
+					type: "toolCall",
+					id: encodeResponsesToolCallId(item.call_id, item.id),
+					name: "computer",
+					arguments: {},
+					providerMetadata: computerCallMetadata(item),
+				};
+				let contentIndex: number;
+				if (block) {
+					block.id = toolCall.id;
+					block.providerMetadata = toolCall.providerMetadata;
+					clearStreamingPartialJson(block);
+					contentIndex = contentIndexOf(block);
+				} else {
+					output.content.push(toolCall);
+					contentIndex = output.content.length - 1;
+				}
+				closeOpenItem(event.output_index, item.id, entry, item.call_id);
+				stream.push({ type: "toolcall_end", contentIndex, toolCall, partial: output });
 			} else if (item.type === "custom_tool_call") {
 				const block = entry?.block.type === "toolCall" ? entry.block : undefined;
-				const rawInput = block?.partialJson ? block.partialJson : (item.input ?? "");
+				const rawInput = block?.[kStreamingPartialJson] ? block[kStreamingPartialJson] : (item.input ?? "");
 				const toolCall: ToolCall = {
 					type: "toolCall",
 					id: encodeResponsesToolCallId(item.call_id, item.id),
@@ -2073,8 +2983,7 @@ export async function processResponsesStream<TApi extends Api>(
 					// Persist the final input on the stored block and drop the transient
 					// accumulation buffer, mirroring the function_call branch above.
 					block.arguments = { input: rawInput };
-					delete (block as { partialJson?: string }).partialJson;
-					delete (block as { lastParseLen?: number }).lastParseLen;
+					clearStreamingPartialJson(block);
 					contentIndex = contentIndexOf(block);
 				} else {
 					output.content.push(toolCall);
@@ -2082,15 +2991,22 @@ export async function processResponsesStream<TApi extends Api>(
 				}
 				closeOpenItem(event.output_index, item.id, entry, item.call_id, prefixedFunctionCallItemKey(item.call_id));
 				stream.push({ type: "toolcall_end", contentIndex, toolCall, partial: output });
+			} else if (item.type === "image_generation_call" && item.status === "completed" && item.result) {
+				appendResponsesImageResult(output, stream, item.result);
 			}
-		} else if (event.type === "response.completed" || event.type === "response.incomplete") {
-			const response = event.response;
+		} else if (terminalEvent) {
+			const response = terminalEvent.response;
+			const shouldPromoteIncompleteToolUse =
+				response?.status === "incomplete" &&
+				response.incomplete_details?.reason === "max_output_tokens" &&
+				hasExecutableIncompleteResponsesToolCalls(output);
 			finalizePendingResponsesToolCalls(output);
 			if (response?.id) {
 				output.responseId = response.id;
 			}
 			populateResponsesUsageFromResponse(output, response?.usage);
 			calculateCost(model, output.usage);
+			applyOpenRouterReportedCost(model, output.usage, response?.usage);
 			applyOpenAIResponsesServiceTierCost(
 				model,
 				output.usage,
@@ -2109,17 +3025,24 @@ export async function processResponsesStream<TApi extends Api>(
 						: typeof statusDetailsReason === "string" && statusDetailsReason.length > 0
 							? `status_details: ${statusDetailsReason}`
 							: "Unknown error (no error details in response)";
-				throw new Error(message);
+				throw new AIError.ProviderResponseError(message, { provider: model.provider, kind: "output" });
 			}
 			if (response?.status === "incomplete" && response.incomplete_details?.reason === "content_filter") {
 				// A content-filtered turn is a failure, not a token-cap truncation —
 				// mapping it to "length" would route the agent loop into "shorten your
 				// output" recovery against a filtered prompt.
-				throw new Error("incomplete: content_filter");
+				throw new AIError.ProviderResponseError("incomplete: content_filter", {
+					provider: model.provider,
+					kind: "content-blocked",
+				});
 			}
-			promoteResponsesToolUseStopReason(output, (response as { end_turn?: boolean } | undefined)?.end_turn);
+			promoteResponsesToolUseStopReason(
+				output,
+				(response as { end_turn?: boolean } | undefined)?.end_turn,
+				shouldPromoteIncompleteToolUse,
+			);
 			options?.onCompleted?.();
-			// `response.completed`/`response.incomplete` is the last event of a
+			// `response.completed`/`response.incomplete`/`response.done` is the last event of a
 			// Responses stream. Stop pulling instead of waiting for the server to
 			// close the connection: misbehaving providers keep the socket open
 			// after the terminal event, which would park this loop until the idle
@@ -2131,7 +3054,10 @@ export async function processResponsesStream<TApi extends Api>(
 			const err = (event as any).error ?? event;
 			const code = err.code ?? "unknown";
 			const message = err.message ?? "no message";
-			throw new Error(`Error Code ${code}: ${message}`);
+			throw new AIError.ProviderResponseError(`Error Code ${code}: ${message}`, {
+				provider: model.provider,
+				kind: "output",
+			});
 		} else if (event.type === "response.failed") {
 			populateResponsesUsageFromResponse(output, event.response?.usage);
 			const error = event.response?.error ?? (event.response as any)?.status_details?.error;
@@ -2141,7 +3067,7 @@ export async function processResponsesStream<TApi extends Api>(
 				: details?.reason
 					? `incomplete: ${details.reason}`
 					: "Unknown error (no error details in response)";
-			throw new Error(message);
+			throw new AIError.ProviderResponseError(message, { provider: model.provider, kind: "output" });
 		}
 	}
 }
@@ -2170,6 +3096,32 @@ export function mapOpenAIResponsesStopReason(status: ResponseStatus | undefined)
 	}
 }
 
+export function hasExecutableIncompleteResponsesToolCalls(output: AssistantMessage): boolean {
+	let hasToolCall = false;
+	for (const block of output.content) {
+		if (block.type !== "toolCall") continue;
+		hasToolCall = true;
+		const pending = block as ToolCall & {
+			[kStreamingPartialJson]?: string;
+			[kStreamingArgumentsDone]?: boolean;
+		};
+		if (pending.providerMetadata?.type === "computer") {
+			if (pending.providerMetadata.actions.length === 0) return false;
+			continue;
+		}
+		const rawArguments = pending[kStreamingPartialJson];
+		// `output_item.done` is not positive completion proof: our Responses
+		// compatibility encoder force-closes still-open calls before forwarding an
+		// upstream `length` stop. Only an explicit arguments/input-done event sets
+		// this marker; an open ordinary call can instead prove completion with its
+		// retained strict-complete JSON.
+		if (pending[kStreamingArgumentsDone]) continue;
+		if (pending.customWireName !== undefined || rawArguments === undefined) return false;
+		if (classifyJsonPrefix(rawArguments) !== "complete") return false;
+	}
+	return hasToolCall;
+}
+
 /**
  * Finalize any streamed toolCall block whose `output_item.done` never arrived
  * (lossy proxy, or a terminal event that raced the per-item done): parse the
@@ -2181,16 +3133,18 @@ export function mapOpenAIResponsesStopReason(status: ResponseStatus | undefined)
 export function finalizePendingResponsesToolCalls(output: AssistantMessage): void {
 	for (const block of output.content) {
 		if (block.type !== "toolCall") continue;
-		const pending = block as ToolCall & { partialJson?: string; lastParseLen?: number; argumentsDone?: boolean };
-		if (pending.partialJson && !pending.argumentsDone) {
+		const pending = block as ToolCall & {
+			[kStreamingPartialJson]?: string;
+			[kStreamingLastParseLen]?: number;
+			[kStreamingArgumentsDone]?: boolean;
+		};
+		if (pending[kStreamingPartialJson] && !pending[kStreamingArgumentsDone]) {
 			pending.arguments =
 				pending.customWireName !== undefined
-					? { input: pending.partialJson }
-					: parseStreamingJson(pending.partialJson);
+					? { input: pending[kStreamingPartialJson] }
+					: parseStreamingJson(pending[kStreamingPartialJson]);
 		}
-		delete pending.partialJson;
-		delete pending.lastParseLen;
-		delete pending.argumentsDone;
+		clearStreamingPartialJson(pending);
 	}
 }
 
@@ -2201,8 +3155,15 @@ export function finalizePendingResponsesToolCalls(output: AssistantMessage): voi
  * re-samples instead of ending. Callers set `output.stopReason` from the wire
  * status first via {@link mapOpenAIResponsesStopReason}.
  */
-export function promoteResponsesToolUseStopReason(output: AssistantMessage, endTurn: boolean | undefined): void {
-	if (output.content.some(block => block.type === "toolCall") && output.stopReason === "stop") {
+export function promoteResponsesToolUseStopReason(
+	output: AssistantMessage,
+	endTurn: boolean | undefined,
+	promoteIncompleteToolUse = false,
+): void {
+	if (
+		output.content.some(block => block.type === "toolCall") &&
+		(output.stopReason === "stop" || (promoteIncompleteToolUse && output.stopReason === "length"))
+	) {
 		output.stopReason = "toolUse";
 	}
 	if (endTurn === false && output.stopReason === "stop") {
@@ -2259,22 +3220,28 @@ type CommonSamplingOptions = Pick<
 export function applyCommonResponsesSamplingParams<P extends CommonResponsesParams>(
 	params: P,
 	options: CommonSamplingOptions | undefined,
-	model: Pick<Model, "provider" | "omitMaxOutputTokens" | "maxTokens">,
+	model: Pick<Model, "provider" | "api" | "id" | "omitMaxOutputTokens" | "maxTokens"> & {
+		compat: Pick<ResolvedOpenAISharedCompat, "supportsSamplingParams">;
+	},
 ): void {
 	if (options?.maxTokens && !model.omitMaxOutputTokens) {
 		params.max_output_tokens = Math.min(
 			options.maxTokens,
 			model.maxTokens ?? Number.POSITIVE_INFINITY,
-			OPENAI_MAX_OUTPUT_TOKENS,
+			resolveOpenAIResponsesOutputClamp(model) ?? OPENAI_MAX_OUTPUT_TOKENS,
 		);
 	}
-	if (options?.temperature !== undefined) params.temperature = options.temperature;
-	if (options?.topP !== undefined) params.top_p = options.topP;
-	if (options?.topK !== undefined) params.top_k = options.topK;
-	if (options?.minP !== undefined) params.min_p = options.minP;
-	if (options?.presencePenalty !== undefined) params.presence_penalty = options.presencePenalty;
-	if (options?.repetitionPenalty !== undefined) params.repetition_penalty = options.repetitionPenalty;
-	applyOpenAIServiceTier(params, options?.serviceTier, model.provider);
+	// OpenAI proprietary reasoning models (o-series, gpt-5+) reject explicit
+	// sampling params with a 400 on every serving host (#5606).
+	if (model.compat.supportsSamplingParams) {
+		if (options?.temperature !== undefined) params.temperature = options.temperature;
+		if (options?.topP !== undefined) params.top_p = options.topP;
+		if (options?.topK !== undefined) params.top_k = options.topK;
+		if (options?.minP !== undefined) params.min_p = options.minP;
+		if (options?.presencePenalty !== undefined) params.presence_penalty = options.presencePenalty;
+		if (options?.repetitionPenalty !== undefined) params.repetition_penalty = options.repetitionPenalty;
+	}
+	applyOpenAIServiceTier(params, options?.serviceTier, model);
 }
 
 type ReasoningOptions = {
@@ -2291,12 +3258,11 @@ export interface ApplyResponsesCompatPolicyOptions {
 
 export function applyResponsesCompatPolicy<P extends ResponseCreateParamsStreaming>(
 	params: P,
-	messages: ResponseInput,
 	policy: OpenAICompatPolicy,
 	options: ApplyResponsesCompatPolicyOptions | undefined,
-): number {
+): void {
 	const reasoning = policy.reasoning;
-	if (!reasoning.modelSupported) return 0;
+	if (!reasoning.modelSupported) return;
 	if (reasoning.includeEncryptedReasoning) {
 		const include = params.include ?? [];
 		if (!include.includes("reasoning.encrypted_content")) include.push("reasoning.encrypted_content");
@@ -2306,7 +3272,7 @@ export function applyResponsesCompatPolicy<P extends ResponseCreateParamsStreami
 	if (reasoning.disabled) {
 		if (reasoning.disableMode === "openrouter-enabled-false") {
 			params.reasoning = { enabled: false } as P["reasoning"];
-			return 0;
+			return;
 		}
 		if (
 			reasoning.disableMode === "lowest-effort" &&
@@ -2316,16 +3282,9 @@ export function applyResponsesCompatPolicy<P extends ResponseCreateParamsStreami
 			type ReasoningParam = NonNullable<ResponseCreateParamsStreaming["reasoning"]>;
 			params.reasoning = { effort: reasoning.wireEffort as ReasoningParam["effort"] } as P["reasoning"] &
 				ReasoningParam;
-			return 0;
+			return;
 		}
-		if (policy.compat.requiresJuiceZeroHack && reasoning.requestedEffort === undefined) {
-			messages.push({
-				role: "developer",
-				content: [{ type: "input_text", text: "# Juice: 0 !important" }],
-			});
-			return 1;
-		}
-		return 0;
+		return;
 	}
 
 	if (reasoning.requestedEffort !== undefined || options?.reasoningSummary !== undefined) {
@@ -2334,7 +3293,7 @@ export function applyResponsesCompatPolicy<P extends ResponseCreateParamsStreami
 				type ReasoningParam = NonNullable<ResponseCreateParamsStreaming["reasoning"]>;
 				params.reasoning = { summary: options.reasoningSummary || "auto" } as P["reasoning"] & ReasoningParam;
 			}
-			return 0;
+			return;
 		}
 
 		const requested = reasoning.requestedEffort ?? "medium";
@@ -2347,17 +3306,8 @@ export function applyResponsesCompatPolicy<P extends ResponseCreateParamsStreami
 			reasoningParams.summary = options?.reasoningSummary || "auto";
 		}
 		params.reasoning = reasoningParams as P["reasoning"];
-		return 0;
+		return;
 	}
-
-	if (policy.compat.requiresJuiceZeroHack) {
-		messages.push({
-			role: "developer",
-			content: [{ type: "input_text", text: "# Juice: 0 !important" }],
-		});
-		return 1;
-	}
-	return 0;
 }
 
 /**
@@ -2368,14 +3318,12 @@ export function applyResponsesReasoningParams<P extends ResponseCreateParamsStre
 	params: P,
 	model: Model<"openai-responses" | "azure-openai-responses" | "openai-codex-responses">,
 	options: ReasoningOptions | undefined,
-	messages: ResponseInput,
 	mapEffort?: (effort: string) => string,
 	includeEncryptedReasoning?: boolean,
 	omitReasoningEffort?: boolean,
-): number {
+): void {
 	return applyResponsesCompatPolicy(
 		params,
-		messages,
 		resolveOpenAICompatPolicy(model, {
 			endpoint: "responses",
 			reasoning: options?.reasoning,
@@ -2415,19 +3363,42 @@ export function populateResponsesUsageFromResponse(
 	if (!usage) return;
 	const details = usage.input_tokens_details;
 	const outputDetails = usage.output_tokens_details;
+	const reportedInputTokens = usage.input_tokens ?? 0;
+	const reportedOutputTokens = usage.output_tokens ?? 0;
+	const reportedCachedTokens = details?.cached_tokens ?? usage.prompt_cache_hit_tokens ?? 0;
 	const orchestrationInputTokens = details?.orchestration_input_tokens ?? 0;
 	const orchestrationInputCachedTokens = details?.orchestration_input_cached_tokens ?? 0;
 	const orchestrationOutputTokens = outputDetails?.orchestration_output_tokens ?? 0;
+	const reportedTotalTokens = typeof usage.total_tokens === "number" ? usage.total_tokens : undefined;
+	const reportedPrimaryTokens = reportedInputTokens + reportedOutputTokens;
+	const reportedWithSeparateOrchestration =
+		reportedPrimaryTokens + orchestrationInputTokens + orchestrationOutputTokens;
+	const primaryIncludesOrchestration =
+		reportedTotalTokens !== undefined &&
+		orchestrationInputTokens + orchestrationOutputTokens > 0 &&
+		Math.abs(reportedTotalTokens - reportedPrimaryTokens) <=
+			Math.abs(reportedTotalTokens - reportedWithSeparateOrchestration);
+	const orchestrationInputCached = Math.min(orchestrationInputTokens, orchestrationInputCachedTokens);
+	const orchestrationInput = Math.max(0, orchestrationInputTokens - orchestrationInputCached);
 	const accounting = calculateOpenAIUsageAccounting({
-		promptTokens: (usage.input_tokens ?? 0) + orchestrationInputTokens,
-		outputTokens: (usage.output_tokens ?? 0) + orchestrationOutputTokens,
-		cachedTokens: (details?.cached_tokens ?? usage.prompt_cache_hit_tokens ?? 0) + orchestrationInputCachedTokens,
+		promptTokens: Math.max(0, reportedInputTokens - (primaryIncludesOrchestration ? orchestrationInputTokens : 0)),
+		outputTokens: Math.max(0, reportedOutputTokens - (primaryIncludesOrchestration ? orchestrationOutputTokens : 0)),
+		cachedTokens: Math.max(0, reportedCachedTokens - (primaryIncludesOrchestration ? orchestrationInputCached : 0)),
 		reasoningTokens: outputDetails?.reasoning_tokens ?? 0,
 		cacheWriteOpenRouter: details?.cache_write_tokens ?? undefined,
 		cacheWriteDeepSeek: usage.prompt_cache_miss_tokens ?? undefined,
 		hasDeepSeekCacheHitAndMiss:
 			usage.prompt_cache_hit_tokens !== undefined && usage.prompt_cache_miss_tokens !== undefined,
 	});
+	const orchestrationTotal = orchestrationInput + orchestrationInputCached + orchestrationOutputTokens;
+	if (orchestrationTotal > 0) {
+		accounting.orchestration = {
+			...(orchestrationInput > 0 ? { input: orchestrationInput } : {}),
+			...(orchestrationInputCached > 0 ? { cacheRead: orchestrationInputCached } : {}),
+			...(orchestrationOutputTokens > 0 ? { output: orchestrationOutputTokens } : {}),
+		};
+		accounting.totalTokens = reportedTotalTokens ?? accounting.totalTokens + orchestrationTotal;
+	}
 
 	// Wholesale replacement must not drop provider-annotated extras (Copilot
 	// premium-request accounting): the failed/cancelled paths throw right after
@@ -2443,6 +3414,55 @@ export function populateResponsesUsageFromResponse(
 }
 
 /**
+ * Structural equality for the chain prefix/option check, equivalent to the
+ * default {@link Bun.deepEquals} (own enumerable keys, `absent ≡ own-undefined`)
+ * except for two deliberate exclusions:
+ *  - **symbol-keyed properties are ignored** — `for…in` walks enumerable
+ *    *string* keys only (never symbols); these are plain wire items whose
+ *    prototype contributes no enumerable keys, so iteration is effectively
+ *    own-string-keyed. That is how the transient streaming symbols
+ *    (`block-symbols.ts`) stamped onto live request items are excluded (the
+ *    deep-cloned baseline never carries them). Do NOT add an
+ *    `Object.getOwnPropertySymbols` pass, or those symbols resurface and break
+ *    chaining.
+ *  - keys listed in `omitKeys` are skipped (the option compare omits `input`
+ *    and the per-turn `client_metadata`).
+ * A defined value differing across sides IS a difference; a key undefined or
+ * absent on both stays equal. Nested values use full {@link Bun.deepEquals}.
+ */
+function deepEqualsWithout(a: unknown, b: unknown, omitKeys?: Record<string, boolean>): boolean {
+	if (!a || !b || typeof a !== "object" || typeof b !== "object") return Bun.deepEquals(a, b);
+	const ao = a as Record<string, unknown>;
+	const bo = b as Record<string, unknown>;
+	for (const key in ao) {
+		if (omitKeys?.[key]) continue;
+		const av = ao[key];
+		const bv = bo[key];
+		if (av !== bv && !Bun.deepEquals(av, bv)) return false;
+	}
+	for (const key in bo) {
+		if (omitKeys?.[key]) continue;
+		if (bo[key] !== undefined && !(key in ao)) return false;
+	}
+	return true;
+}
+
+const TOP_LEVEL_EXCLUDE_MAP = {
+	input: true,
+	client_metadata: true,
+};
+
+/**
+ * Output-only lifecycle metadata excluded from per-item prefix identity:
+ * replay sanitization strips `status` from message/function_call/custom
+ * tool items (they reject output lifecycle fields), so raw response items
+ * must not be distinguished from their sanitized replay form.
+ */
+const ITEM_LIFECYCLE_EXCLUDE_MAP = {
+	status: true,
+};
+
+/**
  * Strict-prefix delta for stateful `previous_response_id` chaining (used by the
  * platform Responses provider and the Codex provider on both transports):
  * returns the input items the current request appends beyond the previous
@@ -2451,24 +3471,30 @@ export function populateResponsesUsageFromResponse(
  * `client_metadata` (e.g. rotating turn ids) is excluded from the option
  * comparison; codex-rs excludes it from the same check.
  */
-export function buildResponsesDeltaInput<TItem>(
-	previous: { input?: unknown } | undefined,
+export function buildResponsesDeltaInput<TItem extends ResponseInputItem | InputItem>(
+	previous: { input?: TItem[] } | undefined,
 	previousResponseItems: readonly TItem[] | undefined,
-	current: { input?: unknown },
+	current: { input?: TItem[] },
 ): TItem[] | null {
 	if (!previous) return null;
 	if (!Array.isArray(previous.input) || !Array.isArray(current.input)) return null;
-	const previousWithoutInput = { ...previous, input: undefined, client_metadata: undefined };
-	const currentWithoutInput = { ...current, input: undefined, client_metadata: undefined };
-	if (!Bun.deepEquals(previousWithoutInput, currentWithoutInput)) {
+	if (!deepEqualsWithout(previous, current, TOP_LEVEL_EXCLUDE_MAP)) {
 		return null;
 	}
-	const baseline = [...previous.input, ...(previousResponseItems ?? [])];
-	if (current.input.length <= baseline.length) return null;
-	for (let index = 0; index < baseline.length; index += 1) {
-		if (!Bun.deepEquals(baseline[index], current.input[index])) {
-			return null;
+
+	const baselineLen = (previous.input?.length ?? 0) + (previousResponseItems?.length ?? 0);
+	if (current.input.length <= baselineLen) return null;
+
+	let index = 0;
+	for (const series of [previous.input, previousResponseItems]) {
+		if (!series) continue;
+		for (const item of series) {
+			if (deepEqualsWithout(item, current.input[index], ITEM_LIFECYCLE_EXCLUDE_MAP)) {
+				index++;
+			} else {
+				return null;
+			}
 		}
 	}
-	return current.input.slice(baseline.length) as TItem[];
+	return current.input.slice(index) as TItem[];
 }

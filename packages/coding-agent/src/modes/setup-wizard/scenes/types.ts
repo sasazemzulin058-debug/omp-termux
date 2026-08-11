@@ -18,6 +18,13 @@ export interface SetupSceneController extends Component {
 	onUnmount?(): void;
 	dispose?(): void;
 	/**
+	 * Render the scene body. `maxLines` is the number of body rows the wizard
+	 * will actually display (header and footer already subtracted); scenes
+	 * shrink list windows and drop decorative chrome so the selected row stays
+	 * inside the budget. Overflow beyond `maxLines` is clipped by the wizard.
+	 */
+	render(width: number, maxLines?: number): readonly string[];
+	/**
 	 * Route an SGR mouse report (tracking is on while the wizard holds the
 	 * alternate screen). `line`/`col` are 0-based within this controller's
 	 * last rendered output. When absent, the wizard falls back to synthesizing
@@ -38,7 +45,8 @@ export interface SetupTab {
 	 * login). The parent scene MUST NOT switch tabs or finish while modal.
 	 */
 	readonly modal: boolean;
-	render(width: number): readonly string[];
+	/** See {@link SetupSceneController.render}: `maxLines` is the tab-local row budget. */
+	render(width: number, maxLines?: number): readonly string[];
 	handleInput(data: string): void;
 	invalidate(): void;
 	/** Called when the tab becomes active (including initial mount). */

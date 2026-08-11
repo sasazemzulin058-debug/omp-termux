@@ -1,54 +1,90 @@
 # Contributing to oh-my-pi
 
-Thanks for your interest in contributing. This project uses a lightweight
-**vouch** system to decide who can open pull requests. Please read this before
-opening a PR.
+Pull requests are welcome. Keep them focused, understand the work you submit,
+and be prepared to explain and maintain it.
 
-## TL;DR
+> [!NOTE]
+> Pull requests are **temporarily open to everyone** as a trial. We previously
+> required a vouch before accepting PRs; that requirement is lifted for now
+> while we evaluate how open contributions go. Depending on the results, the
+> vouch system may return.
 
-- **Issues are open to everyone.** File bugs, feature requests, and questions
-  freely — they are triaged automatically.
-- **Pull requests require a vouch.** A PR whose author is not vouched (or is
-  denounced) is **closed automatically**. If you are not yet vouched, do **not**
-  open a PR to get noticed — it will be closed on sight. Start a Discussion and
-  ask to be vouched first (see below).
+## Before you start
 
-## Who can open PRs
+### Small changes
 
-A pull request is accepted when its author is any of:
+Bug fixes, documentation updates, and narrowly scoped improvements can go
+straight to a pull request.
 
-- a repository collaborator (write access or above), or a bot; or
-- listed — without a leading `-` — in [`.github/VOUCHED.td`](.github/VOUCHED.td).
+### Major changes
 
-Anyone **denounced** (prefixed with `-` in that file) is always blocked.
+Discuss major features and broad architectural or behavioral changes in
+[Discord](https://discord.gg/4NMW9cdXZa) **before writing the implementation**.
+This includes new subsystems, large UI changes, new dependencies, and changes
+that span several packages. A GitHub issue is not a substitute for this
+discussion, and prior discussion does not guarantee that a pull request will be
+merged.
 
-## Getting vouched
+### Do not open an issue for work you are about to submit
 
-1. Open a [Discussion](../../discussions) (or comment on an existing one)
-   describing what you'd like to contribute.
-2. A maintainer vouches you by commenting **`!vouch`** (vouches the discussion
-   author) or **`!vouch @your-handle`** on that discussion.
-3. Once you appear in `.github/VOUCHED.td`, open your PR — it stays open and is
-   reviewed.
+If you intend to implement a change yourself, **do not create an issue for it
+first**. robomp treats actionable issues as work to pick up and may start the
+same fix in parallel, wasting compute and maintainer time.
 
-Maintainers may also `!denounce [@user]` and `!unvouch [@user]`. Only
-collaborators with admin/maintain/write can run these commands.
+Open an issue when you are reporting a problem or proposing work that you are
+not already turning into a pull request. If a relevant issue already exists,
+link it from your pull request instead of creating another one.
 
-## What happens to your PR
+## AI-assisted contributions
 
-| You are… | Result |
-| --- | --- |
-| Vouched (or a collaborator) | PR stays open → automated review → human review |
-| Not vouched | PR closed with a comment — get vouched, then reopen or open a new PR |
-| Denounced | PR closed |
+AI agents are welcome as tools, not as unattended contributors. Do not give an
+agent a vague goal and submit whatever it produces.
 
-Pushing more commits to an open, vouched PR is fine — it remains vouched.
+Before opening a pull request, you must:
 
-## The VOUCHED.td file
+- constrain the agent to the agreed scope and reject unrelated changes;
+- review every changed file and understand the resulting behavior;
+- run the relevant checks and exercise the changed behavior yourself; and
+- submit the pull request only after that review, rather than letting an agent
+  publish it autonomously.
 
-[`.github/VOUCHED.td`](.github/VOUCHED.td) is the source of truth: one handle per
-line, sorted alphabetically, optionally `platform:handle`, with `-` marking a
-denouncement and an optional reason after the handle. The format follows
-[mitchellh/vouch](https://github.com/mitchellh/vouch); the denouncement list is
-intentionally public so other projects can reuse our prior knowledge of bad
-actors.
+You are responsible for the code, regardless of who or what generated it.
+
+## Pull request requirements
+
+Every pull request body **MUST include at least one sentence written by you, in
+your own words**, explaining what changed and why. A generated summary, pasted
+agent transcript, or checklist alone does not satisfy this requirement.
+
+One honest line is enough:
+
+> I reviewed the full diff; this change fixes duplicate PR reviews by reusing
+> the existing delivery guard.
+
+You **MUST verify that the change works as intended**. `bun check` and automated
+tests are expected where relevant, but they are not proof that the behavior
+works. Exercise the changed path yourself and report the exact scenario and
+result in the pull request:
+
+- for a bug fix, reproduce the bug and confirm the same reproduction no longer
+  fails;
+- for a feature, launch the product and use the feature end to end; and
+- for a UI change, interact with it and inspect the rendered result.
+
+“`bun check` passes” by itself is not sufficient verification. For coding-agent
+development commands and repository structure, see
+[`packages/coding-agent/DEVELOPMENT.md`](packages/coding-agent/DEVELOPMENT.md).
+
+Keep each pull request to one logical change. Avoid unrelated cleanup,
+drive-by refactors, generated noise, or features that were not part of the
+agreed scope.
+
+## Review
+
+Maintainers review the submitted behavior and the contributor's understanding
+of it—not the volume of generated code. Respond to review feedback yourself,
+and only apply suggestions you have checked.
+
+Pull requests may be closed when they skip required prior discussion, lack the
+human-written explanation, contain unreviewed agent output, or mix unrelated
+changes.

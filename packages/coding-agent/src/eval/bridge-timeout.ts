@@ -26,6 +26,18 @@ export function isEvalTimeoutControlEvent(event: JsStatusEvent): boolean {
 	return event.op === EVAL_TIMEOUT_PAUSE_OP || event.op === EVAL_TIMEOUT_RESUME_OP;
 }
 
+/** Optional behavior for a timeout pause around a host bridge call. */
+export interface BridgeTimeoutPauseOptions {
+	/**
+	 * Holds an external eval abort back from the *kernel* until this bridge call
+	 * settles, so the runtime is never torn down mid-phase (`agent()` isolation
+	 * worktree setup and merge/cherry-pick). It does not shield the delegated
+	 * work itself: the bridge hands subagents the caller's real signal, so a
+	 * turn cancel still stops them immediately.
+	 */
+	deferExternalAbort?: boolean;
+}
+
 /**
  * Run {@link operation} while suspending the eval watchdog through
  * {@link emitStatus}. A no-op wrapper when no status sink is wired.
@@ -33,12 +45,21 @@ export function isEvalTimeoutControlEvent(event: JsStatusEvent): boolean {
 export async function withBridgeTimeoutPause<T>(
 	emitStatus: ((event: JsStatusEvent) => void) | undefined,
 	operation: () => Promise<T>,
+	options?: BridgeTimeoutPauseOptions,
 ): Promise<T> {
 	if (!emitStatus) return operation();
-	emitStatus({ op: EVAL_TIMEOUT_PAUSE_OP });
+	emitStatus(
+		options?.deferExternalAbort
+			? { op: EVAL_TIMEOUT_PAUSE_OP, deferExternalAbort: true }
+			: { op: EVAL_TIMEOUT_PAUSE_OP },
+	);
 	try {
 		return await operation();
 	} finally {
-		emitStatus({ op: EVAL_TIMEOUT_RESUME_OP });
+		emitStatus(
+			options?.deferExternalAbort
+				? { op: EVAL_TIMEOUT_RESUME_OP, deferExternalAbort: true }
+				: { op: EVAL_TIMEOUT_RESUME_OP },
+		);
 	}
 }

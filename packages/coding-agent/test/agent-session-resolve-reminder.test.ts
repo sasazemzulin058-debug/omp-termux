@@ -11,9 +11,9 @@ import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
-import { queueResolveHandler, ResolveTool } from "@oh-my-pi/pi-coding-agent/tools/resolve";
+import { dispatchResolutionDevice, queueResolveHandler } from "@oh-my-pi/pi-coding-agent/tools/resolve";
 import { buildNamedToolChoice } from "@oh-my-pi/pi-coding-agent/utils/tool-choice";
-import { Snowflake } from "@oh-my-pi/pi-utils";
+import { removeSyncWithRetries, Snowflake } from "@oh-my-pi/pi-utils";
 
 describe("AgentSession resolve reminder", () => {
 	let session: AgentSession;
@@ -22,6 +22,7 @@ describe("AgentSession resolve reminder", () => {
 	let mock: MockModel;
 	let authStorage: AuthStorage | undefined;
 
+	const transitions: Array<"new" | "switch" | "branch"> = ["new", "switch", "branch"];
 	beforeEach(async () => {
 		tempDir = path.join(os.tmpdir(), `pi-resolve-reminder-test-${Snowflake.next()}`);
 		fs.mkdirSync(tempDir, { recursive: true });
@@ -43,7 +44,7 @@ describe("AgentSession resolve reminder", () => {
 			peekQueueInvoker: () => session.peekQueueInvoker(),
 			peekPendingInvoker: () => session.peekPendingInvoker(),
 			clearPendingInvokers: () => session.clearPendingInvokers(),
-			peekStandingResolveHandler: () => session.peekStandingResolveHandler(),
+			peekPlanProposalHandler: () => session.peekPlanProposalHandler(),
 		} as unknown as ToolSession;
 
 		const agent = new Agent({
@@ -54,7 +55,7 @@ describe("AgentSession resolve reminder", () => {
 
 		session = new AgentSession({
 			agent,
-			sessionManager: SessionManager.inMemory(),
+			sessionManager: SessionManager.create(tempDir, path.join(tempDir, "sessions")),
 			settings: Settings.isolated(),
 			modelRegistry,
 		});
@@ -65,9 +66,37 @@ describe("AgentSession resolve reminder", () => {
 		authStorage?.close();
 		authStorage = undefined;
 		if (fs.existsSync(tempDir)) {
-			fs.rmSync(tempDir, { recursive: true, force: true });
+			removeSyncWithRetries(tempDir);
 		}
 	});
+
+	async function changeLogicalSession(transition: "new" | "switch" | "branch"): Promise<void> {
+		if (transition === "new") {
+			expect(await session.newSession()).toBe(true);
+			return;
+		}
+		if (transition === "branch") {
+			session.sessionManager.appendMessage({ role: "user", content: "seed", timestamp: Date.now() });
+			const [target] = session.getUserMessagesForBranching();
+			if (!target) throw new Error("Expected a branchable user message");
+			const result = await session.branch(target.entryId);
+			expect(result.cancelled).toBe(false);
+			return;
+		}
+		const targetId = `target-${Snowflake.next()}`;
+		const targetPath = path.join(tempDir, `${targetId}.jsonl`);
+		await Bun.write(
+			targetPath,
+			`${JSON.stringify({
+				type: "session",
+				version: 3,
+				id: targetId,
+				timestamp: new Date().toISOString(),
+				cwd: tempDir,
+			})}\n`,
+		);
+		expect(await session.switchSession(targetPath)).toBe(true);
+	}
 
 	it("delivers the resolve reminder via a non-forcing soft requirement, not a steer or a forced tool_choice", () => {
 		queueResolveHandler(toolSession, {
@@ -76,23 +105,36 @@ describe("AgentSession resolve reminder", () => {
 			apply: async () => ({ content: [{ type: "text", text: "Applied" }] }),
 		});
 
-		// Forcing was removed — staging a preview never queues a hard tool_choice.
 		expect(session.toolChoiceQueue.nextToolChoice()).toBeUndefined();
 
-		// The reminder now rides an agent-level soft requirement (delivered once by
-		// the agent loop) instead of a host-side steer that churned the prefix.
 		const directive = session.nextToolChoiceDirective();
 		expect(isSoftToolRequirement(directive)).toBe(true);
 		if (!isSoftToolRequirement(directive)) throw new Error("expected soft requirement");
-		expect(directive.toolName).toBe("resolve");
+		expect(directive.toolName).toBe("write");
+		expect(directive.satisfies?.({ name: "write", arguments: { path: "xd://resolve" } })).toBe(true);
+		expect(directive.satisfies?.({ name: "write", arguments: { path: "xd://reject" } })).toBe(true);
+		expect(directive.satisfies?.({ name: "write", arguments: { path: "/tmp/out.md" } })).toBe(false);
 		const reminder = directive.reminder[0];
 		expect(reminder?.role).toBe("custom");
 		if (reminder?.role === "custom") {
 			expect(reminder.customType).toBe("resolve-reminder");
 		}
-
-		// Nothing was steered into the conversation — no prefix churn.
 		expect(session.agent.peekSteeringQueue()).toHaveLength(0);
+	});
+
+	it.each(transitions)("clears a staged preview after a successful %s session boundary", async transition => {
+		queueResolveHandler(toolSession, {
+			label: "AST Edit: 1 replacement in 1 file",
+			sourceToolName: "ast_edit",
+			apply: async () => ({ content: [{ type: "text", text: "Applied" }] }),
+		});
+		expect(session.peekPendingInvoker()).toBeDefined();
+		expect(isSoftToolRequirement(session.nextToolChoiceDirective())).toBe(true);
+
+		await changeLogicalSession(transition);
+
+		expect(session.peekPendingInvoker()).toBeUndefined();
+		expect(session.nextToolChoiceDirective()).toBeUndefined();
 	});
 
 	it("dispatches a staged preview through the production toolSession wiring and drains the gate", async () => {
@@ -106,18 +148,14 @@ describe("AgentSession resolve reminder", () => {
 			},
 		});
 
-		// Gate armed before resolve runs.
 		expect(isSoftToolRequirement(session.nextToolChoiceDirective())).toBe(true);
+		await dispatchResolutionDevice(toolSession, "resolve", "looks correct");
 
-		const tool = new ResolveTool(toolSession);
-		await tool.execute("call-apply", { action: "apply", reason: "looks correct" });
-
-		// Apply ran (forwarding works) AND the gate cleared (no phantom pending).
 		expect(applyRuns).toBe(1);
 		expect(session.nextToolChoiceDirective()).toBeUndefined();
 	});
 
-	it("drains a phantom pending gate when resolve cannot dispatch", async () => {
+	it("drains a phantom pending gate when reject cannot dispatch", async () => {
 		queueResolveHandler(toolSession, {
 			label: "AST Edit: 1 replacement in 1 file",
 			sourceToolName: "ast_edit",
@@ -125,18 +163,14 @@ describe("AgentSession resolve reminder", () => {
 		});
 		expect(isSoftToolRequirement(session.nextToolChoiceDirective())).toBe(true);
 
-		// Mirror the production deadlock: the queue still reports a pending head, but
-		// every dispatch peek returns undefined (the original loop-trigger).
 		const facade = {
 			...toolSession,
 			peekQueueInvoker: () => undefined,
 			peekPendingInvoker: () => undefined,
-			peekStandingResolveHandler: () => undefined,
+			peekPlanProposalHandler: () => undefined,
 		} as ToolSession;
-		const tool = new ResolveTool(facade);
 
-		// `discard` with no invoker now drains the gate instead of leaving a phantom.
-		const result = await tool.execute("call-discard", { action: "discard", reason: "drain stale gate" });
+		const { result } = await dispatchResolutionDevice(facade, "reject", "drain stale gate");
 		expect(result.isError ?? false).toBe(false);
 		expect(session.nextToolChoiceDirective()).toBeUndefined();
 	});

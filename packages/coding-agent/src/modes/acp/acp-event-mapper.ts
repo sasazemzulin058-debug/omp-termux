@@ -5,7 +5,8 @@ import type {
 	ToolCallContent,
 	ToolCallLocation,
 	ToolKind,
-} from "@agentclientprotocol/sdk";
+} from "@oh-my-pi/pi-utils/acp";
+import { parseXdUrl } from "../../internal-urls/xd-protocol";
 import type { AgentSessionEvent } from "../../session/agent-session";
 import { resolveToCwd } from "../../tools/path-utils";
 import type { TodoStatus } from "../../tools/todo";
@@ -20,6 +21,7 @@ interface AcpEventMapperOptions {
 	getMessageId?: (message: unknown) => string | undefined;
 	getMessageProgress?: (message: unknown) => MessageProgress | undefined;
 	getToolArgs?: (toolCallId: string) => unknown;
+	resolveImageData?: (data: string, mimeType: string | undefined) => string;
 	/**
 	 * Session cwd. Tool call locations sent to ACP clients must be absolute
 	 * (the editor host needs them to open or focus files). When provided,
@@ -127,7 +129,57 @@ interface TextMessageLike {
 
 const ACP_TEXT_LIMIT = 4_000;
 
-export function mapToolKind(toolName: string): ToolKind {
+/**
+ * Device name when the call is an `xd://` device dispatch riding the
+ * read/write transport (`write xd://<tool>` executes the mounted tool,
+ * `read xd://` is discovery). Returns `undefined` for plain file paths.
+ */
+function xdevDispatchDevice(toolName: string, args: unknown): string | undefined {
+	if (toolName !== "write" && toolName !== "read") return undefined;
+	const path = extractStringProperty<PathContainer>(args, "path");
+	if (!path) return undefined;
+	return parseXdUrl(path)?.name ?? undefined;
+}
+
+/** Whether a Hub call carries peer-to-peer coordination rather than process control. */
+function isInternalHubMessageTool(toolName: string, args: unknown): boolean {
+	let hubArgs = args;
+	if (toolName !== "hub") {
+		if (xdevDispatchDevice(toolName, args) !== "hub" || typeof args !== "object" || args === null) {
+			return false;
+		}
+		const content = Reflect.get(args, "content");
+		if (typeof content !== "string") return false;
+		try {
+			hubArgs = JSON.parse(content);
+		} catch {
+			return false;
+		}
+	}
+	if (typeof hubArgs !== "object" || hubArgs === null) return false;
+	const op = Reflect.get(hubArgs, "op");
+	switch (op) {
+		case "list":
+		case "inbox":
+			return true;
+		case "send":
+			return typeof Reflect.get(hubArgs, "to") === "string";
+		case "wait":
+			// A bare wait or an `ids` wait settles on background-job delivery,
+			// whose snapshot IS the job result (hub.md) — keep those visible.
+			// Only a peer-scoped wait (`from`, no jobs) is internal messaging.
+			return typeof Reflect.get(hubArgs, "from") === "string" && Reflect.get(hubArgs, "ids") === undefined;
+		default:
+			return false;
+	}
+}
+
+export function mapToolKind(toolName: string, args?: unknown): ToolKind {
+	// An xd:// device write executes the mounted tool — "edit" would make ACP
+	// clients render it as a file modification to a nonexistent path (and
+	// auto-approve it under edit-tier policies). Reads stay "read": listing
+	// devices or fetching docs is discovery.
+	if (toolName === "write" && xdevDispatchDevice(toolName, args)) return "execute";
 	switch (toolName) {
 		case "read":
 			return "read";
@@ -143,8 +195,8 @@ export function mapToolKind(toolName: string): ToolKind {
 		case "exec":
 		case "eval":
 			return "execute";
-		case "search":
-		case "find":
+		case "grep":
+		case "glob":
 		case "ast_grep":
 			return "search";
 		case "web_search":
@@ -167,6 +219,7 @@ export function mapAgentSessionEventToAcpSessionUpdates(
 		case "message_end":
 			return mapAssistantMessageEnd(event, sessionId, options);
 		case "tool_execution_start": {
+			if (isInternalHubMessageTool(event.toolName, event.args)) return [];
 			const update = buildToolCallStartUpdate({
 				toolCallId: event.toolCallId,
 				toolName: event.toolName,
@@ -177,9 +230,10 @@ export function mapAgentSessionEventToAcpSessionUpdates(
 			return [toSessionNotification(sessionId, update)];
 		}
 		case "tool_execution_update": {
+			if (isInternalHubMessageTool(event.toolName, event.args)) return [];
 			const content = mergeToolUpdateContent(
 				buildToolStartContent(event.toolName, event.args),
-				extractToolCallContent(event.partialResult),
+				extractToolCallContent(event.partialResult, options),
 			);
 			const update: SessionUpdate = {
 				sessionUpdate: "tool_call_update",
@@ -197,11 +251,13 @@ export function mapAgentSessionEventToAcpSessionUpdates(
 			return [toSessionNotification(sessionId, update)];
 		}
 		case "tool_execution_end": {
-			const resultContent = [...extractDiffToolCallContent(event.result), ...extractToolCallContent(event.result)];
-			const content = mergeToolUpdateContent(
-				buildToolStartContent(event.toolName, getToolExecutionEndArgs(event, options)),
-				resultContent,
-			);
+			const args = getToolExecutionEndArgs(event, options);
+			if (isInternalHubMessageTool(event.toolName, args)) return [];
+			const resultContent = [
+				...extractDiffToolCallContent(event.result),
+				...extractToolCallContent(event.result, options),
+			];
+			const content = mergeToolUpdateContent(buildToolStartContent(event.toolName, args), resultContent);
 			const update: SessionUpdate = {
 				sessionUpdate: "tool_call_update",
 				toolCallId: event.toolCallId,
@@ -250,6 +306,14 @@ function mapAssistantMessageUpdate(
 	let text: string;
 	const progress = options.getMessageProgress?.(event.message);
 	switch (event.assistantMessageEvent.type) {
+		case "image_end":
+			return [
+				toSessionNotification(sessionId, {
+					sessionUpdate: "agent_message_chunk",
+					content: event.assistantMessageEvent.content,
+					messageId: options.getMessageId?.(event.message),
+				}),
+			];
 		case "text_delta":
 			sessionUpdate = "agent_message_chunk";
 			text = event.assistantMessageEvent.delta;
@@ -280,6 +344,11 @@ function mapAssistantMessageUpdate(
 		case "error":
 			sessionUpdate = "agent_message_chunk";
 			text = event.assistantMessageEvent.error.errorMessage ?? "Unknown error";
+			// The surfaced error is the message's visible text: keeps the
+			// message_end / agent_end fallbacks from emitting again.
+			if (text.length > 0 && progress) {
+				progress.textEmitted = true;
+			}
 			break;
 		default:
 			return [];
@@ -334,6 +403,7 @@ const todoStatusMap: Record<TodoStatus, "pending" | "in_progress" | "completed">
 	in_progress: "in_progress",
 	completed: "completed",
 	abandoned: "completed",
+	blocked: "pending",
 };
 
 function mapTodoStatus(status: TodoStatus): "pending" | "in_progress" | "completed" {
@@ -397,7 +467,13 @@ function extractTodoEntries(phases: unknown[]): Array<{ content: string; status:
 }
 
 function isTodoStatus(status: unknown): status is TodoStatus {
-	return status === "pending" || status === "in_progress" || status === "completed" || status === "abandoned";
+	return (
+		status === "pending" ||
+		status === "in_progress" ||
+		status === "completed" ||
+		status === "abandoned" ||
+		status === "blocked"
+	);
 }
 export function buildToolCallStartUpdate(input: {
 	toolCallId: string;
@@ -411,7 +487,7 @@ export function buildToolCallStartUpdate(input: {
 		sessionUpdate: "tool_call",
 		toolCallId: input.toolCallId,
 		title: buildToolTitle(input.toolName, input.args, input.intent),
-		kind: mapToolKind(input.toolName),
+		kind: mapToolKind(input.toolName, input.args),
 		status: input.status ?? "pending",
 		rawInput: input.args,
 	};
@@ -535,6 +611,9 @@ function buildToolTitle(toolName: string, args: unknown, intent: string | undefi
 		extractStringProperty<PatternContainer>(args, "pattern") ??
 		extractStringProperty<QueryContainer>(args, "query");
 	if (subject) {
+		// Internal URLs (xd://github, skill://react, …) name their target fully;
+		// prefixing the transport tool reads as a file write to a fake path.
+		if (INTERNAL_URL_SUBJECT.test(subject)) return subject;
 		return `${toolName}: ${subject}`;
 	}
 
@@ -556,11 +635,18 @@ function toAcpLocationPath(value: string, cwd?: string): string {
 	}
 }
 
+/**
+ * Scheme-qualified subjects (`xd://`, `skill://`, `agent://`, `https://`, …)
+ * are not local files: resolving them against cwd fabricates paths like
+ * `/repo/xd:/github` and makes editors focus nonexistent files.
+ */
+const INTERNAL_URL_SUBJECT = /^[a-z][a-z0-9+.-]*:\/\//i;
+
 function extractToolLocations(args: unknown, cwd?: string): ToolCallLocation[] {
 	const locations: ToolCallLocation[] = [];
 	const seen = new Set<string>();
 	const pushPath = (raw: string | undefined) => {
-		if (!raw) return;
+		if (!raw || INTERNAL_URL_SUBJECT.test(raw)) return;
 		const path = toAcpLocationPath(raw, cwd);
 		if (seen.has(path)) return;
 		seen.add(path);
@@ -641,13 +727,15 @@ function terminalToolCallContent(terminalId: string): ToolCallContent {
 	return { type: "terminal", terminalId };
 }
 
-function extractToolCallContent(value: unknown): ToolCallContent[] {
-	const richContent = extractStructuredToolCallContent(value);
+function extractToolCallContent(value: unknown, options: AcpEventMapperOptions): ToolCallContent[] {
+	const richContent = extractStructuredToolCallContent(value, options);
+	const detailsImageContent = extractDetailsImageToolCallContent(value, options, richContent);
+	const combinedContent = [...richContent, ...detailsImageContent];
 	const terminalId = extractTerminalId(value);
 	const content =
-		terminalId && !hasTerminalContent(richContent, terminalId)
-			? [...richContent, terminalToolCallContent(terminalId)]
-			: richContent;
+		terminalId && !hasTerminalContent(combinedContent, terminalId)
+			? [...combinedContent, terminalToolCallContent(terminalId)]
+			: combinedContent;
 	const fallbackText = extractReadableText(value);
 	if (!fallbackText) {
 		return content;
@@ -658,7 +746,7 @@ function extractToolCallContent(value: unknown): ToolCallContent[] {
 	return [...content, textToolCallContent(fallbackText)];
 }
 
-function extractStructuredToolCallContent(value: unknown): ToolCallContent[] {
+function extractStructuredToolCallContent(value: unknown, options: AcpEventMapperOptions): ToolCallContent[] {
 	const blocks = getContentBlocks(value);
 	if (!blocks) {
 		return [];
@@ -666,7 +754,7 @@ function extractStructuredToolCallContent(value: unknown): ToolCallContent[] {
 
 	const content: ToolCallContent[] = [];
 	for (const block of blocks) {
-		const toolCallContent = toToolCallContent(block);
+		const toolCallContent = toToolCallContent(block, options);
 		if (toolCallContent) {
 			content.push(toolCallContent);
 		}
@@ -685,7 +773,7 @@ function getContentBlocks(value: unknown): unknown[] | undefined {
 	return Array.isArray(content) ? content : undefined;
 }
 
-function toToolCallContent(value: unknown): ToolCallContent | undefined {
+function toToolCallContent(value: unknown, options: AcpEventMapperOptions): ToolCallContent | undefined {
 	const type = getContentType(value);
 	if (!type) {
 		return undefined;
@@ -697,21 +785,8 @@ function toToolCallContent(value: unknown): ToolCallContent | undefined {
 			return text ? textToolCallContent(text) : undefined;
 		}
 		case "image":
-		case "audio": {
-			const data = extractStringProperty<BinaryLikeContent>(value, "data");
-			const mimeType = extractStringProperty<BinaryLikeContent>(value, "mimeType");
-			if (!data || !mimeType) {
-				return undefined;
-			}
-			return {
-				type: "content",
-				content: {
-					type,
-					data,
-					mimeType,
-				},
-			};
-		}
+		case "audio":
+			return binaryToolCallContent(type, value, options);
 		case "resource_link": {
 			const uri = extractStringProperty<ResourceLinkLikeContent>(value, "uri");
 			const name = extractStringProperty<ResourceLinkLikeContent>(value, "name");
@@ -767,6 +842,64 @@ function toToolCallContent(value: unknown): ToolCallContent | undefined {
 		default:
 			return undefined;
 	}
+}
+
+function binaryToolCallContent(
+	type: "image" | "audio",
+	value: unknown,
+	options: AcpEventMapperOptions,
+): ToolCallContent | undefined {
+	const data = extractStringProperty<BinaryLikeContent>(value, "data");
+	const mimeType = extractStringProperty<BinaryLikeContent>(value, "mimeType");
+	if (!data || !mimeType) {
+		return undefined;
+	}
+	return {
+		type: "content",
+		content: {
+			type,
+			data: type === "image" ? (options.resolveImageData?.(data, mimeType) ?? data) : data,
+			mimeType,
+		},
+	};
+}
+
+function extractDetailsImageToolCallContent(
+	value: unknown,
+	options: AcpEventMapperOptions,
+	existing: ToolCallContent[],
+): ToolCallContent[] {
+	const images = extractDetailsImages(value);
+	if (!images) {
+		return [];
+	}
+	const seen = new Set(existing.map(imageContentKey).filter((key): key is string => key !== undefined));
+	const content: ToolCallContent[] = [];
+	for (const image of images) {
+		const toolCallContent = binaryToolCallContent("image", image, options);
+		const key = imageContentKey(toolCallContent);
+		if (!toolCallContent || !key || seen.has(key)) {
+			continue;
+		}
+		seen.add(key);
+		content.push(toolCallContent);
+	}
+	return content;
+}
+
+function extractDetailsImages(value: unknown): unknown[] | undefined {
+	if (typeof value !== "object" || value === null) return undefined;
+	const details = (value as DetailsContainer).details;
+	if (typeof details !== "object" || details === null) return undefined;
+	const images = (details as { images?: unknown }).images;
+	return Array.isArray(images) && images.length > 0 ? images : undefined;
+}
+
+function imageContentKey(value: ToolCallContent | undefined): string | undefined {
+	if (value?.type !== "content" || value.content.type !== "image") {
+		return undefined;
+	}
+	return `${value.content.mimeType}\u0000${value.content.data}`;
 }
 
 function extractEmbeddedResource(
@@ -846,6 +979,12 @@ function extractReadableText(value: unknown): string | undefined {
 		if (text.length > 0) {
 			return normalizeText(text);
 		}
+		if (hasBinaryContentBlock(contentBlocks)) {
+			return undefined;
+		}
+	}
+	if (extractDetailsImages(value)) {
+		return undefined;
 	}
 	if (isTerminalOnlyDetails(value)) {
 		return undefined;
@@ -865,7 +1004,7 @@ function isTerminalOnlyDetails(value: unknown): boolean {
 	return content === undefined || (Array.isArray(content) && content.length === 0);
 }
 
-function extractAssistantMessageText(value: unknown): string {
+export function extractAssistantMessageText(value: unknown): string {
 	if (typeof value !== "object" || value === null || !("content" in value)) {
 		return "";
 	}
@@ -893,6 +1032,13 @@ function getContentType(value: unknown): string | undefined {
 	}
 	const type = (value as TypedValue).type;
 	return typeof type === "string" ? type : undefined;
+}
+
+function hasBinaryContentBlock(blocks: unknown[]): boolean {
+	return blocks.some(block => {
+		const type = getContentType(block);
+		return type === "image" || type === "audio";
+	});
 }
 
 function extractStringProperty<T extends object>(value: unknown, key: keyof T): string | undefined {

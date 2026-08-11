@@ -1,40 +1,27 @@
-#!/usr/bin/env bun
-
-/**
- * Populate (or reset) the embedded harness documentation index for `omp://`.
- *
- * `--generate` writes `src/internal-urls/docs-index.generated.txt` as two lines:
- * a plain JSON array of the sorted `docs/**\/*.md` file names, then a base64
- * gzip blob of the index-aligned doc bodies (`string[]`). Keeping the filename
- * list out of the blob lets the loader list docs without inflating it.
- * Compiled binaries and the prepacked npm bundle inline this (~0.5MB) instead of
- * the ~1.6MB raw map; `--reset` restores the checked-in empty placeholder so the
- * dev tree reads `docs/` from disk. Mirrors the stats / model-catalog embeds.
- */
-
 import * as path from "node:path";
-import { gzipSync } from "node:zlib";
+import { gunzipSync, gzipSync } from "node:zlib";
 import { Glob } from "bun";
 
-const docsDir = path.resolve(import.meta.dir, "../../../docs");
-const outputPath = path.resolve(import.meta.dir, "../src/internal-urls/docs-index.generated.txt");
-const GENERATE_FLAG = "--generate";
-const RESET_FLAG = "--reset";
+const packageDir = path.resolve(import.meta.dir, "..");
+const docsDir = path.resolve(packageDir, "../../docs");
 
-async function main(): Promise<void> {
-	const rel = path.relative(process.cwd(), outputPath);
+export interface DocsIndexPayload {
+	readonly files: readonly string[];
+	readonly bodies: readonly string[];
+	readonly payload: string;
+}
 
-	if (process.argv.includes(RESET_FLAG)) {
-		await Bun.write(outputPath, "");
-		console.log(`Reset ${rel}`);
-		return;
-	}
+export interface DecodedDocsIndexPayload {
+	readonly files: readonly string[];
+	readonly bodies: readonly string[];
+}
 
-	if (!process.argv.includes(GENERATE_FLAG)) {
-		console.log(`Skipping ${rel}; pass ${GENERATE_FLAG} to embed docs (the dev tree reads docs/ from disk)`);
-		return;
-	}
+function isStringArray(value: unknown): value is string[] {
+	return Array.isArray(value) && value.every(item => typeof item === "string");
+}
 
+/** Build the exact two-line `omp://` docs embed from the source `docs` Markdown corpus. */
+export async function buildDocsIndexPayload(): Promise<DocsIndexPayload> {
 	const glob = new Glob("**/*.md");
 	const files: string[] = [];
 	for await (const relativePath of glob.scan(docsDir)) {
@@ -42,15 +29,30 @@ async function main(): Promise<void> {
 	}
 	files.sort();
 
-	// Index-aligned bodies (Promise.all preserves order), kept separate from the
-	// filename list so the loader can list docs without inflating the blob.
 	const bodies = await Promise.all(files.map(file => Bun.file(path.join(docsDir, file)).text()));
-
 	const bodiesB64 = Buffer.from(gzipSync(Buffer.from(JSON.stringify(bodies)), { level: 9 })).toString("base64");
-	// Two lines: plain filename array, then the base64 gzip blob.
-	const payload = `${JSON.stringify(files)}\n${bodiesB64}`;
-	await Bun.write(outputPath, payload);
-	console.log(`Generated ${rel} (${files.length} docs, ${payload.length} bytes)`);
+	return {
+		files,
+		bodies,
+		payload: `${JSON.stringify(files)}\n${bodiesB64}`,
+	};
 }
 
-await main();
+/** Decode a populated docs embed payload into filenames and index-aligned Markdown bodies. */
+export function decodeDocsIndexPayload(embed: string): DecodedDocsIndexPayload | null {
+	const newline = embed.indexOf("\n");
+	if (newline === -1) return null;
+
+	const filenames: unknown = JSON.parse(embed.slice(0, newline));
+	if (!isStringArray(filenames)) {
+		throw new Error("Embedded docs index filename line is not a JSON string array.");
+	}
+
+	const inflated = gunzipSync(Buffer.from(embed.slice(newline + 1), "base64"));
+	const bodies: unknown = JSON.parse(inflated.toString("utf8"));
+	if (!isStringArray(bodies)) {
+		throw new Error("Embedded docs index body blob is not a JSON string array.");
+	}
+
+	return { files: filenames, bodies };
+}

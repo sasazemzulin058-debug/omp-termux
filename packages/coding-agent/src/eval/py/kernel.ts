@@ -23,7 +23,7 @@ import {
 	resolveExplicitPythonRuntime,
 	resolvePythonRuntime,
 } from "./runtime";
-import { hostHasInheritableConsole, shouldHideKernelWindow } from "./spawn-options";
+import { hostHasInheritableConsole, shouldDetachKernel, shouldHideKernelWindow } from "./spawn-options";
 
 export type {
 	KernelExecuteOptions,
@@ -82,8 +82,9 @@ const availabilityCache = new Map<string, Promise<PythonKernelAvailability>>();
 export async function checkPythonKernelAvailability(
 	cwd: string,
 	interpreter?: string,
+	options?: { forceProbe?: boolean },
 ): Promise<PythonKernelAvailability> {
-	if (isBunTestRuntime() || $flag("PI_PYTHON_SKIP_CHECK")) {
+	if (!options?.forceProbe && (isBunTestRuntime() || $flag("PI_PYTHON_SKIP_CHECK"))) {
 		return { ok: true };
 	}
 	const resolvedCwd = path.resolve(cwd);
@@ -193,6 +194,7 @@ export class PythonKernel extends BaseKernel {
 
 		const proc = Bun.spawn([runtime.pythonPath, "-u", scriptPath], {
 			cwd: options.cwd,
+			detached: shouldDetachKernel(process.platform),
 			env: spawnEnv,
 			stdin: "pipe",
 			stdout: "pipe",

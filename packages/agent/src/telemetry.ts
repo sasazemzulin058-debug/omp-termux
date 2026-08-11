@@ -30,7 +30,6 @@ import {
 	completeSimple,
 	type Message,
 	type Model,
-	resolveServiceTier,
 	type ServiceTier,
 	type SimpleStreamOptions,
 	type StopReason,
@@ -158,6 +157,8 @@ export const enum PiGenAIAttr {
 	GatewayEndpoint = "pi.gen_ai.gateway.endpoint",
 	GatewayCallId = "pi.gen_ai.gateway.call_id",
 	GatewayRoutedTo = "pi.gen_ai.gateway.routed_to",
+	/** Cloudflare AI Gateway response-cache status (`cf-aig-cache-status`), never prompt-cache. */
+	GatewayResponseCacheStatus = "pi.gen_ai.gateway.response_cache.status",
 }
 
 /** GenAI operation names — values for {@link GenAIAttr.OperationName}. */
@@ -752,8 +753,7 @@ function buildChatRequestAttributes(stepNumber: number, request: ChatRequestSnap
 		attrs[GenAIAttr.RequestStopSequences] = [...request.stopSequences];
 	}
 	if (request.serviceTier && shouldSendServiceTier(request.serviceTier, provider)) {
-		const resolved = resolveServiceTier(request.serviceTier, provider);
-		if (resolved) attrs[OpenAIAttr.RequestServiceTier] = resolved;
+		attrs[OpenAIAttr.RequestServiceTier] = request.serviceTier;
 	}
 	if (request.reasoningEffort) attrs[PiGenAIAttr.RequestReasoningEffort] = request.reasoningEffort;
 	const toolChoice = serializeToolChoice(request.toolChoice);
@@ -958,6 +958,9 @@ function assistantContentToOtelParts(content: AssistantMessage["content"]): Otel
 		switch (part.type) {
 			case "text":
 				parts.push({ type: "text", content: part.text });
+				break;
+			case "image":
+				parts.push({ type: "blob", modality: "image", mime_type: part.mimeType, content: part.data });
 				break;
 			case "thinking":
 				parts.push({ type: "reasoning", content: part.thinking });
@@ -1277,17 +1280,56 @@ export function detectGatewayFromHeaders(
 	return undefined;
 }
 
+/**
+ * Bounded Cloudflare AI Gateway response-cache statuses emitted on
+ * {@link PiGenAIAttr.GatewayResponseCacheStatus}. Distinct from provider
+ * prompt-cache token counters (`gen_ai.usage.cache_*`).
+ *
+ * Cloudflare documents `HIT` / `MISS` on `cf-aig-cache-status`; `bypass` covers
+ * skip-cache / CDN-aligned BYPASS values. Any other present value is `unknown`.
+ */
+export type GatewayResponseCacheStatus = "hit" | "miss" | "bypass" | "unknown";
+
+/**
+ * Classify Cloudflare AI Gateway `cf-aig-cache-status` into a bounded
+ * response-cache status. Returns `undefined` when the allow-listed header is
+ * absent so non-Cloudflare traffic stays unaffected. Does not read TTL,
+ * skip-cache, custom-key, or other Cloudflare headers.
+ */
+export function classifyGatewayResponseCacheStatus(
+	headers: Readonly<Record<string, string>> | undefined,
+): GatewayResponseCacheStatus | undefined {
+	if (!headers) return undefined;
+	const raw = headers["cf-aig-cache-status"];
+	if (raw == null) return undefined;
+	switch (raw.trim().toLowerCase()) {
+		case "hit":
+			return "hit";
+		case "miss":
+			return "miss";
+		case "bypass":
+			return "bypass";
+		default:
+			return "unknown";
+	}
+}
+
 function applyGatewayAttributes(
 	span: Span,
 	headers: Readonly<Record<string, string>> | undefined,
 	baseUrl: string | undefined,
 ): void {
 	const gateway = detectGatewayFromHeaders(headers);
-	if (!gateway) return;
-	span.setAttribute(PiGenAIAttr.GatewayName, gateway.name);
-	if (baseUrl) span.setAttribute(PiGenAIAttr.GatewayEndpoint, baseUrl);
-	if (gateway.callId) span.setAttribute(PiGenAIAttr.GatewayCallId, gateway.callId);
-	if (gateway.routedTo) span.setAttribute(PiGenAIAttr.GatewayRoutedTo, gateway.routedTo);
+	if (gateway) {
+		span.setAttribute(PiGenAIAttr.GatewayName, gateway.name);
+		if (baseUrl) span.setAttribute(PiGenAIAttr.GatewayEndpoint, baseUrl);
+		if (gateway.callId) span.setAttribute(PiGenAIAttr.GatewayCallId, gateway.callId);
+		if (gateway.routedTo) span.setAttribute(PiGenAIAttr.GatewayRoutedTo, gateway.routedTo);
+	}
+	const responseCacheStatus = classifyGatewayResponseCacheStatus(headers);
+	if (responseCacheStatus) {
+		span.setAttribute(PiGenAIAttr.GatewayResponseCacheStatus, responseCacheStatus);
+	}
 }
 
 interface AppliedCostEstimate {

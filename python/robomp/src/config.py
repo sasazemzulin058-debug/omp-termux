@@ -10,7 +10,7 @@ from typing import Literal
 from pydantic import Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-ThinkingLevel = Literal["off", "low", "medium", "high", "xhigh"]
+ThinkingLevel = Literal["off", "low", "medium", "high", "xhigh", "max"]
 
 
 class Settings(BaseSettings):
@@ -38,18 +38,6 @@ class Settings(BaseSettings):
     git_author_email: str = Field(..., alias="ROBOMP_GIT_AUTHOR_EMAIL")
     repo_allowlist_raw: str = Field("", alias="ROBOMP_REPO_ALLOWLIST")
     pr_review_enabled: bool = Field(True, alias="ROBOMP_PR_REVIEW_ENABLED")
-    # PR review trigger. "open" (default) reviews incoming PRs on
-    # opened/reopened/ready_for_review. "vouched_label" DEFERS review until the
-    # vouch GitHub Action labels the PR `vouch_review_label`, so robomp reviews
-    # only PRs that survive the vouch gate. `pr_review_enabled` remains the
-    # master switch (False disables review under either trigger).
-    pr_review_trigger: Literal["open", "vouched_label"] = Field("open", alias="ROBOMP_PR_REVIEW_TRIGGER")
-    vouch_review_label: str = Field("vouched", alias="ROBOMP_VOUCH_REVIEW_LABEL")
-    # In vouched_label mode, only `labeled` events from this actor trigger a
-    # review, so a manual label by a triage/maintainer cannot bypass the gate.
-    # Default is the actor for the stock GITHUB_TOKEN; set to your App's bot
-    # login (e.g. "vouch-bot[bot]") if the vouch workflow labels via an App.
-    vouch_review_labeler: str = Field("github-actions[bot]", alias="ROBOMP_VOUCH_REVIEW_LABELER")
 
     # gh-proxy. Set BOTH to route GitHub through the proxy; leave both empty
     # to keep PAT-on-orchestrator behavior. Mixing the two (PAT + proxy) is
@@ -147,6 +135,12 @@ class Settings(BaseSettings):
     question_autoclose_enabled: bool = Field(True, alias="ROBOMP_QUESTION_AUTOCLOSE_ENABLED")
     question_autoclose_hours: float = Field(4.0, alias="ROBOMP_QUESTION_AUTOCLOSE_HOURS")
     question_autoclose_scan_seconds: float = Field(60.0, alias="ROBOMP_QUESTION_AUTOCLOSE_SCAN_SECONDS")
+    # Local issue/PR search index. Webhooks keep it fresh in real time; this
+    # interval controls the periodic GitHub reconcile (first pass = full
+    # backfill of every allowlisted repo). <= 0 disables the reconciler —
+    # `gh_search_issues` then falls back to the remote search API until the
+    # repo has a sync watermark.
+    issue_index_sync_seconds: float = Field(900.0, alias="ROBOMP_ISSUE_INDEX_SYNC_SECONDS")
 
     # pi-natives build-output cache. Hardlinks pre-built
     # `packages/natives/native/*.node` (and its companions) into new
@@ -159,6 +153,15 @@ class Settings(BaseSettings):
     natives_cache_max_entries_per_repo: int = Field(8, alias="ROBOMP_NATIVES_CACHE_MAX_ENTRIES_PER_REPO")
     natives_cache_max_bytes: int = Field(4 * 1024**3, alias="ROBOMP_NATIVES_CACHE_MAX_BYTES")
     natives_cache_gc_interval_seconds: float = Field(3600.0, alias="ROBOMP_NATIVES_CACHE_GC_INTERVAL_SECONDS")
+
+    # Post-run workspace cache reclamation. Every task run reinstalls
+    # node_modules (`ensure_workspace_dependencies`), so between runs the
+    # checkout's node_modules and the workspace-private bun install cache are
+    # dead weight — multiple GB per issue that would otherwise persist until
+    # the issue closes and exhaust the disk. When enabled, the worker strips
+    # them after every event and WorkerPool.start() sweeps all workspaces once
+    # at boot. Costs a dependency re-download on the next run for that issue.
+    reclaim_workspace_caches: bool = Field(True, alias="ROBOMP_RECLAIM_WORKSPACE_CACHES")
 
     @field_validator("bot_login", mode="after")
     @classmethod
@@ -306,8 +309,7 @@ class Settings(BaseSettings):
     @property
     def maintainer_logins(self) -> frozenset[str]:
         items = [
-            piece.strip().lstrip("@").lower().removesuffix("[bot]")
-            for piece in self.maintainer_logins_raw.split(",")
+            piece.strip().lstrip("@").lower().removesuffix("[bot]") for piece in self.maintainer_logins_raw.split(",")
         ]
         return frozenset(item for item in items if item)
 

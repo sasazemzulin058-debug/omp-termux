@@ -29,11 +29,12 @@ export interface Component {
   handleInput?(data: string): void;
   wantsKeyRelease?: boolean;
   invalidate?(): void;
+  setIgnoreTight?(ignore: boolean): any;
   dispose?(): void;
 }
 ```
 
-Render results are component-owned and immutable to callers; a component that did not change should return the **same array reference** it returned last time (reference equality is what enables the renderer's memoization and row virtualization), and must return a new array whenever its content changed.
+Render results are component-owned and immutable to callers. An unchanged component may (and should) return the **same array reference** it returned last time; it must return a new array whenever content changes. Reference equality enables container memoization and stable-prefix work avoidance. A component that mutates a previously returned array in place must also implement `RenderStablePrefix` and report how many leading rows survived unchanged.
 
 `Focusable` is separate:
 
@@ -98,6 +99,10 @@ Then use `isKeyRelease()` / `isKeyRepeat()` if needed.
 - Overlay APIs exist in `TUI` (`showOverlay`, `OverlayHandle`). In interactive extension/custom UI, `custom(..., { overlay: true })` mounts your component through `TUI.showOverlay(...)`; without `overlay`, it replaces the editor component area directly.
 - Overlay custom UI is anchored at `bottom-center` with full terminal width/max height and is removed through the returned overlay handle when `done(...)` closes the flow.
 
+### Built-in full-screen surfaces
+
+The coding-agent integration also mounts built-in full-screen surfaces outside `ctx.ui.custom(...)`. [Agent Hub](./agent-hub.md) is the live roster and control surface for subagents. Its file-backed transcript viewer borrows the alternate screen while it is open, then restores the Hub beneath it on close.
+
 ## Mount points and return contracts
 
 ## 1) Extension UI (`ExtensionUIContext`)
@@ -125,27 +130,41 @@ Behavior in interactive mode (`extension-ui-controller.ts`):
 - On `done(result)`: calls `component.dispose?.()`, hides the overlay if present, restores editor + text for non-overlay flows, focuses editor, resolves promise.
   So `done(...)` is mandatory for completion.
 
-## 2) Hook/custom-tool UI context (legacy typing)
+## 2) Hook/custom-tool UI context (runtime/type mismatch)
 
-`HookUIContext.custom` is typed as `(tui, theme, done)` in hook/custom-tool types.
-Underlying interactive implementation calls factories with `(tui, theme, keybindings, done)`. JS consumers can use the extra arg; type-level compatibility still reflects the 3-arg legacy signature.
+`HookUIContext.custom` is still typed as `(tui, theme, done)`, but the
+interactive controller invokes the factory as
+`(tui, theme, keybindings, done)`. The third runtime argument is therefore a
+`KeybindingsManager`, **not** the completion callback. A three-argument factory
+that calls its third parameter will fail at runtime and leave the custom UI
+unresolved.
 
-Custom tools typically use the same UI entrypoint via the factory-scoped `pi.ui` object, then return the selected value in normal tool content:
+Until the hook/custom-tool type is aligned with the controller, do not copy the
+legacy three-argument examples from the type declaration. Runtime-safe
+interactive code must obtain the completion callback from the fourth positional
+argument, for example with a rest-argument adapter, and should guard the flow
+with `pi.hasUI`:
 
 ```ts
-async execute(toolCallId, params, onUpdate, ctx, signal) {
-  if (!pi.hasUI) {
-    return { content: [{ type: "text", text: "UI unavailable" }] };
-  }
-
-  const picked = await pi.ui.custom<string | undefined>((tui, theme, done) => {
-    const component = new MyPickerComponent(done, signal);
-    return component;
-  });
-
-  return { content: [{ type: "text", text: picked ? `Picked: ${picked}` : "Cancelled" }] };
-}
+const picked = await pi.ui.custom<string | undefined>(
+  (...runtimeArgs: unknown[]) => {
+    const done = runtimeArgs[3];
+    if (typeof done !== "function") {
+      throw new Error(
+        "Interactive custom UI completion callback is unavailable",
+      );
+    }
+    return new MyPickerComponent(
+      done as (value: string | undefined) => void,
+      signal,
+    );
+  },
+);
 ```
+
+This is a compatibility workaround for the current implementation, not a
+stable four-argument hook type. `ExtensionUIContext.custom`, described above,
+has the supported four-argument contract.
 
 ## 3) Custom tool call/result renderers
 
@@ -164,7 +183,7 @@ These renderers are mounted by `ToolExecutionComponent`.
 
 ## Lifecycle and cancellation
 
-- `dispose()` is optional at type level but should be implemented when you own timers, subprocesses, watchers, sockets, or overlays.
+- `dispose()` is optional at type level but should be implemented when you own timers, subprocesses, watchers, sockets, or overlays. It must be idempotent: containers propagate disposal, and reset/removal paths may converge.
 - `done(...)` should be called exactly once from your component flow.
 - For cancellable long-running UI, pair `CancellableLoader` with `AbortSignal` and call `done(...)` from `onAbort`.
 

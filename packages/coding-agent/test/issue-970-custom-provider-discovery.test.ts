@@ -8,11 +8,11 @@ import { writeModelCache } from "@oh-my-pi/pi-catalog/model-cache";
 import type { ModelRegistry, ProviderDiscoveryState } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { ModelRegistry as ModelRegistryImpl } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import { ModelSelectorComponent } from "@oh-my-pi/pi-coding-agent/modes/components/model-selector";
+import { ModelHubComponent } from "@oh-my-pi/pi-coding-agent/modes/components/model-hub";
 import { getThemeByName, setThemeInstance } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import type { TUI } from "@oh-my-pi/pi-tui";
-import { Snowflake } from "@oh-my-pi/pi-utils";
+import { removeSyncWithRetries, Snowflake } from "@oh-my-pi/pi-utils";
 
 function normalizeRenderedText(text: string): string {
 	return stripVTControlCharacters(text).replace(/\s+/g, " ").trim();
@@ -27,7 +27,7 @@ function installTestTheme(): void {
 	setThemeInstance(testTheme);
 }
 
-async function createSelector(state: ProviderDiscoveryState): Promise<ModelSelectorComponent> {
+async function createHub(state: ProviderDiscoveryState): Promise<ModelHubComponent> {
 	const modelRegistry = {
 		refresh: async () => {},
 		refreshProvider: async () => {},
@@ -35,25 +35,22 @@ async function createSelector(state: ProviderDiscoveryState): Promise<ModelSelec
 		getAvailable: () => [],
 		getAll: () => [],
 		getDiscoverableProviders: () => [state.provider],
-		getCanonicalModelSelections: () => [],
 		getProviderDiscoveryState: () => state,
+		authStorage: { hasAuth: () => false },
 	} as unknown as ModelRegistry;
-	const ui = { requestRender: vi.fn() } as unknown as TUI;
-	const selector = new ModelSelectorComponent(
-		ui,
-		undefined,
-		Settings.isolated({}),
-		modelRegistry,
-		[],
-		() => {},
-		() => {},
-	);
+	const ui = { requestRender: vi.fn(), terminal: { rows: 40 } } as unknown as TUI;
+	const hub = new ModelHubComponent(ui, Settings.isolated({}), modelRegistry, [], {
+		onAssign: () => {},
+		onUnassign: () => {},
+		onCancel: () => {},
+	});
 	await Bun.sleep(0);
 	installTestTheme();
-	selector.handleInput("\x1b[C");
-	selector.handleInput("\x1b[C");
+	// Scope-hop is the default arrow mode: one Down moves All models → the
+	// sole provider entry (separators are skipped).
+	hub.handleInput("\x1b[B");
 	await Bun.sleep(0);
-	return selector;
+	return hub;
 }
 
 describe("issue #970 custom provider discovery", () => {
@@ -78,7 +75,7 @@ describe("issue #970 custom provider discovery", () => {
 	afterEach(() => {
 		authStorage.close();
 		if (tempDir && fs.existsSync(tempDir)) {
-			fs.rmSync(tempDir, { recursive: true });
+			removeSyncWithRetries(tempDir);
 		}
 	});
 
@@ -113,7 +110,7 @@ describe("issue #970 custom provider discovery", () => {
 			const headers = init?.headers as Headers | Record<string, string> | undefined;
 			const authHeader = headers instanceof Headers ? headers.get("Authorization") : headers?.Authorization;
 			expect(authHeader).toBe("Bearer sk-1234");
-			return new Response(JSON.stringify({ data: [{ id: "qwen3.6" }, { id: "deepseek-r1" }] }), {
+			return new Response(JSON.stringify({ data: [{ id: "qwen3.6" }, { id: "vllm-lab-fork-b2" }] }), {
 				status: 200,
 				headers: { "Content-Type": "application/json" },
 			});
@@ -123,7 +120,7 @@ describe("issue #970 custom provider discovery", () => {
 		await registry.refreshProvider("vllm");
 
 		const providerModels = registry.getAll().filter(model => model.provider === "vllm");
-		expect(providerModels.map(model => model.id).sort()).toEqual(["deepseek-r1", "qwen3.6"]);
+		expect(providerModels.map(model => model.id).sort()).toEqual(["qwen3.6", "vllm-lab-fork-b2"]);
 		expect(registry.getProviderDiscoveryState("vllm")?.status).toBe("ok");
 
 		const qwen = registry.find("vllm", "qwen3.6");
@@ -133,17 +130,17 @@ describe("issue #970 custom provider discovery", () => {
 		expect(qwen?.contextWindow).toBe(128000);
 		expect(qwen?.maxTokens).toBe(8192);
 
-		const deepseek = registry.find("vllm", "deepseek-r1");
+		const deepseek = registry.find("vllm", "vllm-lab-fork-b2");
 		expect(deepseek?.api).toBe("openai-completions");
 		expect(deepseek?.provider).toBe("vllm");
-		expect(deepseek?.name).toBe("deepseek-r1");
+		expect(deepseek?.name).toBe("vllm-lab-fork-b2");
 		expect(deepseek?.contextWindow).toBe(128000);
 		expect(deepseek?.maxTokens).toBe(32_768);
 	});
 
 	test("shows a provider-tab hint when discovery succeeds but returns zero models", async () => {
 		installTestTheme();
-		const selector = await createSelector({
+		const hub = await createHub({
 			provider: "vllm",
 			status: "empty",
 			optional: false,
@@ -152,14 +149,15 @@ describe("issue #970 custom provider discovery", () => {
 			models: [],
 		});
 
-		const rendered = normalizeRenderedText(selector.render(200).join("\n"));
+		const rendered = normalizeRenderedText(hub.render(200).join("\n"));
 		expect(rendered).toContain("Discovery succeeded but returned 0 models");
 		expect(rendered).toContain("/models returns { data: [{ id }] }");
+		hub.dispose();
 	});
 
 	test("shows a provider-tab hint when the discovery endpoint returns 404", async () => {
 		installTestTheme();
-		const selector = await createSelector({
+		const hub = await createHub({
 			provider: "vllm",
 			status: "unavailable",
 			optional: false,
@@ -169,9 +167,10 @@ describe("issue #970 custom provider discovery", () => {
 			error: "HTTP 404 from http://192.168.5.3:8085/v1/models",
 		});
 
-		const rendered = normalizeRenderedText(selector.render(200).join("\n"));
+		const rendered = normalizeRenderedText(hub.render(200).join("\n"));
 		expect(rendered).toContain("http://192.168.5.3:8085/v1/models returned 404");
 		expect(rendered).toContain("baseUrl");
+		hub.dispose();
 	});
 
 	test("discovers multiple configurable vllm instances and preserves advertised context metadata", async () => {
@@ -197,13 +196,13 @@ describe("issue #970 custom provider discovery", () => {
 		const fetchMock: (input: string | URL | Request) => Promise<Response> = async input => {
 			const url = String(input);
 			if (url === "http://192.168.5.3:8085/v1/models") {
-				return new Response(JSON.stringify({ data: [{ id: "DeepSeek-V4-Flash", max_model_len: 262_144 }] }), {
+				return new Response(JSON.stringify({ data: [{ id: "vllm-lab-fork-flash", max_model_len: 262_144 }] }), {
 					status: 200,
 					headers: { "Content-Type": "application/json" },
 				});
 			}
 			if (url === "http://192.168.5.4:8085/v1/models") {
-				return new Response(JSON.stringify({ data: [{ id: "DeepSeek-V4-Long", context_length: "1048576" }] }), {
+				return new Response(JSON.stringify({ data: [{ id: "vllm-lab-fork-long", context_length: "1048576" }] }), {
 					status: 200,
 					headers: { "Content-Type": "application/json" },
 				});
@@ -215,10 +214,10 @@ describe("issue #970 custom provider discovery", () => {
 		await registry.refreshProvider("vllm-fast");
 		await registry.refreshProvider("vllm-long");
 
-		const fast = registry.find("vllm-fast", "DeepSeek-V4-Flash");
+		const fast = registry.find("vllm-fast", "vllm-lab-fork-flash");
 		expect(fast?.contextWindow).toBe(262_144);
 		expect(fast?.maxTokens).toBe(32_768);
-		const long = registry.find("vllm-long", "DeepSeek-V4-Long");
+		const long = registry.find("vllm-long", "vllm-lab-fork-long");
 		expect(long?.contextWindow).toBe(1_048_576);
 		expect(long?.maxTokens).toBe(32_768);
 		expect(registry.getProviderDiscoveryState("vllm-fast")?.status).toBe("ok");

@@ -6,7 +6,12 @@
  */
 import { describe, expect, it } from "bun:test";
 import { getCapability } from "@oh-my-pi/pi-coding-agent/capability";
-import { BUILTIN_DEFAULTS_PROVIDER_ID, type Rule, ruleCapability } from "@oh-my-pi/pi-coding-agent/capability/rule";
+import {
+	BUILTIN_DEFAULTS_PROVIDER_ID,
+	compileRuleCondition,
+	type Rule,
+	ruleCapability,
+} from "@oh-my-pi/pi-coding-agent/capability/rule";
 import type { LoadContext } from "@oh-my-pi/pi-coding-agent/capability/types";
 // Register all discovery providers as a side effect.
 import "@oh-my-pi/pi-coding-agent/discovery";
@@ -60,9 +65,11 @@ describe("builtin-defaults rule provider", () => {
 		expect(lazylock?.condition).toHaveLength(2);
 	});
 
-	it("preserves a per-rule interruptMode override from frontmatter", async () => {
+	it("forces every bundled rule to warn without interrupting", async () => {
 		const rules = await loadBuiltinRules();
-		expect(rules.find(r => r.name === "ts-set-map")?.interruptMode).toBe("never");
+		for (const rule of rules) {
+			expect(rule.interruptMode, rule.name).toBe("never");
+		}
 	});
 
 	it("fires the no-test-timers rule on real timers in *.test.ts but not plain *.ts", async () => {
@@ -90,6 +97,39 @@ describe("builtin-defaults rule provider", () => {
 		manager.resetBuffer();
 		expect(
 			manager.checkDelta("await Bun.sleep(10)", {
+				source: "tool",
+				toolName: "write",
+				filePaths: ["packages/x/src/foo.ts"],
+			}),
+		).toEqual([]);
+	});
+
+	it("fires ts-no-local-is-record on local function and lambda definitions", async () => {
+		const rules = await loadBuiltinRules();
+		const rule = rules.find(r => r.name === "ts-no-local-is-record");
+		if (!rule) throw new Error("ts-no-local-is-record rule missing");
+
+		const manager = new TtsrManager();
+		expect(manager.addRule(rule)).toBe(true);
+
+		for (const snippet of [
+			'function isRecord(value: unknown): value is Record<string, unknown> { return typeof value === "object"; }',
+			'const isRecord = (value: unknown): value is Record<string, unknown> => typeof value === "object";',
+			'const isRecord = function (value: unknown): value is Record<string, unknown> { return typeof value === "object"; };',
+		]) {
+			manager.resetBuffer();
+			expect(
+				manager.checkDelta(snippet, {
+					source: "tool",
+					toolName: "write",
+					filePaths: ["packages/x/src/foo.ts"],
+				}),
+			).toHaveLength(1);
+		}
+
+		manager.resetBuffer();
+		expect(
+			manager.checkDelta('import { isRecord } from "@oh-my-pi/pi-utils";', {
 				source: "tool",
 				toolName: "write",
 				filePaths: ["packages/x/src/foo.ts"],
@@ -144,6 +184,134 @@ describe("builtin-defaults rule provider", () => {
 				toolName: "edit",
 				filePaths: ["src/foo.js"],
 			}),
+		).toEqual([]);
+	});
+	it("opens every bundled regex condition that uses a bare line anchor with the multiline inline flag", async () => {
+		// Without the (?m) inline flag a bare ^ or $ anchors to the absolute
+		// start/end of input, so a rule whose condition is anchored to a line
+		// silently stops matching in real files (see #6890). Enforce the pairing
+		// at load time so the failure class stays closed.
+		const rules = await loadBuiltinRules();
+		for (const rule of rules) {
+			for (const condition of rule.condition ?? []) {
+				const outsideCharClasses = condition.replace(/\[[^\]]*\]/g, "");
+				const hasBareAnchor = /(^|[^\\])[\^$]/.test(outsideCharClasses);
+				const hasMultilineSemantics = compileRuleCondition(condition).multiline;
+				expect(
+					hasBareAnchor ? hasMultilineSemantics : true,
+					`${rule.name}: a condition with a bare ^ or $ anchor must open with the multiline inline flag`,
+				).toBe(true);
+			}
+		}
+	});
+
+	it("fires ts-no-tiny-functions on one-line arrow functions even with a trailing newline", async () => {
+		const rules = await loadBuiltinRules();
+		const rule = rules.find(r => r.name === "ts-no-tiny-functions");
+		if (!rule) throw new Error("ts-no-tiny-functions rule missing");
+
+		const manager = new TtsrManager();
+		expect(manager.addRule(rule)).toBe(true);
+		const ctx: TtsrMatchContext = { source: "tool", toolName: "edit", filePaths: ["src/foo.ts"] };
+
+		// Real files end with a newline, so the arrow alternative must match
+		// before the line terminator, not only at the absolute end of input.
+		const hits = [
+			"const getName = (u) => u.profile.name;\n",
+			"const getName = (u) => u.profile.name;",
+			"const a = 1;\nconst getName = (u) => u.profile.name;\nconst b = 2;",
+		];
+		for (const snippet of hits) {
+			manager.resetBuffer();
+			expect(
+				manager.checkDelta(snippet, ctx).map(m => m.name),
+				snippet,
+			).toEqual(["ts-no-tiny-functions"]);
+		}
+
+		// Multi-statement functions (block bodies) are not tiny wrappers.
+		const misses = ["function f(v) { const x = v.a; return x; }", "const f = (v) => { const x = v.a; return x; };"];
+		for (const snippet of misses) {
+			manager.resetBuffer();
+			expect(manager.checkDelta(snippet, ctx), snippet).toEqual([]);
+		}
+	});
+
+	it("go-new-expr matches value→pointer helpers (named + generic) but not real functions, only on *.go", async () => {
+		const rules = await loadBuiltinRules();
+		const rule = rules.find(r => r.name === "go-new-expr");
+		if (!rule) throw new Error("go-new-expr rule missing");
+		const manager = new TtsrManager();
+		expect(manager.addRule(rule)).toBe(true);
+		const ctx: TtsrMatchContext = { source: "tool", toolName: "edit", filePaths: ["pkg/foo.go"] };
+
+		const hits = [
+			"package p\nfunc boolPtr(v bool) *bool { return &v }",
+			"package p\nfunc Ptr[T any](v T) *T { return &v }",
+		];
+		for (const snippet of hits) {
+			manager.resetBuffer();
+			expect(
+				(await manager.checkAstSnapshot(snippet, ctx)).map(m => m.name),
+				snippet,
+			).toEqual(["go-new-expr"]);
+		}
+
+		const misses = [
+			"package p\nfunc add(a int, b int) *int { return &a }",
+			"package p\nfunc (s *S) Get() *int { return &s.x }",
+		];
+		for (const snippet of misses) {
+			manager.resetBuffer();
+			expect(await manager.checkAstSnapshot(snippet, ctx), snippet).toEqual([]);
+		}
+
+		// AST conditions never reach a non-go path.
+		manager.resetBuffer();
+		expect(
+			await manager.checkAstSnapshot(hits[0], { source: "tool", toolName: "edit", filePaths: ["pkg/foo.ts"] }),
+		).toEqual([]);
+	});
+
+	it("go-bench-loop fires on a *testing.B b.N loop but not an ordinary .N counter", async () => {
+		const rules = await loadBuiltinRules();
+		const rule = rules.find(r => r.name === "go-bench-loop");
+		if (!rule) throw new Error("go-bench-loop rule missing");
+		const manager = new TtsrManager();
+		expect(manager.addRule(rule)).toBe(true);
+		const ctx: TtsrMatchContext = { source: "tool", toolName: "edit", filePaths: ["pkg/foo_test.go"] };
+
+		const bench =
+			"package p\nfunc BenchmarkX(b *testing.B) {\n\tsetup()\n\tfor i := 0; i < b.N; i++ {\n\t\twork()\n\t}\n}";
+		manager.resetBuffer();
+		expect((await manager.checkAstSnapshot(bench, ctx)).map(m => m.name)).toEqual(["go-bench-loop"]);
+
+		// A `.N` selector on something that is not the benchmark receiver must not fire.
+		const helper =
+			"package p\nfunc TestThing(t *testing.T) {\n\treq := build()\n\tfor i := 0; i < req.N; i++ {\n\t\twork()\n\t}\n}";
+		manager.resetBuffer();
+		expect(await manager.checkAstSnapshot(helper, ctx)).toEqual([]);
+	});
+
+	it("go-range-int fires only on *.go, never on a same-named non-go path", async () => {
+		const rules = await loadBuiltinRules();
+		const rule = rules.find(r => r.name === "go-range-int");
+		if (!rule) throw new Error("go-range-int rule missing");
+		const manager = new TtsrManager();
+		expect(manager.addRule(rule)).toBe(true);
+
+		const loop = "package p\nfunc f(n int) {\n\tfor i := 0; i < n; i++ {\n\t\tuse(i)\n\t}\n}";
+		manager.resetBuffer();
+		expect(
+			(await manager.checkAstSnapshot(loop, { source: "tool", toolName: "edit", filePaths: ["pkg/foo.go"] })).map(
+				m => m.name,
+			),
+		).toEqual(["go-range-int"]);
+		// A step-2 loop is not equivalent to range-over-int and must not fire.
+		const step2 = "package p\nfunc f(n int) {\n\tfor i := 0; i < n; i += 2 {\n\t\tuse(i)\n\t}\n}";
+		manager.resetBuffer();
+		expect(
+			await manager.checkAstSnapshot(step2, { source: "tool", toolName: "edit", filePaths: ["pkg/foo.go"] }),
 		).toEqual([]);
 	});
 

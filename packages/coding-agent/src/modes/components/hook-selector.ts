@@ -61,6 +61,8 @@ export interface HookSelectorOptions {
 	tui?: TUI;
 	timeout?: number;
 	onTimeout?: () => void;
+	onTimeoutStart?: () => void;
+	onTimeoutReset?: () => void;
 	initialIndex?: number;
 	outline?: boolean;
 	maxVisible?: number;
@@ -113,29 +115,41 @@ function splitLeadingSpacesForWrap(line: string, width: number): { indent: strin
 	};
 }
 
-class OutlinedList extends Container {
-	#lines: string[] = [];
+/** One row fed to {@link OutlinedList} or the plain list container. `highlight`
+ *  causes the row (and its wrapped continuations, plus trailing padding) to be
+ *  painted with the theme's `selectedBg` band — the focus cue that survives
+ *  themes where `accent` fg is close to the terminal foreground. */
+type SelectorRow = { text: string; highlight: boolean };
 
-	setLines(lines: string[]): void {
-		this.#lines = lines;
+/** Paint `content` with the `selectedBg` background, applied AFTER any inner
+ *  ANSI styling so the band spans padding as well as content. */
+function paintSelectedRow(content: string): string {
+	return theme.bg("selectedBg", content);
+}
+
+class OutlinedList extends Container {
+	#rows: SelectorRow[] = [];
+
+	setLines(rows: readonly SelectorRow[]): void {
+		this.#rows = rows.slice();
 		this.invalidate();
 	}
 
-	render(width: number): readonly string[] {
+	override render(width: number): readonly string[] {
 		const borderColor = (text: string) => theme.fg("border", text);
 		const horizontal = borderColor(theme.boxRound.horizontal.repeat(Math.max(1, width)));
 		const innerWidth = Math.max(1, width - 2);
 		const content: string[] = [];
-		for (const line of this.#lines) {
-			const normalized = replaceTabs(line);
+		for (const row of this.#rows) {
+			const normalized = replaceTabs(row.text);
 			const { indent, body } = splitLeadingSpacesForWrap(normalized, innerWidth);
 			const wrapped = wrapTextWithAnsi(body, Math.max(1, innerWidth - visibleWidth(indent)));
 			for (const wrappedBody of wrapped.length > 0 ? wrapped : [""]) {
 				const wrappedLine = `${indent}${wrappedBody}`;
 				const pad = Math.max(0, innerWidth - visibleWidth(wrappedLine));
-				content.push(
-					`${borderColor(theme.boxRound.vertical)}${wrappedLine}${padding(pad)}${borderColor(theme.boxRound.vertical)}`,
-				);
+				const filled = `${wrappedLine}${padding(pad)}`;
+				const painted = row.highlight ? paintSelectedRow(filled) : filled;
+				content.push(`${borderColor(theme.boxRound.vertical)}${painted}${borderColor(theme.boxRound.vertical)}`);
 			}
 		}
 		return [horizontal, ...content, horizontal];
@@ -166,6 +180,7 @@ export class HookSelectorComponent extends Container {
 	#onLeftCallback: (() => void) | undefined;
 	#onRightCallback: (() => void) | undefined;
 	#onExternalEditorCallback: (() => void) | undefined;
+	#onTimeoutResetCallback: (() => void) | undefined;
 	#slider: HookSelectorSlider | undefined;
 	#sliderIndex: number = 0;
 	#sliderComponent: Text | undefined;
@@ -201,6 +216,7 @@ export class HookSelectorComponent extends Container {
 		this.#onLeftCallback = opts?.onLeft;
 		this.#onRightCallback = opts?.onRight;
 		this.#onExternalEditorCallback = opts?.onExternalEditor;
+		this.#onTimeoutResetCallback = opts?.onTimeoutReset;
 		if (opts?.slider && opts.slider.segments.length > 0) {
 			this.#slider = opts.slider;
 			this.#sliderIndex = Math.max(0, Math.min(opts.slider.index, opts.slider.segments.length - 1));
@@ -220,6 +236,7 @@ export class HookSelectorComponent extends Container {
 		}
 
 		if (opts?.timeout && opts.timeout > 0 && opts.tui) {
+			opts.onTimeoutStart?.();
 			this.#countdown = new CountdownTimer(
 				opts.timeout,
 				opts.tui,
@@ -472,7 +489,7 @@ export class HookSelectorComponent extends Container {
 	}
 
 	#updateList(renderWidth = this.#lastRenderWidth): void {
-		const lines: string[] = [];
+		const rows: SelectorRow[] = [];
 		const total = this.#filteredOptions.length;
 		const mdTheme = getMarkdownTheme();
 		// Compact mode kicks in exactly when the fully-expanded list (all
@@ -500,34 +517,41 @@ export class HookSelectorComponent extends Container {
 			const filtered = this.#filteredOptions[i];
 			if (filtered === undefined) continue;
 			const isSelected = i === this.#selectedIndex;
+			const isDisabled = this.#isDisabled(filtered.index);
 			const descMode: number | "full" = compact ? (isSelected ? selectedDescRows : 0) : "full";
-			lines.push(
-				...this.#renderOptionLines(
-					filtered.option,
-					isSelected,
-					this.#isDisabled(filtered.index),
-					mdTheme,
-					descMode,
-					renderWidth,
-					filtered.index,
-				),
-			);
+			// Highlight the whole option block (label + wrapped description rows)
+			// so the focus band reads as one continuous bar rather than a stripe
+			// under the label alone. Disabled rows never claim focus even if the
+			// index momentarily lands on one during initial coercion.
+			const highlight = isSelected && !isDisabled;
+			for (const text of this.#renderOptionLines(
+				filtered.option,
+				isSelected,
+				isDisabled,
+				mdTheme,
+				descMode,
+				renderWidth,
+				filtered.index,
+			)) {
+				rows.push({ text, highlight });
+			}
 		}
 
 		if (total === 0) {
-			lines.push(theme.fg("dim", "  No matching options"));
+			rows.push({ text: theme.fg("dim", "  No matching options"), highlight: false });
 		}
 
 		if (startIndex > 0 || endIndex < total || this.#shouldRenderSearchStatus(renderWidth, mdTheme)) {
-			lines.push(this.#renderStatusLine(total));
+			rows.push({ text: this.#renderStatusLine(total), highlight: false });
 		}
 		if (this.#outlinedList) {
-			this.#outlinedList.setLines(lines);
+			this.#outlinedList.setLines(rows);
 			return;
 		}
 		this.#listContainer?.clear();
-		for (const line of lines) {
-			this.#listContainer?.addChild(new Text(line, 1, 0));
+		for (const row of rows) {
+			const bgFn = row.highlight ? paintSelectedRow : undefined;
+			this.#listContainer?.addChild(new Text(row.text, 1, 0, bgFn));
 		}
 	}
 
@@ -614,8 +638,10 @@ export class HookSelectorComponent extends Container {
 	}
 
 	handleInput(keyData: string): void {
-		// Reset countdown on any interaction
-		this.#countdown?.reset();
+		if (this.#countdown) {
+			this.#countdown.reset();
+			this.#onTimeoutResetCallback?.();
+		}
 
 		if (matchesSelectCancel(keyData)) {
 			this.#onCancelCallback();
@@ -626,17 +652,23 @@ export class HookSelectorComponent extends Container {
 			return;
 		}
 
-		if (matchesSelectUp(keyData) || (!this.#isSearchEnabled() && keyData === "k")) {
+		if (matchesSelectUp(keyData) || (!this.#isSearchEnabled() && matchesKey(keyData, "k"))) {
 			this.#moveSelection(-1);
-		} else if (matchesSelectDown(keyData) || (!this.#isSearchEnabled() && keyData === "j")) {
+		} else if (matchesSelectDown(keyData) || (!this.#isSearchEnabled() && matchesKey(keyData, "j"))) {
 			this.#moveSelection(1);
 		} else if (matchesKey(keyData, "enter") || matchesKey(keyData, "return") || keyData === "\n") {
 			const selected = this.#filteredOptions[this.#selectedIndex];
 			if (selected && !this.#isDisabled(selected.index)) this.#onSelectCallback(selected.option.label);
-		} else if (matchesKey(keyData, "left") || (this.#slider && !this.#isSearchEnabled() && keyData === "h")) {
+		} else if (
+			matchesKey(keyData, "left") ||
+			(this.#slider && !this.#isSearchEnabled() && matchesKey(keyData, "h"))
+		) {
 			if (this.#slider) this.#moveSlider(-1);
 			else this.#onLeftCallback?.();
-		} else if (matchesKey(keyData, "right") || (this.#slider && !this.#isSearchEnabled() && keyData === "l")) {
+		} else if (
+			matchesKey(keyData, "right") ||
+			(this.#slider && !this.#isSearchEnabled() && matchesKey(keyData, "l"))
+		) {
 			if (this.#slider) this.#moveSlider(1);
 			else this.#onRightCallback?.();
 		} else if (this.#onExternalEditorCallback && matchesAppExternalEditor(keyData)) {
@@ -653,7 +685,7 @@ export class HookSelectorComponent extends Container {
 		return super.render(renderWidth);
 	}
 
-	dispose(): void {
+	override dispose(): void {
 		this.#countdown?.dispose();
 	}
 }

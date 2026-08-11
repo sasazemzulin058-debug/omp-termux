@@ -8,6 +8,7 @@
 import { type AuthStorage, type FetchImpl, getEnvApiKey } from "@oh-my-pi/pi-ai";
 import type { SearchResponse, SearchSource } from "../../../web/search/types";
 import { SearchProviderError } from "../../../web/search/types";
+import { formatQuery, parseSearchQuery } from "../query";
 import type { SearchParams } from "./base";
 import { SearchProvider } from "./base";
 import { classifyProviderHttpError, withHardTimeout } from "./utils";
@@ -18,7 +19,10 @@ type SearchParamsWithFetch = SearchParams & { fetch?: FetchImpl };
 export interface JinaSearchParams {
 	query: string;
 	num_results?: number;
+	/** Single bare host for Jina's `X-Site` in-site search header. */
+	site?: string;
 	signal?: AbortSignal;
+	timeoutMs?: number;
 	fetch?: FetchImpl;
 }
 
@@ -39,16 +43,20 @@ export function findApiKey(): string | null {
 async function callJinaSearch(
 	apiKey: string,
 	query: string,
+	site?: string,
 	signal?: AbortSignal,
 	fetchImpl: FetchImpl = fetch,
+	timeoutMs?: number,
 ): Promise<JinaSearchResponse> {
 	const requestUrl = `${JINA_SEARCH_URL}/${encodeURIComponent(query)}`;
+	const headers: Record<string, string> = {
+		Accept: "application/json",
+		Authorization: `Bearer ${apiKey}`,
+	};
+	if (site) headers["X-Site"] = site;
 	const response = await fetchImpl(requestUrl, {
-		headers: {
-			Accept: "application/json",
-			Authorization: `Bearer ${apiKey}`,
-		},
-		signal: withHardTimeout(signal),
+		headers,
+		signal: withHardTimeout(signal, timeoutMs),
 	});
 
 	if (!response.ok) {
@@ -69,7 +77,14 @@ export async function searchJina(params: JinaSearchParams): Promise<SearchRespon
 		throw new Error("JINA_API_KEY not found. Set it in environment or .env file.");
 	}
 
-	const response = await callJinaSearch(apiKey, params.query, params.signal, params.fetch);
+	const response = await callJinaSearch(
+		apiKey,
+		params.query,
+		params.site,
+		params.signal,
+		params.fetch,
+		params.timeoutMs,
+	);
 	const sources: SearchSource[] = [];
 
 	for (const result of response) {
@@ -99,13 +114,31 @@ export class JinaProvider extends SearchProvider {
 	}
 
 	search(params: SearchParamsWithFetch): Promise<SearchResponse> {
-		const fetchImpl = params.fetch;
+		const parsed = params.parsedQuery ?? parseSearchQuery(params.query);
+		let query = params.query;
+		let site: string | undefined;
+		if (parsed.hasDirectives) {
+			// Jina's X-Site header takes a single domain; with exactly one
+			// include site, send its host there and strip site: tokens from
+			// the query. Multiple sites stay inline (Bing-backed, parses them).
+			if (parsed.sites.length === 1) site = parsed.sites[0]!.split("/")[0];
+			query = formatQuery(parsed, {
+				phrases: true,
+				negation: true,
+				site: !site,
+				inTitle: true,
+				inUrl: true,
+				filetype: true,
+			});
+		}
 
 		return searchJina({
-			query: params.query,
+			query,
 			num_results: params.numSearchResults ?? params.limit,
+			site,
 			signal: params.signal,
-			fetch: fetchImpl,
+			timeoutMs: params.timeoutMs,
+			fetch: params.fetch,
 		});
 	}
 }

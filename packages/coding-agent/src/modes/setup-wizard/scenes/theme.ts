@@ -1,5 +1,6 @@
 import {
 	padding,
+	routeSelectListMouse,
 	type SelectItem,
 	SelectList,
 	type SgrMouseEvent,
@@ -128,35 +129,38 @@ class ThemeSceneController implements SetupSceneController {
 
 	/** Wheel moves the highlight (live preview); hover lights the row under the pointer; click confirms it. */
 	routeMouse(event: SgrMouseEvent, line: number, _col: number): void {
-		if (event.wheel !== null) {
-			this.#selectList.handleWheel(event.wheel);
-			return;
-		}
-		const index = this.#listRowStart >= 0 ? this.#selectList.hitTest(line - this.#listRowStart) : undefined;
-		if (event.motion) {
-			this.#selectList.setHoverIndex(index ?? null);
-			return;
-		}
-		if (event.leftClick && index !== undefined) {
-			this.#selectList.clickItem(index);
-		}
+		// Mirror the pre-helper flow: wheel/motion are always processed, but a
+		// hidden list (#listRowStart < 0, e.g. while loading all themes) must
+		// never hit-test a row — route through a line that resolves to undefined.
+		const listLine = this.#listRowStart >= 0 ? line - this.#listRowStart : Number.NEGATIVE_INFINITY;
+		routeSelectListMouse(this.#selectList, event, listLine);
 	}
 
-	render(width: number): readonly string[] {
+	render(width: number, maxLines?: number): readonly string[] {
+		const budget = maxLines ?? Number.POSITIVE_INFINITY;
 		const lines = [
 			theme.fg("muted", "Theme changes preview live. Nothing is saved until you press Enter."),
 			this.#mode === "all"
 				? theme.fg("dim", "Browsing all themes · Esc returns to curated choices")
 				: theme.fg("dim", "Esc skips this step"),
 			"",
-			...renderThemePreview(width),
-			"",
 		];
+		// The mock status-line/editor block is decorative — the wizard itself
+		// re-renders in the highlighted theme — so it yields to the list when
+		// it would squeeze the window below the six curated rows (+1 for the
+		// list's own search-status row).
+		const preview = renderThemePreview(width);
+		if (budget - lines.length - (preview.length + 1) - 1 >= CURATED_ITEMS.length) {
+			lines.push(...preview, "");
+		}
 		if (this.#loadingAllThemes) {
 			this.#listRowStart = -1;
 			lines.push(theme.fg("dim", "Loading themes…"));
 		} else {
 			this.#listRowStart = lines.length;
+			if (maxLines !== undefined) {
+				this.#selectList.setMaxVisible(Math.max(1, Math.min(10, budget - lines.length - 1)));
+			}
 			lines.push(...this.#selectList.render(width));
 		}
 		if (this.#message) {
@@ -262,7 +266,7 @@ class ThemeSceneController implements SetupSceneController {
 		} else {
 			this.host.ctx.settings.set("theme.dark", themeName);
 		}
-		await previewTheme(themeName);
+		await previewTheme(themeName, { ephemeral: false });
 	}
 
 	async #preview(value: string): Promise<void> {
@@ -276,7 +280,7 @@ class ThemeSceneController implements SetupSceneController {
 		let result: { success: boolean; error?: string } = { success: true };
 		if (value === "auto") {
 			await this.#applyPreviewPresentation(this.#originalSymbolPreset, this.#originalColorBlindMode);
-			enableAutoTheme();
+			enableAutoTheme({ ephemeral: true });
 		} else if (value === "colorblind") {
 			await this.#applyPreviewPresentation(this.#originalSymbolPreset, true);
 		} else if (value === "ansi") {

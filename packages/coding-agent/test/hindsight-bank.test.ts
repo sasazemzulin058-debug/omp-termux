@@ -5,6 +5,7 @@ import * as path from "node:path";
 import { computeBankScope, deriveBankId, ensureBankExists } from "@oh-my-pi/pi-coding-agent/hindsight/bank";
 import { HindsightApi } from "@oh-my-pi/pi-coding-agent/hindsight/client";
 import type { HindsightConfig } from "@oh-my-pi/pi-coding-agent/hindsight/config";
+import { removeWithRetries } from "@oh-my-pi/pi-utils";
 
 // Isolate `git` invocations in this file from the host's global config —
 // `~/.gitconfig` commit signing or template hooks would otherwise turn the
@@ -59,6 +60,10 @@ const baseConfig = (overrides: Partial<HindsightConfig> = {}): HindsightConfig =
 	recallMaxQueryChars: 800,
 	recallPromptPreamble: "preamble",
 	debug: false,
+	requestTimeoutMs: 30_000,
+	reflectTimeoutMs: 120_000,
+	recallTimeoutMs: 30_000,
+	retainTimeoutMs: 60_000,
 	mentalModelsEnabled: false,
 	mentalModelAutoSeed: false,
 	mentalModelRefreshIntervalMs: 5 * 60 * 1000,
@@ -178,7 +183,7 @@ describe("computeBankScope", () => {
 		});
 
 		afterAll(async () => {
-			if (baseDir) await fs.rm(baseDir, { recursive: true, force: true });
+			if (baseDir) await removeWithRetries(baseDir);
 		});
 
 		it("emits the same project tag from the primary checkout and a linked worktree", () => {

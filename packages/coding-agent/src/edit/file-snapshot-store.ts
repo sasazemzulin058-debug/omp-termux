@@ -74,17 +74,20 @@ export function canonicalSnapshotKey(absolutePath: string): string {
  * Producers that only displayed a slice of the file (range reads, search hits)
  * use this to mint a whole-file tag: the displayed lines stay partial, but the
  * tag fingerprints the entire file so a follow-up edit anchored at any line
- * validates whenever the live file is byte-identical to what was read.
+ * validates whenever the live file is byte-identical to what was read. Raw
+ * reads pass `seenLines` even though they do not emit a header, letting a prior
+ * or later same-content hashline tag inherit the raw range's provenance.
  */
 export async function recordFileSnapshot(
 	session: FileSnapshotStoreOwner,
 	absolutePath: string,
+	seenLines?: Iterable<number>,
 ): Promise<string | undefined> {
 	try {
 		const file = Bun.file(absolutePath);
 		if (file.size > SNAPSHOT_MAX_BYTES) return undefined;
 		const normalized = normalizeToLF(await file.text());
-		return getFileSnapshotStore(session).record(canonicalSnapshotKey(absolutePath), normalized);
+		return getFileSnapshotStore(session).record(canonicalSnapshotKey(absolutePath), normalized, seenLines);
 	} catch {
 		return undefined;
 	}
@@ -128,10 +131,12 @@ export function recordSeenLines(
 }
 
 /**
- * Attach the lines a read displayed to the snapshot it minted, so the patcher
- * can reject edits anchored on lines the model never saw. Best-effort: a no-op
- * when the body has no numbered rows or the snapshot already aged out. `tag`
- * must be the tag returned when this exact content was recorded.
+ * Attach the lines a read displayed to the snapshot it minted, so the patcher's
+ * (opt-in) seen-line guard can reject edits anchored on lines the model never
+ * saw. Best-effort: a no-op when the body has no numbered rows or the snapshot
+ * already aged out. `tag` must be the tag returned when this exact content was
+ * recorded. Every displayed `NN:` row counts as seen, including column-clipped
+ * rows — the guard no longer distinguishes full-width from truncated display.
  */
 export function recordSeenLinesFromBody(
 	session: FileSnapshotStoreOwner,

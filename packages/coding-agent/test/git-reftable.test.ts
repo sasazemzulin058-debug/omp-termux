@@ -1,7 +1,8 @@
-import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { afterAll, beforeAll, describe, expect, test, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
+import { removeWithRetries } from "@oh-my-pi/pi-utils";
 import { $ } from "bun";
 import * as git from "../src/utils/git";
 
@@ -55,9 +56,9 @@ describe.skipIf(!supportsReftable)("git reftable support", () => {
 
 	afterAll(async () => {
 		await $`git worktree remove ${worktreeDir} -f`.cwd(sharedRepoDir).quiet().nothrow();
-		await fs.rm(worktreeDir, { recursive: true, force: true }).catch(() => {});
-		await fs.rm(sharedRepoDir, { recursive: true, force: true }).catch(() => {});
-		await fs.rm(configRepoDir, { recursive: true, force: true }).catch(() => {});
+		await removeWithRetries(worktreeDir).catch(() => {});
+		await removeWithRetries(sharedRepoDir).catch(() => {});
+		await removeWithRetries(configRepoDir).catch(() => {});
 	});
 
 	test("resolves references in a reftable repository", async () => {
@@ -100,6 +101,46 @@ describe.skipIf(!supportsReftable)("git reftable support", () => {
 		const nonexistentExists = await git.ref.exists(sharedRepoDir, "refs/heads/nonexistent");
 		expect(mainExists).toBe(true);
 		expect(nonexistentExists).toBe(false);
+	});
+
+	// #6169: the sync reftable ref readers spawn `git symbolic-ref`/`rev-parse`.
+	// When git is absent from PATH the spawn throws ENOENT synchronously; the
+	// readers must degrade (HEAD resolves as detached with no commit) instead of
+	// letting the raw ENOENT escape during a TUI render.
+	test("head.resolveSync degrades when the git binary is missing", () => {
+		const err = new Error('Executable not found in $PATH: "git"');
+		(err as NodeJS.ErrnoException).code = "ENOENT";
+		vi.spyOn(Bun, "spawnSync").mockImplementation(() => {
+			throw err;
+		});
+		try {
+			const headStateSync = git.head.resolveSync(sharedRepoDir);
+			expect(headStateSync).not.toBeNull();
+			expect(headStateSync?.kind).toBe("detached");
+			expect(headStateSync?.commit).toBeNull();
+		} finally {
+			vi.restoreAllMocks();
+		}
+	});
+
+	test("head.resolveSync treats Bun's timeout marker as a failed symbolic-ref even with exit code zero", () => {
+		const baseResult = Bun.spawnSync(["true"], { stdout: "pipe", stderr: "pipe" });
+		const timedOutSymbolicRef = {
+			...baseResult,
+			exitCode: 0,
+			exitedDueToTimeout: true,
+			stdout: Buffer.from("refs/heads/feature-branch\n"),
+		} satisfies Bun.ReadableSyncSubprocess;
+		const successfulRevParse = {
+			...baseResult,
+			exitCode: 0,
+			stdout: Buffer.from(`${headSha}\n`),
+		} satisfies Bun.ReadableSyncSubprocess;
+		vi.spyOn(Bun, "spawnSync").mockReturnValueOnce(timedOutSymbolicRef).mockReturnValueOnce(successfulRevParse);
+
+		const headState = git.head.resolveSync(sharedRepoDir);
+		expect(headState?.kind).toBe("detached");
+		expect(headState?.commit).toBe(headSha);
 	});
 
 	test("handles git config trailing comments correctly", async () => {

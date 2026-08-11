@@ -519,13 +519,10 @@ function completion(prompt::String; model="default", system=nothing, schema=noth
     return schema === nothing ? text : Main.json_parse(string(text))
 end
 
-function agent(prompt::String; agent="task", model=nothing, label=nothing, schema=nothing, isolated=nothing, apply=nothing, merge=nothing, handle=false, kwargs...)
+function agent(prompt::String; agent="task", label=nothing, schema=nothing, schema_mode=nothing, isolated=nothing, apply=nothing, merge=nothing, handle=false, kwargs...)
     args_dict = Dict{String, Any}("prompt" => prompt)
     if agent !== nothing
         args_dict["agent"] = agent
-    end
-    if model !== nothing
-        args_dict["model"] = model
     end
     if label !== nothing
         args_dict["label"] = label
@@ -533,8 +530,9 @@ function agent(prompt::String; agent="task", model=nothing, label=nothing, schem
     if schema !== nothing
         args_dict["schema"] = schema
     end
-    # Isolation knobs mirror the `task` tool: strict opt-in via `isolated`,
-    # with `apply`/`merge` controlling the post-run patch/branch merge.
+    if schema_mode !== nothing
+        args_dict["schemaMode"] = schema_mode
+    end
     if isolated !== nothing
         args_dict["isolated"] = Bool(isolated)
     end
@@ -544,17 +542,20 @@ function agent(prompt::String; agent="task", model=nothing, label=nothing, schem
     if merge !== nothing
         args_dict["merge"] = Bool(merge)
     end
+    if haskey(kwargs, :model)
+        error("agent() no longer accepts a per-call model override; the selected agent's frontmatter model is used")
+    end
     handle_result = handle
     for (k, v) in kwargs
         args_dict[string(k)] = v
     end
-    # Tell the bridge a handle is wanted so it preserves the backing artifacts.
     if handle_result
         args_dict["handle"] = true
     end
     res = __omp_call_bridge("__agent__", args_dict)
     text = res isa AbstractDict ? get(res, "text", res) : res
-    parsed = schema === nothing ? text : Main.json_parse(string(text))
+    has_data = res isa AbstractDict && haskey(res, "data")
+    parsed = has_data ? res["data"] : (schema === nothing ? text : Main.json_parse(string(text)))
     if !handle_result
         return parsed
     end
@@ -569,7 +570,7 @@ function agent(prompt::String; agent="task", model=nothing, label=nothing, schem
         "id" => get(details, "id", nothing),
         "agent" => get(details, "agent", nothing)
     )
-    if schema !== nothing
+    if has_data || schema !== nothing
         node["data"] = parsed
     end
     for (src_key, dst_key) in (

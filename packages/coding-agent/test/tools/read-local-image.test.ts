@@ -12,9 +12,10 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import { InternalUrlRouter, LocalProtocolHandler } from "@oh-my-pi/pi-coding-agent/internal-urls";
+import { InternalUrlRouter, LocalProtocolHandler, parseInternalUrl } from "@oh-my-pi/pi-coding-agent/internal-urls";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { ReadTool } from "@oh-my-pi/pi-coding-agent/tools/read";
+import { removeWithRetries } from "@oh-my-pi/pi-utils";
 
 // 1x1 transparent PNG — small enough to pass through image loading untouched.
 const TINY_PNG = Buffer.from(
@@ -31,6 +32,9 @@ function makeSession(testDir: string): ToolSession {
 		getSessionFile: () => sessionFile,
 		getArtifactsDir: () => artifactsDir,
 		getSessionSpawns: () => null,
+		// A restricted slate without inspect_image (and no xdev mount) must keep
+		// inlining images — metadata-only guidance would point at an absent tool.
+		isToolActive: () => false,
 		settings: Settings.isolated({ "images.autoResize": false }),
 	} as unknown as ToolSession;
 }
@@ -62,7 +66,7 @@ describe("read local:// images", () => {
 	afterEach(async () => {
 		LocalProtocolHandler.resetOverrideForTests();
 		InternalUrlRouter.resetForTests();
-		await fs.rm(testDir, { recursive: true, force: true });
+		await removeWithRetries(testDir);
 	});
 
 	it("decodes a local:// PNG into an inline image block", async () => {
@@ -87,6 +91,47 @@ describe("read local:// images", () => {
 
 		expect(result.content.some(c => c.type === "image")).toBe(false);
 		expect(joinText(result.content)).toContain("hello world");
+	});
+
+	it("rejects a local:// non-image binary without emitting decoded bytes", async () => {
+		await Bun.write(path.join(localRoot, "clip.mp4"), new Uint8Array([0, 1, 2, 3, 4, 5]));
+		const tool = new ReadTool(makeSession(testDir));
+
+		const result = await tool.execute("call", { path: "local://clip.mp4" });
+		const text = joinText(result.content);
+
+		expect(text).toContain("Cannot read binary file");
+		expect(text).toContain("clip.mp4");
+		expect(text).not.toContain("\u0000");
+	});
+
+	it("rejects a large local:// binary whose first line exceeds the streaming byte budget", async () => {
+		// The streaming reader's byte budget is `max(DEFAULT_MAX_BYTES, defaultLimit*512)` —
+		// 150 KiB under default settings. A NUL-filled blob larger than that with no 0x0A
+		// byte forces streamLinesFromFile into the firstLineExceedsLimit path: collectedLines
+		// stays empty, so the NUL check that walks collectedLines never sees these bytes.
+		// Without the firstLinePreview guard, the preview would be decoded as UTF-8 and
+		// emitted as text (the reviewer's video/archive case).
+		const blob = new Uint8Array(256 * 1024);
+		await Bun.write(path.join(localRoot, "video.mp4"), blob);
+		const tool = new ReadTool(makeSession(testDir));
+
+		const result = await tool.execute("call", { path: "local://video.mp4" });
+		const text = joinText(result.content);
+
+		expect(text).toContain("Cannot read binary file");
+		expect(text).toContain("video.mp4");
+		expect(text).not.toContain("\u0000");
+	});
+
+	it("does not materialize local:// binary resources in the protocol handler", async () => {
+		await Bun.write(path.join(localRoot, "archive.zip"), new Uint8Array([0, 1, 2, 3, 4, 5]));
+
+		const resource = await new LocalProtocolHandler().resolve(parseInternalUrl("local://archive.zip"));
+
+		expect(resource.content).toContain("Cannot read binary local:// file");
+		expect(resource.content).toContain("archive.zip");
+		expect(resource.content).not.toContain("\u0000");
 	});
 
 	it("does not read an image symlinked outside the local root", async () => {

@@ -1,3 +1,4 @@
+import { toNumber } from "@oh-my-pi/pi-catalog/utils";
 import { $env } from "@oh-my-pi/pi-utils";
 import { getKimiCommonHeaders } from "../registry/oauth/kimi";
 import type {
@@ -7,12 +8,12 @@ import type {
 	UsageLimit,
 	UsageProvider,
 	UsageReport,
-	UsageStatus,
 	UsageWindow,
 } from "../usage";
 import { isRecord } from "../utils";
+import { parseIsoTimestamp, usageStatus } from "./shared";
+
 // (Refresh is the sole responsibility of AuthStorage; no provider-direct refresh here.)
-import { toNumber } from "./shared";
 
 const DEFAULT_BASE_URL = "https://api.kimi.com/coding/v1";
 const USAGE_PATH = "usages";
@@ -47,8 +48,8 @@ function parseResetTime(data: Record<string, unknown>, nowMs: number): number | 
 	for (const key of timeKeys) {
 		const value = data[key];
 		if (typeof value === "string" && value.trim()) {
-			const parsed = Date.parse(value);
-			if (Number.isFinite(parsed)) return parsed;
+			const parsed = parseIsoTimestamp(value);
+			if (parsed !== undefined) return parsed;
 		}
 		if (typeof value === "number" && Number.isFinite(value)) {
 			return value > 1_000_000_000_000 ? value : value * 1000;
@@ -136,23 +137,22 @@ function buildUsageAmount(row: KimiUsageRow): UsageAmount {
 	return amount;
 }
 
-function buildUsageStatus(amount: UsageAmount): UsageStatus {
-	if (amount.usedFraction === undefined) return "unknown";
-	if (amount.usedFraction >= 1) return "exhausted";
-	if (amount.usedFraction >= 0.9) return "warning";
-	return "ok";
-}
-
 function toUsageLimit(row: KimiUsageRow, provider: string, index: number, accountId?: string): UsageLimit {
-	const window: UsageWindow | undefined =
-		row.window ??
-		(row.resetsAt
+	// Kimi puts `resetTime` on the limit `detail`, not on `window`, so a
+	// window built from `duration`/`timeUnit` alone carries no resetsAt.
+	// Fall back to the row-level reset so `omp usage` can render
+	// "resets in …" for the 5h window too.
+	const window: UsageWindow | undefined = row.window
+		? row.window.resetsAt !== undefined || row.resetsAt === undefined
+			? row.window
+			: { ...row.window, resetsAt: row.resetsAt }
+		: row.resetsAt
 			? {
 					id: "default",
 					label: "Usage window",
 					resetsAt: row.resetsAt,
 				}
-			: undefined);
+			: undefined;
 
 	const amount = buildUsageAmount(row);
 	return {
@@ -166,7 +166,7 @@ function toUsageLimit(row: KimiUsageRow, provider: string, index: number, accoun
 		},
 		window,
 		amount,
-		status: buildUsageStatus(amount),
+		status: usageStatus(amount.usedFraction),
 	};
 }
 

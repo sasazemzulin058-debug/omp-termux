@@ -83,6 +83,16 @@ describe("isProviderRetryableError", () => {
 		).toBe(false);
 		expect(isProviderRetryableError(new Error("usage_limit_reached"))).toBe(false);
 		expect(isProviderRetryableError(new Error("You have hit your ChatGPT usage limit"))).toBe(false);
+		// Anthropic monthly spend-cap 429 (issue #4787): must not retry, or the
+		// provider loop burns its budget on minutes-long retry-after backoff and
+		// surfaces "Deadline exceeded" instead of the quota error.
+		expect(
+			isProviderRetryableError(
+				new Error(
+					'429 {"type":"error","error":{"type":"rate_limit_error","message":"This request would exceed your account\'s monthly spend limit. Please try again later."}}',
+				),
+			),
+		).toBe(false);
 		// A generic transient rate limit (no account/usage framing) still retries.
 		expect(isProviderRetryableError(new Error("Rate limit exceeded"))).toBe(true);
 	});
@@ -94,5 +104,21 @@ describe("isProviderRetryableError", () => {
 		expect(isProviderRetryableError(err, "github-copilot")).toBe(true);
 		expect(isProviderRetryableError(err, "anthropic")).toBe(false);
 		expect(isProviderRetryableError(err)).toBe(false);
+	});
+
+	it("does not retry Copilot's per-integrator entitlement response", () => {
+		const body = {
+			error: {
+				message:
+					'The requested model is not available for integrator "opencode". Available models: [gpt-4.1 claude-opus-4.7].',
+				code: "model_not_available_for_integrator",
+				param: "model",
+				type: "invalid_request_error",
+			},
+		};
+		const err = new Error(`400 ${JSON.stringify(body)}`);
+		Object.assign(err, { status: 400, error: body });
+		expect(isProviderRetryableError(err, "github-copilot")).toBe(false);
+		expect(isProviderRetryableError(err, "anthropic")).toBe(false);
 	});
 });

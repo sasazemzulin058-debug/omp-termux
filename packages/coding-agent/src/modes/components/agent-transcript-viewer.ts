@@ -7,20 +7,15 @@
  * compositing into the live transcript's scrollback. It renders a parked
  * subagent / advisor / collab-guest transcript that has no live in-view session.
  *
- * The transcript is rebuilt from scratch on every refresh ({@link ChatTranscriptBuilder.rebuild})
- * rather than synced incrementally, so a growing file-backed transcript (the
- * advisor appends while you watch) can never duplicate or misorder rows. Scroll
- * is owned end-to-end by a single {@link ScrollView}; the viewer follows the tail
- * until the reader scrolls up.
- *
- * Local agents re-read the whole session file whenever its size or mtime changes
- * (covering SessionManager's in-place rewrites, not just appends). Collab guests
- * keep the incremental byte cursor the host's capped `readTranscript` requires
- * and rebuild components from the accumulated entries.
+ * Local transcripts tail append-only growth: unchanged file identity plus stable
+ * sentinels means only newly appended JSONL is parsed and rendered. Rewrites,
+ * truncation, rotation, or sentinel drift fall back to a full rebuild so changed
+ * historical entries cannot leave stale components behind. Collab guests use the
+ * same append path over the host's byte-capped transcript reads.
  */
 import * as fs from "node:fs";
 import type { AgentTool } from "@oh-my-pi/pi-agent-core";
-import { type Component, Editor, matchesKey, parseSgrMouse, ScrollView, type TUI } from "@oh-my-pi/pi-tui";
+import { type Component, Editor, matchesKey, routeSgrMouseInput, ScrollView, type TUI } from "@oh-my-pi/pi-tui";
 import { formatDuration, formatNumber, logger } from "@oh-my-pi/pi-utils";
 import type { KeyId } from "../../config/keybindings";
 import type { MessageRenderer } from "../../extensibility/extensions/types";
@@ -28,6 +23,7 @@ import type { AgentLifecycleManager } from "../../registry/agent-lifecycle";
 import type { AgentRegistry, AgentStatus } from "../../registry/agent-registry";
 import type { FileEntry, SessionMessageEntry } from "../../session/session-entries";
 import { parseSessionEntries } from "../../session/session-loader";
+import { replaceTabs, shortenPath, truncateToWidth } from "../../tools/render-utils";
 import type { ObservableSession, SessionObserverRegistry } from "../session-observer-registry";
 import { getEditorTheme, theme } from "../theme/theme";
 import { matchesSelectDown, matchesSelectUp } from "../utils/keybinding-matchers";
@@ -47,6 +43,8 @@ export interface AgentTranscriptViewerDeps {
 	lifecycle?: () => AgentLifecycleManager;
 	ui: TUI;
 	getTool?: (name: string) => AgentTool | undefined;
+	/** Whether the active registry entry came from a built-in factory. */
+	isBuiltInTool?: (name: string) => boolean;
 	getMessageRenderer?: (customType: string) => MessageRenderer | undefined;
 	cwd: string;
 	hideThinkingBlock?: () => boolean;
@@ -63,6 +61,68 @@ export interface AgentTranscriptViewerDeps {
 
 /** How often to re-stat a file-backed transcript for growth (advisor/live tail). */
 const POLL_MS = 250;
+
+const SENTINEL_BYTES = 4096;
+
+/** Sanitize wire-delivered error text for a single TUI row: tabs → spaces,
+ *  newlines collapsed, absolute paths shortened, truncated to `maxWidth`.
+ *  `#remoteError` arrives as `String(err)` from the host — it can carry
+ *  multi-line stacks and absolute host paths that would break the frame's
+ *  1-row accounting and leak host filesystem layout to guests. */
+function sanitizeErrorLine(text: string, maxWidth: number): string {
+	const singleLine = replaceTabs(text)
+		.replace(/[\r\n]+/g, " ")
+		.replace(/\/[^\s'")\]]+/g, p => shortenPath(p));
+	return truncateToWidth(singleLine, Math.max(10, maxWidth));
+}
+
+interface LocalTranscriptSentinel {
+	offset: number;
+	bytes: Buffer;
+}
+
+interface LocalTranscriptState {
+	path: string;
+	dev: number;
+	ino: number;
+	size: number;
+	mtimeMs: number;
+	offset: number;
+	pending: string;
+	sentinels: LocalTranscriptSentinel[];
+}
+
+function readFileRangeSync(file: string, offset: number, length: number): Buffer {
+	if (length <= 0) return Buffer.alloc(0);
+	const fd = fs.openSync(file, "r");
+	try {
+		const buffer = Buffer.alloc(length);
+		const bytesRead = fs.readSync(fd, buffer, 0, length, offset);
+		return bytesRead === length ? buffer : buffer.subarray(0, bytesRead);
+	} finally {
+		fs.closeSync(fd);
+	}
+}
+
+function sentinelOffsets(size: number): number[] {
+	if (size <= 0) return [];
+	const length = Math.min(SENTINEL_BYTES, size);
+	return [...new Set([0, Math.max(0, Math.floor((size - length) / 2)), Math.max(0, size - length)])];
+}
+
+function sentinelsFromBuffer(buffer: Buffer): LocalTranscriptSentinel[] {
+	const size = buffer.byteLength;
+	const length = Math.min(SENTINEL_BYTES, size);
+	return sentinelOffsets(size).map(offset => ({
+		offset,
+		bytes: Buffer.from(buffer.subarray(offset, offset + length)),
+	}));
+}
+
+function sentinelsFromFile(file: string, size: number): LocalTranscriptSentinel[] {
+	const length = Math.min(SENTINEL_BYTES, size);
+	return sentinelOffsets(size).map(offset => ({ offset, bytes: readFileRangeSync(file, offset, length) }));
+}
 
 function statusBadge(status: AgentStatus): string {
 	switch (status) {
@@ -85,14 +145,14 @@ export class AgentTranscriptViewer implements Component {
 	#notice: string | undefined;
 	#expanded = false;
 
-	// Local file transcript state: re-read when the file size or mtime changes.
-	#lastSignature = "";
+	#localState: LocalTranscriptState | undefined;
+	#localUnavailable = "";
 	// Remote transcript state (incremental; the host caps each read).
-	#remoteEntries: SessionMessageEntry[] = [];
 	#remoteBytes = 0;
 	#remoteFetchInFlight = false;
 	#remoteToken = 0;
 	#remoteUnavailable = false;
+	#remoteError = "";
 	#hasRemoteData = false;
 
 	#model: string | undefined;
@@ -103,6 +163,7 @@ export class AgentTranscriptViewer implements Component {
 		this.#builder = new ChatTranscriptBuilder({
 			ui: deps.ui,
 			getTool: deps.getTool,
+			isBuiltInTool: deps.isBuiltInTool,
 			getMessageRenderer: deps.getMessageRenderer,
 			cwd: deps.cwd,
 			hideThinkingBlock: deps.hideThinkingBlock,
@@ -133,19 +194,22 @@ export class AgentTranscriptViewer implements Component {
 
 	dispose(): void {
 		this.#disposed = true;
-		if (this.#pollTimer) {
-			clearInterval(this.#pollTimer);
-			this.#pollTimer = undefined;
-		}
+		this.#stopPolling();
 		this.#remoteToken++;
 		this.#builder.dispose();
+	}
+
+	#stopPolling(): void {
+		if (!this.#pollTimer) return;
+		clearInterval(this.#pollTimer);
+		this.#pollTimer = undefined;
 	}
 
 	// ========================================================================
 	// Transcript loading
 	// ========================================================================
 
-	/** Re-read the transcript and rebuild components when it changed. */
+	/** Refresh the transcript from a local file or remote host. */
 	#refresh(): void {
 		if (this.#disposed) return;
 		if (this.deps.remote) {
@@ -154,39 +218,132 @@ export class AgentTranscriptViewer implements Component {
 		}
 		const sessionFile = this.deps.registry.get(this.deps.agentId)?.sessionFile;
 		if (!sessionFile) {
-			if (this.#lastSignature !== "none") {
-				this.#lastSignature = "none";
-				this.#rebuild([]);
-			}
+			this.#clearLocal("none");
 			return;
 		}
-		let signature: string;
+		let stat: fs.Stats;
 		try {
-			const stat = fs.statSync(sessionFile);
-			// Include the path: a different file with the same size/mtime must not alias.
-			signature = `${sessionFile}:${stat.size}:${stat.mtimeMs}`;
+			stat = fs.statSync(sessionFile);
 		} catch {
-			// File deleted/rotated while open (e.g. the owning session was dropped):
-			// clear stale content once instead of freezing on it forever.
-			if (this.#lastSignature !== "missing") {
-				this.#lastSignature = "missing";
-				this.#model = undefined;
-				this.#rebuild([]);
-			}
+			this.#clearLocal("missing");
 			return;
 		}
-		if (signature === this.#lastSignature) return;
-		let text: string;
+		const state = this.#localState;
+		if (state && this.#canAppendLocal(sessionFile, stat, state)) {
+			if (stat.size === state.size && stat.mtimeMs === state.mtimeMs) return;
+			if (stat.size > state.size) {
+				this.#appendLocal(sessionFile, stat, state);
+				return;
+			}
+		}
+		this.#loadLocalFull(sessionFile, stat);
+	}
+
+	#clearLocal(reason: string): void {
+		if (!this.#localState && this.#localUnavailable === reason) return;
+		this.#localState = undefined;
+		this.#localUnavailable = reason;
+		this.#model = undefined;
+		this.#rebuild([]);
+	}
+
+	#canAppendLocal(sessionFile: string, stat: fs.Stats, state: LocalTranscriptState): boolean {
+		if (state.path !== sessionFile || state.dev !== stat.dev || state.ino !== stat.ino || stat.size < state.size)
+			return false;
+		for (const sentinel of state.sentinels) {
+			let current: Buffer;
+			try {
+				current = readFileRangeSync(sessionFile, sentinel.offset, sentinel.bytes.byteLength);
+			} catch (err) {
+				// The file can be unlinked/rotated between statSync and this read.
+				// Treat as not-appendable so #refresh falls back to a guarded full load.
+				logger.debug("transcript viewer: sentinel read failed", { err: String(err) });
+				return false;
+			}
+			if (!current.equals(sentinel.bytes)) return false;
+		}
+		return true;
+	}
+
+	#loadLocalFull(sessionFile: string, stat: fs.Stats): void {
+		let data: Buffer;
 		try {
-			text = fs.readFileSync(sessionFile, "utf-8");
+			data = fs.readFileSync(sessionFile);
 		} catch (err) {
-			// Leave #lastSignature unchanged so a transient read error retries next poll.
+			// Leave #localState unchanged so a transient read error retries next poll.
 			logger.debug("transcript viewer: read failed", { err: String(err) });
 			return;
 		}
-		this.#lastSignature = signature;
+		// The file may have grown between the earlier `statSync` and this read.
+		// Anchor the tail cursor to what we actually consumed so the next poll's
+		// `#appendLocal` never re-renders bytes already in the rebuilt transcript;
+		// re-stat for mtime/identity so the post-read clock matches what's on disk.
+		let post: fs.Stats;
+		try {
+			post = fs.statSync(sessionFile);
+		} catch {
+			post = stat;
+		}
+		// A reader that opens the file mid-append sees a trailing partial line
+		// (no terminating newline). Carry those bytes as `pending` so the next
+		// poll's `#appendLocal` joins them with the completion bytes instead of
+		// parsing a headless line fragment and dropping the entry.
+		const text = data.toString("utf-8");
+		const lastNewline = text.lastIndexOf("\n");
+		const complete = lastNewline >= 0 ? text.slice(0, lastNewline + 1) : "";
+		const pending = lastNewline >= 0 ? text.slice(lastNewline + 1) : text;
+		this.#localUnavailable = "";
+		this.#localState = {
+			path: sessionFile,
+			dev: post.dev,
+			ino: post.ino,
+			size: data.byteLength,
+			mtimeMs: post.mtimeMs,
+			offset: data.byteLength,
+			pending,
+			sentinels: sentinelsFromBuffer(data),
+		};
 		this.#model = undefined;
-		this.#rebuild(this.#extractMessages(parseSessionEntries(text)));
+		this.#rebuild(this.#extractMessages(parseSessionEntries(complete)));
+	}
+
+	#appendLocal(sessionFile: string, stat: fs.Stats, state: LocalTranscriptState): void {
+		let chunk: string;
+		try {
+			chunk = readFileRangeSync(sessionFile, state.offset, stat.size - state.offset).toString("utf-8");
+		} catch (err) {
+			logger.debug("transcript viewer: tail read failed", { err: String(err) });
+			this.#loadLocalFull(sessionFile, stat);
+			return;
+		}
+		const combined = state.pending + chunk;
+		const lastNewline = combined.lastIndexOf("\n");
+		const complete = lastNewline >= 0 ? combined.slice(0, lastNewline + 1) : "";
+		const previousModel = this.#model;
+		const parsed = complete ? this.#extractMessages(parseSessionEntries(complete)) : [];
+		let sentinels: LocalTranscriptSentinel[];
+		try {
+			sentinels = sentinelsFromFile(sessionFile, stat.size);
+		} catch (err) {
+			// File unlinked/rotated mid-poll: fall back to a guarded full reload
+			// instead of letting the open escape the poll timer.
+			logger.debug("transcript viewer: sentinel recompute failed", { err: String(err) });
+			this.#loadLocalFull(sessionFile, stat);
+			return;
+		}
+		this.#localState = {
+			...state,
+			size: stat.size,
+			mtimeMs: stat.mtimeMs,
+			offset: stat.size,
+			pending: lastNewline >= 0 ? combined.slice(lastNewline + 1) : combined,
+			sentinels,
+		};
+		if (parsed.length > 0) {
+			this.#append(parsed);
+		} else if (this.#model !== previousModel) {
+			this.deps.requestRender();
+		}
 	}
 
 	#fetchRemote(): void {
@@ -208,24 +365,42 @@ export class AgentTranscriptViewer implements Component {
 					}
 					return;
 				}
+				if (result.error) {
+					this.#remoteError = result.error;
+					this.#hasRemoteData = true;
+					this.#remoteUnavailable = false;
+					this.#stopPolling();
+					this.deps.requestRender();
+					return;
+				}
 				if (result.newSize < fromByte) {
-					// Host transcript rotated/truncated — restart from 0.
+					// Host transcript rotated/truncated — drop the stale rendered rows
+					// before restarting; otherwise the post-rotation fetch would stack
+					// new content under the pre-rotation history.
 					this.#remoteBytes = 0;
-					this.#remoteEntries = [];
+					this.#remoteError = "";
+					this.#hasRemoteData = false;
+					this.#model = undefined;
+					this.#rebuild([]);
 					this.#fetchRemote();
 					return;
 				}
 				this.#remoteUnavailable = false;
+				this.#remoteError = "";
 				const firstData = !this.#hasRemoteData;
 				this.#hasRemoteData = true;
 				const lastNewline = result.text.lastIndexOf("\n");
 				if (lastNewline >= 0) {
 					const completeChunk = result.text.slice(0, lastNewline + 1);
 					this.#remoteBytes = fromByte + Buffer.byteLength(completeChunk, "utf-8");
+					const previousModel = this.#model;
 					const parsed = this.#extractMessages(parseSessionEntries(completeChunk));
 					if (parsed.length > 0) {
-						this.#remoteEntries.push(...parsed);
-						this.#rebuild(this.#remoteEntries);
+						this.#append(parsed);
+						return;
+					}
+					if (this.#model !== previousModel) {
+						this.deps.requestRender();
 						return;
 					}
 				}
@@ -257,18 +432,25 @@ export class AgentTranscriptViewer implements Component {
 		this.deps.requestRender();
 	}
 
+	#append(entries: SessionMessageEntry[]): void {
+		this.#builder.append(entries);
+		this.deps.requestRender();
+	}
+
 	// ========================================================================
 	// Input
 	// ========================================================================
 
 	handleInput(data: string): void {
 		if (data.startsWith("\x1b[<")) {
-			const event = parseSgrMouse(data);
-			if (event?.wheel != null) {
-				this.#scrollView.scroll(event.wheel * 3);
-				this.#syncFollow();
-				this.deps.requestRender();
-			}
+			routeSgrMouseInput(data, event => {
+				if (event.wheel !== null) {
+					this.#scrollView.scroll(event.wheel * 3);
+					this.#syncFollow();
+					this.deps.requestRender();
+				}
+				return true;
+			});
 			return;
 		}
 
@@ -317,9 +499,9 @@ export class AgentTranscriptViewer implements Component {
 			this.deps.requestRender();
 			return true;
 		}
-		if (data === "j" || matchesSelectDown(data)) {
+		if (matchesKey(data, "j") || matchesSelectDown(data)) {
 			this.#scrollView.scroll(1);
-		} else if (data === "k" || matchesSelectUp(data)) {
+		} else if (matchesKey(data, "k") || matchesSelectUp(data)) {
 			this.#scrollView.scroll(-1);
 		} else if (data === "g") {
 			this.#scrollView.scrollToTop();
@@ -382,7 +564,11 @@ export class AgentTranscriptViewer implements Component {
 
 		const headerLines = this.#headerLines(ref?.status, ref?.kind, ref?.parentId);
 		const footerLines = this.#footerLines();
-		const noticeLine = this.#notice ? ` ${theme.fg("error", this.#notice)}` : undefined;
+		const noticeLine = this.#notice
+			? ` ${theme.fg("error", sanitizeErrorLine(this.#notice, innerWidth))}`
+			: this.#remoteError && !this.#builder.isEmpty
+				? ` ${theme.fg("error", sanitizeErrorLine(this.#remoteError, innerWidth))}`
+				: undefined;
 		const editorLines = this.#editor ? this.#editor.render(innerWidth) : [];
 
 		// Chrome: top border + header rows + divider border + (notice) + editor + footer + bottom border.
@@ -390,7 +576,7 @@ export class AgentTranscriptViewer implements Component {
 		const viewportHeight = Math.max(3, termHeight - chrome);
 
 		const contentLines = this.#builder.isEmpty
-			? [` ${theme.fg("dim", this.#placeholder())}`]
+			? [` ${theme.fg("dim", this.#placeholder(Math.max(10, contentWidth - 1)))}`]
 			: this.#builder.container.render(contentWidth);
 		this.#scrollView.setLines(contentLines);
 		this.#scrollView.setHeight(viewportHeight);
@@ -430,9 +616,7 @@ export class AgentTranscriptViewer implements Component {
 	}
 
 	#statsLine(): string {
-		const observed: ObservableSession | undefined = this.deps.observers
-			?.getSessions()
-			.find(s => s.id === this.deps.agentId);
+		const observed: ObservableSession | undefined = this.deps.observers?.getSession(this.deps.agentId);
 		const progress = observed?.progress;
 		if (!progress) return "";
 		const stats: string[] = [];
@@ -454,9 +638,12 @@ export class AgentTranscriptViewer implements Component {
 		return parts.join(theme.sep.dot);
 	}
 
-	#placeholder(): string {
-		if (this.deps.remote && this.#remoteUnavailable) return "Transcript lives on the host — not available.";
-		if (this.deps.remote && !this.#hasRemoteData) return "Loading transcript from host…";
+	#placeholder(maxWidth: number): string {
+		if (this.deps.remote) {
+			if (this.#remoteError) return sanitizeErrorLine(this.#remoteError, maxWidth);
+			if (this.#remoteUnavailable) return "Transcript lives on the host — not available.";
+			return this.#hasRemoteData ? "No messages yet." : "Loading transcript from host…";
+		}
 		if (!this.deps.registry.get(this.deps.agentId)?.sessionFile) return "No session file available yet.";
 		return "No messages yet.";
 	}

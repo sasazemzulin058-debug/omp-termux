@@ -1,9 +1,10 @@
 import * as os from "node:os";
 import * as path from "node:path";
-import type { Message, TextContent } from "@oh-my-pi/pi-ai";
+import type { Message } from "@oh-my-pi/pi-ai";
 import { getAgentDir as getDefaultAgentDir, logger, parseJsonlLenient, toError } from "@oh-my-pi/pi-utils";
+import { LRUCache } from "@oh-my-pi/pi-utils/lru";
 import { computeDefaultSessionDir } from "./session-paths";
-import { FileSessionStorage, type SessionStorage } from "./session-storage";
+import { FileSessionStorage, type SessionStorage, type SessionStorageStat } from "./session-storage";
 
 /**
  * Coarse lifecycle status of a session, derived from its last persisted message.
@@ -65,6 +66,44 @@ const SESSION_LIST_SUFFIX_BYTES = 32_768;
 const SESSION_LIST_PARALLEL_THRESHOLD = 64;
 const SESSION_LIST_MAX_WORKERS = 16;
 
+/**
+ * Memoizes {@link scanSessionFile} results keyed by stat identity so listing
+ * refreshes (resume picker opens, startup recent-sessions, cross-project
+ * scans) skip the open+read+parse for unchanged files. The `statSync` still
+ * runs on every scan — it IS the invalidation check: a hit requires both
+ * `mtimeMs` and `size` to match. This covers the two mutation paths:
+ * - streaming appends grow `size` (and bump `mtimeMs`);
+ * - `updateSessionTitle` rewrites the fixed-width title slot in place via
+ *   `writeSync`, which leaves `size` unchanged but updates `mtimeMs`.
+ * Negative results (unparseable files) are cached too, as `undefined` info.
+ * Entries are small header objects, so a generous cap is cheap.
+ */
+const SESSION_SCAN_CACHE_MAX = 4096;
+
+interface SessionScanCacheEntry {
+	mtimeMs: number;
+	size: number;
+	info: SessionInfo | undefined;
+}
+
+type SessionScanCache = LRUCache<string, SessionScanCacheEntry>;
+
+/** All {@link FileSessionStorage} instances view the same real filesystem, so they share one cache. */
+const fileSessionScanCache: SessionScanCache = new LRUCache({ max: SESSION_SCAN_CACHE_MAX });
+/** Other storages (in-memory test doubles) each carry their own cache to avoid cross-instance path collisions. */
+const kScanCache = Symbol("session-listing.scanCache");
+
+interface StorageWithScanCache extends SessionStorage {
+	[kScanCache]?: SessionScanCache;
+}
+
+function getSessionScanCache(storage: SessionStorage): SessionScanCache {
+	if (storage instanceof FileSessionStorage) return fileSessionScanCache;
+	const holder = storage as StorageWithScanCache;
+	if (!holder[kScanCache]) holder[kScanCache] = new LRUCache({ max: SESSION_SCAN_CACHE_MAX });
+	return holder[kScanCache];
+}
+
 function sanitizeSessionName(value: string | undefined): string | undefined {
 	if (!value) return undefined;
 	const firstLine = value.split(/\r?\n/)[0] ?? "";
@@ -108,10 +147,11 @@ function sessionDisplayName(info: SessionInfo): string {
 
 function extractTextFromContent(content: Message["content"]): string {
 	if (typeof content === "string") return content;
-	return content
-		.filter((block): block is TextContent => block.type === "text")
-		.map(block => block.text)
-		.join(" ");
+	const text: string[] = [];
+	for (const block of content) {
+		if (block.type === "text") text.push(block.text);
+	}
+	return text.join(" ");
 }
 
 /**
@@ -245,20 +285,21 @@ function countMessageMarkers(content: string): number {
 	return count;
 }
 
-function extractFirstUserMessageFromPrefix(content: string): string | undefined {
-	const roleIndex = content.indexOf('"role"');
-	if (roleIndex === -1) return undefined;
+function extractFirstDisplayMessageFromPrefix(content: string): string | undefined {
+	let fallback: string | undefined;
+	let index = content.indexOf('"role"');
 
-	let index = roleIndex;
 	while (index !== -1) {
 		const role = extractStringProperty(content, "role", index);
-		if (role === "user") {
-			return extractStringProperty(content, "content", index) ?? extractStringProperty(content, "text", index);
+		const text = extractStringProperty(content, "content", index) ?? extractStringProperty(content, "text", index);
+		if (text) {
+			if (role === "user") return text;
+			if (!fallback && (role === "developer" || role === "assistant")) fallback = text;
 		}
 		index = content.indexOf('"role"', index + 6);
 	}
 
-	return undefined;
+	return fallback;
 }
 
 interface SessionListHeader {
@@ -270,37 +311,67 @@ interface SessionListHeader {
 	timestamp?: string;
 }
 
+function normalizeTitleOverride(title: string | undefined): string | null | undefined {
+	if (title === undefined) return undefined;
+	return title.trim() ? title : null;
+}
+
+function sessionListHeaderFromRecord(
+	record: Record<string, unknown> | undefined,
+	titleOverride?: string | null,
+): SessionListHeader | undefined {
+	if (record?.type !== "session" || typeof record.id !== "string") return undefined;
+	return {
+		type: "session",
+		id: record.id,
+		cwd: typeof record.cwd === "string" ? record.cwd : undefined,
+		title:
+			titleOverride === null
+				? undefined
+				: (titleOverride ?? (typeof record.title === "string" ? record.title : undefined)),
+		parentSession: typeof record.parentSession === "string" ? record.parentSession : undefined,
+		timestamp: typeof record.timestamp === "string" ? record.timestamp : undefined,
+	};
+}
+
+function parseSessionListHeaderLine(line: string, titleOverride?: string | null): SessionListHeader | undefined {
+	if (extractStringProperty(line, "type") !== "session") return undefined;
+	const id = extractStringProperty(line, "id");
+	if (!id) return undefined;
+	return {
+		type: "session",
+		id,
+		cwd: extractStringProperty(line, "cwd"),
+		title: titleOverride === null ? undefined : (titleOverride ?? extractStringProperty(line, "title")),
+		parentSession: extractStringProperty(line, "parentSession"),
+		timestamp: extractStringProperty(line, "timestamp"),
+	};
+}
+
 function parseSessionListHeader(
 	content: string,
 	entries: Array<Record<string, unknown>>,
 ): SessionListHeader | undefined {
-	const parsedHeader = entries[0];
-	if (parsedHeader?.type === "session" && typeof parsedHeader.id === "string") {
-		return {
-			type: "session",
-			id: parsedHeader.id,
-			cwd: typeof parsedHeader.cwd === "string" ? parsedHeader.cwd : undefined,
-			title: typeof parsedHeader.title === "string" ? parsedHeader.title : undefined,
-			parentSession: typeof parsedHeader.parentSession === "string" ? parsedHeader.parentSession : undefined,
-			timestamp: typeof parsedHeader.timestamp === "string" ? parsedHeader.timestamp : undefined,
-		};
+	const firstEntry = entries[0];
+	const parsedSlotTitle = normalizeTitleOverride(
+		firstEntry?.type === "title" && typeof firstEntry.title === "string" ? firstEntry.title : undefined,
+	);
+	const parsedHeader = sessionListHeaderFromRecord(entries[firstEntry?.type === "title" ? 1 : 0], parsedSlotTitle);
+	if (parsedHeader) return parsedHeader;
+
+	let slotTitle: string | null | undefined;
+	let firstNonEmpty = true;
+	for (const rawLine of content.split(/\r?\n/)) {
+		const line = rawLine.trim();
+		if (!line) continue;
+		if (firstNonEmpty && extractStringProperty(line, "type") === "title") {
+			slotTitle = normalizeTitleOverride(extractStringProperty(line, "title"));
+			firstNonEmpty = false;
+			continue;
+		}
+		return parseSessionListHeaderLine(line, slotTitle);
 	}
-
-	const firstLineEnd = content.indexOf("\n");
-	const firstLine = firstLineEnd === -1 ? content : content.slice(0, firstLineEnd);
-	if (extractStringProperty(firstLine, "type") !== "session") return undefined;
-
-	const id = extractStringProperty(firstLine, "id");
-	if (!id) return undefined;
-
-	return {
-		type: "session",
-		id,
-		cwd: extractStringProperty(firstLine, "cwd"),
-		title: extractStringProperty(firstLine, "title"),
-		parentSession: extractStringProperty(firstLine, "parentSession"),
-		timestamp: extractStringProperty(firstLine, "timestamp"),
-	};
+	return undefined;
 }
 
 function getSessionListWorkerCount(fileCount: number): number {
@@ -323,8 +394,22 @@ async function scanSessionFile(
 	storage: SessionStorage,
 	withStatus: boolean,
 ): Promise<SessionInfo | undefined> {
+	let stat: SessionStorageStat;
 	try {
-		const stat = storage.statSync(file);
+		stat = storage.statSync(file);
+	} catch {
+		// Missing/unstatable file: no stat identity to cache under.
+		return undefined;
+	}
+	const cache = getSessionScanCache(storage);
+	// `withStatus` changes what a scan reads (tail window) and returns, so the
+	// two variants are cached under distinct keys.
+	const cacheKey = withStatus ? `s\0${file}` : `h\0${file}`;
+	const cached = cache.get(cacheKey);
+	if (cached && cached.mtimeMs === stat.mtimeMs && cached.size === stat.size) {
+		return cached.info ? { ...cached.info } : undefined;
+	}
+	try {
 		const [content, suffix] = await storage.readTextSlices(
 			file,
 			SESSION_LIST_PREFIX_BYTES,
@@ -333,7 +418,12 @@ async function scanSessionFile(
 		const { size, mtime } = stat;
 		const entries = parseJsonlLenient<Record<string, unknown>>(content);
 		const header = parseSessionListHeader(content, entries);
-		if (!header) return undefined;
+		if (!header) {
+			// Cache the negative result too: an unparseable file stays unparseable
+			// until its stat identity changes.
+			cache.set(cacheKey, { mtimeMs: stat.mtimeMs, size: stat.size, info: undefined });
+			return undefined;
+		}
 
 		let parsedMessageCount = 0;
 		let firstMessage = "";
@@ -364,9 +454,9 @@ async function scanSessionFile(
 			}
 		}
 
-		firstMessage ||= extractFirstUserMessageFromPrefix(content) ?? "";
+		firstMessage ||= extractFirstDisplayMessageFromPrefix(content) ?? "";
 		const messageCount = Math.max(parsedMessageCount, countMessageMarkers(content));
-		return {
+		const info: SessionInfo = {
 			path: file,
 			id: header.id,
 			cwd: header.cwd ?? "",
@@ -380,6 +470,10 @@ async function scanSessionFile(
 			allMessagesText: allMessages.length > 0 ? allMessages.join(" ") : firstMessage,
 			status: withStatus ? deriveSessionStatus(suffix) : undefined,
 		};
+		// The cache keeps its own shallow copy; hits also hand out copies, so
+		// callers can never mutate the shared cached object.
+		cache.set(cacheKey, { mtimeMs: stat.mtimeMs, size: stat.size, info: { ...info } });
+		return info;
 	} catch {
 		return undefined;
 	}
@@ -495,12 +589,32 @@ async function scanSessionDir(
 	}
 }
 
+async function scanSessionDirReadOnly(
+	sessionDir: string,
+	storage: SessionStorage,
+	withStatus: boolean,
+): Promise<SessionInfo[]> {
+	try {
+		const files = storage.listFilesSync(sessionDir, "*.jsonl");
+		return await collectSessionsFromFiles(files, storage, withStatus);
+	} catch {
+		return [];
+	}
+}
+
 /**
  * List sessions in a resolved session directory (newest first), reading each
  * file's lifecycle {@link SessionStatus}.
  */
 export function listSessions(sessionDir: string, storage: SessionStorage): Promise<SessionInfo[]> {
 	return scanSessionDir(sessionDir, storage, true);
+}
+
+/**
+ * List sessions without repairing orphaned backups or mutating the directory.
+ */
+export function listSessionsReadOnly(sessionDir: string, storage: SessionStorage): Promise<SessionInfo[]> {
+	return scanSessionDirReadOnly(sessionDir, storage, true);
 }
 
 /** List all sessions across all project directories (newest first). */
@@ -561,12 +675,25 @@ function sessionMatchesResumeArg(session: SessionInfo, sessionArg: string): bool
 	return fileSessionId.startsWith(normalizedArg);
 }
 
+/** Controls cross-directory fallback for resumable session lookup. */
+export interface ResolveResumableSessionOptions {
+	/** Search default global session buckets after the active/custom session directory misses. */
+	allowGlobalFallback?: boolean;
+}
+
+function isSessionStorage(value: SessionStorage | ResolveResumableSessionOptions): value is SessionStorage {
+	return "listFilesSync" in value;
+}
+
 export async function resolveResumableSession(
 	sessionArg: string,
 	cwd: string,
 	sessionDir?: string,
-	storage: SessionStorage = new FileSessionStorage(),
+	storageOrOptions: SessionStorage | ResolveResumableSessionOptions = new FileSessionStorage(),
+	options: ResolveResumableSessionOptions = {},
 ): Promise<ResolvedSessionMatch | undefined> {
+	const storage = isSessionStorage(storageOrOptions) ? storageOrOptions : new FileSessionStorage();
+	const resolvedOptions = isSessionStorage(storageOrOptions) ? options : storageOrOptions;
 	const localSessionDir = sessionDir ?? computeDefaultSessionDir(cwd, storage);
 	const localSessions = await listSessions(localSessionDir, storage);
 	const localMatch = localSessions.find(session => sessionMatchesResumeArg(session, sessionArg));
@@ -574,7 +701,7 @@ export async function resolveResumableSession(
 		return { session: localMatch, scope: "local" };
 	}
 
-	if (sessionDir) {
+	if (sessionDir && resolvedOptions.allowGlobalFallback !== true) {
 		return undefined;
 	}
 

@@ -1,9 +1,16 @@
-import { afterEach, beforeEach, describe, expect, it } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import * as fs from "node:fs";
+import * as fsPromises from "node:fs/promises";
 import * as path from "node:path";
+import { type ExtensionModule, extensionModuleCapability } from "@oh-my-pi/pi-coding-agent/capability/extension-module";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import { initializeWithSettings } from "@oh-my-pi/pi-coding-agent/discovery";
-import { discoverAndLoadExtensions, loadExtensions } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/loader";
+import { getCapability, initializeWithSettings } from "@oh-my-pi/pi-coding-agent/discovery";
+import {
+	discoverAndLoadExtensions,
+	discoverExtensionPaths,
+	loadExtensions,
+} from "@oh-my-pi/pi-coding-agent/extensibility/extensions/loader";
+import { discoverSessionExtensionPaths } from "@oh-my-pi/pi-coding-agent/sdk";
 import { getProjectAgentDir, TempDir } from "@oh-my-pi/pi-utils";
 import { filterUserScoped } from "./utils/filter-user-extensions";
 
@@ -131,6 +138,81 @@ describe("extensions discovery", () => {
 		expect(result.extensions).toHaveLength(1);
 		expect(result.extensions[0].path).toContain("src");
 		expect(result.extensions[0].path).toContain("main.ts");
+	});
+
+	it("SDK explicit-only discovery loads package hooks without ambient package hooks", async () => {
+		const ambientPackage = path.join(tempDir.path(), "ambient-package");
+		fs.mkdirSync(path.join(ambientPackage, "hooks", "pre"), { recursive: true });
+		fs.writeFileSync(path.join(ambientPackage, "hooks", "pre", "ambient.ts"), extensionCodeWithTool("ambient-tool"));
+		fs.writeFileSync(
+			path.join(getProjectAgentDir(tempDir.path()), "settings.json"),
+			JSON.stringify({ extensions: [ambientPackage] }),
+		);
+
+		const packageDir = path.join(tempDir.path(), "explicit-package");
+		const sourceDir = path.join(packageDir, "src");
+		const hookDir = path.join(packageDir, "hooks", "pre");
+		fs.mkdirSync(sourceDir, { recursive: true });
+		fs.mkdirSync(hookDir, { recursive: true });
+		fs.writeFileSync(path.join(sourceDir, "main.ts"), extensionCodeWithTool("explicit-tool"));
+		fs.writeFileSync(path.join(hookDir, "read.ts"), extensionCodeWithTool("explicit-hook-tool"));
+		fs.writeFileSync(
+			path.join(packageDir, "package.json"),
+			JSON.stringify({
+				name: "explicit-package",
+				omp: {
+					extensions: ["./src/main.ts"],
+				},
+			}),
+		);
+
+		const settings = await Settings.init({
+			inMemory: true,
+			cwd: tempDir.path(),
+			overrides: { extensions: [ambientPackage] },
+		});
+		const paths = await discoverSessionExtensionPaths(
+			{ disableExtensionDiscovery: true, additionalExtensionPaths: [packageDir] },
+			tempDir.path(),
+			settings,
+		);
+		const result = await loadExtensions(paths, tempDir.path());
+
+		expect(result.errors).toHaveLength(0);
+		expect(result.extensions.map(extension => extension.path)).toEqual([
+			path.join(hookDir, "read.ts"),
+			path.join(sourceDir, "main.ts"),
+		]);
+		expect(result.extensions.flatMap(extension => [...extension.tools.keys()])).toEqual([
+			"explicit-hook-tool",
+			"explicit-tool",
+		]);
+	});
+
+	it("explicit-only discovery ignores unreadable optional hook directories", async () => {
+		const packageDir = path.join(tempDir.path(), "explicit-package");
+		const sourceDir = path.join(packageDir, "src");
+		fs.mkdirSync(sourceDir, { recursive: true });
+		fs.writeFileSync(path.join(sourceDir, "main.ts"), extensionCode);
+		fs.writeFileSync(
+			path.join(packageDir, "package.json"),
+			JSON.stringify({
+				name: "explicit-package",
+				omp: {
+					extensions: ["./src/main.ts"],
+				},
+			}),
+		);
+
+		const permissionError = Object.assign(new Error("permission denied"), { code: "EACCES" });
+		const readdirSpy = vi.spyOn(fsPromises, "readdir").mockRejectedValueOnce(permissionError);
+		try {
+			await expect(
+				discoverExtensionPaths([packageDir], tempDir.path(), undefined, { ambient: false }),
+			).resolves.toEqual([path.join(sourceDir, "main.ts")]);
+		} finally {
+			readdirSpy.mockRestore();
+		}
 	});
 
 	it("discovers a symlinked extension package directory", async () => {
@@ -710,5 +792,33 @@ describe("extensions discovery", () => {
 
 		expect(result.errors).toHaveLength(0);
 		expect(result.extensions).toHaveLength(0);
+	});
+	it("discoverExtensionPaths only invokes the native extension-module provider (#4198)", async () => {
+		// The extension-module capability has multiple providers
+		// (native, claude, codex, gemini, opencode), but discoverExtensionPaths
+		// only surfaces native-provider paths. Regression: pre-fix it still
+		// invoked every provider's load() and then dropped foreign items,
+		// running four unused directory walks per startup (worst on Windows).
+		const capability = getCapability<ExtensionModule>(extensionModuleCapability.id);
+		expect(capability, "extension-modules capability must be registered").toBeDefined();
+
+		const providers = capability?.providers ?? [];
+		const foreignIds = providers.map(p => p.id).filter(id => id !== "native");
+		// Guard the invariant this test is defending — without foreign providers
+		// the test would trivially pass and hide a future regression.
+		expect(foreignIds.length).toBeGreaterThan(0);
+
+		const spies = providers.map(provider => vi.spyOn(provider, "load"));
+		try {
+			await discoverExtensionPaths([], tempDir.path());
+
+			const callsById = new Map(providers.map((provider, i) => [provider.id, spies[i].mock.calls.length]));
+			expect(callsById.get("native")).toBe(1);
+			for (const id of foreignIds) {
+				expect(callsById.get(id), `foreign provider ${id} must not be walked`).toBe(0);
+			}
+		} finally {
+			for (const spy of spies) spy.mockRestore();
+		}
 	});
 });

@@ -48,6 +48,8 @@ Upstream uses different package scopes. Replace them consistently.
   - `@mariozechner/pi-tui` → `@oh-my-pi/pi-tui`
   - `@mariozechner/pi-ai` → `@oh-my-pi/pi-ai`
   - `@mariozechner/pi-utils` → `@oh-my-pi/pi-utils`
+  - `@mariozechner/pi-catalog` → `@oh-my-pi/pi-catalog`
+  - `@mariozechner/pi-natives` → `@oh-my-pi/pi-natives`
 - Some upstream packages publish under the `@earendil-works/*` scope instead of `@mariozechner/*`. Map it the same way (`@earendil-works/pi-coding-agent` → `@oh-my-pi/pi-coding-agent`, and so on).
 - The bare `typebox` package is not an `@oh-my-pi/*` scope; do not rewrite it as one. See the Extensions divergence in section 15 for how tool-parameter schemas map.
 
@@ -100,7 +102,7 @@ const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "myapp-"));
 
 ## 5) Prefer Bun embeds (no copying)
 
-Do not add new runtime asset copy steps. Keep assets in repo and prefer Bun embeds/imports; preserve existing explicit generation workflows such as `packages/coding-agent/src/export/html/tool-views.generated.js` (built from collab-web sources via `bun run build-tool-views`).
+Do not add new runtime asset copy steps. Keep assets in repo and prefer Bun embeds/imports; preserve existing explicit generation workflows such as `packages/coding-agent/src/export/html/tool-views.generated.js` (built from collab-web sources via `bun run gen:tool-views`).
 
 - If upstream copies assets into a dist folder, replace with Bun-friendly embeds.
 - Prompts are static `.md` files; use Bun text imports (`with { type: "text" }`) and Handlebars instead of inline prompt strings.
@@ -158,12 +160,13 @@ Unless requested, remove upstream compatibility shims.
 
 ## 10) Validate the port
 
-Run the standard checks after changes:
+Run the checks that cover the port:
 
-- `bun check`
+- `bun check` for the repository's TypeScript and Rust checks.
+- Targeted Bun tests for the packages and behavior you changed (for example, `bun test packages/<package>/test/<file>.test.ts`).
+- If dependencies changed, run `bun install --frozen-lockfile` after updating `bun.lock`.
 
-If the repo already has failing checks unrelated to your changes, call that out.
-Tests use Bun's runner (not Vitest), but only run `bun test` when explicitly requested.
+Tests use Bun's runner, not Vitest. Do not substitute a project-wide `bun test` for targeted coverage; the root `test` script uses the repository's sharded runner. If a check already fails for an unrelated reason, call out the exact command and failure.
 
 ## 11) Protect improved features (regression trap list)
 
@@ -302,12 +305,13 @@ Our fork has architectural decisions that differ from upstream. **Do not port th
 
 ### UI Architecture
 
-| Upstream                                    | Our Fork                                                  | Reason                                                                |
-| ------------------------------------------- | --------------------------------------------------------- | --------------------------------------------------------------------- |
-| `FooterDataProvider` class                  | `StatusLineComponent`                                     | Simpler, integrated status line                                       |
-| `ctx.ui.setHeader()` / `ctx.ui.setFooter()` | No-op stubs in current extension contexts                 | Not currently wired to replace the TUI status/header UI               |
-| `ctx.ui.setEditorComponent()`               | Wired in interactive mode; no-op stubs in ACP/RPC/headless contexts | Custom editor replacement works in the interactive TUI; non-TUI runtimes keep stubs |
-| `InteractiveModeOptions` options object     | Positional constructor args (options type still exported) | Keep constructor signature; update the type when upstream adds fields |
+| Upstream                                    | Our Fork                                                            | Reason                                                                                                                                         |
+| ------------------------------------------- | ------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------- |
+| `FooterDataProvider` class                  | `StatusLineComponent`                                               | Simpler, integrated status line                                                                                                                |
+| `ctx.ui.setHeader()` / `ctx.ui.setFooter()` | No-op stubs in current extension contexts                           | Not currently wired to replace the TUI status/header UI                                                                                        |
+| `ctx.ui.setEditorComponent()`               | Wired in interactive mode; no-op stubs in ACP/RPC/headless contexts | Custom editor replacement works in the interactive TUI; non-TUI runtimes keep stubs                                                            |
+| `ctx.ui.addAutocompleteProvider()`          | Wired in interactive mode; no-op stubs in ACP/RPC/headless contexts | Factory wrapping matches upstream; omp's editor has no custom `triggerCharacters`, so wrapped providers surface at the built-in trigger points |
+| `InteractiveModeOptions` options object     | Positional constructor args (options type still exported)           | Keep constructor signature; update the type when upstream adds fields                                                                          |
 
 ### Component Naming
 
@@ -356,13 +360,13 @@ Our fork has architectural decisions that differ from upstream. **Do not port th
 
 ### Extensions
 
-| Upstream                                                         | Our Fork                                                                                          |
-| ---------------------------------------------------------------- | ------------------------------------------------------------------------------------------------- |
-| `jiti` for TypeScript loading                                    | Native Bun `import()`                                                                              |
-| `pkg.pi` manifest field                                          | `pkg.omp` preferred; fallback to `pkg.pi` remains                                                  |
-| `StringEnum` from `pi-ai`                                        | `Type.Enum` from the `pi.typebox` shim (or author the schema with `pi.zod`); `pi-ai` no longer exports `StringEnum` |
-| `formatSize` from `pi-coding-agent`                              | `formatBytes` from `@oh-my-pi/pi-utils`                                                            |
-| `DefaultResourceLoader` / `DefaultPackageManager` / `SettingsManager` / `createEventBus` | Capability-based discovery (`loadCapability(...)`) plus the `Settings` singleton and `EventBus` |
+| Upstream                                                               | Our Fork                                                                                                                                                                                                                                                                                     |
+| ---------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `jiti` for TypeScript loading                                          | Native Bun `import()`                                                                                                                                                                                                                                                                        |
+| `pkg.pi` manifest field                                                | `pkg.omp` preferred; fallback to `pkg.pi` remains                                                                                                                                                                                                                                            |
+| `StringEnum` from `pi-ai`                                              | `Type.Enum` from `pi.typebox`, or `pi.arktype.enumerated(...)`; `pi-ai` no longer exports `StringEnum`                                                                                                                                                                                       |
+| `formatSize` from `pi-coding-agent`                                    | `formatBytes` from `@oh-my-pi/pi-utils`                                                                                                                                                                                                                                                      |
+| Upstream resource/package/settings managers as the native architecture | Capability-based discovery (`loadCapability(...)`), the `Settings` singleton, and `EventBus`; legacy extension imports of `DefaultResourceLoader`, `DefaultPackageManager`, and `SettingsManager` are compatibility shims in `legacy-pi-coding-agent-shim.ts`, not the native implementation |
 
 ### Skip These Upstream Features
 

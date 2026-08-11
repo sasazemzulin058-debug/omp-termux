@@ -80,7 +80,9 @@ mod imp {
 
 	use crate::{IsoError, IsoResult};
 
-	const FICLONE: libc::c_ulong = 0x4004_9409;
+	// `libc::Ioctl` is `c_int` on musl and `c_ulong` on glibc; the constant fits
+	// both.
+	const FICLONE: libc::Ioctl = 0x4004_9409;
 
 	pub fn start(lower: &Path, merged: &Path) -> IsoResult<()> {
 		let lower = canonical_existing_dir(lower)?;
@@ -246,14 +248,8 @@ mod imp {
 
 	fn set_times_nofollow(path: &Path, meta: &fs::Metadata) -> std::io::Result<()> {
 		let times = [
-			libc::timespec {
-				tv_sec:  meta.atime() as libc::time_t,
-				tv_nsec: meta.atime_nsec() as libc::c_long,
-			},
-			libc::timespec {
-				tv_sec:  meta.mtime() as libc::time_t,
-				tv_nsec: meta.mtime_nsec() as libc::c_long,
-			},
+			libc::timespec { tv_sec: meta.atime() as _, tv_nsec: meta.atime_nsec() as libc::c_long },
+			libc::timespec { tv_sec: meta.mtime() as _, tv_nsec: meta.mtime_nsec() as libc::c_long },
 		];
 		let c_path = CString::new(path.as_os_str().as_bytes())?;
 		// SAFETY: `c_path` and `times` live until the syscall returns; the

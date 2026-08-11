@@ -2,6 +2,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import type { ImageContent } from "@oh-my-pi/pi-ai";
 import { RpcClient } from "@oh-my-pi/pi-coding-agent/modes/rpc/rpc-client";
 import {
 	handleRpcSessionChange,
@@ -21,12 +22,13 @@ import {
 	TASK_SUBAGENT_PROGRESS_CHANNEL,
 } from "@oh-my-pi/pi-coding-agent/task";
 import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
+import { removeSyncWithRetries } from "@oh-my-pi/pi-utils";
 
 const tempPaths: string[] = [];
 
 afterEach(() => {
 	for (const tempPath of tempPaths.splice(0)) {
-		fs.rmSync(tempPath, { recursive: true, force: true });
+		removeSyncWithRetries(tempPath);
 	}
 });
 
@@ -69,14 +71,15 @@ function createRegistryWithSnapshot(): RpcSubagentRegistry {
 type SessionChangeStubOptions = {
 	newSession?: boolean;
 	switchSession?: boolean;
-	branch?: { selectedText: string; cancelled: boolean };
+	branch?: { selectedText: string; selectedImages: ImageContent[]; cancelled: boolean };
 };
 
 function createSessionChangeSession(options: SessionChangeStubOptions): RpcSessionChangeSession {
 	return {
 		newSession: async (_options?: unknown) => options.newSession ?? true,
 		switchSession: async (_sessionPath: string) => options.switchSession ?? true,
-		branch: async (_entryId: string) => options.branch ?? { selectedText: "branched text", cancelled: false },
+		branch: async (_entryId: string) =>
+			options.branch ?? { selectedText: "branched text", selectedImages: [], cancelled: false },
 	};
 }
 
@@ -207,7 +210,9 @@ describe("RPC subagent registry", () => {
 			},
 			{
 				command: { type: "branch", entryId: "entry-1" },
-				session: createSessionChangeSession({ branch: { selectedText: "Branch text", cancelled: false } }),
+				session: createSessionChangeSession({
+					branch: { selectedText: "Branch text", selectedImages: [], cancelled: false },
+				}),
 				expected: { type: "branch", data: { text: "Branch text", cancelled: false } },
 			},
 		];
@@ -246,7 +251,7 @@ describe("RPC subagent registry", () => {
 			},
 			{
 				command: { type: "branch", entryId: "entry-1" },
-				session: createSessionChangeSession({ branch: { selectedText: "", cancelled: true } }),
+				session: createSessionChangeSession({ branch: { selectedText: "", selectedImages: [], cancelled: true } }),
 				expected: { type: "branch", data: { text: "", cancelled: true } },
 			},
 		];

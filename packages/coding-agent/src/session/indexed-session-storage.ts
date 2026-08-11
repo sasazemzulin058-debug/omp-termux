@@ -1,10 +1,25 @@
 import { toError } from "@oh-my-pi/pi-utils";
-import type { SessionStorage, SessionStorageStat, SessionStorageWriter } from "./session-storage";
+import type {
+	SessionStorage,
+	SessionStorageStat,
+	SessionStorageWriter,
+	WriteTextAtomicOptions,
+} from "./session-storage";
+import {
+	overlayTitleSlotContent,
+	overlayTitleSlotPrefix,
+	parseTitleSlotFromContent,
+	type SessionTitleUpdate,
+	titleUpdateFromSlot,
+} from "./session-title-slot";
 
 export interface SessionStorageIndexEntry {
 	path: string;
 	size: number;
 	mtimeMs: number;
+	title?: string;
+	titleSource?: SessionTitleUpdate["source"];
+	titleUpdatedAt?: string;
 }
 
 export interface SessionStorageBackend {
@@ -12,8 +27,9 @@ export interface SessionStorageBackend {
 	loadIndex(): Promise<Iterable<SessionStorageIndexEntry>>;
 	readFull(path: string): Promise<string | null>;
 	readSlices(path: string, prefixBytes: number, suffixBytes: number): Promise<[string, string]>;
-	writeFull(path: string, content: string, mtimeMs: number): Promise<void>;
+	writeFull(path: string, content: string, mtimeMs: number, title?: SessionTitleUpdate): Promise<void>;
 	append(path: string, line: string, mtimeMs: number): Promise<void>;
+	updateSessionTitle(path: string, title: SessionTitleUpdate, mtimeMs: number): Promise<void>;
 	truncate(path: string, mtimeMs: number): Promise<void>;
 	remove(paths: string[]): Promise<void>;
 	move(src: string, dst: string, mtimeMs: number): Promise<void>;
@@ -22,6 +38,9 @@ export interface SessionStorageBackend {
 interface IndexEntry {
 	size: number;
 	mtimeMs: number;
+	title?: string;
+	titleSource?: SessionTitleUpdate["source"];
+	titleUpdatedAt?: string;
 }
 
 interface EnqueueOptions {
@@ -64,6 +83,10 @@ function uniquePaths(paths: readonly string[]): string[] {
 	}
 	return out;
 }
+function titleUpdateForIndex(entry: IndexEntry): SessionTitleUpdate | undefined {
+	if (!entry.titleUpdatedAt) return undefined;
+	return { title: entry.title, source: entry.titleSource, updatedAt: entry.titleUpdatedAt };
+}
 
 export class IndexedSessionStorage implements SessionStorage {
 	readonly #backend: SessionStorageBackend;
@@ -89,13 +112,21 @@ export class IndexedSessionStorage implements SessionStorage {
 		const rows = await this.#backend.loadIndex();
 		this.#index.clear();
 		for (const row of rows) {
-			this.#setIndex(row.path, row.size, row.mtimeMs);
+			const title = row.titleUpdatedAt
+				? { title: row.title, source: row.titleSource, updatedAt: row.titleUpdatedAt }
+				: null;
+			this.#setIndex(row.path, row.size, row.mtimeMs, title);
 		}
 	}
 
 	async drain(): Promise<void> {
-		while (this.#drainPending.size > 0) {
-			await Promise.allSettled(this.#drainPending);
+		// Quiesce EVERY pending backend operation, not just the drain-tracked
+		// fire-and-forget publishes: an atomic write whose commit guard passed
+		// just before a terminal seal is still on the wire with
+		// `trackDrain: false`, and a graceful shutdown (SessionManager.close)
+		// must not return while it can still publish under a reopened path.
+		while (this.#drainPending.size > 0 || this.#pathPending.size > 0) {
+			await Promise.allSettled([...this.#drainPending, ...this.#pathPending.values()]);
 		}
 		const error = this.#firstDrainError;
 		this.#firstDrainError = undefined;
@@ -112,8 +143,40 @@ export class IndexedSessionStorage implements SessionStorage {
 
 	writeTextSync(path: string, content: string): void {
 		const mtimeMs = this.#allocMtimeMs();
-		this.#setIndex(path, byteLength(content), mtimeMs);
-		this.#enqueuePath(path, () => this.#backend.writeFull(path, content, mtimeMs), { trackDrain: true });
+		const title = titleUpdateFromSlot(parseTitleSlotFromContent(content));
+		this.#setIndex(path, byteLength(content), mtimeMs, title ?? null);
+		this.#enqueuePath(path, () => this.#backend.writeFull(path, content, mtimeMs, title), { trackDrain: true });
+	}
+
+	async updateSessionTitle(path: string, title: SessionTitleUpdate): Promise<void> {
+		await this.#awaitPath(path);
+		const previous = this.#index.get(path);
+		if (!previous) throw enoent(path);
+		const mtimeMs = this.#allocMtimeMs();
+		const next = {
+			...previous,
+			title: title.title,
+			titleSource: title.source,
+			titleUpdatedAt: title.updatedAt,
+			mtimeMs,
+		};
+		this.#index.set(path, next);
+		try {
+			await this.#enqueuePath(path, () => this.#backend.updateSessionTitle(path, title, mtimeMs), {
+				trackDrain: false,
+			});
+		} catch (err) {
+			const current = this.#index.get(path);
+			if (
+				current?.mtimeMs === next.mtimeMs &&
+				current.title === next.title &&
+				current.titleSource === next.titleSource &&
+				current.titleUpdatedAt === next.titleUpdatedAt
+			) {
+				this.#index.set(path, previous);
+			}
+			throw toError(err);
+		}
 	}
 
 	statSync(path: string): SessionStorageStat {
@@ -144,37 +207,84 @@ export class IndexedSessionStorage implements SessionStorage {
 	}
 
 	async readText(path: string): Promise<string> {
-		if (!this.#index.has(path)) throw enoent(path);
+		const entry = this.#index.get(path);
+		if (!entry) throw enoent(path);
 		await this.#awaitPath(path);
 		const content = await this.#backend.readFull(path);
 		if (content === null) throw enoent(path);
-		return content;
+		const title = titleUpdateForIndex(entry);
+		return title ? overlayTitleSlotContent(content, title) : content;
 	}
 
 	async readTextSlices(path: string, prefixBytes: number, suffixBytes: number): Promise<[string, string]> {
-		if (!this.#index.has(path)) throw enoent(path);
+		const entry = this.#index.get(path);
+		if (!entry) throw enoent(path);
 		const prefixLimit = normalizeByteLimit(prefixBytes);
 		const suffixLimit = normalizeByteLimit(suffixBytes);
 		if (prefixLimit === 0 && suffixLimit === 0) return ["", ""];
 		await this.#awaitPath(path);
-		return this.#backend.readSlices(path, prefixLimit, suffixLimit);
+		const [prefix, suffix] = await this.#backend.readSlices(path, prefixLimit, suffixLimit);
+		const title = titleUpdateForIndex(entry);
+		return [title ? overlayTitleSlotPrefix(prefix, prefixLimit, title) : prefix, suffix];
 	}
 
 	async writeText(path: string, content: string): Promise<void> {
 		await this.#awaitPath(path);
 		const previous = this.#index.get(path);
 		const mtimeMs = this.#allocMtimeMs();
-		this.#setIndex(path, byteLength(content), mtimeMs);
+		const title = titleUpdateFromSlot(parseTitleSlotFromContent(content));
+		this.#setIndex(path, byteLength(content), mtimeMs, title ?? null);
 		try {
-			await this.#enqueuePath(path, () => this.#backend.writeFull(path, content, mtimeMs), { trackDrain: false });
+			await this.#enqueuePath(path, () => this.#backend.writeFull(path, content, mtimeMs, title), {
+				trackDrain: false,
+			});
 		} catch (err) {
 			this.#restoreIndex(path, previous);
 			throw toError(err);
 		}
 	}
 
-	writeTextAtomic(path: string, content: string): Promise<void> {
-		return this.writeText(path, content);
+	async writeTextAtomic(path: string, content: string, options?: WriteTextAtomicOptions): Promise<void> {
+		const commitGuard = options?.commitGuard;
+		if (commitGuard && !commitGuard()) return;
+		await this.#awaitPath(path);
+		// A concurrent flushSync (writeTextSync) may have taken over during the
+		// awaitPath yield and bumped the epoch. Re-check before touching the
+		// index or enqueueing the backend publish.
+		if (commitGuard && !commitGuard()) return;
+		const previous = this.#index.get(path);
+		const mtimeMs = this.#allocMtimeMs();
+		const title = titleUpdateFromSlot(parseTitleSlotFromContent(content));
+		this.#setIndex(path, byteLength(content), mtimeMs, title ?? null);
+		try {
+			await this.#enqueuePath(
+				path,
+				async () => {
+					// Final guard immediately before the backend actually publishes.
+					// If a concurrent writer has advanced the index past our
+					// optimistic entry, leave that newer state alone; otherwise
+					// restore the pre-write snapshot so readers do not observe a
+					// body we never wrote.
+					if (commitGuard && !commitGuard()) {
+						const current = this.#index.get(path);
+						if (current?.mtimeMs === mtimeMs) this.#restoreIndex(path, previous);
+						return;
+					}
+					await this.#backend.writeFull(path, content, mtimeMs, title);
+				},
+				{ trackDrain: false },
+			);
+		} catch (err) {
+			const error = toError(err);
+			try {
+				if ((await this.#backend.readFull(path)) === content) return;
+			} catch {
+				// Preserve the original write failure; verification was unavailable.
+			}
+			const current = this.#index.get(path);
+			if (current?.mtimeMs === mtimeMs) this.#restoreIndex(path, previous);
+			throw error;
+		}
 	}
 
 	async rename(src: string, dst: string): Promise<void> {
@@ -249,7 +359,7 @@ export class IndexedSessionStorage implements SessionStorage {
 
 	_truncateForWriter(path: string): number {
 		const mtimeMs = this.#allocMtimeMs();
-		this.#setIndex(path, 0, mtimeMs);
+		this.#setIndex(path, 0, mtimeMs, null);
 		return mtimeMs;
 	}
 
@@ -293,8 +403,20 @@ export class IndexedSessionStorage implements SessionStorage {
 		}
 	}
 
-	#setIndex(path: string, size: number, mtimeMs: number): void {
-		this.#index.set(path, { size, mtimeMs });
+	#setIndex(
+		path: string,
+		size: number,
+		mtimeMs: number,
+		title: SessionTitleUpdate | null | undefined = undefined,
+	): void {
+		const current = title === undefined ? this.#index.get(path) : undefined;
+		this.#index.set(path, {
+			size,
+			mtimeMs,
+			title: title === undefined ? current?.title : (title?.title ?? undefined),
+			titleSource: title === undefined ? current?.titleSource : (title?.source ?? undefined),
+			titleUpdatedAt: title === undefined ? current?.titleUpdatedAt : (title?.updatedAt ?? undefined),
+		});
 		if (mtimeMs > this.#nextMtimeMs) this.#nextMtimeMs = mtimeMs;
 	}
 
@@ -392,6 +514,15 @@ class IndexedSessionStorageWriter implements SessionStorageWriter {
 		});
 		this.#pendingChain = next.catch(() => {});
 		return next;
+	}
+
+	appendSync(line: string): void {
+		if (this.#closed) throw new Error("Writer closed");
+		if (this.#error) throw this.#error;
+		// Local index is updated immediately; remote publish stays ordered on the
+		// path queue. Callers that need remote durability still await append()/flush().
+		const mtimeMs = this.#storage._appendForWriter(this.#path, line);
+		void this.#trackPromise(this.#storage._queueAppend(this.#path, line, mtimeMs, () => this.#error));
 	}
 
 	async append(line: string): Promise<void> {

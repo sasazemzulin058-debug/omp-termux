@@ -10,6 +10,7 @@ const DEFAULT_MODEL_PROVIDER_ORDER = [
 	"kimi-code",
 	"moonshot",
 	"qwen-portal",
+	"alibaba-token-plan",
 	"zai",
 	"xai-oauth",
 	"xai",
@@ -20,6 +21,7 @@ const DEFAULT_MODEL_PROVIDER_ORDER = [
 	// High-quality aggregators / hosted inference providers.
 	"fireworks",
 	"cerebras",
+	"baseten",
 	"openrouter",
 	"aimlapi",
 	"together",

@@ -5,17 +5,16 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import type { ImageContent } from "@oh-my-pi/pi-ai";
 import { getProjectDir, isEnoent, readImageMetadata } from "@oh-my-pi/pi-utils";
-import chalk from "chalk";
+import chalk from "@oh-my-pi/pi-utils/chalk";
 import { resolveReadPath } from "../tools/path-utils";
 import { formatBytes } from "../tools/render-utils";
 import { formatDimensionNote, resizeImage } from "../utils/image-resize";
-import { convertFileWithMarkit } from "../utils/markit";
+import { CONVERTIBLE_EXTENSIONS, convertFileWithMarkit } from "../utils/markit";
 
 // Keep CLI startup responsive and avoid OOM when users pass huge files.
 // If a file exceeds these limits, we include it as a path-only <file/> block.
 const MAX_CLI_TEXT_BYTES = 5 * 1024 * 1024; // 5MB
 const MAX_CLI_IMAGE_BYTES = 25 * 1024 * 1024; // 25MB
-const CONVERTIBLE_EXTENSIONS = new Set([".pdf", ".doc", ".docx", ".ppt", ".pptx", ".xls", ".xlsx", ".rtf", ".epub"]);
 
 export interface ProcessedFiles {
 	text: string;

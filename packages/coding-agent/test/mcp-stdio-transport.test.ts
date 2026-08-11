@@ -2,8 +2,8 @@ import { afterEach, describe, expect, it } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-
 import { resolveStdioSpawnCommand, StdioTransport, writeFrame } from "@oh-my-pi/pi-coding-agent/mcp/transports/stdio";
+import { removeWithRetries } from "@oh-my-pi/pi-utils";
 
 describe("resolveStdioSpawnCommand", () => {
 	it("resolves bare Windows commands through PATHEXT and wraps .cmd shims with cmd.exe", async () => {
@@ -28,13 +28,16 @@ describe("resolveStdioSpawnCommand", () => {
 			expect(result.cmd).toEqual([
 				"C:\\Windows\\System32\\cmd.exe",
 				"/d",
-				"/s",
+				"/e:ON",
+				"/v:OFF",
 				"/c",
-				`""${shim}" "serve" "--mcp""`,
+				`""${shim}" serve --mcp"`,
 			]);
+			expect(result.windowsVerbatimArguments).toBe(true);
 			expect(result.windowsHide).toBe(true);
+			expect(result.detached).toBe(false);
 		} finally {
-			await fs.rm(tempDir, { recursive: true, force: true });
+			await removeWithRetries(tempDir);
 		}
 	});
 
@@ -60,15 +63,82 @@ describe("resolveStdioSpawnCommand", () => {
 				},
 			);
 
-			expect(result.cmd).toEqual(["C:\\Windows\\System32\\cmd.exe", "/d", "/s", "/c", `""${localShim}" "serve""`]);
+			expect(result.cmd).toEqual([
+				"C:\\Windows\\System32\\cmd.exe",
+				"/d",
+				"/e:ON",
+				"/v:OFF",
+				"/c",
+				`""${localShim}" serve"`,
+			]);
+			expect(result.windowsVerbatimArguments).toBe(true);
 			expect(result.windowsHide).toBe(true);
+			expect(result.detached).toBe(false);
 		} finally {
-			await fs.rm(projectDir, { recursive: true, force: true });
-			await fs.rm(globalDir, { recursive: true, force: true });
+			await removeWithRetries(projectDir);
+			await removeWithRetries(globalDir);
 		}
 	});
 
-	it("launches npm .cmd shims through node so CodeGraph owns the stdio pipes", async () => {
+	it("keeps PATH-resolved npx.cmd on the cmd.exe path so npm preserves stdio semantics", async () => {
+		const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-mcp-npx-"));
+		try {
+			const shim = path.join(tempDir, "npx.cmd");
+			await Bun.write(
+				shim,
+				[
+					"@ECHO off",
+					"GOTO start",
+					":find_dp0",
+					"SET dp0=%~dp0",
+					"EXIT /b",
+					":start",
+					"SETLOCAL",
+					"CALL :find_dp0",
+					"",
+					'IF EXIST "%dp0%\\node.exe" (',
+					'  SET "_prog=%dp0%\\node.exe"',
+					") ELSE (",
+					'  SET "_prog=node"',
+					"  SET PATHEXT=%PATHEXT:;.JS;=;%",
+					")",
+					"",
+					'endLocal & goto #_undefined_# 2>NUL || title %COMSPEC% & "%_prog%" "%dp0%\\node_modules\\npm\\bin\\npx-cli.js" %*',
+					"",
+				].join("\r\n"),
+			);
+
+			const result = await resolveStdioSpawnCommand(
+				{ type: "stdio", command: "npx", args: ["-y", "mcp-gdb"] },
+				{
+					cwd: tempDir,
+					env: {
+						COMSPEC: "C:\\Windows\\System32\\cmd.exe",
+						PATH: tempDir,
+						PATHEXT: ".cmd",
+					},
+					platform: "win32",
+					hostHasInheritableConsole: true,
+				},
+			);
+
+			expect(result.cmd).toEqual([
+				"C:\\Windows\\System32\\cmd.exe",
+				"/d",
+				"/e:ON",
+				"/v:OFF",
+				"/c",
+				`""${shim}" -y mcp-gdb"`,
+			]);
+			expect(result.windowsVerbatimArguments).toBe(true);
+			expect(result.windowsHide).toBe(false);
+			expect(result.detached).toBe(false);
+		} finally {
+			await removeWithRetries(tempDir);
+		}
+	});
+
+	it("still launches non-npx npm .cmd shims through node so stdio stays owned by the server process", async () => {
 		const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-mcp-codegraph-"));
 		try {
 			const shim = path.join(tempDir, "codegraph.cmd");
@@ -107,13 +177,15 @@ describe("resolveStdioSpawnCommand", () => {
 						PATHEXT: ".cmd",
 					},
 					platform: "win32",
+					hostHasInheritableConsole: true,
 				},
 			);
 
 			expect(result.cmd).toEqual(["node", entry, "serve", "--mcp"]);
-			expect(result.windowsHide).toBe(true);
+			expect(result.windowsHide).toBe(false);
+			expect(result.detached).toBe(false);
 		} finally {
-			await fs.rm(tempDir, { recursive: true, force: true });
+			await removeWithRetries(tempDir);
 		}
 	});
 
@@ -152,14 +224,23 @@ describe("resolveStdioSpawnCommand", () => {
 				},
 			);
 
-			expect(result.cmd).toEqual(["C:\\Windows\\System32\\cmd.exe", "/d", "/s", "/c", `""${shim}" "serve""`]);
+			expect(result.cmd).toEqual([
+				"C:\\Windows\\System32\\cmd.exe",
+				"/d",
+				"/e:ON",
+				"/v:OFF",
+				"/c",
+				`""${shim}" serve"`,
+			]);
+			expect(result.windowsVerbatimArguments).toBe(true);
 			expect(result.windowsHide).toBe(true);
+			expect(result.detached).toBe(false);
 		} finally {
-			await fs.rm(tempDir, { recursive: true, force: true });
+			await removeWithRetries(tempDir);
 		}
 	});
 
-	it("escapes percent-delimited args before routing .cmd shims through cmd.exe", async () => {
+	it("neutralizes percent-delimited args so cmd.exe cannot expand them before the .cmd shim", async () => {
 		const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-mcp-percent-"));
 		try {
 			const shim = path.join(tempDir, "codegraph.cmd");
@@ -178,20 +259,26 @@ describe("resolveStdioSpawnCommand", () => {
 				},
 			);
 
+			// `%TOKEN%` -> `%%cd:~,%TOKEN%%cd:~,%`: `%cd:~,%` expands to nothing,
+			// so cmd.exe leaves a literal `%TOKEN%` for the shim instead of
+			// substituting an environment variable (BatBadBut / CVE-2024-24576).
 			expect(result.cmd).toEqual([
 				"C:\\Windows\\System32\\cmd.exe",
 				"/d",
-				"/s",
+				"/e:ON",
+				"/v:OFF",
 				"/c",
-				`""${shim}" "serve" "--header" "Authorization=^%TOKEN^%""`,
+				`""${shim}" serve --header "Authorization=%%cd:~,%TOKEN%%cd:~,%""`,
 			]);
+			expect(result.windowsVerbatimArguments).toBe(true);
 			expect(result.windowsHide).toBe(true);
+			expect(result.detached).toBe(false);
 		} finally {
-			await fs.rm(tempDir, { recursive: true, force: true });
+			await removeWithRetries(tempDir);
 		}
 	});
 
-	it("escapes quoted JSON args before routing .cmd shims through cmd.exe", async () => {
+	it("doubles embedded quotes so cmd.exe delivers JSON args to the .cmd shim intact", async () => {
 		const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-mcp-quotes-"));
 		try {
 			const shim = path.join(tempDir, "codegraph.cmd");
@@ -213,13 +300,16 @@ describe("resolveStdioSpawnCommand", () => {
 			expect(result.cmd).toEqual([
 				"C:\\Windows\\System32\\cmd.exe",
 				"/d",
-				"/s",
+				"/e:ON",
+				"/v:OFF",
 				"/c",
-				`""${shim}" "--config" "{^"a^":^"b&c|d^"}""`,
+				`""${shim}" --config "{""a"":""b&c|d""}""`,
 			]);
+			expect(result.windowsVerbatimArguments).toBe(true);
 			expect(result.windowsHide).toBe(true);
+			expect(result.detached).toBe(false);
 		} finally {
-			await fs.rm(tempDir, { recursive: true, force: true });
+			await removeWithRetries(tempDir);
 		}
 	});
 
@@ -253,17 +343,20 @@ describe("resolveStdioSpawnCommand", () => {
 			expect(result.cmd).toEqual([
 				"C:\\Windows\\System32\\cmd.exe",
 				"/d",
-				"/s",
+				"/e:ON",
+				"/v:OFF",
 				"/c",
-				`""${shim}" "serve" "--mcp""`,
+				`""${shim}" serve --mcp"`,
 			]);
+			expect(result.windowsVerbatimArguments).toBe(true);
 			expect(result.windowsHide).toBe(true);
+			expect(result.detached).toBe(false);
 		} finally {
-			await fs.rm(tempDir, { recursive: true, force: true });
+			await removeWithRetries(tempDir);
 		}
 	});
 
-	it("wraps explicit Windows .cmd commands with cmd.exe while preserving quoted argv", async () => {
+	it("wraps explicit Windows .cmd commands in an escaped cmd.exe command line", async () => {
 		const result = await resolveStdioSpawnCommand(
 			{ type: "stdio", command: "codegraph.cmd", args: ["serve", "--mcp"] },
 			{
@@ -280,11 +373,14 @@ describe("resolveStdioSpawnCommand", () => {
 		expect(result.cmd).toEqual([
 			"C:\\Windows\\System32\\cmd.exe",
 			"/d",
-			"/s",
+			"/e:ON",
+			"/v:OFF",
 			"/c",
-			`""codegraph.cmd" "serve" "--mcp""`,
+			`""codegraph.cmd" serve --mcp"`,
 		]);
+		expect(result.windowsVerbatimArguments).toBe(true);
 		expect(result.windowsHide).toBe(true);
+		expect(result.detached).toBe(false);
 	});
 
 	it("routes unresolvable bare Windows commands through cmd.exe so PATHEXT can find a .cmd shim (#3250)", async () => {
@@ -312,11 +408,123 @@ describe("resolveStdioSpawnCommand", () => {
 		expect(result.cmd).toEqual([
 			"C:\\Windows\\System32\\cmd.exe",
 			"/d",
-			"/s",
+			"/e:ON",
+			"/v:OFF",
 			"/c",
-			`""npx" "-y" "cloakbrowser-mcp@latest""`,
+			`""npx" -y cloakbrowser-mcp@latest"`,
 		]);
+		expect(result.windowsVerbatimArguments).toBe(true);
 		expect(result.windowsHide).toBe(true);
+		expect(result.detached).toBe(false);
+	});
+
+	it("escapes command-injection payloads in .cmd shim args instead of leaving them live for cmd.exe", async () => {
+		// BatBadBut / CVE-2024-24576: cmd.exe re-parses the /c string and
+		// expands variables before the shim's argv split, so a crafted arg such
+		// as `"&calc.exe` or `%CMDCMDLINE:~-1%&calc.exe` could break out and run
+		// an attacker command. The escaped line MUST keep each `&` inside quotes
+		// and split every `%` with `%cd:~,%` (which expands to nothing), so no
+		// live `%VAR%` reference or bare `&calc.exe` reaches cmd.exe.
+		const result = await resolveStdioSpawnCommand(
+			{ type: "stdio", command: "npx", args: ['"&calc.exe', "%CMDCMDLINE:~-1%&calc.exe"] },
+			{
+				cwd: "C:\\project",
+				env: {
+					COMSPEC: "C:\\Windows\\System32\\cmd.exe",
+					PATH: "",
+					PATHEXT: ".COM;.EXE;.BAT;.CMD",
+				},
+				platform: "win32",
+			},
+		);
+
+		const line = result.cmd.at(-1) ?? "";
+		expect(line).toBe(`""npx" """&calc.exe" "%%cd:~,%CMDCMDLINE:~-1%%cd:~,%&calc.exe""`);
+		// Every raw `%` is broken by an inserted `%cd:~,%`, so no substring
+		// remains that cmd.exe would expand as `%…%` (the `~-1` extraction that
+		// pulls a literal quote out of `%CMDCMDLINE%` can no longer fire).
+		expect(line).not.toContain("%CMDCMDLINE:~-1%&");
+		expect(line.split("&calc.exe").length - 1).toBe(2);
+		expect(result.windowsVerbatimArguments).toBe(true);
+	});
+
+	it("rejects .cmd shim args containing characters that cannot round-trip through cmd.exe", async () => {
+		for (const bad of ["a\0b", "a\rb", "a\nb"]) {
+			await expect(
+				resolveStdioSpawnCommand(
+					{ type: "stdio", command: "npx", args: [bad] },
+					{
+						cwd: "C:\\project",
+						env: {
+							COMSPEC: "C:\\Windows\\System32\\cmd.exe",
+							PATH: "",
+							PATHEXT: ".COM;.EXE;.BAT;.CMD",
+						},
+						platform: "win32",
+					},
+				),
+			).rejects.toThrow(/NUL, CR, or LF/);
+		}
+	});
+
+	it("neutralizes percent syntax in the resolved .cmd path so cmd.exe launches the real shim", async () => {
+		// A project/PATH directory can legally contain `%` on NTFS. cmd.exe
+		// expands `%VAR%` across the whole /c string before launching the batch
+		// file, so an un-escaped command token like C:\work\%TOKEN%\server.cmd
+		// would resolve to a different path. The command token must be escaped
+		// the same way arguments are.
+		const base = await fs.mkdtemp(path.join(os.tmpdir(), "omp-mcp-cmdpct-"));
+		const dir = path.join(base, "%TOKEN%");
+		try {
+			await fs.mkdir(dir, { recursive: true });
+			const shim = path.join(dir, "server.cmd");
+			await Bun.write(shim, "@echo off\r\n");
+
+			const result = await resolveStdioSpawnCommand(
+				{ type: "stdio", command: shim, args: ["serve"] },
+				{
+					cwd: base,
+					env: {
+						COMSPEC: "C:\\Windows\\System32\\cmd.exe",
+						PATH: "",
+						PATHEXT: ".cmd",
+					},
+					platform: "win32",
+				},
+			);
+
+			const escapedShim = shim.replace("%TOKEN%", "%%cd:~,%TOKEN%%cd:~,%");
+			expect(result.cmd).toEqual([
+				"C:\\Windows\\System32\\cmd.exe",
+				"/d",
+				"/e:ON",
+				"/v:OFF",
+				"/c",
+				`""${escapedShim}" serve"`,
+			]);
+			// No live `%TOKEN%` reference survives for cmd.exe to expand.
+			expect(result.cmd.at(-1)).not.toContain(`${path.join(base, "%TOKEN%")}`);
+			expect(result.windowsVerbatimArguments).toBe(true);
+		} finally {
+			await removeWithRetries(base);
+		}
+	});
+
+	it("rejects a resolved .cmd command path containing characters that cannot round-trip through cmd.exe", async () => {
+		await expect(
+			resolveStdioSpawnCommand(
+				{ type: "stdio", command: "C:\\work\\ser\rver.cmd", args: ["serve"] },
+				{
+					cwd: "C:\\project",
+					env: {
+						COMSPEC: "C:\\Windows\\System32\\cmd.exe",
+						PATH: "",
+						PATHEXT: ".COM;.EXE;.BAT;.CMD",
+					},
+					platform: "win32",
+				},
+			),
+		).rejects.toThrow(/command cannot contain NUL, CR, or LF/);
 	});
 
 	it("leaves non-Windows commands untouched", async () => {
@@ -327,6 +535,33 @@ describe("resolveStdioSpawnCommand", () => {
 
 		expect(result.cmd).toEqual(["codegraph", "serve", "--mcp"]);
 		expect(result.windowsHide).toBeUndefined();
+		expect(result.detached).toBe(true);
+	});
+
+	it("keeps console-attached Windows cmd.exe wrapper chains out of CREATE_NO_WINDOW (#3567)", async () => {
+		// The #3544 shape is `cmd.exe` → `node wrapper` → another console
+		// launcher (`cmd.exe /C npx.cmd`, PowerShell, similar). If the OMP host
+		// already owns a terminal console, `windowsHide: true` maps to
+		// CREATE_NO_WINDOW and strips that inheritable console from the direct
+		// hidden wrapper. Grandchildren then allocate fresh visible conhost
+		// windows during startup or reconnect loops (#3567). Keep the tree
+		// attached to OMP's console instead.
+		const result = await resolveStdioSpawnCommand(
+			{ type: "stdio", command: "cmd.exe", args: ["/C", "node .codex\\mcp-wrapper.js"] },
+			{
+				cwd: "C:\\project",
+				env: {
+					COMSPEC: "C:\\Windows\\System32\\cmd.exe",
+					PATH: "",
+					PATHEXT: ".COM;.EXE;.BAT;.CMD",
+				},
+				platform: "win32",
+				hostHasInheritableConsole: true,
+			},
+		);
+
+		expect(result.detached).toBe(false);
+		expect(result.windowsHide).toBe(false);
 	});
 });
 
@@ -610,4 +845,68 @@ describe("StdioTransport.close", () => {
 		expect(closeCount).toBe(1);
 		expect(transport.connected).toBe(false);
 	});
+
+	// Regression for #5578: close() escalates SIGTERM to SIGKILL when the
+	// subprocess ignores the former, so this must stay idempotent even when
+	// the *first* close() had to run the full escalation path, not just the
+	// already-covered "child exited before close()" and "child dies on plain
+	// SIGTERM" cases above. POSIX-only: on Windows, `Subprocess.kill("SIGTERM")`
+	// terminates the process immediately regardless of the handler, so the
+	// child cannot trap it and the `elapsedMs >= 900` escalation-timing
+	// assertion below would fail even though Windows `close()` behaves
+	// correctly — same rationale as the `terminateStdioProcess` describe
+	// block's platform skip in `stdio.test.ts`.
+	it.skipIf(process.platform === "win32")(
+		"is idempotent even when close() had to escalate to SIGKILL",
+		async () => {
+			const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-mcp-stdio-close-escalate-"));
+			const scriptPath = path.join(tempDir, "child.mjs");
+			const readyPath = path.join(tempDir, "ready");
+			try {
+				await fs.writeFile(
+					scriptPath,
+					[
+						"import { writeFileSync } from 'node:fs';",
+						"process.on('SIGTERM', () => {});",
+						`writeFileSync(${JSON.stringify(readyPath)}, '1');`,
+						"setInterval(() => {}, 60_000);",
+					].join("\n"),
+				);
+				transport = new StdioTransport({
+					type: "stdio",
+					command: "bun",
+					args: ["run", scriptPath],
+				});
+
+				await transport.connect();
+
+				// Wait for the child to actually register its SIGTERM handler before
+				// closing: closing too early races the child's startup and hits the
+				// default (terminate) action instead of exercising the escalation
+				// path this test defends.
+				for (let i = 0; i < 100; i++) {
+					try {
+						await fs.access(readyPath);
+						break;
+					} catch {
+						await Bun.sleep(20);
+					}
+				}
+
+				const started = performance.now();
+				await transport.close();
+				const elapsedMs = performance.now() - started;
+				// Escalation only fires after the SIGTERM grace window elapses.
+				expect(elapsedMs).toBeGreaterThanOrEqual(900);
+
+				// Repeat close() calls must not throw or attempt to re-signal a
+				// process the first call already tore down.
+				await expect(transport.close()).resolves.toBeUndefined();
+				await expect(transport.close()).resolves.toBeUndefined();
+			} finally {
+				await fs.rm(tempDir, { recursive: true, force: true });
+			}
+		},
+		5000,
+	);
 });
