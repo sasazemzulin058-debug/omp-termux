@@ -20,7 +20,7 @@ permissions:
 jobs:
   release:
     name: Build and attach android-arm64 addon
-    runs-on: ubuntu-24.04-8-core
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
         with:

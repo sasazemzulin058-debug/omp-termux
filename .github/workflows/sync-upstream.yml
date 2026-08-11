@@ -59,5 +59,13 @@ jobs:
           git push origin "$tag" --force
           gh workflow run android-release.yml --ref "$tag" \
             -f tag="$tag"
+          for attempt in 1 2 3; do
+            sleep 15
+            run_id=$(gh run list --workflow android-release.yml --branch "$tag" --limit 1 --json databaseId --jq '.[0].databaseId')
+            [ -n "$run_id" ] || continue
+            gh run watch "$run_id" --exit-status && exit 0
+            [ "$attempt" -lt 3 ] || exit 1
+            gh run rerun "$run_id" --failed
+          done
         env:
           GH_TOKEN: ${{ github.token }}
