@@ -39,7 +39,7 @@ jobs:
         run: python3 android/scripts/check-release-inputs.py
 
       - name: Install Rust target
-        shell: pwsh
+        shell: powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command "& '{0}'"
         run: |
           rustup show active-toolchain
           if ($LASTEXITCODE -ne 0) { rustup toolchain install }

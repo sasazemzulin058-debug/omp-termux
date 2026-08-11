@@ -44,7 +44,7 @@ jobs:
       - name: Install Rust target for the repo-pinned toolchain
         # rust-toolchain.toml pins nightly-2026-04-29; rustup auto-activates it
         # for any cargo invocation in the repo.
-        shell: pwsh
+        shell: powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command "& '{0}'"
         run: |
           rustup show active-toolchain
           if ($LASTEXITCODE -ne 0) { rustup toolchain install }
