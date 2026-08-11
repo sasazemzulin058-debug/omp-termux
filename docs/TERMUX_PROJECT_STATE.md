@@ -44,7 +44,7 @@ native-addon ──┐
 js-bundle ─────┘
 ```
 
-`native-addon` builds `pi_natives.android-arm64.node` with NDK r27 and uploads it as an artifact. Native jobs use `ubuntu-24.04-8-core`; standard `ubuntu-24.04` reached Rust compilation but was terminated with exit 143.
+`native-addon` builds `pi_natives.android-arm64.node` with NDK r27 and uploads it as an artifact. Native build uses an NDK-supported GitHub host and derives the NDK host toolchain from `uname -m`.
 
 `js-bundle` builds JavaScript bundle and uploads `termux-js-bundle`.
 
@@ -55,9 +55,7 @@ js-bundle ─────┘
 - `pi_natives.android-arm64.node`
 - `pi_natives.android-arm64.node.sha256`
 
-Preflight checks reject version/tag mismatch, missing overlay inputs, and runtime caches. The lockfile was synchronized in commit `78391f2f` after run `31489858118` failed at frozen install.
-
-Jobs use `CARGO_BUILD_JOBS=1`, low optimization, disabled debug info, and swap.
+Preflight checks reject version/tag mismatch, missing overlay inputs, runtime caches, and lockfile drift. Native compilation uses `CARGO_BUILD_JOBS=1`, low optimization, disabled debug info, and swap.
 
 ## Android overlay
 
@@ -100,13 +98,9 @@ Device does not run `bun install`, Rust, clang, or native source build.
 As of this document update:
 
 - latest successful published release: `v0.1.6`; its four expected assets exist;
-- release foundation and research log are published through commits `932b1030` and `f73c15d5`;
-- `bun.lock` is synchronized with current upstream package metadata in commit `78391f2f`;
-- run `31489632958` passed dependency install and overlay verification, then failed native Rust compilation with exit 143 on standard runner;
-- run `31490421319` remained queued because `ubuntu-24.04-8-core` is unavailable for this public repository;
-- run `31491799176` proved public `ubuntu-24.04-arm` is available but `nttld/setup-ndk@v1` rejects host `linux-arm64`;
-- native jobs now use x64 `ubuntu-24.04` with an 8G swap step; build script keeps dynamic NDK host-tag resolution;
-- next release run must confirm whether swap resolves exit 143; release assets remain unpublished for `v17.2.12-termux*`;
+- release foundation and research log are published;
+- `bun.lock` is synchronized with current upstream package metadata;
+- tags without published assets are not installable;
 - full physical test on another Android device is still pending;
 - `docs/TERMUX_COMPATIBILITY_MATRIX.md` is authoritative for subsystem status and no-feature-loss acceptance criteria.
 

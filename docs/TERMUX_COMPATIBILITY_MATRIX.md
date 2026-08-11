@@ -28,11 +28,11 @@
 *   **Баг-трекер Bun (Android):** [#30859 EACCES/cwd](https://github.com/oven-sh/bun/issues/30859), [#30766 seccomp/SIGSYS](https://github.com/oven-sh/bun/issues/30766), [#30666 Termux support](https://github.com/oven-sh/bun/issues/30666), [PR #29675 Android target](https://github.com/oven-sh/bun/pull/29675)
 *   **Документация Termux:** [execution environment](https://github.com/termux/termux-packages/wiki/Termux-execution-environment), [filesystem layout](https://github.com/termux/termux-packages/wiki/Termux-file-system-layout)
 
-### Фактическое состояние репозитория и CI
-1.  **Последний успешный стабильный релиз:** `v0.1.6` (`НЕ ПРОВЕРЕНО` на физическом устройстве в полном объеме).
-2.  **Тег `v17.2.12-termux`:** Создан в Git, но сборка в GitHub Actions [завершилась ошибкой (Run 31485948518)](https://github.com/sasazemzulin058-debug/omp-termux/actions/runs/31485948518) из-за превышения лимитов памяти/времени на runner (`SIGTERM` / exit 143 в Rust compiler). Релизные артефакты для этого тега **отсутствуют**.
-3.  **Оверлей сборки:** Нативные патчи переведены из `android/patches/` в детерминированный Python-скрипт оверлея [`android/scripts/apply-overlay.py`](https://github.com/sasazemzulin058-debug/omp-termux/blob/main/android/scripts/apply-overlay.py) и верификатор [`android/scripts/verify-overlay.py`](https://github.com/sasazemzulin058-debug/omp-termux/blob/main/android/scripts/verify-overlay.py).
-4.  **Установка:** Выполняется в один шаг через `quickstart.sh` без локальной сборки Rust/C++ на Android-устройстве.
+### Фактическое состояние репозитория
+1. Последний стабильный опубликованный релиз: `v0.1.6`; физическая E2E-проверка полного OMP на устройстве не завершена.
+2. Теги без опубликованных и проверенных assets не считаются installable.
+3. Оверлей сборки — детерминированные `android/scripts/apply-overlay.py` и `android/scripts/verify-overlay.py`.
+4. Установка выполняется через `quickstart.sh` без локальной Rust/C++ сборки на Android.
 
 ---
 
@@ -83,7 +83,7 @@
 | **WebRTC** | `НЕ ПОДДЕРЖИВАЕТСЯ` | Нативные модули WebRTC не собираются под Android NDK в данном форке. | Отсутствует нативный интерфейс передачи потоков. | `ОГРАНИЧЕНИЕ ФОРКА` |
 | **Isolation / Sandboxing** | `ОГРАНИЧЕННО` | Изоляция ограничена Linux UID/GID приложения Termux в Android. | Отсутствуют `namespaces`, `chroot` без root и полноценный `docker`/`podman`. | Android OS Security Model |
 | **Install & Update** | `АДАПТИРОВАНО` | Автоматическая загрузка готовкой сборки JS + NDK-нативного аддона через `quickstart.sh`. | Нет автоматического фонового обновления; обновление переустановкой. | [`quickstart.sh`](https://github.com/sasazemzulin058-debug/omp-termux/blob/main/quickstart.sh) |
-| **CI / Cross-Compile** | `АДАПТИРОВАНО` | Двухэтапный сборщик GitHub Actions (`android-release.yml`) с ограничениями ресурсов Rust. | GitHub Runners поддаются `SIGTERM` при компиляции больших Rust-крайтов без `CARGO_BUILD_JOBS=1`. | [`.github/workflows/android-release.yml`](https://github.com/sasazemzulin058-debug/omp-termux/blob/main/.github/workflows/android-release.yml) |
+| **CI / Cross-Compile** | `АДАПТИРОВАНО` | Двухэтапный GitHub Actions pipeline с NDK r27, preflight, checksum и artifact checks. | Native build требует NDK-compatible host, low-memory настройки и отдельный Android runtime smoke. | [`.github/workflows/android-release.yml`](https://github.com/sasazemzulin058-debug/omp-termux/blob/main/.github/workflows/android-release.yml) |
 | **Security & Permissions** | `ПОДДЕРЖИВАЕТСЯ` | Соблюдение модели разрешений Android SELinux и Termux storage access. | Требуется явное разрешение `termux-setup-storage` для доступа к `/sdcard`. | Termux Wiki |
 | **Lifecycle & Background** | `ОГРАНИЧЕННО` | Выполнение процессов в рамках сессии Termux. | Завершение процессов операционной системой из-за Phantom Process Killer в Android 12+. | Android OS restrictions |
 
@@ -179,15 +179,11 @@ omp --eval 'import { ps } from "pi-builtins"; console.log(ps)'
 ---
 
 ## 10. Приоритетная дорожная карта (Roadmap)
-
-1.  **Высокий приоритет (P0):**
-    *   Опубликовать успешный релиз под новым тегом upstream и подтвердить создание артефактов в `android-release.yml`.
-    *   Провести физическое сквозное тестирование (E2E) на реальном Android-устройстве под управлением Android 14+ (`НЕ ПРОВЕРЕНО`).
-2.  **Средний приоритет (P1):**
-    *   Добавить интеграцию с `termux-clipboard-set` / `termux-clipboard-get` на уровне JS CLI для восстановления работы буфера обмена.
-    *   Добавить обработку грациозного завершения при получении сигнала от Android Phantom Process Killer.
-3.  **Низкий приоритет (P2):**
-    *   Оптимизировать время сборки нативного аддона в GitHub Actions runner.
+1. **P0:** опубликовать verified Android artifact и провести физическое E2E на Android 14+.
+2. **P1:** добавить Termux clipboard API, signal/lifecycle recovery, shell/TMPDIR/socket capability adapters.
+3. **P1:** проверить LSP/DAP/browser через native/remote backends.
+4. **P2:** реализовать audio/WebRTC и другие Android adapters без silent stubs.
+5. **Никогда:** не подменять Android/Bionic artifact glibc binary и не объявлять функции поддержанными без runtime evidence.
 
 ---
 
@@ -216,13 +212,9 @@ omp --eval 'import { ps } from "pi-builtins"; console.log(ps)'
 | Termux runtime | `process.platform=android`, `process.arch=arm64`, Bun `1.3.14`, Node `24.18.0` | локальный Android smoke |
 | Shell | `/system/bin/sh` и Bun spawn работают | локальный subprocess smoke |
 | Upstream native loader до overlay | `Unsupported platform: android-arm64` | импорт `packages/natives/native/index.js` |
-| Bun dependency stage | frozen lockfile drift | [run 31489632958](https://github.com/sasazemzulin058-debug/omp-termux/actions/runs/31489632958) |
-| Lockfile correction | `bun.lock` regenerated and committed as `78391f2f` | fork commit |
-| Overlay/dependency stage после correction | passed; native stage reached | [run 31489858118](https://github.com/sasazemzulin058-debug/omp-termux/actions/runs/31489858118) |
-| Standard runner native build | exit 143 during Rust compile | run `31489858118` |
-| Larger runner experiment | fork history already tested `ubuntu-24.04-8-core` | commit `9d66eba16c23` |
-| Current larger-runner attempt | queued; availability not yet proven | [run 31490421319](https://github.com/sasazemzulin058-debug/omp-termux/actions/runs/31490421319) |
-| Existing release | `v0.1.6` has four expected assets | `gh release view v0.1.6` |
+| Bun dependency contract | lockfile drift выявляется preflight; synchronized lockfile required | `android/scripts/check-release-inputs.py` |
+| Native artifact contract | Android filename and SHA-256 are mandatory | `android-release.yml` |
+| Existing release | `v0.1.6` has four expected assets | GitHub Release metadata |
 
 ### Внешние источники
 
@@ -235,11 +227,10 @@ omp --eval 'import { ps } from "pi-builtins"; console.log(ps)'
 
 ### Следующий план
 
-1. Дождаться/проверить `ubuntu-24.04-8-core` native run.
-2. Если runner доступен: запустить `android-release.yml` на новом immutable test tag, проверить четыре assets и checksum.
-3. Если runner недоступен: выбрать доступный larger/self-hosted runner; не снижать native build correctness и не возвращаться к glibc artifact.
-4. После artifact: добавить Android capability/runtime smoke и loader test на физическом Termux.
-5. Затем реализовать Termux clipboard API, shell/TMPDIR/socket adapters, process fallback, browser/CDP и DAP capability paths.
+1. Завершить reproducible Android native build на NDK-compatible GitHub/self-hosted runner с достаточной памятью; не снижать функциональность и не возвращаться к glibc artifact.
+2. Запустить `android-release.yml` на новом immutable tag; проверить четыре assets и checksum.
+3. После artifact добавить Android capability/runtime smoke и loader test на физическом Termux.
+4. Затем реализовать Termux clipboard API, shell/TMPDIR/socket adapters, process fallback, browser/CDP и DAP capability paths.
 
 ### Verification commands
 
