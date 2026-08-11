@@ -40,6 +40,25 @@ export CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER="$NDK_CLANG"
 export CARGO_TARGET_AARCH64_LINUX_ANDROID_AR="$NDK_AR"
 export CARGO_TARGET_AARCH64_LINUX_ANDROID_RANLIB="$NDK_RANLIB"
 
+# napi may inject its own Android NDK linker. Cargo config wins over that
+# default and keeps all native objects on same NDK toolchain.
+mkdir -p .cargo
+CARGO_CONFIG_BACKUP=""
+if [ -f .cargo/config.toml ]; then
+	CARGO_CONFIG_BACKUP="$(mktemp)"
+	cp .cargo/config.toml "$CARGO_CONFIG_BACKUP"
+fi
+restore_cargo_config() {
+	if [ -n "$CARGO_CONFIG_BACKUP" ]; then cp "$CARGO_CONFIG_BACKUP" .cargo/config.toml; rm -f "$CARGO_CONFIG_BACKUP"; else rm -f .cargo/config.toml; fi
+}
+trap restore_cargo_config EXIT
+cat > .cargo/config.toml <<EOF
+[target.aarch64-linux-android]
+linker = "$NDK_CLANG"
+ar = "$NDK_AR"
+runner = "$NDK_CLANG"
+EOF
+
 # Locate the napi bin. The CLI is declared as a dev dependency in
 # packages/natives, so `bun install` should hoist `node_modules/.bin/napi` to
 # the repo root, but workspace hoisting varies; check several locations and
