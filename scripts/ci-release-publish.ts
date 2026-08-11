@@ -14,9 +14,14 @@
  *      that points at `./src/*.ts(x)` is repointed to `./dist/types/*.d.ts`,
  *      `dist/types` (plus `dist/client` for `stats`) is added to `files`,
  *      and packages with a `publishBin` override get their `bin` swapped to
- *      the prepack bundle (coding-agent: `src/cli.ts` → `dist/cli.js`). The
- *      on-repo manifest keeps pointing at source so local dev and source
- *      installs (`bun link`, `install.sh --source`) work without a build.
+ *      the prepack bundle (coding-agent: `src/cli.ts` → `dist/cli.js`).
+ *      Packages flagged `publishJs` (omptype) additionally emit transpiled
+ *      per-module JS into `dist/js/` and get their runtime entries (`main`,
+ *      `exports[*]` import paths) repointed there, with a `bun` condition
+ *      keeping TS-source resolution for Bun consumers — so the published
+ *      package runs on plain Node. The on-repo manifest keeps pointing at
+ *      source so local dev and source installs (`bun link`,
+ *      `install.sh --source`) work without a build.
  *   3. Pack with `bun pm pack` (resolves the `catalog:`/`workspace:`
  *      protocols npm cannot, and runs each package's `prepack` lifecycle),
  *      then publish the resolved tarball with `npm publish` — see
@@ -31,10 +36,11 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { $ } from "bun";
 import {
+	type GeneratedLeafPackage,
 	generateNpmPackages,
 	LEAF_TARGETS,
-	type GeneratedLeafPackage,
 } from "../packages/natives/scripts/gen-npm-packages.ts";
+import { fixEmitExtensions } from "./fix-emit-extensions.ts";
 
 export interface PublishPackage {
 	dir: string;
@@ -45,6 +51,12 @@ export interface PublishPackage {
 	extraFiles?: readonly string[];
 	/** Extra tsgo invocations beyond `tsconfig.publish.json`. */
 	extraTypeConfigs?: readonly string[];
+	/**
+	 * Also emit transpiled JS to `dist/js` (via `tsconfig.publish.js.json`)
+	 * and repoint the published runtime entries there so the package runs on
+	 * plain Node. Requires the package to be dependency-free of Bun APIs.
+	 */
+	publishJs?: boolean;
 	/**
 	 * `bin` map for the published manifest. The on-repo manifest points `bin`
 	 * at TS source so source installs (`bun link`, `install.sh --source`) work
@@ -86,6 +98,7 @@ const nativeLeafTag = nativeLeafTagFromArgs(process.argv.slice(2));
 export const packages: PublishPackage[] = [
 	{ dir: "packages/utils", kind: "typescript" },
 	{ dir: "packages/wire", kind: "typescript" },
+	{ dir: "packages/omptype", kind: "typescript", publishJs: true },
 	{ dir: "packages/catalog", kind: "typescript" },
 	{ dir: "packages/ai", kind: "typescript" },
 	{ dir: "packages/natives", kind: "native" },
@@ -104,18 +117,30 @@ export const packages: PublishPackage[] = [
 	{ dir: "packages/coding-agent", kind: "typescript", publishBin: { omp: "dist/cli.js" } },
 ];
 
-function rewriteSrcPath(value: string): string {
+function rewriteSrcToTypes(value: string): string {
 	if (!value.startsWith("./src/")) return value;
 	const rel = value.slice("./src/".length).replace(/\.tsx?$/, "");
 	return `./dist/types/${rel}.d.ts`;
 }
 
-function rewriteExports(exports: JsonValue): JsonValue {
+function rewriteSrcToJs(value: string): string {
+	if (!value.startsWith("./src/")) return value;
+	const rel = value.slice("./src/".length).replace(/\.tsx?$/, "");
+	return `./dist/js/${rel}.js`;
+}
+
+function rewriteExports(exports: JsonValue, publishJs: boolean): JsonValue {
 	if (exports === null || typeof exports !== "object" || Array.isArray(exports)) return exports;
 	const src = exports as JsonObject;
 	const out: JsonObject = {};
 	for (const key in src) {
 		const val = src[key];
+		if (publishJs && typeof val === "string" && val.startsWith("./src/")) {
+			// String-form subpath (e.g. `"./*.js": "./src/*.ts"`): declarations
+			// for TS, TS source for Bun, transpiled JS for everything else.
+			out[key] = { types: rewriteSrcToTypes(val), bun: val, default: rewriteSrcToJs(val) };
+			continue;
+		}
 		if (
 			val !== null &&
 			typeof val === "object" &&
@@ -123,9 +148,16 @@ function rewriteExports(exports: JsonValue): JsonValue {
 			typeof (val as JsonObject).types === "string" &&
 			((val as JsonObject).types as string).startsWith("./src/")
 		) {
-			const next: JsonObject = { ...(val as JsonObject) };
-			next.types = rewriteSrcPath(next.types as string);
-			out[key] = next;
+			const srcTypes = (val as JsonObject).types as string;
+			if (publishJs) {
+				// Condition order matters: `types` is TS-only, `bun` must win
+				// over `default` for Bun consumers.
+				out[key] = { types: rewriteSrcToTypes(srcTypes), bun: srcTypes, default: rewriteSrcToJs(srcTypes) };
+			} else {
+				const next: JsonObject = { ...(val as JsonObject) };
+				next.types = rewriteSrcToTypes(srcTypes);
+				out[key] = next;
+			}
 		} else {
 			out[key] = val;
 		}
@@ -133,17 +165,22 @@ function rewriteExports(exports: JsonValue): JsonValue {
 	return out;
 }
 
-async function rewriteManifest(pkg: PublishPackage, write: boolean): Promise<PackageManifest> {
+/** Compute (and optionally write) the published manifest for a package. */
+export async function rewriteManifest(pkg: PublishPackage, write: boolean): Promise<PackageManifest> {
 	const manifestPath = path.join(repoRoot, pkg.dir, "package.json");
 	const manifest = (await Bun.file(manifestPath).json()) as PackageManifest;
 	if (pkg.publishBin) manifest.bin = { ...pkg.publishBin };
 	if (typeof manifest.types === "string" && manifest.types.startsWith("./src/")) {
-		manifest.types = rewriteSrcPath(manifest.types);
+		manifest.types = rewriteSrcToTypes(manifest.types);
 	}
-	if (manifest.exports !== undefined) manifest.exports = rewriteExports(manifest.exports);
+	if (pkg.publishJs && typeof manifest.main === "string") {
+		manifest.main = rewriteSrcToJs(manifest.main);
+	}
+	if (manifest.exports !== undefined) manifest.exports = rewriteExports(manifest.exports, pkg.publishJs === true);
 	const files = Array.isArray(manifest.files) ? [...manifest.files] : [];
 	const hasDist = files.includes("dist");
 	if (!hasDist && !files.includes("dist/types")) files.push("dist/types");
+	if (pkg.publishJs && !hasDist && !files.includes("dist/js")) files.push("dist/js");
 	for (const extra of pkg.extraFiles ?? []) {
 		if (!hasDist && !files.includes(extra)) files.push(extra);
 	}
@@ -160,6 +197,16 @@ async function preparePackage(pkg: PublishPackage): Promise<PackageManifest> {
 	await $`bun x tsgo -p tsconfig.publish.json`.cwd(pkgDir);
 	for (const cfg of pkg.extraTypeConfigs ?? []) {
 		await $`bun x tsgo -p ${cfg}`.cwd(pkgDir);
+	}
+	if (pkg.publishJs) {
+		await $`bun x tsgo -p tsconfig.publish.js.json`.cwd(pkgDir);
+	}
+	// Both emits run under `moduleResolution: "Bundler"`, so relative
+	// specifiers land extensionless — unresolvable for a `nodenext` consumer
+	// (types) and for Node ESM at runtime (js). Rewrite them to explicit `.js`.
+	await fixEmitExtensions(path.join(pkgDir, "dist/types"), ".d.ts");
+	if (pkg.publishJs) {
+		await fixEmitExtensions(path.join(pkgDir, "dist/js"), ".js");
 	}
 	return rewriteManifest(pkg, !isDryRun);
 }
@@ -196,6 +243,10 @@ export async function prepareNativeCorePackage(pkgDir: string, write: boolean): 
 	manifest.files = [
 		"native/index.js",
 		"native/index.d.ts",
+		"native/clipboard.js",
+		"native/clipboard.d.ts",
+		"native/desktop.js",
+		"native/desktop.d.ts",
 		"native/loader-state.js",
 		"native/loader-state.d.ts",
 		"native/embedded-addon.js",
@@ -222,6 +273,25 @@ export async function prepareNativeCorePackage(pkgDir: string, write: boolean): 
  * only on the OIDC path, so we never pass `--provenance` (it would hard-fail the
  * token fallback).
  */
+export interface PackedTarball {
+	name: string;
+	version: string;
+	path: string;
+}
+
+/** Read the package identity npm will publish from the packed archive. */
+export async function inspectPackedTarball(tarballPath: string): Promise<PackedTarball> {
+	const extracted = await $`tar -xOzf ${tarballPath} package/package.json`.quiet().nothrow();
+	if (extracted.exitCode !== 0) {
+		throw new Error(`Could not read packed manifest from ${tarballPath}: ${extracted.stderr.toString().trim()}`);
+	}
+	const manifest = JSON.parse(extracted.stdout.toString()) as PackageManifest;
+	if (typeof manifest.name !== "string" || typeof manifest.version !== "string") {
+		throw new Error(`Packed manifest is missing name/version: ${tarballPath}`);
+	}
+	return { name: manifest.name, version: manifest.version, path: tarballPath };
+}
+
 async function packAndPublish(dir: string, name: string): Promise<void> {
 	if (isDryRun) {
 		console.log(`DRY RUN bun pm pack && npm publish --access public (${path.relative(repoRoot, dir)})`);
@@ -238,15 +308,21 @@ async function packAndPublish(dir: string, name: string): Promise<void> {
 		}
 		const tarball = (await fs.readdir(packDir)).find(entry => entry.endsWith(".tgz"));
 		if (!tarball) throw new Error(`bun pm pack produced no tarball for ${name} (${path.relative(repoRoot, dir)})`);
-		const result = await $`npm publish ${path.join(packDir, tarball)} --access public`.quiet().nothrow();
+		const packedTarball = await inspectPackedTarball(path.join(packDir, tarball));
+		// Preflight the exact packed version so reruns skip deterministically.
+		// Fail open on lookup errors; only a confirmed published version may skip publishing.
+		const preflight = await $`npm view ${`${packedTarball.name}@${packedTarball.version}`} version`.quiet().nothrow();
+		if (preflight.exitCode === 0 && preflight.stdout.toString().trim()) {
+			console.log(`Skipping ${packedTarball.name} (version already published)`);
+			return;
+		}
+		const result = await $`npm publish ${packedTarball.path} --access public`.quiet().nothrow();
 		const output = `${result.stdout.toString()}${result.stderr.toString()}`.trim();
 		if (output) console.log(output);
 		if (result.exitCode !== 0) {
-			// Idempotent re-runs: tolerate this exact version already being on the
-			// registry (the `bun publish --tolerate-republish` equivalent), but
-			// surface every other failure.
+			// A concurrent publisher may win after the preflight.
 			if (isVersionAlreadyPublished(output)) {
-				console.log(`Skipping ${name} (version already published)`);
+				console.log(`Skipping ${packedTarball.name} (version already published)`);
 				return;
 			}
 			process.exit(result.exitCode ?? 1);
@@ -256,9 +332,15 @@ async function packAndPublish(dir: string, name: string): Promise<void> {
 	}
 }
 
-/** Match npm's rejection when this exact version already exists on the registry. */
-function isVersionAlreadyPublished(output: string): boolean {
-	return /cannot publish over the previously published version|EPUBLISHCONFLICT/i.test(output);
+/**
+ * npm's existing-version machine codes across supported CLI generations, plus
+ * npm 11's registry-precheck prose when it emits no machine code.
+ */
+export function isVersionAlreadyPublished(output: string): boolean {
+	return (
+		/npm (?:error|err!) code (E409|EPUBLISHCONFLICT)\b/i.test(output) ||
+		/you cannot publish over (?:the )?previously published versions?\b/i.test(output)
+	);
 }
 
 async function publishGeneratedLeafPackage(leaf: GeneratedLeafPackage): Promise<void> {
@@ -271,7 +353,12 @@ async function publishNativeLeafPackage(tag: string): Promise<void> {
 	const pkgDir = path.join(repoRoot, pkg.dir);
 	const coreManifest = (await Bun.file(path.join(pkgDir, "package.json")).json()) as PackageManifest;
 	if (typeof coreManifest.version !== "string") throw new Error(`Missing version in ${pkg.dir}/package.json`);
-	const leaves = await generateNpmPackages({ packageDir: pkgDir, dryRun: isDryRun, version: coreManifest.version, tags: [tag] });
+	const leaves = await generateNpmPackages({
+		packageDir: pkgDir,
+		dryRun: isDryRun,
+		version: coreManifest.version,
+		tags: [tag],
+	});
 	const leaf = leaves[0];
 	if (!leaf) throw new Error(`No native leaf generated for ${tag}`);
 	await publishGeneratedLeafPackage(leaf);
@@ -283,7 +370,9 @@ async function publishNativePackage(pkg: PublishPackage): Promise<void> {
 	const name = manifest.name ?? path.basename(pkg.dir);
 	if (isDryRun) {
 		console.log(`DRY RUN native core manifest rewrite (${pkg.dir})`);
-		console.log(JSON.stringify({ optionalDependencies: manifest.optionalDependencies, files: manifest.files }, null, "\t"));
+		console.log(
+			JSON.stringify({ optionalDependencies: manifest.optionalDependencies, files: manifest.files }, null, "\t"),
+		);
 	}
 	await packAndPublish(pkgDir, name);
 }

@@ -2,15 +2,18 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import {
 	ApplyPatchError,
 	applyCodexPatch,
 	applyPatch,
+	EditTool,
 	ParseError,
 	parseApplyPatch,
 	parseDiffHunks,
 	seekSequence,
 } from "@oh-my-pi/pi-coding-agent/edit";
+import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { removeSyncWithRetries } from "@oh-my-pi/pi-utils";
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -315,6 +318,19 @@ describe("applyPatch", () => {
 
 		expect(result.change.type).toBe("create");
 		expect(await Bun.file(path.join(tempDir, "add.txt")).text()).toBe("ab\ncd\n");
+	});
+
+	test("create with allowCreateOverwrite replaces an existing file (JSON patch contract)", async () => {
+		const target = path.join(tempDir, "exists.txt");
+		await Bun.write(target, "original\n");
+
+		const result = await applyPatch(
+			{ path: "exists.txt", op: "create", diff: "replacement\n" },
+			{ cwd: tempDir, allowCreateOverwrite: true },
+		);
+
+		expect(result.change.type).toBe("create");
+		expect(await Bun.file(target).text()).toBe("replacement\n");
 	});
 
 	test("delete file", async () => {
@@ -716,5 +732,134 @@ describe("applyCodexPatch (production)", () => {
 
 		// First op should have landed before the failure.
 		expect(await Bun.file(path.join(tempDir, "first.txt")).text()).toBe("A\n");
+	});
+
+	// #4074-A: Add File / Move to must not silently overwrite pre-existing
+	// destinations. The apply_patch grammar documents these as create/rename
+	// with no overwrite affordance (see prompts/tools/apply-patch.md), and
+	// the fs-level `applyPatch`, the envelope-level `applyCodexPatch`, and
+	// their shared `applyNormalizedPatch` implementation share the guard.
+	test("applyPatch create refuses to overwrite an existing file", async () => {
+		const target = path.join(tempDir, "exists.txt");
+		await Bun.write(target, "original\n");
+
+		await expect(
+			applyPatch({ path: "exists.txt", op: "create", diff: "replacement\n" }, { cwd: tempDir }),
+		).rejects.toBeInstanceOf(ApplyPatchError);
+		// Pre-existing content must remain byte-identical.
+		expect(await Bun.file(target).text()).toBe("original\n");
+	});
+
+	test("applyPatch rename refuses to overwrite an existing destination", async () => {
+		const src = path.join(tempDir, "src.txt");
+		const dst = path.join(tempDir, "dst.txt");
+		await Bun.write(src, "source\n");
+		await Bun.write(dst, "destination\n");
+
+		await expect(
+			applyPatch(
+				{ path: "src.txt", op: "update", rename: "dst.txt", diff: "@@\n-source\n+source2" },
+				{ cwd: tempDir },
+			),
+		).rejects.toBeInstanceOf(ApplyPatchError);
+		// Both source and destination must remain byte-identical.
+		expect(await Bun.file(src).text()).toBe("source\n");
+		expect(await Bun.file(dst).text()).toBe("destination\n");
+	});
+
+	test("applyCodexPatch *** Add File over existing file rejects and preserves content", async () => {
+		const target = path.join(tempDir, "hello.txt");
+		await Bun.write(target, "kept\n");
+
+		const patch = ["*** Begin Patch", "*** Add File: hello.txt", "+overwritten", "*** End Patch"].join("\n");
+
+		await expect(applyCodexPatch(patch, { cwd: tempDir })).rejects.toBeInstanceOf(ApplyPatchError);
+		expect(await Bun.file(target).text()).toBe("kept\n");
+	});
+
+	test("applyCodexPatch *** Move to over existing destination rejects and preserves both files", async () => {
+		const src = path.join(tempDir, "src.txt");
+		const dst = path.join(tempDir, "dst.txt");
+		await Bun.write(src, "hello\n");
+		await Bun.write(dst, "will-be-preserved\n");
+
+		const patch = [
+			"*** Begin Patch",
+			"*** Update File: src.txt",
+			"*** Move to: dst.txt",
+			"@@",
+			"-hello",
+			"+HELLO",
+			"*** End Patch",
+		].join("\n");
+
+		await expect(applyCodexPatch(patch, { cwd: tempDir })).rejects.toBeInstanceOf(ApplyPatchError);
+		expect(await Bun.file(src).text()).toBe("hello\n");
+		expect(await Bun.file(dst).text()).toBe("will-be-preserved\n");
+	});
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// EditTool mode split: JSON `patch` create-as-overwrite vs envelope Add File
+// ═══════════════════════════════════════════════════════════════════════════
+
+describe("EditTool create-over-existing mode split", () => {
+	let tempDir: string;
+
+	function makeSession(cwd: string, editMode: "patch" | "apply_patch"): ToolSession {
+		return {
+			cwd,
+			hasUI: false,
+			getSessionFile: () => null,
+			getSessionSpawns: () => "*",
+			enableLsp: false,
+			settings: Settings.isolated({ "edit.mode": editMode }),
+			getArtifactsDir: () => null,
+			getSessionId: () => null,
+			getPlanModeState: () => undefined,
+		} as unknown as ToolSession;
+	}
+
+	beforeEach(async () => {
+		resetSettingsForTest();
+		tempDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), "omp-apply-patch-overwrite-"));
+		await Settings.init({ inMemory: true, cwd: tempDir });
+	});
+
+	afterEach(() => {
+		resetSettingsForTest();
+		try {
+			removeSyncWithRetries(tempDir);
+		} catch {
+			// Ignore cleanup errors
+		}
+	});
+
+	// prompts/tools/patch.md sanctions full-file overwrite via `op: "create"`
+	// (the JSON grammar has no `*** Update File`), so the envelope-only
+	// clobber guard must not fire in JSON patch mode.
+	test("JSON patch mode: op create over an existing file is a full-file overwrite", async () => {
+		const target = path.join(tempDir, "exists.txt");
+		await Bun.write(target, "original\n");
+		const tool = new EditTool(makeSession(tempDir, "patch"));
+
+		const result = await tool.execute("json-create-overwrite", {
+			path: "exists.txt",
+			edits: [{ op: "create", diff: "replacement\n" }],
+		});
+
+		expect(result.isError).toBeUndefined();
+		expect(await Bun.file(target).text()).toBe("replacement\n");
+	});
+
+	test("apply_patch mode: *** Add File over an existing file still rejects", async () => {
+		const target = path.join(tempDir, "exists.txt");
+		await Bun.write(target, "original\n");
+		const tool = new EditTool(makeSession(tempDir, "apply_patch"));
+
+		const patch = ["*** Begin Patch", "*** Add File: exists.txt", "+replacement", "*** End Patch", ""].join("\n");
+
+		await expect(tool.execute("envelope-create-reject", { input: patch })).rejects.toThrow(/already exists/);
+		expect(await Bun.file(target).text()).toBe("original\n");
 	});
 });

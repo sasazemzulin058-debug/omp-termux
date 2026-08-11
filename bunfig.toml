@@ -1,7 +1,6 @@
 telemetry = false
 
 [install]
-backend = "copy"
 minimumReleaseAge = 259200 # 3 days in seconds
 minimumReleaseAgeExcludes = ["@types/bun", "bun-types"]
 linker = "hoisted"

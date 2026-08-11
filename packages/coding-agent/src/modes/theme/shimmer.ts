@@ -180,12 +180,16 @@ export function shimmerSegments(segments: readonly ShimmerSegment[], theme: Shim
 	const mode = resolveMode();
 
 	// Pre-scan: total code-point count (positions the band) and resolved palette.
+	// The per-segment string is kept verbatim — iterating UTF-16 units with a
+	// surrogate-pair guard produces the same code points as `Array.from(text)`
+	// at zero per-frame allocation (previously the #1 hotspot at ~10% of profiled
+	// CPU during streaming — the working message is shimmered every animation
+	// frame at 30fps and `Array.from` reallocated the code-point array each tick).
 	let total = 0;
-	const perSeg: { chars: string[]; palette: ShimmerPalette }[] = [];
+	const perSeg: { text: string; palette: ShimmerPalette }[] = [];
 	for (const seg of segments) {
-		const chars = Array.from(seg.text);
-		total += chars.length;
-		perSeg.push({ chars, palette: seg.palette ?? DEFAULT_SHIMMER_PALETTE });
+		total += countCodePoints(seg.text);
+		perSeg.push({ text: seg.text, palette: seg.palette ?? DEFAULT_SHIMMER_PALETTE });
 	}
 	if (total === 0) return "";
 
@@ -193,9 +197,9 @@ export function shimmerSegments(segments: readonly ShimmerSegment[], theme: Shim
 	// tier so the working line stays legible without movement.
 	if (mode === "disabled") {
 		let out = "";
-		for (const { chars, palette } of perSeg) {
+		for (const { text, palette } of perSeg) {
 			const seq = compile(theme, palette).mid;
-			out += `${seq.open}${chars.join("")}${seq.close}`;
+			out += `${seq.open}${text}${seq.close}`;
 		}
 		return out;
 	}
@@ -203,31 +207,97 @@ export function shimmerSegments(segments: readonly ShimmerSegment[], theme: Shim
 	const time = Date.now();
 	const intensityFn = mode === "kitt" ? kittIntensity : classicIntensity;
 
+	// Fast-path window: outside `[bandLo, bandHi]` the intensity is guaranteed
+	// zero (tier "low"), so we can skip `intensityFn` + `tierFor` entirely for
+	// the prefix/suffix of every segment. On the typical ~60-char working
+	// message the classic band spans ~12 cells, so ~80% of the per-char loop
+	// disappears — the intensity call and the tier compare were the residual
+	// per-frame cost after #4353 removed the allocation hotspot (issue #4377).
+	const { lo: bandLo, hi: bandHi } = activeBand(mode, time, total);
+
 	let out = "";
 	let index = 0;
-	for (const { chars, palette } of perSeg) {
+	for (const { text, palette } of perSeg) {
 		const compiled = compile(theme, palette);
 		let runTier: Tier | null = null;
-		let runBuf = "";
-		for (let i = 0; i < chars.length; i++) {
-			const tier = tierFor(intensityFn(time, index, total));
+		let runStart = 0;
+		let runEnd = 0;
+		let i = 0;
+		while (i < text.length) {
+			// Detect a surrogate pair so a single code point (e.g. an emoji) stays
+			// atomic; the band position is measured in code points, not UTF-16 units.
+			const c = text.charCodeAt(i);
+			let step = 1;
+			if (c >= 0xd800 && c <= 0xdbff && i + 1 < text.length) {
+				const c2 = text.charCodeAt(i + 1);
+				if (c2 >= 0xdc00 && c2 <= 0xdfff) step = 2;
+			}
+			const tier: Tier = index < bandLo || index > bandHi ? "low" : tierFor(intensityFn(time, index, total));
 			if (tier !== runTier) {
-				if (runTier !== null) {
+				if (runTier !== null && runEnd > runStart) {
 					const seq = compiled[runTier];
-					out += `${seq.open}${runBuf}${seq.close}`;
-					runBuf = "";
+					out += `${seq.open}${text.slice(runStart, runEnd)}${seq.close}`;
 				}
 				runTier = tier;
+				runStart = i;
 			}
-			runBuf += chars[i];
+			runEnd = i + step;
 			index++;
+			i += step;
 		}
-		if (runTier !== null && runBuf.length > 0) {
+		if (runTier !== null && runEnd > runStart) {
 			const seq = compiled[runTier];
-			out += `${seq.open}${runBuf}${seq.close}`;
+			out += `${seq.open}${text.slice(runStart, runEnd)}${seq.close}`;
 		}
 	}
 	return out;
+}
+
+/**
+ * Sweep window (code-point indices) outside which the intensity is guaranteed
+ * zero for `mode` at `time` over `total` cells. Widening the window is safe —
+ * the per-char intensity call still runs inside the window and reports 0 for
+ * off-band code points — but narrower windows skip more of the per-char loop.
+ */
+function activeBand(mode: "classic" | "kitt", time: number, total: number): { lo: number; hi: number } {
+	if (mode === "classic") {
+		const period = total + CLASSIC_PADDING * 2;
+		const pos = ((time / 1000) * SHIMMER_SPEED_CELLS_PER_S) % period;
+		return {
+			lo: pos - CLASSIC_PADDING - CLASSIC_BAND_HALF_WIDTH,
+			hi: pos - CLASSIC_PADDING + CLASSIC_BAND_HALF_WIDTH,
+		};
+	}
+	const range = total - 1;
+	if (range <= 0) return { lo: 0, hi: total };
+	const cycleCells = 2 * range;
+	const sweep = ((time / 1000) * SHIMMER_SPEED_CELLS_PER_S) % cycleCells;
+	const goingRight = sweep < range;
+	const head = goingRight ? sweep : cycleCells - sweep;
+	// The trail always lies behind the head for the current direction — chars
+	// ahead of the head are dark. See {@link kittIntensity} for the exact rule.
+	return goingRight
+		? { lo: head - KITT_HEAD_HALF - KITT_TRAIL_LEN, hi: head + KITT_HEAD_HALF }
+		: { lo: head - KITT_HEAD_HALF, hi: head + KITT_HEAD_HALF + KITT_TRAIL_LEN };
+}
+
+function countCodePoints(text: string): number {
+	let n = 0;
+	let i = 0;
+	while (i < text.length) {
+		const c = text.charCodeAt(i);
+		if (c >= 0xd800 && c <= 0xdbff && i + 1 < text.length) {
+			const c2 = text.charCodeAt(i + 1);
+			if (c2 >= 0xdc00 && c2 <= 0xdfff) {
+				i += 2;
+				n++;
+				continue;
+			}
+		}
+		i++;
+		n++;
+	}
+	return n;
 }
 
 export function shimmerText(text: string, theme: ShimmerTheme, palette?: ShimmerPalette): string {

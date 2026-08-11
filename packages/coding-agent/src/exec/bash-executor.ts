@@ -3,18 +3,19 @@
  *
  * Uses brush-core via native bindings for shell execution.
  */
-import * as fs from "node:fs/promises";
 import { ExponentialYield } from "@oh-my-pi/pi-agent-core/utils/yield";
-import { executeShell, type MinimizerOptions, Shell, type ShellRunResult } from "@oh-my-pi/pi-natives";
-import { isExecutable, type ShellConfig } from "@oh-my-pi/pi-utils/procmgr";
+import { type MinimizerOptions, Shell, type ShellRunResult } from "@oh-my-pi/pi-natives";
+import { isCmdShell, isExecutable, type ShellConfig } from "@oh-my-pi/pi-utils/procmgr";
 import { Settings, type ShellMinimizerSettings } from "../config/settings";
 import { OutputSink } from "../session/streaming-output";
 import { resolveOutputMaxColumns, resolveOutputSinkHeadBytes } from "../tools/output-meta";
 import { getOrCreateSnapshot } from "../utils/shell-snapshot";
+import { loadDirenvEnv } from "./direnv";
 import { buildNonInteractiveEnv } from "./non-interactive-env";
 
 export interface BashExecutorOptions {
 	cwd?: string;
+	/** Milliseconds before aborting the command; 0 disables the executor deadline. */
 	timeout?: number;
 	onChunk?: (chunk: string) => void;
 	chunkThrottleMs?: number;
@@ -45,12 +46,87 @@ export interface BashResult {
 	output: string;
 	exitCode: number | undefined;
 	cancelled: boolean;
+	/** True when the command was killed by its timeout deadline (not a user abort). */
+	timedOut?: boolean;
 	truncated: boolean;
 	totalLines: number;
 	totalBytes: number;
 	outputLines: number;
 	outputBytes: number;
 	artifactId?: string;
+	workingDir?: string;
+}
+
+/** POSIX-safe variable name — gates which direnv unsets we inject into the
+ *  command line, so a hostile `.envrc` can't smuggle shell syntax through
+ *  `unset`. `.envrc` never produces non-identifier names in practice. */
+const SAFE_ENV_NAME = /^[A-Za-z_][A-Za-z0-9_]*$/;
+
+export interface DirenvPreflightOptions {
+	/** Caller-supplied env overlay; these values win over direnv-provided ones. */
+	callerEnv?: Record<string, string>;
+	signal?: AbortSignal;
+	/** Full direnv-load budget (`bash.direnvLoadTimeoutMs`). A positive
+	 *  `callerTimeoutMs` clamps the effective load below this; `0`/undefined
+	 *  leaves the full budget. */
+	timeoutMs?: number;
+	/** The caller's command deadline (ms). A positive value clamps the direnv
+	 *  load so a cold `.envrc` can't outlast a short-timeout command; `0` or
+	 *  undefined means "no caller clamp" — the load keeps its full `timeoutMs`
+	 *  budget (a disabled command deadline is NOT a 0 ms load). Centralizing the
+	 *  clamp here keeps every backend (executeBash, ACP terminal, PTY) on one
+	 *  contract instead of each re-deriving it. */
+	callerTimeoutMs?: number;
+	/** `bash.direnv` setting — `"off"` skips the load entirely. */
+	direnvSetting: "auto" | "off";
+	/** Shell wrapper prefix (profiler/strace) to place *after* the unset prefix,
+	 *  matching `executeBash`'s ordering. Backends that apply their own shell
+	 *  wrapping (ACP `wrapShellLineForClientTerminal`) omit this. */
+	commandPrefix?: string | undefined;
+}
+
+/**
+ * Load the repo's direnv/devenv env and fold it into a `(command, env)` pair so
+ * every bash backend (one-shot `executeBash`, ACP client terminal, PTY) exposes
+ * the same devenv tools. Encapsulates: load the diff, merge `set` under the
+ * caller's overlay (caller wins), and prepend a regex-gated `unset -v` for
+ * variables the `.envrc` removes (skipping any the caller re-supplied).
+ *
+ * Returns the possibly-prefixed command plus the merged env, or the inputs
+ * unchanged (`env` = `callerEnv`) when direnv is off, absent, or has no `.envrc`.
+ * Pure transform: does NOT layer non-interactive env defaults — that stays the
+ * caller's job (so interactive PTY/ACP paths keep their own env shape).
+ */
+export async function applyDirenvPreflight(
+	command: string,
+	cwd: string,
+	opts: DirenvPreflightOptions,
+): Promise<{ command: string; env: Record<string, string> | undefined }> {
+	const withPrefix = (line: string): string => (opts.commandPrefix ? `${opts.commandPrefix} ${line}` : line);
+	// A positive caller deadline clamps the direnv load below its full budget so
+	// a cold `.envrc` can't outlast a short-timeout command; `0`/undefined means
+	// "no caller clamp" (a disabled command deadline is not a 0 ms load). Every
+	// backend routes through here, so the clamp lives in one place.
+	const loadTimeoutMs =
+		opts.callerTimeoutMs !== undefined && opts.callerTimeoutMs > 0
+			? Math.min(opts.timeoutMs ?? opts.callerTimeoutMs, opts.callerTimeoutMs)
+			: opts.timeoutMs;
+	const direnvDiff =
+		opts.direnvSetting === "off" ? null : await loadDirenvEnv(cwd, { timeoutMs: loadTimeoutMs, signal: opts.signal });
+	if (!direnvDiff) {
+		return { command: withPrefix(command), env: opts.callerEnv };
+	}
+	// The caller's explicit env still wins over direnv-provided values.
+	const mergedEnv = { ...direnvDiff.set, ...opts.callerEnv };
+	// direnv can also *remove* inherited variables (a `.envrc` doing
+	// `unset AWS_PROFILE`). An env overlay can only add/override, so prepend a
+	// real `unset` for those — unless the caller re-supplied the same var
+	// explicitly, in which case the caller wins.
+	const direnvUnsets = direnvDiff.unset.filter(
+		name => !(opts.callerEnv && name in opts.callerEnv) && SAFE_ENV_NAME.test(name),
+	);
+	const unsetPrefix = direnvUnsets.length > 0 ? `unset -v ${direnvUnsets.join(" ")}; ` : "";
+	return { command: `${unsetPrefix}${withPrefix(command)}`, env: mergedEnv };
 }
 
 const shellSessions = new Map<string, Shell>();
@@ -69,6 +145,9 @@ const shellSessionsInUse = new Set<string>();
  */
 const retainedShells = new Set<Shell>();
 const RETAIN_REAP_INTERVAL_MS = 5_000;
+// Native cancellation may spend two seconds unwinding the shell before its
+// N-API chunk bridge drains. The JS watchdog must not race that teardown.
+const NATIVE_TIMEOUT_FALLBACK_GRACE_MS = 5_000;
 
 async function retainShellWithLiveBackgroundJobs(shell: Shell): Promise<void> {
 	let live: number;
@@ -115,16 +194,10 @@ function quarantineShellSession(
 		.catch(() => undefined);
 }
 
-async function resolveShellCwd(cwd: string | undefined): Promise<string | undefined> {
-	if (!cwd) return undefined;
-
-	try {
-		// Brush preserves the working directory string verbatim, so resolve symlinks
-		// up front to keep `pwd` aligned with tools like `git worktree list`.
-		return await fs.realpath(cwd);
-	} catch {
-		return cwd;
-	}
+function resolveShellCwd(cwd: string | undefined): string | undefined {
+	// Preserve the caller's logical cwd string. Brush uses this value to update `PWD` and its
+	// internal working directory, so realpathing here collapses symlinks before the shell sees them.
+	return cwd;
 }
 
 /** Translate `ShellMinimizerSettings` into native `MinimizerOptions`, or `undefined` when disabled. */
@@ -150,9 +223,56 @@ function isBashShell(shell: string): boolean {
 	return basename.includes("bash");
 }
 
+const UNSUPPORTED_UNQUOTED_CD_CHARS = "\\$`;&|<>(){}*?[]!#\"'";
+
+function hasUnsupportedUnquotedCdSyntax(value: string): boolean {
+	for (const char of value) {
+		if (/\s/.test(char) || UNSUPPORTED_UNQUOTED_CD_CHARS.includes(char)) return true;
+	}
+	return false;
+}
+
+export function isPersistentShellCdCommand(command: string): boolean {
+	if (/[\r\n]/.test(command)) return false;
+
+	const trimmed = command.trim();
+	if (trimmed === "cd") return true;
+	if (!trimmed.startsWith("cd") || !/[ \t]/.test(trimmed[2] ?? "")) return false;
+
+	let rest = trimmed.slice(2).trim();
+	if (rest === "" || rest === "--") return true;
+
+	let hasOptionTerminator = false;
+	if (/^--[ \t]/.test(rest)) {
+		hasOptionTerminator = true;
+		rest = rest.slice(2).trimStart();
+	}
+	if (rest === "") return true;
+
+	const quote = rest[0];
+	let target: string;
+	let quoted = false;
+	if (quote === `"` || quote === "'") {
+		if (rest.length < 2 || rest[rest.length - 1] !== quote) return false;
+		target = rest.slice(1, -1);
+		if (target.includes(quote)) return false;
+		if (quote === `"` && /[\\$`\r\n]/.test(target)) return false;
+		quoted = true;
+	} else {
+		if (hasUnsupportedUnquotedCdSyntax(rest)) return false;
+		target = rest;
+	}
+
+	if (target === "") return false;
+	if (/^[+-]\d+$/.test(target)) return false;
+	if (!hasOptionTerminator && target.startsWith("-") && target !== "-") return false;
+	if (!quoted && target.startsWith("~") && target !== "~" && !target.startsWith("~/")) return false;
+	return true;
+}
+
 function needsInteractiveShellArg(shell: string): boolean {
 	const basename = shellBasename(shell);
-	return basename.includes("zsh");
+	return basename.includes("zsh") || basename.includes("fish");
 }
 
 function supportsAutoUserShell(shell: string): boolean {
@@ -165,19 +285,31 @@ function hasInteractiveShellArg(args: string[]): boolean {
 }
 
 function ensureInteractiveShellArgs(shell: string, args: string[]): string[] {
-	if (!needsInteractiveShellArg(shell) || hasInteractiveShellArg(args)) return args;
+	if (!needsInteractiveShellArg(shell)) return args;
 
-	const commandIndex = args.findIndex(arg => arg === "-c" || arg === "--command");
+	// fish sources the same config files (config.fish + conf.d) for interactive
+	// shells as for login shells, so the inherited `-l` adds nothing — it only
+	// marks the shell as login, firing `status is-login` blocks in user config
+	// (agent/keychain setup, path mutation) on every `!` command. zsh keeps `-l`
+	// because .zprofile is login-only. Args originate from procmgr's
+	// getShellArgs(), so login only ever appears as a standalone `-l`/`--login`.
+	const effectiveArgs = shellBasename(shell).includes("fish")
+		? args.filter(arg => arg !== "-l" && arg !== "--login")
+		: args;
+
+	if (hasInteractiveShellArg(effectiveArgs)) return effectiveArgs;
+
+	const commandIndex = effectiveArgs.findIndex(arg => arg === "-c" || arg === "--command");
 	if (commandIndex !== -1) {
-		return [...args.slice(0, commandIndex), "-i", ...args.slice(commandIndex)];
+		return [...effectiveArgs.slice(0, commandIndex), "-i", ...effectiveArgs.slice(commandIndex)];
 	}
 
-	const compactCommandIndex = args.findIndex(arg => /^-[^-]*c[^-]*$/.test(arg));
+	const compactCommandIndex = effectiveArgs.findIndex(arg => /^-[^-]*c[^-]*$/.test(arg));
 	if (compactCommandIndex !== -1) {
-		return args.map((arg, index) => (index === compactCommandIndex ? arg.replace("c", "ic") : arg));
+		return effectiveArgs.map((arg, index) => (index === compactCommandIndex ? arg.replace("c", "ic") : arg));
 	}
 
-	return [...args, "-i"];
+	return [...effectiveArgs, "-i"];
 }
 
 function quoteShellArg(value: string): string {
@@ -219,15 +351,28 @@ export async function executeBash(command: string, options?: BashExecutorOptions
 
 	const minimizer = buildMinimizerOptions(settings.getGroup("shellMinimizer"));
 
-	const commandCwd = await resolveShellCwd(options?.cwd);
-	const commandEnv = buildNonInteractiveEnv(options?.env);
-
-	// Apply command prefix if configured
-	const prefixedCommand = prefix ? `${prefix} ${command}` : command;
+	const commandCwd = resolveShellCwd(options?.cwd);
+	// Fold the repo's direnv/devenv env into the command + env so devenv tools
+	// land on PATH; the caller's explicit `env` still wins. Thread the caller's
+	// signal + timeout so an aborted / short-timeout call can't hang on a cold
+	// `.envrc` load before the abort listener is installed. The helper applies
+	// the configured shell `prefix` after any `unset -v` it prepends.
+	const preflight = await applyDirenvPreflight(command, commandCwd ?? process.cwd(), {
+		callerEnv: options?.env,
+		signal: options?.signal,
+		timeoutMs: settings.get("bash.direnvLoadTimeoutMs"),
+		callerTimeoutMs: options?.timeout,
+		direnvSetting: settings.get("bash.direnv"),
+		commandPrefix: prefix,
+	});
+	const commandEnv = buildNonInteractiveEnv(preflight.env);
+	const runCdInPersistentShell = options?.useUserShell === true && !prefix && isPersistentShellCdCommand(command);
+	// Never wrap in cmd.exe: it is only the Windows no-bash fallback for spawn
+	// paths, and the embedded brush shell runs the POSIX line better directly.
 	const finalCommand =
-		options?.useUserShell === true && !bashShell
-			? buildUserShellCommand(shell, args, prefixedCommand)
-			: prefixedCommand;
+		options?.useUserShell === true && !bashShell && !isCmdShell(shell) && !runCdInPersistentShell
+			? buildUserShellCommand(shell, args, preflight.command)
+			: preflight.command;
 
 	// Create output sink for truncation and artifact handling
 	const sink = new OutputSink({
@@ -255,6 +400,11 @@ export async function executeBash(command: string, options?: BashExecutorOptions
 		};
 	}
 
+	const shellOptions = {
+		sessionEnv: shellEnv,
+		snapshotPath: snapshotPath ?? undefined,
+		minimizer,
+	};
 	const sessionKey = buildSessionKey(shell, prefix, snapshotPath, shellEnv, options?.sessionKey, minimizer);
 	const persistentSessionBroken = brokenShellSessions.has(sessionKey);
 	if (persistentSessionBroken) {
@@ -269,13 +419,10 @@ export async function executeBash(command: string, options?: BashExecutorOptions
 	const sessionBusy = shellSessionsInUse.has(sessionKey);
 	let shellSession = persistentSessionBroken || sessionBusy ? undefined : shellSessions.get(sessionKey);
 	if (!shellSession && !persistentSessionBroken && !sessionBusy) {
-		shellSession = new Shell({
-			sessionEnv: shellEnv,
-			snapshotPath: snapshotPath ?? undefined,
-			minimizer,
-		});
+		shellSession = new Shell(shellOptions);
 		shellSessions.set(sessionKey, shellSession);
 	}
+	const executionShell = shellSession ?? new Shell(shellOptions);
 	const ownsPersistentSession = shellSession !== undefined;
 	if (ownsPersistentSession) {
 		shellSessionsInUse.add(sessionKey);
@@ -283,13 +430,15 @@ export async function executeBash(command: string, options?: BashExecutorOptions
 	const userSignal = options?.signal;
 	const runAbortController = new AbortController();
 	let abortCleanupPromise: Promise<void> | undefined;
+	const abortShell = (): Promise<void> => {
+		abortCleanupPromise ??= executionShell.abort().catch(() => undefined);
+		return abortCleanupPromise;
+	};
 	const abortCurrentExecution = () => {
 		if (!runAbortController.signal.aborted) {
 			runAbortController.abort();
 		}
-		if (shellSession && !abortCleanupPromise) {
-			abortCleanupPromise = shellSession.abort().catch(() => undefined);
-		}
+		void abortShell();
 	};
 	const abortDeferred = Promise.withResolvers<"abort">();
 	const abortHandler = () => {
@@ -302,47 +451,42 @@ export async function executeBash(command: string, options?: BashExecutorOptions
 
 	let timeoutTimer: NodeJS.Timeout | undefined;
 	const timeoutDeferred = Promise.withResolvers<"timeout">();
-	const baseTimeoutMs = Math.max(1_000, options?.timeout ?? 300_000);
-	timeoutTimer = setTimeout(() => {
-		abortCurrentExecution();
-		timeoutDeferred.resolve("timeout");
-	}, baseTimeoutMs);
+	const requestedTimeoutMs = options?.timeout;
+	const deadlineTimeoutMs = requestedTimeoutMs === 0 ? undefined : Math.max(1_000, requestedTimeoutMs ?? 300_000);
+	const nativeTimeoutMs = requestedTimeoutMs !== undefined && requestedTimeoutMs > 0 ? requestedTimeoutMs : undefined;
+	const nativeOwnsTimeout = nativeTimeoutMs !== undefined;
+	if (deadlineTimeoutMs !== undefined) {
+		const fallbackTimeoutMs = nativeOwnsTimeout
+			? deadlineTimeoutMs + NATIVE_TIMEOUT_FALLBACK_GRACE_MS
+			: deadlineTimeoutMs;
+		timeoutTimer = setTimeout(() => {
+			// Explicit timeouts are enforced inside pi-natives via `timeoutMs`.
+			// Give native cancellation time to flush pipeline output and drain the
+			// N-API bridge before this result-only watchdog quarantines the run.
+			if (!nativeOwnsTimeout) {
+				abortCurrentExecution();
+			}
+			timeoutDeferred.resolve("timeout");
+		}, fallbackTimeoutMs);
+	}
 
 	let resetSession = false;
 
 	try {
-		const runPromise = shellSession
-			? shellSession.run(
-					{
-						command: finalCommand,
-						cwd: commandCwd,
-						env: commandEnv,
-						timeoutMs: options?.timeout,
-						signal: runAbortController.signal,
-					},
-					(err, chunk) => {
-						if (!err) {
-							enqueueChunk(chunk);
-						}
-					},
-				)
-			: executeShell(
-					{
-						command: finalCommand,
-						cwd: commandCwd,
-						env: commandEnv,
-						sessionEnv: shellEnv,
-						snapshotPath: snapshotPath ?? undefined,
-						minimizer,
-						timeoutMs: options?.timeout,
-						signal: runAbortController.signal,
-					},
-					(err, chunk) => {
-						if (!err) {
-							enqueueChunk(chunk);
-						}
-					},
-				);
+		const runPromise = executionShell.run(
+			{
+				command: finalCommand,
+				cwd: commandCwd,
+				env: commandEnv,
+				timeoutMs: nativeTimeoutMs,
+				signal: runAbortController.signal,
+			},
+			(err, chunk) => {
+				if (!err) {
+					enqueueChunk(chunk);
+				}
+			},
+		);
 
 		const ey = new ExponentialYield();
 		const winner = await ey.race<
@@ -355,18 +499,20 @@ export async function executeBash(command: string, options?: BashExecutorOptions
 
 		if (winner.kind === "timeout" || winner.kind === "abort") {
 			acceptingChunks = false;
+			const cleanupPromise = abortShell();
 			if (shellSession) {
 				resetSession = true;
-				quarantineShellSession(sessionKey, runPromise, abortCleanupPromise);
+				quarantineShellSession(sessionKey, runPromise, cleanupPromise);
 			} else {
-				void runPromise.catch(() => undefined);
+				void Promise.allSettled([runPromise, cleanupPromise]);
 			}
 			return {
 				exitCode: undefined,
 				cancelled: true,
+				...(winner.kind === "timeout" ? { timedOut: true } : {}),
 				...(await sink.dump(
-					winner.kind === "timeout"
-						? `Command timed out after ${Math.round(baseTimeoutMs / 1000)} seconds`
+					winner.kind === "timeout" && deadlineTimeoutMs !== undefined
+						? `Command timed out after ${Math.round(deadlineTimeoutMs / 1000)} seconds`
 						: "Command cancelled",
 				)),
 			};
@@ -388,6 +534,7 @@ export async function executeBash(command: string, options?: BashExecutorOptions
 			return {
 				exitCode: undefined,
 				cancelled: true,
+				timedOut: true,
 				...(await sink.dump(annotation)),
 			};
 		}
@@ -429,12 +576,14 @@ export async function executeBash(command: string, options?: BashExecutorOptions
 		return {
 			exitCode: winner.result.exitCode,
 			cancelled: false,
+			workingDir: winner.result.workingDir,
 			...(await sink.dump()),
 		};
 	} catch (err) {
 		resetSession = true;
 		throw err;
 	} finally {
+		await sink.dispose();
 		if (timeoutTimer) {
 			clearTimeout(timeoutTimer);
 		}

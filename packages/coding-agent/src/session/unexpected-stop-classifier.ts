@@ -16,8 +16,11 @@ const CLASSIFIER_SYSTEM_PROMPT = prompt.render(unexpectedStopClassifierPrompt);
  */
 const ANSWER_MAX_TOKENS = 16;
 /**
- * Reasoning backends ignore `disableReasoning` on some providers, so reserve
- * enough output room for the keyword to still land after unavoidable thinking.
+ * Online classifier budget. Sized to survive backends that ignore
+ * `disableReasoning` (e.g. Qwen3 via llama.cpp catalogued `reasoning: false`
+ * but still emitting thinking): the yes/no keyword needs to land after any
+ * unavoidable thinking preamble. `maxTokens` is a hard cap — non-thinking
+ * completions still return in a single word (issue #4355).
  */
 const REASONING_SAFE_MAX_TOKENS = 1024;
 
@@ -31,14 +34,23 @@ export interface ClassifyUnexpectedStopDeps {
 
 export function isUnexpectedStopCandidate(message: AssistantMessage): boolean {
 	if (message.stopReason !== "stop") return false;
-	let hasText = false;
+	let hasContent = false;
 	for (const content of message.content) {
 		if (content.type === "toolCall") return false;
 		if (content.type === "text" && /\S/.test(content.text)) {
-			hasText = true;
+			hasContent = true;
+		}
+		// A signed thinking-only stop is still a candidate: reasoning models can
+		// trap the intended response (or a truncated fragment) in a thinking block
+		// with no text. #isEmptyAssistantStop treats a non-whitespace signature as
+		// terminal (not empty), so such stops bypass the empty-stop path entirely.
+		// Match that predicate here — unsigned thinking-only stops stay with the
+		// empty-stop retry path (and its cap) rather than being re-handled here.
+		if (content.type === "thinking" && /\S/.test(content.thinking) && /\S/.test(content.thinkingSignature ?? "")) {
+			hasContent = true;
 		}
 	}
-	return hasText;
+	return hasContent;
 }
 
 export async function classifyUnexpectedStop(
@@ -64,17 +76,17 @@ export async function classifyUnexpectedStop(
 }
 
 async function classifyOnline(text: string, deps: ClassifyUnexpectedStopDeps): Promise<boolean | undefined> {
-	const resolved = resolveRoleSelection(["smol"], deps.settings, deps.registry.getAvailable(), deps.registry);
+	const resolved = resolveRoleSelection(["tiny", "smol"], deps.settings, deps.registry.getAvailable());
 	const model = resolved?.model;
 	if (!model) {
-		throw new Error("unexpected-stop: no smol model available for classification");
+		throw new Error("unexpected-stop: no tiny/smol model available for classification");
 	}
 	const apiKey = await deps.registry.getApiKey(model, deps.sessionId);
 	if (!apiKey) {
 		throw new Error(`unexpected-stop: no API key for ${model.provider}/${model.id}`);
 	}
 	const metadata = deps.metadataResolver?.(model.provider);
-	const maxTokens = model.reasoning ? Math.max(ANSWER_MAX_TOKENS, REASONING_SAFE_MAX_TOKENS) : ANSWER_MAX_TOKENS;
+	const maxTokens = REASONING_SAFE_MAX_TOKENS;
 
 	const response = await completeSimple(
 		model,

@@ -53,6 +53,7 @@ When strict mode is requested (`strict=true` at call site), the schema MUST sati
 
 6. **Provider payload strict flag must match effective strictness**
    - Callers MUST send `strict: true` only if enforcement succeeded (`effectiveStrict === true`).
+   - Callers MUST preserve an author's explicit `tool.strict === false` on the wire so that `strict: false` and omitted `strict` remain distinguishable — some OpenAI-compat backends over-fill optional fields when the flag is absent but respect it when set to `false` (#4336). Exceptions: `openai-responses` emits explicit `false` only while its `strictMode` gate and `PI_NO_STRICT` permit sending the strict field; `openai-codex-responses` gates explicit `false` on `!PI_NO_STRICT` so the documented global bypass keeps the `strict` key off the wire for Codex proxies that reject it; `openai-completions` emits explicit `false` only in `toolStrictMode === "mixed"` with `compat.supportsStrictMode !== false`, because the `all_strict → none` collapse and providers that reject the `strict` key rely on uniform absence.
 
 ---
 
@@ -68,6 +69,7 @@ Schemas sent on the Google JSON Schema path MUST follow:
      - `minItems`, `maxItems`, `minLength`, `maxLength`
      - `minimum`, `maximum`, `exclusiveMinimum`, `exclusiveMaximum`
      - `pattern`, `format`
+     - `dependencies`, `dependentSchemas`, `dependentRequired`
    - Important: keys inside a `properties` object are treated as property names and MUST NOT be stripped by keyword match.
    - Human-meaningful stripped keys (`pattern`, `format`, min/max constraints, `default`, `examples`, etc.) are appended to the sibling `description` as an Anthropic-style spill block: `{pattern: "^foo$", minimum: 0}`. Structural/meta keys such as `$ref`, `$defs`, and `additionalProperties` are not spilled.
 

@@ -3,16 +3,37 @@ import { replaceTabs } from "../../tools/render-utils";
 import { getMarkdownTheme, theme } from "../theme/theme";
 import { DynamicBorder } from "./dynamic-border";
 
-type BtwPanelState = "running" | "complete" | "aborted" | "error";
+type BtwPanelState = "running" | "complete" | "branching" | "aborted" | "error";
 
 interface BtwPanelComponentOptions {
 	question: string;
 	tui: TUI;
+	canBranch?: () => boolean;
+}
+
+class BtwFooter implements Component {
+	#getLine: () => string;
+	#line: string | undefined;
+	#text: Text | undefined;
+
+	constructor(getLine: () => string) {
+		this.#getLine = getLine;
+	}
+
+	render(width: number): readonly string[] {
+		const line = this.#getLine();
+		if (line !== this.#line || !this.#text) {
+			this.#line = line;
+			this.#text = new Text(line, 1, 0);
+		}
+		return this.#text.render(width);
+	}
 }
 
 export class BtwPanelComponent extends Container {
 	#question: string;
 	#tui: TUI;
+	#canBranch: (() => boolean) | undefined;
 	#state: BtwPanelState = "running";
 	#answer = "";
 	#errorMessage: string | undefined;
@@ -23,6 +44,7 @@ export class BtwPanelComponent extends Container {
 		super();
 		this.#question = options.question;
 		this.#tui = options.tui;
+		this.#canBranch = options.canBranch;
 		this.#rebuild();
 	}
 
@@ -43,6 +65,14 @@ export class BtwPanelComponent extends Container {
 	markComplete(): void {
 		if (this.#closed) return;
 		this.#state = "complete";
+		this.#errorMessage = undefined;
+		this.#rebuild();
+	}
+
+	/** Shows that the completed answer is being promoted into the chat session. */
+	markBranching(): void {
+		if (this.#closed) return;
+		this.#state = "branching";
 		this.#errorMessage = undefined;
 		this.#rebuild();
 	}
@@ -86,7 +116,7 @@ export class BtwPanelComponent extends Container {
 		this.addChild(new Spacer(1));
 		this.addChild(this.#contentComponent());
 		this.addChild(new Spacer(1));
-		this.addChild(new Text(this.#footerLine(), 1, 0));
+		this.addChild(new BtwFooter(() => this.#footerLine()));
 		this.addChild(new Spacer(1));
 		this.addChild(new DynamicBorder(str => theme.fg("dim", str)));
 		// Component-scoped: a rebuild replaces only this panel's own children
@@ -100,8 +130,15 @@ export class BtwPanelComponent extends Container {
 		switch (this.#state) {
 			case "running":
 				return theme.fg("muted", "Esc cancel /btw");
-			case "complete":
-				return theme.fg("muted", this.isCopyable() ? "c copy · b branch to chat · Esc dismiss" : "Esc dismiss");
+			case "complete": {
+				if (!this.isCopyable()) return theme.fg("muted", "Esc dismiss");
+				const actions = ["c copy"];
+				if (this.#canBranch?.() ?? this.isBranchable()) actions.push("b branch to chat");
+				actions.push("Esc dismiss");
+				return theme.fg("muted", actions.join(" · "));
+			}
+			case "branching":
+				return theme.fg("muted", `${theme.status.pending} Branching to chat…`);
 			case "aborted":
 				return theme.fg("warning", `${theme.status.warning} Cancelled · Esc dismiss`);
 			case "error":

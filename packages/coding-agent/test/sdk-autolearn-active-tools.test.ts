@@ -9,7 +9,7 @@ import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { createAgentSession } from "@oh-my-pi/pi-coding-agent/sdk";
 import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
-import { Snowflake } from "@oh-my-pi/pi-utils";
+import { removeSyncWithRetries, Snowflake } from "@oh-my-pi/pi-utils";
 
 // Guards the auto-learn tool ACTIVATION wiring in createAgentSession: createTools
 // force-includes manage_skill into the built registry for an enabled top-level
@@ -34,7 +34,7 @@ describe("createAgentSession auto-learn tool activation", () => {
 	afterAll(async () => {
 		for (const session of sessions) await session.dispose().catch(() => {});
 		authStorage.close();
-		if (fs.existsSync(registryDir)) fs.rmSync(registryDir, { recursive: true, force: true });
+		if (fs.existsSync(registryDir)) removeSyncWithRetries(registryDir);
 	});
 
 	async function activeToolNames(settings: Settings): Promise<string[]> {
@@ -85,5 +85,60 @@ describe("createAgentSession auto-learn tool activation", () => {
 		const names = await activeToolNames(Settings.isolated({}));
 		expect(names).toContain("read");
 		expect(names).not.toContain("manage_skill");
+	});
+
+	it("activates checkpoint and rewind when only checkpoint is in an explicit toolNames list", async () => {
+		const { session } = await createAgentSession({
+			cwd: registryDir,
+			agentDir: registryDir,
+			modelRegistry,
+			sessionManager: SessionManager.inMemory(),
+			settings: Settings.isolated({ "checkpoint.enabled": true }),
+			model: getBundledModel("openai", "gpt-4o-mini"),
+			disableExtensionDiscovery: true,
+			toolNames: ["checkpoint"],
+			requireYieldTool: true,
+		});
+		sessions.push(session);
+		const names = session.getActiveToolNames();
+		expect(names).toContain("checkpoint");
+		expect(names).toContain("rewind");
+	});
+
+	it("activates checkpoint and rewind when only rewind is in an explicit toolNames list", async () => {
+		const { session } = await createAgentSession({
+			cwd: registryDir,
+			agentDir: registryDir,
+			modelRegistry,
+			sessionManager: SessionManager.inMemory(),
+			settings: Settings.isolated({ "checkpoint.enabled": true }),
+			model: getBundledModel("openai", "gpt-4o-mini"),
+			disableExtensionDiscovery: true,
+			toolNames: ["rewind"],
+			requireYieldTool: true,
+		});
+		sessions.push(session);
+		const names = session.getActiveToolNames();
+		expect(names).toContain("checkpoint");
+		expect(names).toContain("rewind");
+	});
+
+	it("activates checkpoint and rewind in a restricted session with one-sided toolNames", async () => {
+		const { session } = await createAgentSession({
+			cwd: registryDir,
+			agentDir: registryDir,
+			modelRegistry,
+			sessionManager: SessionManager.inMemory(),
+			settings: Settings.isolated({ "checkpoint.enabled": true }),
+			model: getBundledModel("openai", "gpt-4o-mini"),
+			disableExtensionDiscovery: true,
+			toolNames: ["checkpoint"],
+			requireYieldTool: true,
+			restrictToolNames: true,
+		});
+		sessions.push(session);
+		const names = session.getActiveToolNames();
+		expect(names).toContain("checkpoint");
+		expect(names).toContain("rewind");
 	});
 });

@@ -1,7 +1,7 @@
 {
   "type": "module",
   "name": "@oh-my-pi/collab-web",
-  "version": "15.11.7",
+  "version": "16.3.6",
   "private": true,
   "description": "Browser guest client and local relay tools for omp collab live sessions",
   "homepage": "https://omp.sh",
@@ -27,7 +27,7 @@
     "mock-host": "bun scripts/mock-host.ts",
     "relay": "bun scripts/local-relay.ts",
     "build": "rm -rf dist && bun build ./index.html --outdir=dist --minify --entry-naming=[hash].[ext] --chunk-naming=[hash].[ext] --asset-naming=[hash].[ext] && mv dist/*.html dist/index.html && cp -R public/. dist/",
-    "build:tool-views": "bun scripts/build-tool-views.ts",
+    "gen:tool-views": "bun scripts/build-tool-views.ts",
     "prepack": "bun run build",
     "test": "bun test --parallel",
     "check": "biome check . && bun run check:types",
@@ -37,16 +37,16 @@
     "fmt": "biome format --write ."
   },
   "dependencies": {
-    "@oh-my-pi/pi-wire": "16.1.16",
-    "lucide-react": "^1.17.0",
-    "marked": "^18.0.5",
-    "react": "19.2.7",
-    "react-dom": "19.2.7"
+    "@oh-my-pi/pi-utils": "catalog:",
+    "@oh-my-pi/pi-wire": "catalog:",
+    "lucide-react": "catalog:",
+    "react": "catalog:",
+    "react-dom": "catalog:"
   },
   "devDependencies": {
-    "@types/bun": "^1.3.14",
-    "@types/react": "^19.2.17",
-    "@types/react-dom": "^19.2.3"
+    "@types/bun": "catalog:",
+    "@types/react": "catalog:",
+    "@types/react-dom": "catalog:"
   },
   "engines": {
     "bun": ">=1.3.14"

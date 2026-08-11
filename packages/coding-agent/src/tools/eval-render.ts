@@ -19,6 +19,7 @@ import { formatContextUsage } from "../modes/components/status-line/context-thre
 import { truncateToVisualLines } from "../modes/components/visual-truncate";
 import { getMarkdownTheme, type Theme } from "../modes/theme/theme";
 import { markFramedBlockComponent, outputBlockContentWidth, renderCodeCell } from "../tui";
+import { formatEvalCodeForDisplay } from "./eval-format";
 import {
 	JSON_TREE_MAX_DEPTH_COLLAPSED,
 	JSON_TREE_MAX_DEPTH_EXPANDED,
@@ -89,10 +90,11 @@ function getRenderCells(args: EvalRenderArgs | undefined): EvalRenderCell[] {
 	const out: EvalRenderCell[] = [];
 	for (const cell of raw) {
 		if (!cell || typeof cell !== "object") continue;
+		const language = normalizeRenderLanguage(typeof cell.language === "string" ? cell.language : undefined);
 		const code = typeof cell.code === "string" ? cell.code : "";
 		out.push({
-			language: normalizeRenderLanguage(typeof cell.language === "string" ? cell.language : undefined),
-			code,
+			language,
+			code: formatEvalCodeForDisplay(code, language),
 			title: typeof cell.title === "string" ? cell.title : undefined,
 		});
 	}
@@ -414,35 +416,37 @@ function formatStatusEventExpanded(event: EvalStatusEvent, theme: Theme): string
 	return lines;
 }
 
-/** Render status events as tree lines. */
+/**
+ * Render status events as tree lines. Shows a tail window (newest events are
+ * the live edge for `log()` progress loops) behind an "… N earlier" marker,
+ * matching the code/output tail-window convention. Collapsed keeps a small
+ * fixed window; expanded widens to the viewport-sized preview window.
+ */
 function renderStatusEvents(events: EvalStatusEvent[], theme: Theme, expanded: boolean): string[] {
 	if (events.length === 0) return [];
 
-	const maxCollapsed = 3;
-	const maxExpanded = 10;
-	const displayCount = expanded ? Math.min(events.length, maxExpanded) : Math.min(events.length, maxCollapsed);
+	const max = expanded ? Math.max(10, previewWindowRows()) : 3;
+	const hidden = Math.max(0, events.length - max);
+	const visible = hidden > 0 ? events.slice(hidden) : events;
 
 	const lines: string[] = [];
-	for (let i = 0; i < displayCount; i++) {
-		const isLast = i === displayCount - 1 && (expanded || events.length <= maxCollapsed);
+	if (hidden > 0) {
+		lines.push(`${theme.fg("dim", theme.tree.branch)} ${theme.fg("dim", `… ${hidden} earlier`)}`);
+	}
+	for (let i = 0; i < visible.length; i++) {
+		const isLast = i === visible.length - 1;
 		const branch = isLast ? theme.tree.last : theme.tree.branch;
 
 		if (expanded) {
-			const eventLines = formatStatusEventExpanded(events[i], theme);
+			const eventLines = formatStatusEventExpanded(visible[i], theme);
 			lines.push(`${theme.fg("dim", branch)} ${eventLines[0]}`);
 			const continueBranch = isLast ? "   " : `${theme.tree.vertical}  `;
 			for (let j = 1; j < eventLines.length; j++) {
 				lines.push(`${theme.fg("dim", continueBranch)}${eventLines[j]}`);
 			}
 		} else {
-			lines.push(`${theme.fg("dim", branch)} ${formatStatusEvent(events[i], theme)}`);
+			lines.push(`${theme.fg("dim", branch)} ${formatStatusEvent(visible[i], theme)}`);
 		}
-	}
-
-	if (!expanded && events.length > maxCollapsed) {
-		lines.push(`${theme.fg("dim", theme.tree.last)} ${theme.fg("dim", `… ${events.length - maxCollapsed} more`)}`);
-	} else if (expanded && events.length > maxExpanded) {
-		lines.push(`${theme.fg("dim", theme.tree.last)} ${theme.fg("dim", `… ${events.length - maxExpanded} more`)}`);
 	}
 
 	return lines;
@@ -489,6 +493,8 @@ function formatCellOutputLines(
 }
 
 export const evalToolRenderer = {
+	animatedPendingPreview: true,
+	animatedPartialResult: true,
 	renderCall(args: EvalRenderArgs, options: RenderResultOptions, uiTheme: Theme): Component {
 		const cells = getRenderCells(args);
 
@@ -502,7 +508,7 @@ export const evalToolRenderer = {
 
 		return markFramedBlockComponent({
 			render: (width: number): readonly string[] => {
-				const key = `${options.expanded ? 1 : 0}|${previewWindowRows()}|${cells.map(c => `${c.language}:${c.title ?? ""}:${c.code.length}`).join("|")}`;
+				const key = `${options.expanded ? 1 : 0}|${options.spinnerFrame ?? "-"}|${previewWindowRows()}|${cells.map(c => `${c.language}:${c.title ?? ""}:${c.code.length}`).join("|")}`;
 				if (cached && cached.key === key && cached.width === width) {
 					return cached.result;
 				}
@@ -518,7 +524,8 @@ export const evalToolRenderer = {
 							index: i,
 							total: cells.length,
 							title: cell.title,
-							status: "pending",
+							status: options.spinnerFrame !== undefined ? "running" : "pending",
+							spinnerFrame: options.spinnerFrame,
 							width,
 							// Viewport-sized tail window following the newest streamed code
 							// line; renderResult keeps the same cap so the cell never snaps
@@ -582,6 +589,10 @@ export const evalToolRenderer = {
 
 		const cellResults = details?.cells;
 		if (cellResults && cellResults.length > 0) {
+			const displayCells = cellResults.map(cell => {
+				const language = cell.language ?? details?.language ?? "python";
+				return { cell, code: formatEvalCodeForDisplay(cell.code, language), language };
+			});
 			let cached: { key: string; width: number; result: string[] } | undefined;
 
 			return markFramedBlockComponent({
@@ -597,8 +608,8 @@ export const evalToolRenderer = {
 					}
 
 					const lines: string[] = [];
-					for (let i = 0; i < cellResults.length; i++) {
-						const cell = cellResults[i];
+					for (let i = 0; i < displayCells.length; i++) {
+						const { cell, code, language } = displayCells[i];
 						const allEvents = cell.statusEvents ?? [];
 						const agentEvents = allEvents.filter(e => e.op === "agent");
 						const otherEvents = agentEvents.length > 0 ? allEvents.filter(e => e.op !== "agent") : allEvents;
@@ -618,8 +629,8 @@ export const evalToolRenderer = {
 						}
 						const cellLines = renderCodeCell(
 							{
-								code: cell.code,
-								language: languageForHighlighter(cell.language ?? details?.language),
+								code,
+								language: languageForHighlighter(language),
 								showLanguage: true,
 								index: i,
 								total: cellResults.length,
@@ -770,9 +781,4 @@ export const evalToolRenderer = {
 
 	mergeCallAndResult: true,
 	inline: true,
-	// Collapsed pending preview shows tail-window code cells; the result render
-	// interleaves each cell's output under its code, re-laying-out every row
-	// below the first cell. Expanded output is top-anchored enough for the
-	// transcript to commit its settled prefix.
-	provisionalPendingPreview: "collapsed",
 };

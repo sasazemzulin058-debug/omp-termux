@@ -17,6 +17,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { loadExtensions } from "@oh-my-pi/pi-coding-agent/extensibility/extensions";
 import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
+import { removeWithRetries } from "@oh-my-pi/pi-utils";
 
 describe("loadExtensions per-session binding (#2190 review fix)", () => {
 	let tmp: string;
@@ -34,7 +35,7 @@ describe("loadExtensions per-session binding (#2190 review fix)", () => {
 				"  api.registerTool({",
 				"    name: 'tag',",
 				"    description: 'binding probe',",
-				"    params: api.typebox.Type.Object({}),",
+				"    parameters: api.typebox.Type.Object({}),",
 				"    async execute() { return { content: [{ type: 'text', text: '' }] }; },",
 				"  });",
 				"  Object.defineProperty(globalThis, '__lastExtBinding', {",
@@ -50,7 +51,7 @@ describe("loadExtensions per-session binding (#2190 review fix)", () => {
 	});
 
 	afterAll(async () => {
-		await fs.rm(tmp, { recursive: true, force: true });
+		await removeWithRetries(tmp);
 		delete (globalThis as { __bindings?: unknown }).__bindings;
 		delete (globalThis as { __lastExtBinding?: unknown }).__lastExtBinding;
 	});

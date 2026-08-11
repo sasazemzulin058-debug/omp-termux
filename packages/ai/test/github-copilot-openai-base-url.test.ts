@@ -30,12 +30,29 @@ function getRequestHeader(
 	return new Headers(init?.headers).get(headerName);
 }
 
+async function getRequestBody(input: string | URL | Request, init?: RequestInit): Promise<Record<string, unknown>> {
+	if (input instanceof Request) {
+		return (await input.clone().json()) as Record<string, unknown>;
+	}
+	return JSON.parse(String(init?.body)) as Record<string, unknown>;
+}
+
 function createUnauthorizedResponse(): Response {
 	return new Response(JSON.stringify({ error: { message: "Unauthorized" } }), {
 		status: 401,
 		headers: { "Content-Type": "application/json" },
 	});
 }
+
+const INTEGRATOR_ENTITLEMENT_BODY = {
+	error: {
+		message:
+			'The requested model is not available for integrator "opencode". Available models: [gpt-4.1 claude-opus-4.7 gpt-5.5]',
+		code: "model_not_available_for_integrator",
+		param: "model",
+		type: "invalid_request_error",
+	},
+};
 
 const testToken = "ghu_test_copilot_token";
 const enterpriseApiKey = JSON.stringify({ token: testToken, enterpriseUrl: "ghe.example.com" });
@@ -77,6 +94,51 @@ describe("GitHub Copilot OpenAI transport base URL", () => {
 
 		expect(result.stopReason).toBe("error");
 		expect(requestedUrls[0]).toBe("https://api.githubcopilot.com/responses");
+	});
+
+	it("surfaces responses API integrator entitlement details without retrying", async () => {
+		const fetchMock = vi.fn(
+			async () =>
+				new Response(JSON.stringify(INTEGRATOR_ENTITLEMENT_BODY), {
+					status: 400,
+					headers: { "Content-Type": "application/json" },
+				}),
+		);
+
+		const model = getBundledModel("github-copilot", "gpt-5.6-sol") as Model<"openai-responses">;
+		const result = await streamOpenAIResponses(model, testContext, {
+			apiKey: testToken,
+			fetch: fetchMock as unknown as typeof fetch,
+		}).result();
+
+		expect(fetchMock).toHaveBeenCalledTimes(1);
+		expect(result.stopReason).toBe("error");
+		expect(result.errorMessage).toContain('not available for integrator "opencode"');
+		expect(result.errorMessage).toContain("Available models: [gpt-4.1 claude-opus-4.7 gpt-5.5]");
+		expect(result.errorMessage).not.toContain("only part of its fleet");
+	});
+
+	it("omits OpenAI priority service tier while native OpenAI keeps it", async () => {
+		const requestedBodies: Record<string, unknown>[] = [];
+		const fetchMock = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+			requestedBodies.push(await getRequestBody(input, init));
+			return createUnauthorizedResponse();
+		});
+		const requestOptions = {
+			apiKey: testToken,
+			fetch: fetchMock as unknown as typeof fetch,
+			serviceTier: "priority" as const,
+		};
+
+		const copilotModel = getBundledModel("github-copilot", "gpt-5.4") as Model<"openai-responses">;
+		await streamOpenAIResponses(copilotModel, testContext, requestOptions).result();
+
+		const openAIModel = getBundledModel("openai", "gpt-5-mini") as Model<"openai-responses">;
+		await streamOpenAIResponses(openAIModel, testContext, requestOptions).result();
+
+		expect(requestedBodies).toHaveLength(2);
+		expect(requestedBodies[0]?.service_tier).toBeUndefined();
+		expect(requestedBodies[1]?.service_tier).toBe("priority");
 	});
 
 	it("routes structured enterprise credentials to the enterprise chat completions host", async () => {

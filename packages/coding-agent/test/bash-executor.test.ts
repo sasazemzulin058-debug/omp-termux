@@ -3,10 +3,16 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { resetSettingsForTest, Settings, type ShellMinimizerSettings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import { buildMinimizerOptions, executeBash } from "@oh-my-pi/pi-coding-agent/exec/bash-executor";
+import {
+	applyDirenvPreflight,
+	buildMinimizerOptions,
+	executeBash,
+	isPersistentShellCdCommand,
+} from "@oh-my-pi/pi-coding-agent/exec/bash-executor";
+import * as direnvModule from "@oh-my-pi/pi-coding-agent/exec/direnv";
 import { DEFAULT_MAX_BYTES } from "@oh-my-pi/pi-coding-agent/session/streaming-output";
 import * as shellSnapshot from "@oh-my-pi/pi-coding-agent/utils/shell-snapshot";
-import type { Shell } from "@oh-my-pi/pi-natives";
+import type { Shell, ShellRunResult } from "@oh-my-pi/pi-natives";
 import * as piNatives from "@oh-my-pi/pi-natives";
 import { removeSyncWithRetries } from "@oh-my-pi/pi-utils";
 
@@ -29,6 +35,22 @@ function makeTempDir(): string {
 
 function shellQuote(value: string): string {
 	return `'${value.replace(/'/g, "'\\''")}'`;
+}
+
+function configureBashUserShell(homeDir: string): boolean {
+	if (process.platform === "win32" || !fs.existsSync("/bin/bash")) return false;
+	Settings.instance.set("shellPath", "/bin/bash");
+	vi.spyOn(Settings.prototype, "getShellConfig").mockReturnValue({
+		shell: "/bin/bash",
+		args: ["-c"],
+		env: {
+			PATH: Bun.env.PATH ?? "",
+			HOME: homeDir,
+			SHELL: "/bin/bash",
+		},
+		prefix: undefined,
+	});
+	return true;
 }
 
 /** Resolve once `predicate()` holds or `deadlineMs` passes, polling every 2ms. */
@@ -110,6 +132,34 @@ describe("executeBash", () => {
 			legacyFilters: true,
 		});
 	});
+
+	it.each([
+		["cd", true],
+		[" cd child ", true],
+		["cd\tchild", true],
+		["cd -", true],
+		["cd --", true],
+		["cd -- -P", true],
+		['cd "#note"', true],
+		['cd "two words"', true],
+		["cd '~/literal'", true],
+		["cd +1", false],
+		['cd "+1"', false],
+		["cd -- -1", false],
+		["cd -- '+2'", false],
+		["cd\npwd", false],
+		["cd\rpwd", false],
+		["cd -P", false],
+		["cd -L /tmp", false],
+		["cd #note", false],
+		["cd child && pwd", false],
+		["cd two words", false],
+		['cd ""', false],
+		["cd ~other", false],
+		["echo cd child", false],
+	] as const)("classifies persistent-shell cd routing for %j", (command, expected) => {
+		expect(isPersistentShellCdCommand(command)).toBe(expected);
+	});
 	it("returns non-zero exit codes without cancellation", async () => {
 		const result = await executeBash("exit 7", { cwd: tempDir, timeout: 5000 });
 		expect(result.exitCode).toBe(7);
@@ -118,21 +168,57 @@ describe("executeBash", () => {
 
 	it("honors cwd", async () => {
 		const result = await executeBash("pwd", { cwd: tempDir, timeout: 5000 });
-		expect(result.output.trim()).toBe(fs.realpathSync(tempDir));
+		expect(result.output.trim()).toBe(tempDir);
 	});
 
-	it("canonicalizes symlinked cwd before execution", async () => {
+	it("passes the full direnv-load budget when the command deadline is disabled (timeout: 0)", async () => {
+		// A disabled command deadline (`timeout: 0`) must NOT collapse the direnv
+		// export window to 0 ms — that would make AbortSignal.timeout(0) abort the
+		// load instantly, silently dropping the repo's direnv env. The load keeps
+		// its full `bash.direnvLoadTimeoutMs` budget. Spying on loadDirenvEnv both
+		// captures the timeoutMs and short-circuits real direnv (null diff = no-op).
+		const budget = (await Settings.init()).get("bash.direnvLoadTimeoutMs");
+		const spy = vi.spyOn(direnvModule, "loadDirenvEnv").mockResolvedValue(null);
+
+		await executeBash("true", { cwd: tempDir, timeout: 0 });
+
+		expect(spy).toHaveBeenCalledTimes(1);
+		expect(spy.mock.calls[0][1]?.timeoutMs).toBe(budget);
+		expect(spy.mock.calls[0][1]?.timeoutMs).not.toBe(0);
+	});
+
+	it("clamps the direnv-load budget to a positive command timeout smaller than it", async () => {
+		// A positive caller timeout below the budget DOES clamp the direnv window,
+		// proving the fix only relaxes the `timeout: 0` case and did not disable
+		// clamping wholesale. Setting and options.timeout are both milliseconds.
+		const budget = (await Settings.init()).get("bash.direnvLoadTimeoutMs");
+		const callerTimeout = 5;
+		expect(callerTimeout).toBeLessThan(budget);
+		const spy = vi.spyOn(direnvModule, "loadDirenvEnv").mockResolvedValue(null);
+
+		await executeBash("true", { cwd: tempDir, timeout: callerTimeout });
+
+		expect(spy).toHaveBeenCalledTimes(1);
+		expect(spy.mock.calls[0][1]?.timeoutMs).toBe(Math.min(budget, callerTimeout));
+	});
+
+	it("honors symlinked cwd requests in persistent shells", async () => {
 		if (process.platform === "win32") {
 			return;
 		}
+		if (!configureBashUserShell(tempDir)) return;
 
 		const realDir = path.join(tempDir, "real");
 		const linkDir = path.join(tempDir, "link");
 		fs.mkdirSync(realDir);
 		fs.symlinkSync(realDir, linkDir, "dir");
+		const sessionKey = `cwd-symlink-${Date.now()}`;
 
-		const result = await executeBash("pwd", { cwd: linkDir, timeout: 5000 });
-		expect(result.output.trim()).toBe(fs.realpathSync(linkDir));
+		await executeBash("pwd", { sessionKey, cwd: realDir, timeout: 5000, useUserShell: true });
+		const result = await executeBash("pwd", { sessionKey, cwd: linkDir, timeout: 5000, useUserShell: true });
+
+		expect(result.output.trim()).toBe(linkDir);
+		expect(result.workingDir).toBe(linkDir);
 	});
 
 	it("passes env vars", async () => {
@@ -145,12 +231,12 @@ describe("executeBash", () => {
 	});
 
 	it("applies non-interactive environment defaults", async () => {
-		const result = await executeBash('echo "$GIT_TERMINAL_PROMPT:$PI_TEST_ENV"', {
+		const result = await executeBash('echo "$AGENT:$GIT_TERMINAL_PROMPT:$PI_TEST_ENV"', {
 			cwd: tempDir,
 			timeout: 5000,
 			env: { PI_TEST_ENV: "hello" },
 		});
-		expect(result.output.trim()).toBe("0:hello");
+		expect(result.output.trim()).toBe("1:0:hello");
 	});
 
 	it("runs non-bash shellPath commands through the configured shell", async () => {
@@ -206,6 +292,88 @@ exit 64
 		}
 	});
 
+	it("persists cd, bare cd, and cd - when shortcut commands use a non-bash user shell", async () => {
+		if (process.platform === "win32") return;
+
+		const shellDir = fs.mkdtempSync(path.join(os.tmpdir(), "omp-cd-shellpath-"));
+		const marker = path.join(shellDir, "fake-shell-ran");
+		const fakeShell = path.join(shellDir, "fake-shell");
+		const childDir = path.join(tempDir, "child");
+		fs.mkdirSync(childDir);
+		fs.writeFileSync(
+			fakeShell,
+			`#!/bin/sh
+printf '%s\\n' "$*" > ${shellQuote(marker)}
+while [ "$#" -gt 0 ]; do
+	if [ "$1" = "-c" ]; then
+		shift
+		exec /bin/sh -c "$1"
+	fi
+	shift
+done
+exit 64
+`,
+		);
+		fs.chmodSync(fakeShell, 0o755);
+		Settings.instance.set("shellPath", fakeShell);
+		vi.spyOn(Settings.prototype, "getShellConfig").mockReturnValue({
+			shell: fakeShell,
+			args: ["-l", "-c"],
+			env: {
+				PATH: Bun.env.PATH ?? "",
+				HOME: tempDir,
+			},
+			prefix: undefined,
+		});
+
+		try {
+			const sessionKey = `persistent-cd-${Date.now()}`;
+			const moved = await executeBash("cd child", {
+				cwd: tempDir,
+				timeout: 5000,
+				sessionKey,
+				useUserShell: true,
+			});
+
+			expect(moved.exitCode).toBe(0);
+			expect(moved.workingDir).toBe(childDir);
+			expect(fs.existsSync(marker)).toBe(false);
+
+			const home = await executeBash("cd", {
+				cwd: childDir,
+				timeout: 5000,
+				sessionKey,
+				useUserShell: true,
+			});
+
+			expect(home.exitCode).toBe(0);
+			expect(home.workingDir).toBe(tempDir);
+			expect(fs.existsSync(marker)).toBe(false);
+
+			const returned = await executeBash("cd -", {
+				cwd: tempDir,
+				timeout: 5000,
+				sessionKey,
+				useUserShell: true,
+			});
+
+			expect(returned.exitCode).toBe(0);
+			expect(returned.workingDir).toBe(childDir);
+			expect(fs.existsSync(marker)).toBe(false);
+
+			const pwd = await executeBash("pwd", {
+				cwd: childDir,
+				timeout: 5000,
+				sessionKey,
+				useUserShell: true,
+			});
+			expect(pwd.output.trim()).toBe(childDir);
+			expect(fs.existsSync(marker)).toBe(true);
+		} finally {
+			removeSyncWithRetries(shellDir);
+		}
+	});
+
 	it("uses executable SHELL for user-shell shortcut commands", async () => {
 		if (process.platform === "win32") {
 			return;
@@ -255,8 +423,10 @@ exit 64
 			expect(result.cancelled).toBe(false);
 			expect(result.exitCode).toBe(0);
 			expect(result.output.trim()).toBe("env-shell-ok");
-			expect(fs.readFileSync(marker, "utf8")).toContain("-l -c");
-			expect(fs.readFileSync(marker, "utf8")).not.toContain("-i");
+			// fish gets `-i` (interactive loads config.fish too) instead of `-l`,
+			// so `status is-login` blocks in user config don't fire on `!` commands.
+			expect(fs.readFileSync(marker, "utf8")).toContain("-i -c");
+			expect(fs.readFileSync(marker, "utf8")).not.toContain("-l");
 		} finally {
 			if (originalShell === undefined) {
 				delete Bun.env.SHELL;
@@ -304,6 +474,58 @@ exit 64
 			expect(result.cancelled).toBe(false);
 			expect(result.exitCode).toBe(0);
 			expect(result.output.trim()).toBe("zsh-alias-ok");
+		} finally {
+			removeSyncWithRetries(shellDir);
+		}
+	});
+
+	it("runs fish user-shell commands without login-shell side effects", async () => {
+		if (process.platform === "win32") {
+			return;
+		}
+
+		const fishPath = ["/usr/bin/fish", "/bin/fish", "/usr/local/bin/fish", "/opt/homebrew/bin/fish"].find(candidate =>
+			fs.existsSync(candidate),
+		);
+		if (!fishPath) {
+			return;
+		}
+
+		const shellDir = fs.mkdtempSync(path.join(os.tmpdir(), "omp-fish-shellpath-"));
+		const configDir = path.join(shellDir, ".config", "fish");
+		fs.mkdirSync(path.join(configDir, "conf.d"), { recursive: true });
+		fs.writeFileSync(path.join(configDir, "config.fish"), "function pi_fish_fn; echo fish-fn-ok; end\n");
+		// Login-gated snippet: fires only when the spawned fish is a login shell.
+		fs.writeFileSync(
+			path.join(configDir, "conf.d", "pi-login.fish"),
+			"if status is-login; echo fish-login-side-effect; end\n",
+		);
+		Settings.instance.set("shellPath", fishPath);
+
+		vi.spyOn(Settings.prototype, "getShellConfig").mockReturnValue({
+			shell: fishPath,
+			args: ["-l", "-c"],
+			env: {
+				PATH: Bun.env.PATH ?? "",
+				HOME: shellDir,
+			},
+			prefix: undefined,
+		});
+
+		try {
+			const result = await executeBash("pi_fish_fn", {
+				cwd: tempDir,
+				timeout: 5000,
+				sessionKey: "fish-shell-path",
+				useUserShell: true,
+			});
+
+			expect(result.cancelled).toBe(false);
+			expect(result.exitCode).toBe(0);
+			// config.fish must still load (#1816 contract)…
+			expect(result.output).toContain("fish-fn-ok");
+			// …but the shell must not be a login shell.
+			expect(result.output).not.toContain("fish-login-side-effect");
 		} finally {
 			removeSyncWithRetries(shellDir);
 		}
@@ -381,6 +603,15 @@ exit 64
 		expect(result.output).not.toContain("done");
 	});
 
+	it("does not arm a deadline when timeout is zero", async () => {
+		if (process.platform === "win32") {
+			return;
+		}
+		const result = await executeBash("sleep 1.2; echo done", { cwd: tempDir, timeout: 0 });
+		expect(result.cancelled).toBe(false);
+		expect(result.output.trim()).toBe("done");
+	});
+
 	it("aborts commands", async () => {
 		if (process.platform === "win32") {
 			return;
@@ -445,7 +676,7 @@ exit 64
 			sessionKey: "hung-native-abort",
 		});
 		expect(next.output.trim()).toBe("next");
-		expect(runCalls).toBe(1);
+		expect(runCalls).toBe(2);
 	});
 
 	it("restores persistent sessions after native abort cleanup settles", async () => {
@@ -490,11 +721,7 @@ exit 64
 		expect(next.output.trim()).toBe("still_persistent");
 	});
 
-	it("returns at the JavaScript timeout when native timeout cleanup stalls", async () => {
-		if (process.platform === "win32") {
-			return;
-		}
-
+	it("aborts the shell without aborting its native signal when the JavaScript timeout fallback wins", async () => {
 		// Compress the JS-side fallback timer (floored at 1000ms in the source) so
 		// the safety-net fires deterministically without a real 1s wait. Only long
 		// timers are shrunk — fs/subprocess setup keeps real scheduling — and the
@@ -507,8 +734,12 @@ exit 64
 				...rest,
 			)) as typeof globalThis.setTimeout);
 
-		vi.spyOn(piNatives.Shell.prototype, "run").mockImplementation((_options, onChunk) => {
-			onChunk?.(null, "started\n");
+		let nativeSignal: AbortSignal | undefined;
+		vi.spyOn(piNatives.Shell.prototype, "run").mockImplementation((options, onChunk) => {
+			if (options.signal instanceof AbortSignal) {
+				nativeSignal = options.signal;
+			}
+			onChunk?.(null, "streamed-before-timeout\n");
 			return Promise.withResolvers<never>().promise;
 		});
 		const abortSpy = vi.spyOn(piNatives.Shell.prototype, "abort").mockResolvedValue();
@@ -516,12 +747,60 @@ exit 64
 		const result = await executeBash("sleep 10", {
 			cwd: tempDir,
 			timeout: 1000,
-			sessionKey: "hung-native-timeout",
+			sessionKey: "explicit-timeout-keeps-native-signal",
 		});
 
 		expect(result.cancelled).toBe(true);
+		expect(result.output).toContain("streamed-before-timeout");
 		expect(result.output).toContain("Command timed out after 1 seconds");
-		expect(abortSpy).toHaveBeenCalled();
+		expect(nativeSignal).toBeDefined();
+		expect(nativeSignal?.aborted).toBe(false);
+		expect(abortSpy).toHaveBeenCalledTimes(1);
+	});
+
+	it("explicitly aborts an overlapping one-shot shell when timeout cleanup stalls", async () => {
+		const realSetTimeout = globalThis.setTimeout;
+		vi.spyOn(globalThis, "setTimeout").mockImplementation(((handler: () => void, ms?: number, ...rest: unknown[]) =>
+			realSetTimeout(
+				handler,
+				typeof ms === "number" && ms >= 1000 ? 5 : ms,
+				...rest,
+			)) as typeof globalThis.setTimeout);
+
+		const ownerResult = Promise.withResolvers<ShellRunResult>();
+		const isolatedResult = Promise.withResolvers<ShellRunResult>();
+		const ownerDispatched = Promise.withResolvers<void>();
+		const isolatedDispatched = Promise.withResolvers<void>();
+		vi.spyOn(piNatives.Shell.prototype, "run").mockImplementation(options => {
+			if (options.command === "owner") {
+				ownerDispatched.resolve();
+				return ownerResult.promise;
+			}
+			isolatedDispatched.resolve();
+			return isolatedResult.promise;
+		});
+		const abortSpy = vi.spyOn(piNatives.Shell.prototype, "abort").mockResolvedValue();
+
+		const owner = executeBash("owner", {
+			cwd: tempDir,
+			timeout: 0,
+			sessionKey: "stalled-one-shot-timeout",
+		});
+		await ownerDispatched.promise;
+		const overlapping = executeBash("isolated", {
+			cwd: tempDir,
+			timeout: 1000,
+			sessionKey: "stalled-one-shot-timeout",
+		});
+		await isolatedDispatched.promise;
+
+		const result = await overlapping;
+		expect(result.cancelled).toBe(true);
+		expect(abortSpy).toHaveBeenCalledTimes(1);
+
+		isolatedResult.resolve({ exitCode: undefined, cancelled: true, timedOut: true });
+		ownerResult.resolve({ exitCode: 0, cancelled: false, timedOut: false });
+		await owner;
 	});
 
 	it("aborts before follow-up output", async () => {
@@ -956,6 +1235,42 @@ exit 64
 		expect(result.output).toContain("Command cancelled");
 		await expectMarkerNeverWritten(marker, release);
 	});
+	it("waits for native timeout teardown to flush piped output", async () => {
+		const realSetTimeout = globalThis.setTimeout;
+		vi.spyOn(globalThis, "setTimeout").mockImplementation(((handler: () => void, ms?: number, ...rest: unknown[]) =>
+			realSetTimeout(
+				handler,
+				ms === 1000 ? 5 : typeof ms === "number" && ms > 1000 ? 50 : ms,
+				...rest,
+			)) as typeof globalThis.setTimeout);
+
+		let nativeSignal: AbortSignal | undefined;
+		vi.spyOn(piNatives.Shell.prototype, "run").mockImplementation((options, onChunk) => {
+			if (options.signal instanceof AbortSignal) {
+				nativeSignal = options.signal;
+			}
+			const nativeResult = Promise.withResolvers<piNatives.ShellRunResult>();
+			realSetTimeout(() => {
+				onChunk?.(null, "flushed-during-timeout\n");
+				nativeResult.resolve({ exitCode: undefined, cancelled: false, timedOut: true });
+			}, 20);
+			return nativeResult.promise;
+		});
+		const abortSpy = vi.spyOn(piNatives.Shell.prototype, "abort").mockResolvedValue();
+
+		const result = await executeBash("producer | tail -5", {
+			cwd: tempDir,
+			timeout: 1000,
+			sessionKey: "native-timeout-flushes-pipeline",
+		});
+
+		expect(result.cancelled).toBe(true);
+		expect(result.output).toContain("flushed-during-timeout");
+		expect(result.output).toContain("Command timed out after 1 seconds");
+		expect(nativeSignal).toBeDefined();
+		expect(nativeSignal?.aborted).toBe(false);
+		expect(abortSpy).not.toHaveBeenCalled();
+	});
 });
 
 describe("executeBash :async: background retention", () => {
@@ -1057,4 +1372,67 @@ describe("executeBash :async: background retention", () => {
 			}
 		},
 	);
+});
+
+describe("applyDirenvPreflight direnv-load clamp", () => {
+	let tempDir: string;
+
+	beforeEach(() => {
+		tempDir = makeTempDir();
+	});
+
+	afterEach(() => {
+		vi.restoreAllMocks();
+		if (fs.existsSync(tempDir)) removeSyncWithRetries(tempDir);
+	});
+
+	it("clamps the direnv load to a positive caller timeout below the full budget", async () => {
+		// The clamp lives INSIDE the helper, so every backend that routes through
+		// applyDirenvPreflight (executeBash, ACP terminal, PTY) inherits it. A
+		// positive callerTimeoutMs smaller than the full load budget must win, so a
+		// short-timeout command can't hand a cold `.envrc` the full 30s window.
+		// Reverting the clamp to executeBash-only leaves the ACP/PTY backend
+		// passing the full budget here, reddening this assertion.
+		const spy = vi.spyOn(direnvModule, "loadDirenvEnv").mockResolvedValue(null);
+
+		await applyDirenvPreflight("true", tempDir, {
+			direnvSetting: "auto",
+			timeoutMs: 30_000,
+			callerTimeoutMs: 5,
+		});
+
+		expect(spy).toHaveBeenCalledTimes(1);
+		expect(spy.mock.calls[0][1]?.timeoutMs).toBe(5);
+	});
+
+	it("keeps the full direnv-load budget when the caller deadline is disabled (callerTimeoutMs: 0)", async () => {
+		// A disabled command deadline (`0`) is NOT a 0 ms load — it means "no caller
+		// clamp", so the load keeps its full `timeoutMs` budget. Collapsing it to 0
+		// would make AbortSignal.timeout(0) abort instantly and silently drop the
+		// repo's direnv env.
+		const spy = vi.spyOn(direnvModule, "loadDirenvEnv").mockResolvedValue(null);
+
+		await applyDirenvPreflight("true", tempDir, {
+			direnvSetting: "auto",
+			timeoutMs: 30_000,
+			callerTimeoutMs: 0,
+		});
+
+		expect(spy).toHaveBeenCalledTimes(1);
+		expect(spy.mock.calls[0][1]?.timeoutMs).toBe(30_000);
+	});
+
+	it("keeps the full direnv-load budget when no caller deadline is supplied (callerTimeoutMs: undefined)", async () => {
+		// An omitted caller deadline behaves like a disabled one: no clamp, full
+		// budget. Guards the `!== undefined` half of the clamp condition.
+		const spy = vi.spyOn(direnvModule, "loadDirenvEnv").mockResolvedValue(null);
+
+		await applyDirenvPreflight("true", tempDir, {
+			direnvSetting: "auto",
+			timeoutMs: 30_000,
+		});
+
+		expect(spy).toHaveBeenCalledTimes(1);
+		expect(spy.mock.calls[0][1]?.timeoutMs).toBe(30_000);
+	});
 });

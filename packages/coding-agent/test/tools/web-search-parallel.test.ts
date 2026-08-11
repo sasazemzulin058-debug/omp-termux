@@ -131,6 +131,45 @@ describe("Parallel web search", () => {
 		]);
 	});
 
+	it("maps site: directives onto source_policy.include_domains and strips them from the query", async () => {
+		const fetchMock = mockFetch({
+			search_id: "search-parallel-3",
+			results: [],
+			warnings: null,
+			usage: null,
+		});
+
+		await searchParallel({ query: "web api site:parallel.ai", fetch: fetchMock }, fakeAuthStorage);
+		expect(capturedRequestBody).toEqual({
+			objective: "web api",
+			search_queries: ["web api"],
+			mode: "fast",
+			excerpts: { max_chars_per_result: 10_000 },
+			source_policy: { include_domains: ["parallel.ai"] },
+		});
+	});
+
+	it("maps -site: and after: onto exclude_domains/after_date, keeping phrases and negation", async () => {
+		const fetchMock = mockFetch({
+			search_id: "search-parallel-4",
+			results: [],
+			warnings: null,
+			usage: null,
+		});
+
+		await searchParallel(
+			{ query: '"web api" -legacy -site:reddit.com/r/node after:2025-06-01', fetch: fetchMock },
+			fakeAuthStorage,
+		);
+		expect(capturedRequestBody).toEqual({
+			objective: '"web api" -legacy',
+			search_queries: ['"web api" -legacy'],
+			mode: "fast",
+			excerpts: { max_chars_per_result: 10_000 },
+			source_policy: { exclude_domains: ["reddit.com"], after_date: "2025-06-01" },
+		});
+	});
+
 	it("surfaces plain-text Parallel API errors", async () => {
 		const fetchMock: FetchImpl = () => Promise.resolve(new Response("upstream unavailable", { status: 503 }));
 		await expect(searchParallel({ query: "broken", fetch: fetchMock }, fakeAuthStorage)).rejects.toMatchObject({

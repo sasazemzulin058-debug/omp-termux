@@ -30,17 +30,70 @@ export const SEARCH_PROVIDER_OPTIONS = [
 		label: "OpenAI",
 		description: "OpenAI's native web_search (uses ChatGPT OAuth via /login openai-codex)",
 	},
+	{
+		value: "xai",
+		label: "xAI",
+		description:
+			"Grok web search via xAI Responses API (uses SuperGrok/X Premium+ OAuth via /login xai-oauth, or XAI_API_KEY)",
+	},
 	{ value: "zai", label: "Z.AI", description: "Calls Z.AI webSearchPrime MCP" },
-	{ value: "exa", label: "Exa", description: "Uses Exa API when EXA_API_KEY is set; falls back to Exa MCP" },
+	{ value: "exa", label: "Exa", description: "API via /login exa or EXA_API_KEY; explicit keyless fallback via MCP" },
+	{ value: "tinyfish", label: "TinyFish", description: "Requires TINYFISH_API_KEY" },
 	{ value: "jina", label: "Jina", description: "Requires JINA_API_KEY" },
 	{ value: "kagi", label: "Kagi", description: "Requires KAGI_API_KEY and Kagi Search API beta access" },
 	{ value: "tavily", label: "Tavily", description: "Requires TAVILY_API_KEY" },
+	{
+		value: "firecrawl",
+		label: "Firecrawl",
+		description: "Uses Firecrawl API when FIRECRAWL_API_KEY is set; falls back to keyless mode",
+	},
 	{ value: "brave", label: "Brave", description: "Requires BRAVE_API_KEY" },
-	{ value: "kimi", label: "Kimi", description: "Requires MOONSHOT_SEARCH_API_KEY or MOONSHOT_API_KEY" },
+	{
+		value: "kimi",
+		label: "Kimi",
+		description:
+			"Kimi Code search (requires a Kimi Code Console key via KIMI_SEARCH_API_KEY/MOONSHOT_SEARCH_API_KEY or /login kimi-code; not MOONSHOT_API_KEY)",
+	},
 	{ value: "parallel", label: "Parallel", description: "Requires PARALLEL_API_KEY" },
 	{ value: "synthetic", label: "Synthetic", description: "Requires SYNTHETIC_API_KEY" },
 	{ value: "searxng", label: "SearXNG", description: "Requires SEARXNG_ENDPOINT or searxng.endpoint" },
+	{
+		value: "startpage",
+		label: "Startpage",
+		description: "Credential-free scrape of Startpage (Google-backed) results; may be bot-challenged",
+	},
+	{
+		value: "duckduckgo",
+		label: "DuckDuckGo",
+		description: "Credential-free best-effort fallback; may be bot-challenged on datacenter/shared-egress IPs",
+	},
+	{
+		value: "ecosia",
+		label: "Ecosia",
+		description: "Credential-free browser-backed scrape of Ecosia (Google-backed) results",
+	},
+	{
+		value: "google",
+		label: "Google",
+		description: "Credential-free browser-backed fallback; slower and may be bot-challenged",
+	},
+	{
+		value: "mojeek",
+		label: "Mojeek",
+		description: "Credential-free browser-backed scrape of Mojeek's independent index",
+	},
+	{
+		value: "public",
+		label: "Public Web",
+		description: "Queries every credential-free engine in parallel and consolidates deduplicated results",
+	},
 ] as const;
+
+/** Default hard timeout for each web-search provider transport. */
+export const DEFAULT_WEB_SEARCH_TIMEOUT_SECONDS = 60;
+
+/** Maximum configurable hard timeout for each web-search provider transport. */
+export const MAX_WEB_SEARCH_TIMEOUT_SECONDS = 300;
 
 /** Supported web search providers (every option except `auto`). */
 export type SearchProviderId = Exclude<(typeof SEARCH_PROVIDER_OPTIONS)[number]["value"], "auto">;
@@ -53,6 +106,9 @@ export type SearchProviderId = Exclude<(typeof SEARCH_PROVIDER_OPTIONS)[number][
 export const SEARCH_PROVIDER_ORDER: readonly SearchProviderId[] = SEARCH_PROVIDER_OPTIONS.flatMap(option =>
 	option.value === "auto" ? [] : [option.value],
 );
+
+/** Concrete provider choices (no `auto` sentinel) — for list-valued settings like order/exclude. */
+export const SEARCH_PROVIDER_CHOICES = SEARCH_PROVIDER_OPTIONS.filter(option => option.value !== "auto");
 
 export const SEARCH_PROVIDER_PREFERENCES = ["auto", ...SEARCH_PROVIDER_ORDER] as const;
 
@@ -81,7 +137,7 @@ export interface SearchSource {
 	author?: string;
 }
 
-/** Citation with text reference (anthropic, perplexity) */
+/** Citation with text reference (LLM-mediated providers) */
 export interface SearchCitation {
 	url: string;
 	title: string;
@@ -101,7 +157,7 @@ export interface SearchUsage {
 /** Unified response across providers */
 export interface SearchResponse {
 	provider: SearchProviderId | "none";
-	/** Synthesized answer text (anthropic, perplexity) */
+	/** Synthesized answer text (LLM-mediated providers) */
 	answer?: string;
 	/** Search result sources */
 	sources: SearchSource[];

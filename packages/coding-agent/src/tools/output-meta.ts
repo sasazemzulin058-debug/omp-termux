@@ -191,6 +191,13 @@ export class OutputMetaBuilder {
 
 	/** Add truncation info from OutputSummary. No-op if not truncated. */
 	truncationFromSummary(summary: OutputSummary, options: TruncationSummaryOptions): this {
+		// A per-line column cap only trims individual lines (with a `…` marker);
+		// it is not a window/byte truncation, so surface it as its own limit
+		// notice rather than a "Showing lines X-Y … limit" range. This runs even
+		// when the output is otherwise complete (`truncated === false`).
+		if (summary.columnMax != null && summary.columnMax > 0 && (summary.columnTruncatedLines ?? 0) > 0) {
+			this.columnTruncated(summary.columnMax);
+		}
 		if (!summary.truncated) return this;
 
 		const { direction, startLine = 1, totalFileLines } = options;
@@ -385,6 +392,56 @@ export function formatFullOutputReference(artifactId: string): string {
 	return `Read artifact://${artifactId} for full output`;
 }
 
+const RAW_OUTPUT_ARTIFACT_PREFIX = "[raw output: artifact://";
+const RAW_OUTPUT_ARTIFACT_SUFFIX = "]";
+
+/** Remove the trailing bash raw-output artifact footer while preserving its artifact id. */
+export function stripRawOutputArtifactNotice(text: string): { text: string; artifactId?: string } {
+	const trimmed = text.trimEnd();
+	const lineStart = trimmed.lastIndexOf("\n");
+	const candidateStart = lineStart === -1 ? 0 : lineStart + 1;
+	if (
+		!trimmed.startsWith(RAW_OUTPUT_ARTIFACT_PREFIX, candidateStart) ||
+		!trimmed.endsWith(RAW_OUTPUT_ARTIFACT_SUFFIX)
+	) {
+		return { text };
+	}
+
+	const idStart = candidateStart + RAW_OUTPUT_ARTIFACT_PREFIX.length;
+	const idEnd = trimmed.length - RAW_OUTPUT_ARTIFACT_SUFFIX.length;
+	if (idStart === idEnd) return { text };
+	for (let i = idStart; i < idEnd; i++) {
+		const code = trimmed.charCodeAt(i);
+		if (code < 48 || code > 57) return { text };
+	}
+
+	const artifactId = trimmed.slice(idStart, idEnd);
+	return {
+		text: trimmed.slice(0, lineStart === -1 ? 0 : lineStart).trimEnd(),
+		artifactId,
+	};
+}
+
+function isGeneratedOutputNoticeLine(line: string): boolean {
+	if (!line.startsWith("[") || !line.endsWith("]")) return false;
+	const body = line.slice(1, -1);
+	return (
+		body.startsWith("Showing ") ||
+		/^\d+ matches limit reached\. Use limit=\d+ for more/u.test(body) ||
+		/^\d+ results limit reached\. Use limit=\d+ for more/u.test(body) ||
+		body.startsWith("Some lines truncated to ")
+	);
+}
+
+/** Remove a trailing generated output notice when metadata is unavailable. */
+export function stripGeneratedOutputNotice(text: string): string {
+	const trimmed = text.trimEnd();
+	const lineStart = trimmed.lastIndexOf("\n");
+	const candidateStart = lineStart === -1 ? 0 : lineStart + 1;
+	if (!isGeneratedOutputNoticeLine(trimmed.slice(candidateStart))) return text;
+	return trimmed.slice(0, lineStart === -1 ? 0 : lineStart).trimEnd();
+}
+
 export function formatTruncationMetaNotice(truncation: TruncationMeta): string {
 	let notice: string;
 
@@ -400,6 +457,9 @@ export function formatTruncationMetaNotice(truncation: TruncationMeta): string {
 			notice = `Showing ${headPart} and ${tailPart} of ${totalLines}; ${elidedLines.toLocaleString()} middle line${elidedLines === 1 ? "" : "s"} (${formatBytes(elidedBytes)}) elided`;
 		} else {
 			notice = `Showing ${truncation.outputLines} of ${totalLines} lines; middle elided`;
+		}
+		if (truncation.nextOffset != null) {
+			notice += `. Use :${truncation.nextOffset} to continue`;
 		}
 		if (truncation.artifactId != null) {
 			notice += `. ${formatFullOutputReference(truncation.artifactId)}`;
@@ -575,6 +635,26 @@ export function resolveOutputSinkHeadBytes(s: Settings | undefined): number {
 }
 
 /**
+ * Slack on top of the configured spill threshold before the final-defense
+ * inline byte cap fires. The OutputSink already bounds inline bodies to the
+ * threshold; only notice slop (wall time, exit code, elision marker,
+ * `[raw output: artifact://N]` footer) rides above it. The slack keeps the
+ * cap a genuine last resort for paths that bypass the sink (e.g. ACP
+ * client-bridge terminals) instead of re-truncating — and re-saving — every
+ * sink-elided result (the double-artifact `Artifact: N+1` vs `artifact://N`
+ * mismatch).
+ */
+const INLINE_CAP_SLACK_BYTES = 2 * 1024;
+
+/**
+ * Resolve the `enforceInlineByteCap` budget for streaming tools (bash/ssh)
+ * from session settings: the user's spill threshold plus notice slack.
+ */
+export function resolveInlineByteCapBudget(s: Settings | undefined): number {
+	return getSpillConfig(s).threshold + INLINE_CAP_SLACK_BYTES;
+}
+
+/**
  * Resolve the per-line column cap from session settings. Shared by streaming
  * executors (bash/python/ssh/eval via OutputSink) and the `read` tool's
  * line-buffer post-processing, so one setting controls both surfaces.
@@ -597,12 +677,22 @@ async function spillLargeResultToArtifact(
 ): Promise<AgentToolResult> {
 	const sessionManager = context?.sessionManager;
 	if (!sessionManager) return result;
-	if (toolName === "read") return result;
 	const { threshold, tailBytes, tailLines, headBytes } = getSpillConfig(context?.settings);
 
 	// Skip if tool already saved an artifact
 	const existingMeta: OutputMeta | undefined = result.details?.meta;
 	if (existingMeta?.truncation?.artifactId) return result;
+
+	// Reading an artifact already addresses recoverable full output. Spilling that
+	// read would only create a redundant artifact containing another artifact's
+	// page (and can repeat indefinitely on subsequent reads).
+	if (
+		toolName === "read" &&
+		existingMeta?.source?.type === "internal" &&
+		existingMeta.source.value.startsWith("artifact://")
+	) {
+		return result;
+	}
 
 	// Measure total text content
 	const textParts: string[] = [];
@@ -683,6 +773,7 @@ async function spillLargeResultToArtifact(
 			elidedLines,
 			elidedBytes,
 			artifactId,
+			nextOffset: existingMeta?.truncation?.nextOffset,
 		};
 	} else {
 		const shownStart = truncated.totalLines - outputLines + 1;
@@ -696,6 +787,7 @@ async function spillLargeResultToArtifact(
 			maxBytes: tailBytes,
 			shownRange: { start: shownStart, end: truncated.totalLines },
 			artifactId,
+			nextOffset: existingMeta?.truncation?.nextOffset,
 		};
 	}
 

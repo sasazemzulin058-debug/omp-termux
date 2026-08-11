@@ -39,8 +39,7 @@ const DESCRIPTION_UNAVAILABLE_NOTE =
 	"[Image description unavailable: the vision model returned no usable text. The image was saved for further analysis.]";
 
 /** Registry surface needed to resolve a vision model and authorize requests. */
-export type VisionFallbackRegistry = Pick<ModelRegistry, "getAvailable" | "getApiKey" | "resolver"> &
-	Partial<Pick<ModelRegistry, "resolveCanonicalModel" | "getCanonicalVariants" | "getCanonicalId">>;
+export type VisionFallbackRegistry = Pick<ModelRegistry, "getAvailable" | "getApiKey" | "resolver">;
 
 export interface DescribeAttachedImagesDeps {
 	/** Active (text-only) model the prompt is destined for. */
@@ -98,7 +97,7 @@ function formatImageBlock(localUrl: string, description: string): string {
 
 /**
  * Resolve a vision-capable model, mirroring the inspect_image priority
- * (`pi/vision` → `pi/default` → active → first image-capable available), but
+ * (`@vision` → `@default` → active → first image-capable available), but
  * never returning a text-only model.
  */
 function resolveVisionModel(deps: DescribeAttachedImagesDeps): Model<Api> | undefined {
@@ -108,12 +107,12 @@ function resolveVisionModel(deps: DescribeAttachedImagesDeps): Model<Api> | unde
 	const resolvePattern = (pattern: string | undefined): Model<Api> | undefined => {
 		if (!pattern) return undefined;
 		const expanded = expandRoleAlias(pattern, deps.settings);
-		const model = resolveModelFromString(expanded, available, preferences, deps.modelRegistry);
+		const model = resolveModelFromString(expanded, available, preferences);
 		return model?.input.includes("image") ? model : undefined;
 	};
 	return (
-		resolvePattern("pi/vision") ??
-		resolvePattern("pi/default") ??
+		resolvePattern("@vision") ??
+		resolvePattern("@default") ??
 		resolvePattern(deps.activeModelString) ??
 		available.find(model => model.input.includes("image"))
 	);

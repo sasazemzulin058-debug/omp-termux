@@ -115,4 +115,151 @@ describe("AgentSession manual retry", () => {
 		expect(mock.calls.length).toBe(1);
 		expect(lastAgentMessage(session).content).toContainEqual({ type: "text", text: "already done" });
 	});
+
+	it("retries past synthetic tool results left by a mid-tool-call stream stall", async () => {
+		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
+		if (!model) {
+			throw new Error("Expected bundled Anthropic test model to exist");
+		}
+
+		// First turn stalls mid-tool-call: the assistant emits a `write` tool call
+		// but the stream ends with an error before it runs, so `stopReason: "error"`.
+		// The agent loop then appends a synthetic tool_result for the un-run call,
+		// which trails the failed assistant turn in agent state.
+		const mock = createMockModel({
+			responses: [
+				{
+					content: [{ type: "toolCall", name: "write", arguments: { path: "plan.md", content: "x" } }],
+					stopReason: "error",
+					errorMessage: "OpenAI completions stream stalled while waiting for the next event",
+				},
+				{ content: ["recovered after stalled tool call"], stopReason: "stop" },
+			],
+		});
+		const agent = new Agent({
+			getApiKey: model => `${model.provider}-test-key`,
+			initialState: {
+				model,
+				systemPrompt: ["Test"],
+				tools: [],
+				messages: [],
+			},
+			streamFn: mock.stream,
+		});
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings: Settings.isolated({ "compaction.enabled": false, "retry.enabled": false }),
+			modelRegistry: new ModelRegistry(authStorage),
+		});
+		session.subscribe(() => {});
+
+		await session.prompt("write the plan");
+		await session.waitForIdle();
+
+		// The failed assistant turn is shadowed by a trailing synthetic tool_result.
+		const messages = session.agent.state.messages;
+		expect(messages.at(-1)?.role).toBe("toolResult");
+		const failedAssistant = messages.findLast(m => m.role === "assistant") as AssistantMessage;
+		expect(failedAssistant.stopReason).toBe("error");
+
+		await expect(session.retry()).resolves.toBe(true);
+		await session.waitForIdle();
+
+		expect(mock.calls.length).toBe(2);
+		expect(lastAgentMessage(session).stopReason).toBe("stop");
+		expect(lastAgentMessage(session).content).toContainEqual({
+			type: "text",
+			text: "recovered after stalled tool call",
+		});
+	});
+
+	it("retries a persisted failed turn after rebuilding provider context", async () => {
+		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
+		if (!model) {
+			throw new Error("Expected bundled Anthropic test model to exist");
+		}
+
+		const mock = createMockModel({
+			responses: [
+				{
+					content: [{ type: "toolCall", name: "write", arguments: { path: "plan.md", content: "x" } }],
+					stopReason: "error",
+					errorMessage: "stream stalled before the tool ran",
+				},
+				{ content: ["recovered after session reopen"], stopReason: "stop" },
+			],
+		});
+		const sessionManager = SessionManager.inMemory();
+		const agent = new Agent({
+			getApiKey: model => `${model.provider}-test-key`,
+			initialState: {
+				model,
+				systemPrompt: ["Test"],
+				tools: [],
+				messages: [],
+			},
+			streamFn: mock.stream,
+		});
+		session = new AgentSession({
+			agent,
+			sessionManager,
+			settings: Settings.isolated({ "compaction.enabled": false, "retry.enabled": false }),
+			modelRegistry: new ModelRegistry(authStorage),
+		});
+		session.subscribe(() => {});
+
+		await session.prompt("write before reopen");
+		await session.waitForIdle();
+		const failedAssistant = session.agent.state.messages.findLast(
+			(message): message is AssistantMessage => message.role === "assistant",
+		);
+		expect(failedAssistant?.stopReason).toBe("error");
+
+		const reopenedManager = SessionManager.inMemory();
+		reopenedManager.restoreState(sessionManager.captureState());
+		await session.dispose();
+		session = undefined;
+
+		const restoredMessages = reopenedManager.buildSessionContext().messages;
+		// The failed tool-call turn AND its paired synthetic tool result are both
+		// dropped from provider context — leaving a stranded tool result with no
+		// preceding tool_use would be rejected by provider converters.
+		expect(restoredMessages.map(message => message.role)).toEqual(["user"]);
+		const transcriptMessages = reopenedManager.buildSessionContext({ transcript: true }).messages;
+		expect(transcriptMessages.at(-1)?.role).toBe("toolResult");
+		const transcriptAssistant = transcriptMessages.findLast(
+			(message): message is AssistantMessage => message.role === "assistant",
+		);
+		expect(transcriptAssistant?.stopReason).toBe("error");
+
+		const reopenedAgent = new Agent({
+			getApiKey: model => `${model.provider}-test-key`,
+			initialState: {
+				model,
+				systemPrompt: ["Test"],
+				tools: [],
+				messages: restoredMessages,
+			},
+			streamFn: mock.stream,
+		});
+		session = new AgentSession({
+			agent: reopenedAgent,
+			sessionManager: reopenedManager,
+			settings: Settings.isolated({ "compaction.enabled": false, "retry.enabled": false }),
+			modelRegistry: new ModelRegistry(authStorage),
+		});
+		session.subscribe(() => {});
+
+		await expect(session.retry()).resolves.toBe(true);
+		await session.waitForIdle();
+		expect(session.agent.state.messages.map(message => message.role)).toEqual(["user", "assistant"]);
+
+		expect(mock.calls.length).toBe(2);
+		expect(lastAgentMessage(session).stopReason).toBe("stop");
+		expect(lastAgentMessage(session).content).toContainEqual({
+			type: "text",
+			text: "recovered after session reopen",
+		});
+	});
 });

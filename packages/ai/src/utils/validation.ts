@@ -1,31 +1,19 @@
 /**
  * Tool-call argument validation pipeline.
  *
- * Tools may declare their parameters as either Zod schemas (canonical) or
- * plain JSON Schema (legacy / extensions). This module is the single
- * entrypoint the agent calls before dispatching a tool — it:
- *
- *   1. Builds (or fetches from cache) a `ValidationContext` for the tool —
- *      the Zod schema if available plus the equivalent wire JSON Schema, or
- *      just the JSON Schema for non-Zod tools.
- *   2. Normalizes LLM quirks (null / "null" → omit-or-default substitution)
- *      against the JSON Schema before validation.
- *   3. Validates with the Zod or JSON-Schema validator.
- *   4. On failure, walks the resulting issues and coerces common LLM type
- *      drift (JSON-stringified values, boolean/number/string scalar drift),
- *      drops unrecognized keys, and retries up to `MAX_COERCION_PASSES` times.
- *   5. Throws a formatted error if reconciliation fails; otherwise returns
- *      the parsed arguments with original unknown root fields preserved (so
- *      hallucinated top-level keys still surface to the caller).
+ * Tools may declare ArkType schemas or plain JSON Schema. This module builds a
+ * cached validation context, normalizes common LLM quirks against the wire
+ * schema, validates, performs conservative schema-directed coercions, and
+ * returns parsed arguments while preserving unknown root fields.
  *
  * The goal is to be conservative: every coercion is a structural rewrite that
  * keeps the schema in charge of acceptance — we never invent values, only
  * massage shapes the LLM almost got right.
  */
+
+import { type Type, type } from "@oh-my-pi/omptype";
 import { structuredCloneJSON } from "@oh-my-pi/pi-utils";
-import { type Type, type } from "arktype";
-import type { ZodType } from "zod/v4";
-import type { $ZodIssue as ZodIssue } from "zod/v4/core";
+import * as AIError from "../error";
 import type { Tool, ToolCall } from "../types";
 import { upgradeJsonSchemaTo202012 } from "./schema/draft";
 import {
@@ -34,7 +22,7 @@ import {
 	validateJsonSchemaValue,
 } from "./schema/json-schema-validator";
 import { stamp } from "./schema/stamps";
-import { arkToWireSchema, isArkSchema, isZodSchema, zodToWireSchema } from "./schema/wire";
+import { arkToWireSchema, isArkSchema } from "./schema/wire";
 
 // ============================================================================
 // Type Coercion Utilities
@@ -45,12 +33,8 @@ import { arkToWireSchema, isArkSchema, isZodSchema, zodToWireSchema } from "./sc
 // `"[1, 2, 3]"`, a boolean as `"yes"` or `1`, or a string field as a structured
 // object that should be embedded verbatim.
 //
-// Rather than rejecting these outright, we attempt automatic coercion:
-//   1. Validate against the tool's schema (Zod, derived from TypeBox when the
-//      tool was authored with TypeBox).
-//   2. For each type error, perform only the schema-directed rewrite that
-//      matches the expected type.
-//   3. Re-validate the full argument object after each coercion pass.
+// Rather than rejecting these outright, validate against the declared schema
+// and perform only schema-directed rewrites for reported type errors.
 //
 // This is intentionally conservative: each rewrite is small and validation
 // remains the source of truth for whether the result is accepted.
@@ -526,13 +510,11 @@ function tryParseJsonForTypes(value: string, expectedTypes: string[], depth = 0)
 // JSON Pointer Utilities (RFC 6901)
 // ============================================================================
 //
-// Internally we still address error locations using JSON Pointer syntax
-// (e.g., `/foo/0/bar`).  These utilities let coercion read and write values at
-// those paths regardless of whether the original error came from Zod or
-// from JSON-Schema-shaped normalization.
+// Error locations use JSON Pointer syntax so coercion can read and write
+// validator-reported paths uniformly.
 // ============================================================================
 
-/** Encode a structured Zod issue path as a JSON Pointer. */
+/** Encode a structured issue path as a JSON Pointer. */
 function pathToPointer(path: ReadonlyArray<PropertyKey>): string {
 	if (path.length === 0) return "";
 	return `/${path.map(seg => String(seg).replace(/~/g, "~0").replace(/\//g, "~1")).join("/")}`;
@@ -812,11 +794,8 @@ function normalizeOptionalNullsForSchema(
 	// with non-null unknown values are left intact so genuine schema mistakes
 	// still surface as validation errors.
 	//
-	// At the ROOT level we deliberately keep unknown null-valued keys intact:
-	// Zod-emitted wire schemas always set `additionalProperties: false`, but the
-	// post-validation `preserveUnknownRootFields` pass re-attaches root extras
-	// so callers can observe (and reject) hallucinated fields. Stripping here
-	// would erase the field before that snapshot, hiding the rejection signal.
+	// At the root level unknown null-valued keys stay intact; the
+	// post-validation `preserveUnknownRootFields` pass re-attaches root extras.
 	if (!isRoot && schemaObject.additionalProperties === false) {
 		const knownKeys = new Set(Object.keys(properties));
 		for (const key of Object.keys(nextValue)) {
@@ -832,6 +811,262 @@ function normalizeOptionalNullsForSchema(
 	}
 
 	return { value: changed ? nextValue : value, changed };
+}
+
+function decodeJsonPointerToken(token: string): string {
+	return token.replace(/~1/g, "/").replace(/~0/g, "~");
+}
+
+function resolveLocalJsonSchemaRef(root: unknown, ref: string): unknown | undefined {
+	if (ref === "#") return root;
+	if (!ref.startsWith("#/")) return undefined;
+	let current: unknown = root;
+	for (const rawToken of ref.slice(2).split("/")) {
+		const token = decodeJsonPointerToken(rawToken);
+		if (current === null || typeof current !== "object") return undefined;
+		current = (current as Record<string, unknown>)[token];
+	}
+	return current;
+}
+
+function normalizeEnumStringWhitespace(
+	schema: unknown,
+	value: unknown,
+	root: unknown = schema,
+	refs: ReadonlySet<string> = new Set(),
+): { value: unknown; changed: boolean } {
+	if (value === null || value === undefined) return { value, changed: false };
+	if (schema === null || typeof schema !== "object") return { value, changed: false };
+
+	const schemaObject = schema as Record<string, unknown>;
+	const ref = schemaObject.$ref;
+	if (typeof ref === "string") {
+		if (refs.has(ref)) return { value, changed: false };
+		const resolved = resolveLocalJsonSchemaRef(root, ref);
+		if (resolved === undefined) return { value, changed: false };
+		return normalizeEnumStringWhitespace(resolved, value, root, new Set([...refs, ref]));
+	}
+
+	const branchMatches = (branch: unknown, candidate: unknown): boolean => {
+		if (branch !== null && typeof branch === "object") {
+			const branchRef = (branch as Record<string, unknown>).$ref;
+			if (typeof branchRef === "string" && !refs.has(branchRef)) {
+				const resolved = resolveLocalJsonSchemaRef(root, branchRef);
+				if (resolved !== undefined) return branchMatchesSchema(resolved, candidate);
+			}
+		}
+		return branchMatchesSchema(branch, candidate);
+	};
+
+	const normalizeAnyOfLike = (keyword: "anyOf" | "oneOf"): { value: unknown; changed: boolean } => {
+		const branches = schemaObject[keyword];
+		if (!Array.isArray(branches)) return { value, changed: false };
+		if (branches.some(branch => branchMatches(branch, value))) return { value, changed: false };
+
+		for (const branch of branches) {
+			const normalized = normalizeEnumStringWhitespace(branch, value, root, refs);
+			if (!normalized.changed) continue;
+			if (branchMatches(branch, normalized.value)) return normalized;
+		}
+		return { value, changed: false };
+	};
+
+	const anyOfNormalization = normalizeAnyOfLike("anyOf");
+	if (anyOfNormalization.changed) return anyOfNormalization;
+
+	const oneOfNormalization = normalizeAnyOfLike("oneOf");
+	if (oneOfNormalization.changed) return oneOfNormalization;
+
+	if (Array.isArray(schemaObject.allOf)) {
+		let changed = false;
+		let nextValue: unknown = value;
+		for (const branch of schemaObject.allOf) {
+			const normalized = normalizeEnumStringWhitespace(branch, nextValue, root, refs);
+			if (!normalized.changed) continue;
+			nextValue = normalized.value;
+			changed = true;
+		}
+		if (changed) return { value: nextValue, changed: true };
+	}
+
+	if (typeof value === "string") {
+		const trimmed = value.trim();
+		if (trimmed !== value) {
+			const enumValues = schemaObject.enum;
+			if (Array.isArray(enumValues) && !enumValues.includes(value) && enumValues.includes(trimmed)) {
+				return { value: trimmed, changed: true };
+			}
+			const constValue = schemaObject.const;
+			if (typeof constValue === "string" && trimmed === constValue) {
+				return { value: trimmed, changed: true };
+			}
+		}
+		return { value, changed: false };
+	}
+
+	if (Array.isArray(value)) {
+		let changed = false;
+		let nextValue = value;
+		const prefixItems = schemaObject.prefixItems;
+		if (Array.isArray(prefixItems)) {
+			for (let i = 0; i < value.length && i < prefixItems.length; i += 1) {
+				const itemSchema = prefixItems[i];
+				const normalized = normalizeEnumStringWhitespace(itemSchema, value[i], root, refs);
+				if (!normalized.changed) continue;
+				if (!changed) {
+					nextValue = [...value];
+					changed = true;
+				}
+				nextValue[i] = normalized.value;
+			}
+		}
+
+		const itemSchema = schemaObject.items;
+		if (itemSchema !== null && typeof itemSchema === "object" && !Array.isArray(itemSchema)) {
+			for (let i = 0; i < value.length; i += 1) {
+				if (Array.isArray(prefixItems) && i < prefixItems.length) continue;
+				const normalized = normalizeEnumStringWhitespace(itemSchema, nextValue[i], root, refs);
+				if (!normalized.changed) continue;
+				if (!changed) {
+					nextValue = [...value];
+					changed = true;
+				}
+				nextValue[i] = normalized.value;
+			}
+		}
+		return { value: changed ? nextValue : value, changed };
+	}
+
+	if (typeof value !== "object") return { value, changed: false };
+	const properties = schemaObject.properties;
+	if (!properties || typeof properties !== "object") return { value, changed: false };
+
+	const propsObject = properties as Record<string, unknown>;
+	const valueObject = value as Record<string, unknown>;
+	let changed = false;
+	let nextValue = valueObject;
+	for (const [key, propertySchema] of Object.entries(propsObject)) {
+		if (!(key in nextValue)) continue;
+		const normalized = normalizeEnumStringWhitespace(propertySchema, nextValue[key], root, refs);
+		if (!normalized.changed) continue;
+		if (!changed) {
+			nextValue = { ...nextValue };
+			changed = true;
+		}
+		nextValue[key] = normalized.value;
+	}
+	return { value: changed ? nextValue : valueObject, changed };
+}
+
+// ============================================================================
+// Identifier-string trailing-whitespace normalization (LLM quirk).
+// ============================================================================
+//
+// LLMs sometimes emit tool arguments with a trailing newline dangling off a
+// short identifier — a path, URL, or a display label like `title`. These
+// values are never legitimately terminated by line breaks, so we strip trailing
+// line terminators from string values on the well-known keys below before the
+// tool ever sees them. Content-carrying properties (`content`, `input`, `body`,
+// `text`, `command`, `code`) are intentionally not traversed or trimmed so
+// genuine trailing whitespace survives on writes, patches, shell commands, and
+// eval snippets.
+// ============================================================================
+
+/**
+ * Property names whose values are treated as short identifiers — filesystem
+ * paths, URLs, URIs, or display labels. The trim only fires on strings sitting
+ * under one of these keys, so `path: "docs/report "` still targets the file
+ * whose name ends in a space.
+ */
+const IDENTIFIER_STRING_KEYS: ReadonlySet<string> = new Set([
+	"path",
+	"paths",
+	"file",
+	"file_path",
+	"filePath",
+	"filepath",
+	"url",
+	"uri",
+	"title",
+	"label",
+]);
+
+const CONTENT_CARRYING_KEYS: ReadonlySet<string> = new Set(["content", "input", "body", "text", "command", "code"]);
+
+const TRAILING_LINE_TERMINATOR_RE = /[\r\n]+$/;
+
+function trimTrailingLineTerminators(input: string): string {
+	if (!TRAILING_LINE_TERMINATOR_RE.test(input)) return input;
+	return input.replace(TRAILING_LINE_TERMINATOR_RE, "");
+}
+
+function trimIdentifierStringLeaf(input: unknown): unknown {
+	if (typeof input === "string") {
+		const trimmed = trimTrailingLineTerminators(input);
+		return trimmed === input ? input : trimmed;
+	}
+	if (Array.isArray(input)) {
+		let changed = false;
+		let next = input;
+		for (let i = 0; i < input.length; i += 1) {
+			const item = input[i];
+			if (typeof item !== "string") continue;
+			const trimmed = trimTrailingLineTerminators(item);
+			if (trimmed === item) continue;
+			if (!changed) {
+				next = input.slice();
+				changed = true;
+			}
+			next[i] = trimmed;
+		}
+		return changed ? next : input;
+	}
+	return input;
+}
+
+/**
+ * Recursively strip trailing line terminators from string values whose property
+ * key matches {@link IDENTIFIER_STRING_KEYS}. Runs by property name only so it
+ * fires uniformly across ArkType and plain JSON Schema tools.
+ */
+function normalizeIdentifierStringWhitespace(value: unknown): { value: unknown; changed: boolean } {
+	if (Array.isArray(value)) {
+		let changed = false;
+		let next = value;
+		for (let i = 0; i < value.length; i += 1) {
+			const normalized = normalizeIdentifierStringWhitespace(value[i]);
+			if (!normalized.changed) continue;
+			if (!changed) {
+				next = [...value];
+				changed = true;
+			}
+			next[i] = normalized.value;
+		}
+		return { value: changed ? next : value, changed };
+	}
+
+	if (value === null || typeof value !== "object") return { value, changed: false };
+
+	const source = value as Record<string, unknown>;
+	let changed = false;
+	let out: Record<string, unknown> = source;
+	for (const [key, entry] of Object.entries(source)) {
+		let nextEntry = entry;
+		if (CONTENT_CARRYING_KEYS.has(key)) continue;
+		if (IDENTIFIER_STRING_KEYS.has(key)) {
+			const trimmed = trimIdentifierStringLeaf(entry);
+			if (trimmed !== entry) nextEntry = trimmed;
+		}
+		const nested = normalizeIdentifierStringWhitespace(nextEntry);
+		if (nested.changed) nextEntry = nested.value;
+		if (nextEntry === entry) continue;
+		if (!changed) {
+			out = { ...source };
+			changed = true;
+		}
+		out[key] = nextEntry;
+	}
+	return { value: changed ? out : value, changed };
 }
 
 // ============================================================================
@@ -995,12 +1230,9 @@ function parsedArrayMatchesArrayBranch(schema: Record<string, unknown>, value: u
 
 /**
  * Pre-validation normalization: when a schema field accepts BOTH `string` and
- * `array`, providers that double-serialize tool arguments (e.g. Z.AI / GLM)
- * deliver array values as JSON-encoded strings like `'["a","b"]'`. Zod's
- * `union([string, array])` happily accepts that string against the string
- * branch, so the type-error driven coercion in {@link coerceArgsFromIssues}
- * never fires, and downstream tools treat the literal `["a","b"]` as a path
- * (silently producing zero matches or glob parse errors).
+ * `array`, providers that double-serialize tool arguments can deliver array
+ * values as JSON-encoded strings like `'["a","b"]'`. A string-or-array union
+ * accepts that value against the string branch before issue-driven coercion.
  *
  * Walk the schema; when both shapes are accepted AND the incoming value is a
  * JSON-array-shaped string, substitute the parsed array only if it validates
@@ -1080,90 +1312,61 @@ function normalizeStringEncodedArrayUnions(schema: unknown, value: unknown): { v
 	return { value: changed ? nextValue : valueObject, changed };
 }
 
-// ============================================================================
-// Zod issue → coercion bridge
-// ============================================================================
+/**
+ * Name of the sole property when a schema declares exactly one required string
+ * field, else `undefined`. Recognizes the closed single-argument tool shape
+ * (`{ type: "object", properties: { X: { type: "string" } }, required: ["X"] }`).
+ */
+function singleRequiredStringKey(schema: unknown): string | undefined {
+	if (!schema || typeof schema !== "object" || Array.isArray(schema)) return undefined;
+	const obj = schema as Record<string, unknown>;
+	if (obj.type !== "object") return undefined;
+	const properties = obj.properties;
+	if (!properties || typeof properties !== "object") return undefined;
+	const keys = Object.keys(properties as Record<string, unknown>);
+	if (keys.length !== 1) return undefined;
+	const key = keys[0];
+	const required = obj.required;
+	if (!Array.isArray(required) || required.length !== 1 || required[0] !== key) return undefined;
+	const propertySchema = (properties as Record<string, unknown>)[key];
+	if (!propertySchema || typeof propertySchema !== "object") return undefined;
+	return (propertySchema as Record<string, unknown>).type === "string" ? key : undefined;
+}
+
+/**
+ * LLM-quirk repair for single-argument tools. When a tool declares exactly one
+ * property — a required string — some providers deliver the payload under a
+ * different key (e.g. the `edit` tool's patch arriving as `input`/`_input`, or
+ * any single-string tool whose argument the model mislabels). When the declared
+ * key is absent but another field holds a string, adopt the first such string
+ * as the declared key so the call validates instead of failing with "<key> was
+ * missing". A present-but-wrong-type value is left alone so its real type error
+ * still surfaces.
+ */
+function normalizeSingleStringField(schema: unknown, value: unknown): { value: unknown; changed: boolean } {
+	const key = singleRequiredStringKey(schema);
+	if (key === undefined) return { value, changed: false };
+	if (typeof value !== "object" || value === null || Array.isArray(value)) return { value, changed: false };
+	const record = value as Record<string, unknown>;
+	if (record[key] !== undefined) return { value, changed: false };
+	for (const candidate in record) {
+		if (candidate === key || !Object.hasOwn(record, candidate)) continue;
+		const candidateValue = record[candidate];
+		if (typeof candidateValue !== "string") continue;
+		const next = { ...record, [key]: candidateValue };
+		delete next[candidate];
+		return { value: next, changed: true };
+	}
+	return { value, changed: false };
+}
+
+// Validation issue → coercion bridge
 
 interface FlatIssue {
 	keyword: "type" | "unrecognized" | "other";
 	instancePath: string;
 	expectedTypes: string[];
 	unionBranch: boolean;
-}
-
-/**
- * Translate the Zod expected-type marker into the JSON-Schema type name our
- * coercion helpers already understand.
- */
-function mapZodExpectedToJsonSchemaType(expected: unknown): string | null {
-	if (typeof expected !== "string") return null;
-	switch (expected) {
-		case "string":
-		case "number":
-		case "boolean":
-		case "array":
-		case "object":
-		case "null":
-			return expected;
-		case "record":
-			return "object";
-		case "int":
-		case "bigint":
-			return "integer";
-		case "nan":
-			return "number";
-		default:
-			return null;
-	}
-}
-
-/**
- * Flatten Zod issues into a list of (path, expected-types) records suitable
- * for the coercion pass. Recurses through `invalid_union` so each inner
- * candidate produces independent coercion attempts.
- */
-function flattenIssues(issues: ReadonlyArray<ZodIssue>): FlatIssue[] {
-	const out: FlatIssue[] = [];
-	const walk = (issue: ZodIssue, prefix: ReadonlyArray<PropertyKey>, unionBranch: boolean): void => {
-		const fullPath = prefix.length === 0 ? issue.path : [...prefix, ...issue.path];
-		if (issue.code === "invalid_type") {
-			const mapped = mapZodExpectedToJsonSchemaType((issue as { expected?: unknown }).expected);
-			if (mapped) {
-				out.push({ keyword: "type", instancePath: pathToPointer(fullPath), expectedTypes: [mapped], unionBranch });
-				return;
-			}
-		}
-		if (issue.code === "unrecognized_keys") {
-			const keys = (issue as { keys?: ReadonlyArray<string> }).keys ?? [];
-			for (const key of keys) {
-				out.push({
-					keyword: "unrecognized",
-					instancePath: pathToPointer([...fullPath, key]),
-					expectedTypes: [],
-					unionBranch,
-				});
-			}
-			return;
-		}
-		if (issue.code === "invalid_union") {
-			const inner = (issue as unknown as { errors?: ReadonlyArray<ReadonlyArray<ZodIssue>> }).errors;
-			if (inner) {
-				// A union-branch issue only competes with a sibling branch when it
-				// sits at the union node's own path. Issues whose own path is
-				// non-empty live on a deeper field that an already-identified
-				// branch owns, so the singleton-array repair should still apply.
-				for (const branch of inner) {
-					for (const child of branch) {
-						walk(child, fullPath, child.path.length === 0);
-					}
-				}
-			}
-			return;
-		}
-		out.push({ keyword: "other", instancePath: pathToPointer(fullPath), expectedTypes: [], unionBranch });
-	};
-	for (const issue of issues) walk(issue, [], false);
-	return out;
 }
 
 /**
@@ -1175,11 +1378,9 @@ function flattenIssues(issues: ReadonlyArray<ZodIssue>): FlatIssue[] {
  *    accept boolean spellings, stringify non-null values for string fields,
  *    map booleans to numeric 0/1, and wrap singleton array values for non-union
  *    array expectations.
- *  - **unrecognized**: when a strict object received an extra key (Zod's
- *    `unrecognized_keys` or JSON Schema's `additionalProperties: false`),
- *    drop that key so re-validation succeeds. This effectively coerces every
- *    object schema to loose semantics recursively without rebuilding the
- *    underlying Zod tree.
+ *  - **unrecognized**: when a closed object received an extra key
+ *    (`additionalProperties: false`), drop that key so re-validation succeeds.
+ *    This effectively coerces object schemas to loose semantics recursively.
  *
  * The function is safe and conservative:
  *   - Only processes "type" and "unrecognized" issues
@@ -1245,11 +1446,6 @@ function coerceArgsFromIssues(args: unknown, issues: FlatIssue[]): { value: unkn
 
 type ValidationContext =
 	| {
-			kind: "zod";
-			zod: ZodType;
-			json: Record<string, unknown>;
-	  }
-	| {
 			kind: "arktype";
 			ark: Type;
 			json: Record<string, unknown>;
@@ -1270,9 +1466,7 @@ function getValidationContext(tool: Tool): ValidationContext {
 	return stamp(tool.parameters as object, kValidationContext, params =>
 		isArkSchema(params)
 			? { kind: "arktype", ark: params, json: arkToWireSchema(params) }
-			: isZodSchema(params)
-				? { kind: "zod", zod: params, json: zodToWireSchema(params) }
-				: { kind: "json", json: upgradeJsonSchemaTo202012(params) as Record<string, unknown> },
+			: { kind: "json", json: upgradeJsonSchemaTo202012(params) as Record<string, unknown> },
 	);
 }
 
@@ -1314,18 +1508,6 @@ function formatIssuePath(path: ReadonlyArray<PropertyKey>): string {
 }
 
 function validateContext(ctx: ValidationContext, value: unknown): ContextValidationResult {
-	if (ctx.kind === "zod") {
-		const result = ctx.zod.safeParse(value);
-		if (result.success) {
-			return { success: true, value: preserveUnknownRootFields(value, result.data) };
-		}
-		return {
-			success: false,
-			flatIssues: flattenIssues(result.error.issues),
-			messages: result.error.issues.map(issue => `  - ${formatIssuePath(issue.path)}: ${issue.message}`),
-		};
-	}
-
 	if (ctx.kind === "arktype") {
 		const out = ctx.ark(value);
 		if (!(out instanceof type.errors)) {
@@ -1353,6 +1535,161 @@ function validateContext(ctx: ValidationContext, value: unknown): ContextValidat
 	};
 }
 
+// In-band `arg_key`/`arg_value` tool-call syntax that leaks into native
+// tool-call arguments when a provider parses the model's owned format
+// server-side and the model botches an `</arg_value>` closer.
+const SPILL_KEY_OPEN = "<arg_key>";
+const SPILL_KEY_CLOSE = "</arg_key>";
+const SPILL_VALUE_OPEN = "<arg_value>";
+const SPILL_VALUE_CLOSE = "</arg_value>";
+const SPILL_TOOL_CLOSE = "</tool_call>";
+/** Plausible spilled argument names; anything else is ordinary content. */
+const SPILL_KEY_PATTERN = /^[\w.$-]{1,128}$/;
+
+interface SpillSplit {
+	head: string;
+	pairs: [string, string][];
+}
+
+function skipSpillWhitespace(text: string, from: number): number {
+	let at = from;
+	while (at < text.length && " \n\t\r".includes(text[at]!)) at++;
+	return at;
+}
+
+/** Whether a well-formed `<arg_key>NAME</arg_key>…<arg_value>` pair starts at `at`. */
+function isSpillPairStart(text: string, at: number): boolean {
+	if (!text.startsWith(SPILL_KEY_OPEN, at)) return false;
+	const keyStart = at + SPILL_KEY_OPEN.length;
+	const keyEnd = text.indexOf(SPILL_KEY_CLOSE, keyStart);
+	if (keyEnd === -1 || !SPILL_KEY_PATTERN.test(text.slice(keyStart, keyEnd))) return false;
+	const valueAt = skipSpillWhitespace(text, keyEnd + SPILL_KEY_CLOSE.length);
+	return text.startsWith(SPILL_VALUE_OPEN, valueAt);
+}
+
+/**
+ * Finds where a spilled `<arg_value>` body ends: the legit closer, a
+ * mistyped `</arg_key>` closer (validated by its follow-up), the start of the
+ * next pair when the closer is missing entirely, or end of input (the
+ * provider's parser consumed the terminating closer).
+ */
+function findSpillValueEnd(text: string, from: number): { end: number; next: number } {
+	const close = text.indexOf(SPILL_VALUE_CLOSE, from);
+	let wrong = text.indexOf(SPILL_KEY_CLOSE, from);
+	let open = text.indexOf(SPILL_KEY_OPEN, from);
+	while (true) {
+		const candidates = [close, wrong, open].filter(index => index !== -1);
+		if (candidates.length === 0) return { end: text.length, next: text.length };
+		const at = Math.min(...candidates);
+		if (at === close) return { end: at, next: at + SPILL_VALUE_CLOSE.length };
+		if (at === wrong) {
+			const follow = skipSpillWhitespace(text, at + SPILL_KEY_CLOSE.length);
+			if (
+				follow >= text.length ||
+				text.startsWith(SPILL_KEY_OPEN, follow) ||
+				text.startsWith(SPILL_TOOL_CLOSE, follow)
+			) {
+				return { end: at, next: at + SPILL_KEY_CLOSE.length };
+			}
+			wrong = text.indexOf(SPILL_KEY_CLOSE, at + 1);
+			continue;
+		}
+		if (isSpillPairStart(text, at)) {
+			let end = at;
+			while (end > from && " \n\t\r".includes(text[end - 1]!)) end--;
+			return { end, next: at };
+		}
+		open = text.indexOf(SPILL_KEY_OPEN, at + 1);
+	}
+}
+
+/**
+ * Strictly parses a spill tail as `<arg_key>…</arg_key><arg_value>…` pairs,
+ * tolerating a trailing `</tool_call>`. Returns null on any shape that is not
+ * pure pair syntax — the caller then treats the text as ordinary content.
+ */
+function parseSpilledPairs(text: string): [string, string][] | null {
+	const pairs: [string, string][] = [];
+	let at = skipSpillWhitespace(text, 0);
+	while (at < text.length) {
+		if (text.startsWith(SPILL_TOOL_CLOSE, at)) {
+			at = skipSpillWhitespace(text, at + SPILL_TOOL_CLOSE.length);
+			return at >= text.length ? pairs : null;
+		}
+		if (!text.startsWith(SPILL_KEY_OPEN, at)) return null;
+		const keyStart = at + SPILL_KEY_OPEN.length;
+		const keyEnd = text.indexOf(SPILL_KEY_CLOSE, keyStart);
+		if (keyEnd === -1) return null;
+		const key = text.slice(keyStart, keyEnd);
+		if (!SPILL_KEY_PATTERN.test(key)) return null;
+		at = skipSpillWhitespace(text, keyEnd + SPILL_KEY_CLOSE.length);
+		if (!text.startsWith(SPILL_VALUE_OPEN, at)) return null;
+		at += SPILL_VALUE_OPEN.length;
+		const { end, next } = findSpillValueEnd(text, at);
+		pairs.push([key, text.slice(at, end)]);
+		at = skipSpillWhitespace(text, next);
+	}
+	return pairs;
+}
+
+/**
+ * Splits a contaminated string value at the earliest spill boundary: a
+ * mistyped `</arg_key>` closer or an inlined next pair. Returns null when no
+ * boundary yields a cleanly parseable tail.
+ */
+function splitSpilledValue(text: string): SpillSplit | null {
+	let wrong = text.indexOf(SPILL_KEY_CLOSE);
+	let open = text.indexOf(SPILL_KEY_OPEN);
+	while (wrong !== -1 || open !== -1) {
+		if (wrong !== -1 && (open === -1 || wrong < open)) {
+			const pairs = parseSpilledPairs(text.slice(wrong + SPILL_KEY_CLOSE.length));
+			if (pairs) return { head: text.slice(0, wrong), pairs };
+			wrong = text.indexOf(SPILL_KEY_CLOSE, wrong + 1);
+			continue;
+		}
+		if (isSpillPairStart(text, open)) {
+			const pairs = parseSpilledPairs(text.slice(open));
+			if (pairs && pairs.length > 0) return { head: text.slice(0, open).trimEnd(), pairs };
+		}
+		open = text.indexOf(SPILL_KEY_OPEN, open + 1);
+	}
+	return null;
+}
+
+/**
+ * Repairs native tool-call arguments contaminated by in-band
+ * `<arg_key>`/`<arg_value>` syntax. Some providers parse owned tool-call
+ * formats server-side; when the model mistypes or omits an `</arg_value>`
+ * closer, every following pair is swallowed into one string argument, e.g.
+ * `op: "done</arg_key>\n<arg_key>task</arg_key>\n<arg_value>…"`. Truncates
+ * each contaminated top-level string at its spill boundary and restores the
+ * swallowed pairs as sibling arguments (never overwriting existing keys).
+ *
+ * Only invoked after validation and every coercion pass fail, so valid calls
+ * whose string content legitimately contains tag-like text are never touched.
+ */
+function healInbandArgSpill(value: unknown): { value: unknown; changed: boolean } {
+	if (!isPlainRecord(value)) return { value, changed: false };
+	let changed = false;
+	const out: Record<string, unknown> = { ...value };
+	const recovered: [string, string][] = [];
+	for (const key in value) {
+		const entry = value[key];
+		if (typeof entry !== "string") continue;
+		if (!entry.includes(SPILL_KEY_OPEN) && !entry.includes(SPILL_KEY_CLOSE)) continue;
+		const split = splitSpilledValue(entry);
+		if (!split) continue;
+		out[key] = split.head;
+		recovered.push(...split.pairs);
+		changed = true;
+	}
+	if (!changed) return { value, changed: false };
+	for (const [key, entry] of recovered) {
+		if (!(key in out)) out[key] = entry;
+	}
+	return { value: out, changed: true };
+}
+
 const MAX_COERCION_PASSES = 5;
 
 /**
@@ -1365,7 +1702,7 @@ const MAX_COERCION_PASSES = 5;
 export function validateToolCall(tools: Tool[], toolCall: ToolCall): ToolCall["arguments"] {
 	const tool = tools.find(t => t.name === toolCall.name);
 	if (!tool) {
-		throw new Error(`Tool "${toolCall.name}" not found`);
+		throw new AIError.ToolNotFoundError(toolCall.name);
 	}
 	return validateToolArguments(tool, toolCall);
 }
@@ -1388,10 +1725,8 @@ function truncateArgsForError(value: unknown): unknown {
 }
 
 /**
- * Validates tool call arguments against the tool's schema (Zod or plain JSON
- * Schema). Applies LLM-quirk coercions (numeric strings, JSON-string
- * containers, null/invalid-empty-string-for-optional, null-for-default) before
- * declaring failure.
+ * Validates tool call arguments against an ArkType or plain JSON Schema schema.
+ * Applies conservative LLM-quirk normalization before declaring failure.
  *
  * @throws Error with a formatted message when validation cannot be reconciled.
  */
@@ -1405,7 +1740,7 @@ export function validateToolArguments(tool: Tool, toolCall: ToolCall): ToolCall[
 			rawJson.length <= maxLen
 				? rawJson
 				: `${rawJson.slice(0, maxLen)}… [truncated ${rawJson.length - maxLen} chars]`;
-		throw new Error(
+		throw new AIError.ValidationError(
 			`Validation failed for tool "${toolCall.name}": Tool call arguments are not valid JSON.\nParse Error: ${parseError}\nRaw JSON:\n${truncatedRawJson}`,
 		);
 	}
@@ -1436,50 +1771,68 @@ export function validateToolArguments(tool: Tool, toolCall: ToolCall): ToolCall[
 		changed = true;
 	}
 
+	const enumStringNormalization = normalizeEnumStringWhitespace(json, normalizedArgs);
+	if (enumStringNormalization.changed) {
+		normalizedArgs = enumStringNormalization.value;
+		changed = true;
+	}
+
+	// Strip trailing whitespace from string values on well-known
+	// identifier-like property names (paths, URLs, titles). Some models tack
+	// a newline onto a short-identifier arg from stream artifacts; downstream
+	// tools then either fail to stat the target or annotate a "corrected
+	// from" hint the model misreads as tool corruption.
+	const identifierStringNormalization = normalizeIdentifierStringWhitespace(normalizedArgs);
+	if (identifierStringNormalization.changed) {
+		normalizedArgs = identifierStringNormalization.value;
+		changed = true;
+	}
+
 	// Then re-shape JSON-stringified arrays whose schema accepts both string
-	// and array (e.g. `paths: string | string[]`). Without this, zod accepts
-	// the literal `'["a","b"]'` as a string and downstream tools treat it as
-	// a single path with embedded glob brackets — silent zero results.
+	// and array. Otherwise downstream tools receive the encoded string.
 	const stringEncodedArrayNorm = normalizeStringEncodedArrayUnions(json, normalizedArgs);
 	if (stringEncodedArrayNorm.changed) {
 		normalizedArgs = stringEncodedArrayNorm.value;
 		changed = true;
 	}
 
+	const identifierStringNormalizationAfterArray = normalizeIdentifierStringWhitespace(normalizedArgs);
+	if (identifierStringNormalizationAfterArray.changed) {
+		normalizedArgs = identifierStringNormalizationAfterArray.value;
+		changed = true;
+	}
+
+	// Single-argument tools (e.g. `edit`): if the model put the lone required
+	// string under a different key, adopt the first string field as that key.
+	const singleStringNorm = normalizeSingleStringField(json, normalizedArgs);
+	if (singleStringNorm.changed) {
+		normalizedArgs = singleStringNorm.value;
+		changed = true;
+	}
+
 	let result = validateContext(ctx, normalizedArgs);
 	if (result.success) return result.value as ToolCall["arguments"];
 
-	for (let pass = 0; pass < MAX_COERCION_PASSES; pass += 1) {
-		const coercion = coerceArgsFromIssues(normalizedArgs, result.flatIssues);
-		if (!coercion.changed) break;
+	const coercionOutcome = runCoercionPasses(ctx, normalizedArgs, result);
+	normalizedArgs = coercionOutcome.args;
+	changed ||= coercionOutcome.changed;
+	result = coercionOutcome.result;
+	if (result.success) return result.value as ToolCall["arguments"];
 
-		normalizedArgs = coercion.value;
+	// Last resort: some providers parse in-band tool-call syntax server-side,
+	// and a mistyped/missing `</arg_value>` closer inlines the remaining pairs
+	// into one string argument. Gated on validation failure so valid calls
+	// with tag-like string content are never rewritten.
+	const spillHeal = healInbandArgSpill(normalizedArgs);
+	if (spillHeal.changed) {
+		normalizedArgs = spillHeal.value;
 		changed = true;
-
-		// `coerceArgsFromIssues` may have just parsed a JSON-string container at
-		// the root or a nested field, exposing double-encoded keys the initial
-		// pass could not reach. Re-unwrap before the unrecognized-key repair on
-		// the next validation pass would delete them.
-		const keyNormalizationPass = normalizeDoubleEncodedKeys(normalizedArgs);
-		if (keyNormalizationPass.changed) {
-			normalizedArgs = keyNormalizationPass.value;
-		}
-
-		const nullNormalization = normalizeOptionalNullsForSchema(json, normalizedArgs);
-		if (nullNormalization.changed) {
-			normalizedArgs = nullNormalization.value;
-		}
-
-		// Re-run the union-string coercion because `coerceArgsFromIssues` may
-		// have just unwrapped a JSON-stringified object at the root or inside a
-		// nested field — exposing `string | string[]` descendants the initial
-		// pre-validation pass could not reach.
-		const stringEncodedArrayNormPass = normalizeStringEncodedArrayUnions(json, normalizedArgs);
-		if (stringEncodedArrayNormPass.changed) {
-			normalizedArgs = stringEncodedArrayNormPass.value;
-		}
-
 		result = validateContext(ctx, normalizedArgs);
+		if (!result.success) {
+			const healedOutcome = runCoercionPasses(ctx, normalizedArgs, result);
+			normalizedArgs = healedOutcome.args;
+			result = healedOutcome.result;
+		}
 		if (result.success) return result.value as ToolCall["arguments"];
 	}
 
@@ -1501,5 +1854,79 @@ export function validateToolArguments(tool: Tool, toolCall: ToolCall): ToolCall[
 		toolCall.name
 	}":\n${errors}\n\nReceived arguments:\n${JSON.stringify(receivedArgs, null, 2)}`;
 
-	throw new Error(errorMessage);
+	throw new AIError.ValidationError(errorMessage);
+}
+
+/**
+ * Runs up to {@link MAX_COERCION_PASSES} issue-driven coercion rounds,
+ * re-applying the schema normalizations after each round because a coercion
+ * may unwrap JSON-string containers and expose fields the pre-validation
+ * passes could not reach.
+ */
+function runCoercionPasses(
+	ctx: ValidationContext,
+	args: unknown,
+	initial: ContextValidationResult,
+): { args: unknown; result: ContextValidationResult; changed: boolean } {
+	const { json } = ctx;
+	let normalizedArgs = args;
+	let result = initial;
+	let changed = false;
+	for (let pass = 0; pass < MAX_COERCION_PASSES; pass += 1) {
+		if (result.success) break;
+		const coercion = coerceArgsFromIssues(normalizedArgs, result.flatIssues);
+		if (!coercion.changed) break;
+
+		normalizedArgs = coercion.value;
+		changed = true;
+
+		// `coerceArgsFromIssues` may have just parsed a JSON-string container at
+		// the root or a nested field, exposing double-encoded keys the initial
+		// pass could not reach. Re-unwrap before the unrecognized-key repair on
+		// the next validation pass would delete them.
+		const keyNormalizationPass = normalizeDoubleEncodedKeys(normalizedArgs);
+		if (keyNormalizationPass.changed) {
+			normalizedArgs = keyNormalizationPass.value;
+		}
+
+		const nullNormalization = normalizeOptionalNullsForSchema(json, normalizedArgs);
+		if (nullNormalization.changed) {
+			normalizedArgs = nullNormalization.value;
+		}
+
+		const enumStringNormalizationPass = normalizeEnumStringWhitespace(json, normalizedArgs);
+		if (enumStringNormalizationPass.changed) {
+			normalizedArgs = enumStringNormalizationPass.value;
+		}
+
+		const identifierStringNormalizationPass = normalizeIdentifierStringWhitespace(normalizedArgs);
+		if (identifierStringNormalizationPass.changed) {
+			normalizedArgs = identifierStringNormalizationPass.value;
+		}
+
+		// Re-run the union-string coercion because `coerceArgsFromIssues` may
+		// have just unwrapped a JSON-stringified object at the root or inside a
+		// nested field — exposing `string | string[]` descendants the initial
+		// pre-validation pass could not reach.
+		const stringEncodedArrayNormPass = normalizeStringEncodedArrayUnions(json, normalizedArgs);
+		if (stringEncodedArrayNormPass.changed) {
+			normalizedArgs = stringEncodedArrayNormPass.value;
+		}
+
+		const identifierStringNormalizationAfterArrayPass = normalizeIdentifierStringWhitespace(normalizedArgs);
+		if (identifierStringNormalizationAfterArrayPass.changed) {
+			normalizedArgs = identifierStringNormalizationAfterArrayPass.value;
+		}
+
+		// Re-run single-string remap: `coerceArgsFromIssues` may have just
+		// unwrapped a JSON-stringified root object, exposing a mislabelled lone
+		// string field the initial pre-pass could not see.
+		const singleStringNormPass = normalizeSingleStringField(json, normalizedArgs);
+		if (singleStringNormPass.changed) {
+			normalizedArgs = singleStringNormPass.value;
+		}
+
+		result = validateContext(ctx, normalizedArgs);
+	}
+	return { args: normalizedArgs, result, changed };
 }

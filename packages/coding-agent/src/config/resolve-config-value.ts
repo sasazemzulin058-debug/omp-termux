@@ -5,6 +5,7 @@
  */
 
 import { executeShell } from "@oh-my-pi/pi-natives";
+import { $envExact } from "@oh-my-pi/pi-utils";
 
 /** Cache for successful shell command results (persists for process lifetime). */
 const commandResultCache = new Map<string, string>();
@@ -21,7 +22,7 @@ export async function resolveConfigValue(config: string): Promise<string | undef
 	if (config.startsWith("!")) {
 		return await executeCommand(config);
 	}
-	const envValue = process.env[config];
+	const envValue = $envExact(config);
 	return envValue || config;
 }
 

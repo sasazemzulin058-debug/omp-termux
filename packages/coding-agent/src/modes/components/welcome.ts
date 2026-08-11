@@ -44,20 +44,19 @@ const NEW_GLOW_PERIOD_MS = 1500;
  *  affordance surfaces this many times as often. */
 const NEW_TIP_WEIGHT = 4;
 
-/** Per-tip selection weights, parallel to {@link TIPS}. */
-const TIP_WEIGHTS: readonly number[] = TIPS.map(tip => (NEW_TIP_MARKER.test(tip) ? NEW_TIP_WEIGHT : 1));
-const TIP_WEIGHT_TOTAL = TIP_WEIGHTS.reduce((sum, weight) => sum + weight, 0);
-
-/** Pick a tip at random, biased toward "[NEW]" tips by {@link NEW_TIP_WEIGHT}.
- *  Returns "" when no tips are embedded. */
-function pickWeightedTip(): string {
-	if (TIPS.length === 0) return "";
-	let r = Math.random() * TIP_WEIGHT_TOTAL;
-	for (let i = 0; i < TIPS.length; i++) {
-		r -= TIP_WEIGHTS[i] ?? 1;
-		if (r < 0) return TIPS[i] ?? "";
+/** Pick a tip from `tips`, biased toward "[NEW]" tips by {@link NEW_TIP_WEIGHT};
+ *  `r` is a uniform sample in [0, 1). Returns "" when `tips` is empty.
+ *  Exported for tests. */
+export function pickWeightedTip(tips: readonly string[], r: number): string {
+	if (tips.length === 0) return "";
+	const weights = tips.map(tip => (NEW_TIP_MARKER.test(tip) ? NEW_TIP_WEIGHT : 1));
+	const total = weights.reduce((sum, weight) => sum + weight, 0);
+	let acc = r * total;
+	for (let i = 0; i < tips.length; i++) {
+		acc -= weights[i] ?? 1;
+		if (acc < 0) return tips[i] ?? "";
 	}
-	return TIPS[TIPS.length - 1] ?? "";
+	return tips[tips.length - 1] ?? "";
 }
 
 type ColorEncoding = "ansi-16m" | "ansi-256";
@@ -95,24 +94,23 @@ export function renderWelcomeTip(tip: string, boxWidth: number, phase = 0): stri
 	const wrappedBody = wrapTextWithAnsi(replaceTabs(body), bodyBudget);
 	if (wrappedBody.length === 0) return [];
 
-	const encoding: ColorEncoding = TERMINAL.trueColor ? "ansi-16m" : "ansi-256";
-	const purple = Bun.color("#b48cff", encoding) ?? "";
-	const lightBlue = Bun.color("#9ccfff", encoding) ?? "";
-	const italic = "\x1b[3m";
-	const dim = "\x1b[2m";
-	const reset = "\x1b[0m";
+	// Pull both colors from the active theme so the line stays readable on light
+	// themes; the previous hardcoded `#b48cff` / `#9ccfff` pastels (plus a manual
+	// `\x1b[2m` dim on the body) dropped to ~1.5:1 contrast on a white background.
 	const continuationIndent = padding(labelWidth);
+	const styledLabel = theme.fg("customMessageLabel", label);
 
-	const lines = wrappedBody.map((line, index) =>
-		index === 0
-			? ` ${italic}${purple}${label}${dim}${lightBlue}${line}${reset}`
-			: ` ${italic}${continuationIndent}${dim}${lightBlue}${line}${reset}`,
-	);
+	const lines = wrappedBody.map((line, index) => {
+		const styledBody = theme.fg("muted", line);
+		const content = index === 0 ? `${styledLabel}${styledBody}` : `${continuationIndent}${styledBody}`;
+		return ` ${theme.italic(content)}`;
+	});
 
 	if (isNew) {
 		// Append the rainbow tag to the final body line when it fits within the
 		// box; otherwise drop it onto its own indented continuation line so the
 		// styled glyphs never overflow or reflow the wrapped body.
+		const encoding: ColorEncoding = TERMINAL.trueColor ? "ansi-16m" : "ansi-256";
 		const tag = renderNewTag(phase, encoding);
 		const tagWidth = 1 + visibleWidth(NEW_TAG_TEXT); // 1 = space separator
 		const lastLine = lines[lines.length - 1];
@@ -162,7 +160,7 @@ export class WelcomeComponent implements Component {
 			if (theme.getSymbolPreset() === "unicode" && Math.random() < 0.1) {
 				this.#selectedTip = "Please use nerdfont 😭.";
 			} else {
-				this.#selectedTip = pickWeightedTip();
+				this.#selectedTip = pickWeightedTip(TIPS, Math.random());
 			}
 		}
 		return this.#selectedTip || undefined;
@@ -330,7 +328,6 @@ export class WelcomeComponent implements Component {
 		// Right column
 		const rightLines = [
 			` ${theme.bold(theme.fg("accent", "Tips"))}`,
-			` ${theme.fg("dim", "?")}${theme.fg("muted", " for keyboard shortcuts")}`,
 			` ${theme.fg("dim", "#")}${theme.fg("muted", " for prompt actions")}`,
 			` ${theme.fg("dim", "/")}${theme.fg("muted", " for commands")}`,
 			` ${theme.fg("dim", "!")}${theme.fg("muted", " to run bash")}`,
@@ -393,8 +390,8 @@ export class WelcomeComponent implements Component {
 	}
 
 	/**
-	 * Render the per-instance tip line: a purple "Tip:" label followed by the
-	 * tip body in dimmed light blue, the whole line italicized. Returns `[]`
+	 * Render the per-instance tip line: the `customMessageLabel`-themed `Tip:`
+	 * label followed by a `muted` body, the whole line italicized. Returns `[]`
 	 * when no tip is available or the box is too narrow to be useful.
 	 */
 	#renderTip(boxWidth: number): string[] {

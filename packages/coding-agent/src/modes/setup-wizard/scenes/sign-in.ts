@@ -80,6 +80,7 @@ export class SignInTab implements SetupTab {
 	#selector: OAuthSelectorComponent;
 	#statusLines: string[] = [];
 	#authUrl: string | undefined;
+	#authLaunchUrl: string | undefined;
 	#prompt: PromptState | undefined;
 	#promptResolve: ((value: string) => void) | undefined;
 	#loginAbort: AbortController | undefined;
@@ -130,13 +131,19 @@ export class SignInTab implements SetupTab {
 		this.#selector.routeMouse(event, line - this.#selectorRowStart, col);
 	}
 
-	render(width: number): readonly string[] {
+	render(width: number, maxLines?: number): readonly string[] {
 		const lines: string[] = [];
 		if (this.#loggingInProvider) {
 			lines.push(theme.bold(`Signing in to ${this.#loggingInProvider}`));
 		} else {
-			lines.push(theme.fg("muted", "Pick a provider to sign in — you can connect more than one."), "");
+			// Hint + blank cost two rows; the wizard subtitle already explains
+			// this panel, so on short screens the rows go to the provider list
+			// instead (17 = full selector: 4 chrome above, 10 rows, 3 below).
+			if (maxLines === undefined || maxLines >= 17 + 2) {
+				lines.push(theme.fg("muted", "Pick a provider to sign in — you can connect more than one."), "");
+			}
 			this.#selectorRowStart = lines.length;
+			if (maxLines !== undefined) this.#selector.setMaxHeight(maxLines - lines.length);
 			lines.push(...this.#selector.render(width));
 		}
 
@@ -146,6 +153,9 @@ export class SignInTab implements SetupTab {
 				theme.fg("accent", `Browser login: ${loginUrlLink(this.#authUrl)} ${loginCopyHint()}`),
 				...urlLines.slice(0, 2),
 			);
+			if (this.#authLaunchUrl) {
+				lines.push(theme.fg("dim", `Local shortcut (this machine only): ${this.#authLaunchUrl}`));
+			}
 		}
 		if (this.#prompt) {
 			lines.push(theme.fg("warning", this.#prompt.message));
@@ -182,6 +192,7 @@ export class SignInTab implements SetupTab {
 		this.#loggingInProvider = providerId;
 		this.#statusLines = [theme.fg("dim", "Starting OAuth flow…")];
 		this.#authUrl = undefined;
+		this.#authLaunchUrl = undefined;
 		this.#loginAbort = new AbortController();
 		this.host.restoreFocus();
 		this.host.requestRender();
@@ -189,7 +200,17 @@ export class SignInTab implements SetupTab {
 			await this.#authStorage.login(providerId as OAuthProvider, {
 				signal: this.#loginAbort.signal,
 				onAuth: info => {
+					// Store the full authorization URL as the primary copy/display
+					// target: it works from any machine, including SSH boxes where
+					// the OMP-hosted `launchUrl` would resolve against the user's
+					// local browser and fail. The wizard render uses
+					// `wrapTextWithAnsi`, so long URLs wrap across lines rather
+					// than getting truncated — the RFC 7636 §4.3 PKCE-downgrade
+					// bug that motivated `launchUrl` is unreachable through this
+					// surface. `launchUrl` is still surfaced as an optional local
+					// shortcut for wide-terminal local users.
 					this.#authUrl = info.url;
+					this.#authLaunchUrl = info.launchUrl && info.launchUrl !== info.url ? info.launchUrl : undefined;
 					this.#statusLines = [];
 					if (info.instructions) {
 						this.#statusLines.push(theme.fg("warning", info.instructions));
@@ -209,13 +230,16 @@ export class SignInTab implements SetupTab {
 				onManualCodeInput: () =>
 					this.#showPrompt({ message: "Paste the authorization code (or full redirect URL):" }),
 			});
-			await this.host.ctx.session.modelRegistry.refresh();
+			// Provider-scoped online refresh so the just-persisted credential re-runs
+			// discovery instead of reusing a fresh authoritative cache row (#5780).
+			await this.host.ctx.session.modelRegistry.refreshProvider(providerId, "online");
 			if (this.#disposed) return;
 			this.#statusLines = [
 				theme.fg("success", `${theme.status.success} Signed in to ${providerId}`),
 				theme.fg("dim", `Credentials saved to ${getAgentDbPath()}`),
 			];
 			this.#authUrl = undefined;
+			this.#authLaunchUrl = undefined;
 			this.#loggingInProvider = undefined;
 			this.#loginAbort = undefined;
 			this.#selector.stopValidation();
@@ -227,6 +251,7 @@ export class SignInTab implements SetupTab {
 			if (this.#loginAbort?.signal.aborted) {
 				this.#statusLines = [theme.fg("dim", "Login cancelled.")];
 				this.#authUrl = undefined;
+				this.#authLaunchUrl = undefined;
 			} else {
 				const message = error instanceof Error ? error.message : String(error);
 				this.#statusLines = [
@@ -234,6 +259,7 @@ export class SignInTab implements SetupTab {
 					theme.fg("dim", "Choose another provider or press Esc to continue."),
 				];
 				this.#authUrl = undefined;
+				this.#authLaunchUrl = undefined;
 			}
 			this.#loggingInProvider = undefined;
 			this.#loginAbort = undefined;

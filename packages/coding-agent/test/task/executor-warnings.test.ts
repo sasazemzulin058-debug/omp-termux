@@ -191,4 +191,215 @@ describe("subagent warning injection", () => {
 		expect(JSON.parse(result.rawOutput)).toEqual({ verdict: "looks good" });
 		expect(result.stderr.startsWith("invalid output schema:")).toBe(true);
 	});
+
+	it("assembles incremental typed yield sections on idle", () => {
+		const result = finalizeSubprocessOutput({
+			rawOutput: "",
+			exitCode: 0,
+			stderr: "",
+			doneAborted: false,
+			signalAborted: false,
+			yieldItems: [
+				{ status: "success", type: ["summary"], data: "first" },
+				{ status: "success", type: ["summary", "notes"], data: { detail: "second" } },
+			],
+			outputSchema: {
+				type: "object",
+				required: ["summary", "notes"],
+				properties: {
+					summary: { type: "array", minItems: 2 },
+					notes: { type: "object", required: ["detail"], properties: { detail: { type: "string" } } },
+				},
+			},
+		});
+
+		expect(result.exitCode).toBe(0);
+		expect(result.hasYield).toBe(true);
+		expect(JSON.parse(result.rawOutput)).toEqual({
+			summary: ["first", { detail: "second" }],
+			notes: { detail: "second" },
+		});
+	});
+
+	it("validates assembled typed yield data against the output schema", () => {
+		const result = finalizeSubprocessOutput({
+			rawOutput: "",
+			exitCode: 0,
+			stderr: "",
+			doneAborted: false,
+			signalAborted: false,
+			yieldItems: [{ status: "success", type: ["summary"], data: "text only" }],
+			outputSchema: {
+				type: "object",
+				required: ["summary", "notes"],
+				properties: {
+					summary: { type: "string" },
+					notes: { type: "string" },
+				},
+			},
+		});
+
+		expect(result.exitCode).toBe(1);
+		expect(result.stderr).toContain("schema_violation");
+		expect(JSON.parse(result.rawOutput)).toMatchObject({
+			error: "schema_violation",
+			missingRequired: ["notes"],
+		});
+	});
+
+	it("assembles a single incremental array-typed section into a one-element list", () => {
+		const result = finalizeSubprocessOutput({
+			rawOutput: "",
+			exitCode: 0,
+			stderr: "",
+			doneAborted: false,
+			signalAborted: false,
+			yieldItems: [
+				{ status: "success", type: ["findings"], data: { title: "Handle null response", body: "Crashes" } },
+				{ status: "success", type: ["overall_correctness"], data: "incorrect" },
+				{ status: "success", type: ["explanation"], data: "One bug blocks approval." },
+				{ status: "success", type: ["confidence"], data: 0.8 },
+			],
+			// JTD reviewer-style schema: only `findings` is array-valued (elements).
+			outputSchema: {
+				properties: {
+					overall_correctness: { enum: ["correct", "incorrect"] },
+					explanation: { type: "string" },
+					confidence: { type: "number" },
+				},
+				optionalProperties: {
+					findings: {
+						elements: { properties: { title: { type: "string" }, body: { type: "string" } } },
+					},
+				},
+			},
+		});
+
+		expect(result.exitCode).toBe(0);
+		expect(result.stderr).toBe("");
+		expect(JSON.parse(result.rawOutput)).toEqual({
+			findings: [{ title: "Handle null response", body: "Crashes" }],
+			overall_correctness: "incorrect",
+			explanation: "One bug blocks approval.",
+			confidence: 0.8,
+		});
+	});
+
+	it("uses last assistant text as the raw result for terminal string-typed yields without data", () => {
+		const result = finalizeSubprocessOutput({
+			rawOutput: "",
+			exitCode: 0,
+			stderr: "",
+			doneAborted: false,
+			signalAborted: false,
+			yieldItems: [{ status: "success", type: "final" }],
+			outputSchema: undefined,
+			lastAssistantText: "final answer from the assistant",
+		});
+
+		expect(result.exitCode).toBe(0);
+		expect(result.rawOutput).toBe("final answer from the assistant");
+	});
+
+	it("keeps accumulated sections when a data-less terminal yield finalizes", () => {
+		// Previously a data-less `type: "final"` collapsed to the last assistant
+		// turn and dropped earlier incremental sections; the sections are the work
+		// product, so they must survive the finalize.
+		const result = finalizeSubprocessOutput({
+			rawOutput: "",
+			exitCode: 0,
+			stderr: "",
+			doneAborted: false,
+			signalAborted: false,
+			yieldItems: [
+				{ status: "success", type: ["summary"], data: "first" },
+				{ status: "success", type: "final" },
+			],
+			outputSchema: undefined,
+			lastAssistantText: "plain final answer",
+		});
+
+		expect(result.exitCode).toBe(0);
+		expect(JSON.parse(result.rawOutput)).toEqual({ summary: "first" });
+	});
+
+	it("finalizes a string-typed terminal yield that carries data as the top-level result", () => {
+		// Regression: a `type: "result"` finalize with the full structured object
+		// was treated as a section labeled "result", nesting the payload one level
+		// deep so every required field read as missing (schema_violation).
+		const result = finalizeSubprocessOutput({
+			rawOutput: "",
+			exitCode: 0,
+			stderr: "",
+			doneAborted: false,
+			signalAborted: false,
+			yieldItems: [
+				{
+					status: "success",
+					type: "result",
+					data: { summary: "did it", filesChanged: ["a.ts"], notes: ["ok"] },
+				},
+			],
+			outputSchema: {
+				properties: {
+					summary: { type: "string" },
+					filesChanged: { elements: { type: "string" } },
+					notes: { elements: { type: "string" } },
+				},
+			},
+			lastAssistantText: "some prose that must not become the result",
+		});
+
+		expect(result.stderr).not.toContain("schema_violation");
+		expect(result.exitCode).toBe(0);
+		expect(JSON.parse(result.rawOutput)).toEqual({
+			summary: "did it",
+			filesChanged: ["a.ts"],
+			notes: ["ok"],
+		});
+	});
+
+	it("serializes untyped useLastTurn yield as raw text", () => {
+		const result = finalizeSubprocessOutput({
+			rawOutput: "",
+			exitCode: 0,
+			stderr: "",
+			doneAborted: false,
+			signalAborted: false,
+			yieldItems: [{ status: "success", useLastTurn: true }],
+			outputSchema: undefined,
+			lastAssistantText: "plain final answer",
+		});
+
+		expect(result.exitCode).toBe(0);
+		expect(result.rawOutput).toBe("plain final answer");
+	});
+
+	it("rejects exhausted schema retries in strict mode and retains parsed validation metadata", () => {
+		const result = finalizeSubprocessOutput({
+			rawOutput: "",
+			exitCode: 0,
+			stderr: "",
+			doneAborted: false,
+			signalAborted: false,
+			yieldItems: [{ status: "success", data: { ok: "wrong" }, schemaOverridden: true }],
+			outputSchema: {
+				type: "object",
+				required: ["ok"],
+				properties: { ok: { type: "boolean" } },
+			},
+			outputSchemaMode: "strict",
+			outputSchemaSource: "caller",
+		});
+
+		expect(result.exitCode).toBe(1);
+		expect(result.stderr).toContain("schema_violation");
+		expect(result.structuredOutput).toEqual({
+			source: "caller",
+			mode: "strict",
+			status: "invalid",
+			data: { ok: "wrong" },
+			error: expect.any(String),
+		});
+	});
 });

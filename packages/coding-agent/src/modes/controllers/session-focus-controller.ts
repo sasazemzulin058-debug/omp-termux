@@ -12,6 +12,7 @@
 import { AgentLifecycleManager } from "../../registry/agent-lifecycle";
 import { AgentRegistry, MAIN_AGENT_ID, type RegistryEvent } from "../../registry/agent-registry";
 import type { AgentSession } from "../../session/agent-session";
+import { setTerminalTitleState } from "../../utils/title-generator";
 import type { InteractiveModeContext } from "../types";
 
 export class SessionFocusController {
@@ -104,8 +105,12 @@ export class SessionFocusController {
 		});
 		this.ctx.statusLine.setSession(target, this.#focusedAgentId);
 		this.ctx.renderInitialMessages({ clearTerminalHistory: true });
-		// Mid-turn attach: no agent_start will arrive; arm the loader/turn state manually.
+		// Sync the run-state title to the attached target: a streaming target has no
+		// agent_start incoming, so arm the loader/working title manually; an idle
+		// target would otherwise inherit the previous session's stuck spinner, so
+		// reset it to idle (agent_end teardown already ran via clearTransientSessionUi).
 		if (target.isStreaming) await this.ctx.eventController.handleEvent({ type: "agent_start" });
+		else setTerminalTitleState("idle");
 		this.ctx.updateEditorBorderColor();
 		this.ctx.ui.requestRender();
 	}

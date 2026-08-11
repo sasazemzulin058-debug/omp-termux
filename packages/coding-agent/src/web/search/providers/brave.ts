@@ -7,6 +7,8 @@
 import { type AuthStorage, type FetchImpl, getEnvApiKey } from "@oh-my-pi/pi-ai";
 import type { SearchResponse, SearchSource } from "../../../web/search/types";
 import { SearchProviderError } from "../../../web/search/types";
+import type { QuerySyntax, StructuredQuery } from "../query";
+import { formatQuery, GOOGLE_QUERY_SYNTAX, parseSearchQuery } from "../query";
 import { clampNumResults, dateToAgeSeconds } from "../utils";
 import type { SearchParams } from "./base";
 import { SearchProvider } from "./base";
@@ -23,11 +25,34 @@ const RECENCY_MAP: Record<"day" | "week" | "month" | "year", "pd" | "pw" | "pm" 
 	year: "py",
 };
 
+/**
+ * Brave parses the classic operator set inline (site:, quotes, -, OR…) but
+ * date bounds map onto the native `freshness` param, so `before:`/`after:`
+ * tokens are stripped from the rebuilt query string.
+ */
+const BRAVE_QUERY_SYNTAX: QuerySyntax = { ...GOOGLE_QUERY_SYNTAX, dateRange: false };
+
+/**
+ * Freshness param: explicit `after:`/`before:` bounds win over the
+ * recency-derived period, rendered as Brave's absolute range
+ * `YYYY-MM-DDtoYYYY-MM-DD` with sensible open ends.
+ */
+function braveFreshness(parsed: StructuredQuery, recency?: keyof typeof RECENCY_MAP): string | undefined {
+	if (parsed.after || parsed.before) {
+		const start = parsed.after ?? "1970-01-01";
+		const end = parsed.before ?? new Date().toISOString().slice(0, 10);
+		return `${start}to${end}`;
+	}
+	return recency ? RECENCY_MAP[recency] : undefined;
+}
+
 export interface BraveSearchParams {
 	query: string;
 	num_results?: number;
 	recency?: "day" | "week" | "month" | "year";
+	parsedQuery?: StructuredQuery;
 	signal?: AbortSignal;
+	timeoutMs?: number;
 	fetch?: FetchImpl;
 }
 
@@ -73,12 +98,14 @@ async function callBraveSearch(
 	params: BraveSearchParams,
 ): Promise<{ response: BraveSearchResponse; requestId?: string }> {
 	const numResults = clampNumResults(params.num_results, DEFAULT_NUM_RESULTS, MAX_NUM_RESULTS);
+	const parsed = params.parsedQuery ?? parseSearchQuery(params.query);
 	const url = new URL(BRAVE_SEARCH_URL);
-	url.searchParams.set("q", params.query);
+	url.searchParams.set("q", parsed.hasDirectives ? formatQuery(parsed, BRAVE_QUERY_SYNTAX) : params.query);
 	url.searchParams.set("count", String(numResults));
 	url.searchParams.set("extra_snippets", "true");
-	if (params.recency) {
-		url.searchParams.set("freshness", RECENCY_MAP[params.recency]);
+	const freshness = braveFreshness(parsed, params.recency);
+	if (freshness) {
+		url.searchParams.set("freshness", freshness);
 	}
 
 	const fetchImpl = params.fetch ?? fetch;
@@ -87,7 +114,7 @@ async function callBraveSearch(
 			Accept: "application/json",
 			"X-Subscription-Token": apiKey,
 		},
-		signal: withHardTimeout(params.signal),
+		signal: withHardTimeout(params.signal, params.timeoutMs),
 	});
 
 	if (!response.ok) {
@@ -145,7 +172,9 @@ export class BraveProvider extends SearchProvider {
 			query: params.query,
 			num_results: params.numSearchResults ?? params.limit,
 			recency: params.recency,
+			parsedQuery: params.parsedQuery,
 			signal: params.signal,
+			timeoutMs: params.timeoutMs,
 			fetch: params.fetch,
 		});
 	}

@@ -1,5 +1,5 @@
-import type { ptree } from "@oh-my-pi/pi-utils";
-import { type } from "arktype";
+import { type } from "@oh-my-pi/omptype";
+import { TOOL_TIMEOUTS } from "../tools/tool-timeouts";
 
 // =============================================================================
 // Tool Schema
@@ -14,7 +14,10 @@ export const lspSchema = type({
 	query: "string?",
 	new_name: "string?",
 	apply: "boolean?",
-	timeout: "number?",
+	"timeout?": type.number
+		.atLeast(TOOL_TIMEOUTS.lsp.min)
+		.atMost(TOOL_TIMEOUTS.lsp.max)
+		.describe("Timeout in seconds (default 20; range 5–300)."),
 	payload: "string?",
 });
 
@@ -336,6 +339,8 @@ export interface ServerConfig {
 	command: string;
 	args?: string[];
 	fileTypes: string[];
+	/** LSP language identifier sent in didOpen; inferred from the file path when omitted. */
+	languageId?: string;
 	rootMarkers: string[];
 	initOptions?: Record<string, unknown>;
 	settings?: Record<string, unknown>;
@@ -365,6 +370,33 @@ export interface ServerConfig {
 }
 
 // =============================================================================
+// Transport
+// =============================================================================
+
+/** Minimal write sink for the server-bound byte stream (satisfied by `Bun.FileSink` and the mux socket adapter). */
+export interface LspWriteSink {
+	write(data: string | Uint8Array): number | Promise<number>;
+	flush(): number | void | Promise<number | void>;
+}
+
+/**
+ * Byte transport carrying one LSP JSON-RPC link. Structurally satisfied by
+ * `ptree.ChildProcess<"pipe">` (local server spawn) and by the socket adapter
+ * in `mux/daemon.ts` (broker-shared server). `exited` may reject (ptree kill).
+ */
+export interface LspTransport {
+	readonly stdin: LspWriteSink;
+	readonly stdout: ReadableStream<Uint8Array>;
+	readonly exited: Promise<number>;
+	readonly exitCode: number | null;
+	readonly pid?: number;
+	/** Present and true on broker-shared mux links; `lsp reload` uses it to request a shared-server restart. */
+	readonly sharedMux?: boolean;
+	kill(): void;
+	peekStderr(): string;
+}
+
+// =============================================================================
 // Client State
 // =============================================================================
 
@@ -387,6 +419,7 @@ export interface LspServerCapabilities {
 	referencesProvider?: boolean;
 	documentSymbolProvider?: boolean;
 	workspaceSymbolProvider?: boolean;
+	diagnosticProvider?: boolean | Record<string, unknown>;
 	[key: string]: unknown;
 }
 
@@ -394,10 +427,12 @@ export interface LspClient {
 	name: string;
 	cwd: string;
 	config: ServerConfig;
-	proc: ptree.ChildProcess<"pipe">;
+	proc: LspTransport;
 	requestId: number;
 	diagnostics: Map<string, PublishedDiagnostics>;
 	diagnosticsVersion: number;
+	/** Dynamic capability registrations keyed by the server-provided registration ID. */
+	dynamicCapabilityRegistrations?: Map<string, string>;
 	openFiles: Map<string, OpenFile>;
 	pendingRequests: Map<number | string, PendingRequest>;
 	messageBuffer: Uint8Array;

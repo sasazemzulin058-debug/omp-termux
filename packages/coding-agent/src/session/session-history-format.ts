@@ -40,6 +40,21 @@ export interface HistoryFormatOptions {
 	 * still collapse to a one-liner.
 	 */
 	expandPrimaryContext?: boolean;
+	/**
+	 * Append the full unified diff (from a tool result's `details.diff`) below
+	 * edit/apply_patch tool lines, instead of just the path. The advisor sets
+	 * this so it sees what changed without re-reading the file.
+	 */
+	expandEditDiffs?: boolean;
+	/**
+	 * Chunked rendering support: a caller formatting one logical transcript in
+	 * several calls (the advisor's chunked delta render) passes a result index
+	 * built over the WHOLE delta plus one shared consumed-id set, so a toolCall
+	 * finds its toolResult across chunk boundaries and the result is never
+	 * re-rendered as an orphan in a later chunk.
+	 */
+	toolResultIndex?: ReadonlyMap<string, ToolResultMessage>;
+	consumedToolCallIds?: Set<string>;
 }
 
 /** Max length of the primary-arg summary inside `→ tool(...)` lines. */
@@ -70,6 +85,10 @@ function oneLine(text: string, max = PRIMARY_ARG_MAX): string {
 	return flat.length > max ? `${flat.slice(0, max - 1)}…` : flat;
 }
 
+export function formatExecutionSourcePreview(source: string): string {
+	return oneLine(source);
+}
+
 /** Join the text blocks of a string-or-blocks content field. Images become `[image]`. */
 function contentToText(content: string | readonly (TextContent | ImageContent)[]): string {
 	if (typeof content === "string") return content;
@@ -86,8 +105,16 @@ function lineCount(text: string): number {
 	return text.split("\n").length;
 }
 
+function primaryArgValue(value: unknown): string {
+	if (typeof value === "string" && value.length > 0) return value;
+	if (Array.isArray(value) && value.length > 0 && value.every(v => typeof v === "string")) {
+		return value.join(", ");
+	}
+	return "";
+}
+
 /** Pick the most informative scalar argument of a tool call. */
-function primaryArg(name: string, args: Record<string, unknown> | undefined): string {
+export function formatToolCallPrimaryArg(name: string, args: Record<string, unknown> | undefined): string {
 	if (!args || typeof args !== "object") return "";
 	// Advisor note is the most informative summary; preserve severity too.
 	if (name === "advise") {
@@ -97,12 +124,25 @@ function primaryArg(name: string, args: Record<string, unknown> | undefined): st
 		if (note) return oneLine(note);
 		if (severity) return oneLine(severity);
 	}
+	if (name === "grep") {
+		const pattern = primaryArgValue(args.pattern);
+		const paths = primaryArgValue(args.path) || primaryArgValue(args.paths);
+		if (pattern && paths) return oneLine(`${pattern} @ ${paths}`);
+		if (pattern) return oneLine(pattern);
+		if (paths) return oneLine(paths);
+	}
+	if (name === "glob") {
+		const paths = primaryArgValue(args.path) || primaryArgValue(args.paths);
+		if (paths) return oneLine(paths);
+	}
+	if (name === "ast_grep") {
+		const pattern = primaryArgValue(args.pat);
+		if (pattern) return oneLine(pattern);
+	}
 	for (const key of PRIMARY_ARG_KEYS) {
 		const value = args[key];
-		if (typeof value === "string" && value.length > 0) return oneLine(value);
-		if (Array.isArray(value) && value.length > 0 && value.every(v => typeof v === "string")) {
-			return oneLine(value.join(", "));
-		}
+		const summary = primaryArgValue(value);
+		if (summary) return oneLine(summary);
 	}
 	// Fallback: first non-intent string arg, then a compact JSON of the args.
 	const rest: Record<string, unknown> = {};
@@ -122,14 +162,35 @@ function primaryArg(name: string, args: Record<string, unknown> | undefined): st
 	}
 }
 
+export function formatToolCallIntentPreview(args: Record<string, unknown> | undefined): string | undefined {
+	const intent = args?.[INTENT_FIELD];
+	return typeof intent === "string" && intent.trim() ? oneLine(intent, 80) : undefined;
+}
+
+export function formatToolResultErrorPreview(content: string | readonly (TextContent | ImageContent)[]): string {
+	return oneLine(contentToText(content).split("\n", 1)[0] ?? "");
+}
+
+/**
+ * Wrap a diff body in a backtick fence sized to outlast the longest backtick
+ * run inside it, so a diff that touches markdown (triple backticks) can't break
+ * out of the fence. Info string `diff` for syntax highlighting.
+ */
+function fenceDiff(diff: string): string {
+	const longest = diff.match(/`+/g)?.reduce((m, run) => Math.max(m, run.length), 0) ?? 0;
+	const fence = "`".repeat(Math.max(3, longest + 1));
+	return `${fence}diff\n${diff}\n${fence}`;
+}
+
 /** One line per tool call: `→ read(src/foo.ts:50-80) ⇒ ok · 31 lines`. */
 function toolCallLine(
 	name: string,
 	args: Record<string, unknown> | undefined,
 	result: ToolResultMessage | undefined,
 	includeToolIntent?: boolean,
+	expandEditDiffs?: boolean,
 ): string {
-	const head = `→ ${name}(${primaryArg(name, args)})`;
+	const head = `→ ${name}(${formatToolCallPrimaryArg(name, args)})`;
 	let base: string;
 	if (!result) {
 		base = `${head} ⇒ pending`;
@@ -138,22 +199,29 @@ function toolCallLine(
 		const lines = lineCount(text);
 		const count = `${lines} ${lines === 1 ? "line" : "lines"}`;
 		if (result.isError) {
-			const firstLine = oneLine(text.split("\n", 1)[0] ?? "");
+			const firstLine = formatToolResultErrorPreview(result.content);
 			base = firstLine ? `${head} ⇒ error · ${count} — ${firstLine}` : `${head} ⇒ error · ${count}`;
 		} else {
 			base = `${head} ⇒ ok · ${count}`;
 		}
 	}
 
-	const intent = includeToolIntent ? args?.[INTENT_FIELD] : undefined;
-	if (typeof intent === "string" && intent.trim()) {
-		const formattedIntent = oneLine(intent, 80);
-		return `// ${formattedIntent}\n${base}`;
+	if (expandEditDiffs) {
+		const diff = (result?.details as { diff?: unknown } | undefined)?.diff;
+		if (typeof diff === "string" && diff.trim()) {
+			base = `${base}\n${fenceDiff(diff)}`;
+		}
 	}
+
+	const formattedIntent = includeToolIntent ? formatToolCallIntentPreview(args) : undefined;
+	if (formattedIntent) return `// ${formattedIntent}\n${base}`;
 	return base;
 }
 
-/** One line for a user-initiated `!`/`$` execution. */
+/** One line for a user-initiated `!`/`$` execution. Always attributed to the
+ *  user: these roles never carry agent-run commands (the model's bash goes
+ *  through `toolCall`), so the `user-` prefix makes provenance explicit for the
+ *  advisor and history readers regardless of render mode. */
 function executionLine(
 	kind: "bash" | "python",
 	source: string,
@@ -165,7 +233,8 @@ function executionLine(
 			? `error · exit ${msg.exitCode}`
 			: "ok";
 	const lines = lineCount(msg.output);
-	return `→ ${kind}! ${oneLine(source)} ⇒ ${status} · ${lines} ${lines === 1 ? "line" : "lines"}`;
+	const sourcePreview = formatExecutionSourcePreview(source);
+	return `→ user-${kind}! ${sourcePreview} ⇒ ${status} · ${lines} ${lines === 1 ? "line" : "lines"}`;
 }
 
 /**
@@ -182,6 +251,11 @@ function executionLine(
  * targets.
  */
 export const PRIMARY_CONTEXT_CUSTOM_TYPES: ReadonlySet<string> = new Set(["plan-mode-context", "plan-mode-reference"]);
+
+/** Hidden non-primary custom messages whose content is needed to understand visible transcript entries. */
+const CONTEXTUAL_NON_PRIMARY_HIDDEN_CUSTOM_TYPES: Record<string, true> = {
+	"image-attachment-description": true,
+};
 
 /** One-liner for custom/hook messages: `[irc] A → B: body…`. */
 function customOneLiner(msg: CustomMessage | HookMessage): string {
@@ -222,18 +296,36 @@ export function formatSessionHistoryMarkdown(messages: unknown[], opts?: History
 	}
 
 	// Index tool results by call id so each toolCall collapses to one line.
-	const resultsByCallId = new Map<string, ToolResultMessage>();
-	for (const msg of typed) {
-		if (msg.role === "toolResult") {
-			resultsByCallId.set(msg.toolCallId, msg);
+	// Chunked callers supply a whole-delta index + shared consumed set so
+	// call/result pairs resolve across chunk boundaries.
+	let resultsByCallId = opts?.toolResultIndex;
+	if (!resultsByCallId) {
+		const local = new Map<string, ToolResultMessage>();
+		for (const msg of typed) {
+			if (msg.role === "toolResult") {
+				local.set(msg.toolCallId, msg);
+			}
 		}
+		resultsByCallId = local;
 	}
-	const consumed = new Set<string>();
+	const consumed = opts?.consumedToolCallIds ?? new Set<string>();
 	// In watched mode, consecutive same-role messages collapse under one label
 	// (the watched agent emits one assistant message per tool call, so otherwise
 	// every call repeats `**agent**:`). Cleared whenever a
 	// non-role-labeled line is emitted so the next turn re-labels.
 	let lastWatchedLabel: string | undefined;
+	// Emit a watched-mode role label, collapsing consecutive same-role turns
+	// under one label (matching the user/assistant paths). Used for the
+	// user-attributed `!`/`$` execution lines so the advisor never reads them
+	// as agent actions.
+	const pushWatchedRole = (label: string, body: string): void => {
+		if (lastWatchedLabel === label) {
+			lines.push(body, "");
+		} else {
+			lines.push(label, body, "");
+			lastWatchedLabel = label;
+		}
+	};
 
 	for (const msg of typed) {
 		switch (msg.role) {
@@ -263,7 +355,9 @@ export function formatSessionHistoryMarkdown(messages: unknown[], opts?: History
 					} else if (block.type === "toolCall") {
 						const result = resultsByCallId.get(block.id);
 						if (result) consumed.add(block.id);
-						body.push(toolCallLine(block.name, block.arguments, result, opts?.includeToolIntent));
+						body.push(
+							toolCallLine(block.name, block.arguments, result, opts?.includeToolIntent, opts?.expandEditDiffs),
+						);
 					} else if (opts?.includeThinking && block.type === "thinking" && block.thinking.trim()) {
 						body.push(`_thinking:_ ${block.thinking}`);
 					}
@@ -286,27 +380,44 @@ export function formatSessionHistoryMarkdown(messages: unknown[], opts?: History
 			case "toolResult": {
 				// Normally consumed by its toolCall; orphans (e.g. truncated history) get their own line.
 				if (consumed.has(msg.toolCallId)) break;
-				lines.push(toolCallLine(msg.toolName, undefined, msg, opts?.includeToolIntent), "");
+				lines.push(toolCallLine(msg.toolName, undefined, msg, opts?.includeToolIntent, opts?.expandEditDiffs), "");
 				lastWatchedLabel = undefined;
 				break;
 			}
 			case "bashExecution": {
 				const bashMsg = msg as BashExecutionMessage;
 				if (bashMsg.excludeFromContext) break;
-				lines.push(executionLine("bash", bashMsg.command, bashMsg), "");
-				lastWatchedLabel = undefined;
+				const bashLine = executionLine("bash", bashMsg.command, bashMsg);
+				if (opts?.watchedRoles) {
+					pushWatchedRole("**user**:", bashLine);
+				} else {
+					lines.push(bashLine, "");
+					lastWatchedLabel = undefined;
+				}
 				break;
 			}
 			case "pythonExecution": {
 				const pythonMsg = msg as PythonExecutionMessage;
 				if (pythonMsg.excludeFromContext) break;
-				lines.push(executionLine("python", pythonMsg.code, pythonMsg), "");
-				lastWatchedLabel = undefined;
+				const pythonLine = executionLine("python", pythonMsg.code, pythonMsg);
+				if (opts?.watchedRoles) {
+					pushWatchedRole("**user**:", pythonLine);
+				} else {
+					lines.push(pythonLine, "");
+					lastWatchedLabel = undefined;
+				}
 				break;
 			}
 			case "custom":
 			case "hookMessage": {
 				const custom = msg as CustomMessage | HookMessage;
+				if (
+					custom.display === false &&
+					!PRIMARY_CONTEXT_CUSTOM_TYPES.has(custom.customType) &&
+					CONTEXTUAL_NON_PRIMARY_HIDDEN_CUSTOM_TYPES[custom.customType] !== true
+				) {
+					break;
+				}
 				if (opts?.expandPrimaryContext && PRIMARY_CONTEXT_CUSTOM_TYPES.has(custom.customType)) {
 					const text = contentToText(custom.content).trim();
 					if (text) {

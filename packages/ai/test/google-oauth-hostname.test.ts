@@ -8,6 +8,7 @@ describe("GoogleOAuthFlow callback hostname", () => {
 			onAuth: () => {},
 		};
 		const flow = new GoogleOAuthFlow(ctrl, {
+			provider: "google-gemini-cli",
 			clientId: "test-client",
 			clientSecret: "test-secret",
 			authUrl: "https://example.com/auth",

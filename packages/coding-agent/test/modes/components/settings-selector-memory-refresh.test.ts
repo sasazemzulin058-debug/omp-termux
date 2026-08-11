@@ -1,5 +1,6 @@
 import { afterEach, beforeAll, beforeEach, describe, expect, it } from "bun:test";
 import { resetSettingsForTest, Settings, settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { loadHindsightConfig } from "@oh-my-pi/pi-coding-agent/hindsight/config";
 import { SettingsSelectorComponent } from "@oh-my-pi/pi-coding-agent/modes/components/settings-selector";
 import { initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
 
@@ -25,8 +26,8 @@ function stubStdoutGeometry(cols: number): { restore(): void } {
 	const rowsDesc = Object.getOwnPropertyDescriptor(process.stdout, "rows");
 	const colsDesc = Object.getOwnPropertyDescriptor(process.stdout, "columns");
 	const rows = 40;
-	Object.defineProperty(process.stdout, "rows", { configurable: true, get: () => rows });
-	Object.defineProperty(process.stdout, "columns", { configurable: true, get: () => cols });
+	Object.defineProperty(process.stdout, "rows", { configurable: true, get: () => rows, set: () => {} });
+	Object.defineProperty(process.stdout, "columns", { configurable: true, get: () => cols, set: () => {} });
 	const restoreOne = (key: "rows" | "columns", desc: PropertyDescriptor | undefined) => {
 		if (desc) Object.defineProperty(process.stdout, key, desc);
 		else Object.defineProperty(process.stdout, key, { configurable: true, value: undefined, writable: true });
@@ -45,6 +46,7 @@ function createSelector(onCancel: () => void = () => {}): SettingsSelectorCompon
 			availableThinkingLevels: [],
 			thinkingLevel: undefined,
 			availableThemes: ["dark"],
+			providers: [],
 			cwd: process.cwd(),
 		},
 		{
@@ -71,6 +73,7 @@ describe("SettingsSelectorComponent memory tab", () => {
 		const before = comp.render(70).join("\n");
 		expect(before).toContain("Memory Backend");
 		expect(before).not.toContain("Hindsight API URL");
+		expect(before).not.toContain("Hindsight API Token");
 
 		// Memory Backend is the only visible row, so it's already selected at index 0.
 		// Enter opens the SelectSubmenu pre-positioned on "off"; navigate to "hindsight" (index 2) and confirm.
@@ -83,7 +86,36 @@ describe("SettingsSelectorComponent memory tab", () => {
 		const after = comp.render(70).join("\n");
 		expect(after).toContain("Memory Backend");
 		expect(after).toContain("Hindsight API URL");
+		expect(after).toContain("Hindsight API Token");
 		expect(after).toContain("Hindsight Auto Recall");
+	});
+
+	it("saves a pasted Hindsight API token from its settings row", () => {
+		settings.set("memory.backend", "hindsight");
+		settings.set("hindsight.apiToken", "saved-secret-token");
+		const comp = createSelector();
+
+		for (const ch of "hindsight api token") comp.handleInput(ch);
+		const row = comp.render(120).join("\n");
+		expect(row).toContain("Hindsight API Token");
+		expect(row).toContain("••••••••");
+		expect(row).not.toContain("saved-secret-token");
+
+		comp.handleInput("\n");
+		expect(comp.render(120).join("\n")).not.toContain("saved-secret-token");
+		comp.handleInput("\n");
+		expect(settings.get("hindsight.apiToken")).toBe("saved-secret-token");
+		expect(comp.render(120).join("\n")).not.toContain("saved-secret-token");
+
+		comp.handleInput("\n");
+		comp.handleInput("\x15");
+		comp.handleInput("\x1b[200~test-token-123\x1b[201~");
+		expect(comp.render(120).join("\n")).not.toContain("test-token-123");
+		comp.handleInput("\n");
+
+		expect(settings.get("hindsight.apiToken")).toBe("test-token-123");
+		expect(loadHindsightConfig(settings, {}).hindsightApiToken).toBe("test-token-123");
+		expect(comp.render(120).join("\n")).not.toContain("test-token-123");
 	});
 
 	it("hides Hindsight rows again when the backend is switched back to off without leaving the tab", () => {

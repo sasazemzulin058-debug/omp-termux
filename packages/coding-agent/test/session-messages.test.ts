@@ -1,8 +1,13 @@
 import { describe, expect, it } from "bun:test";
-import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
+import { type AgentMessage, filterProviderReplayMessages } from "@oh-my-pi/pi-agent-core";
 import type { ImageContent, Message, TextContent } from "@oh-my-pi/pi-ai";
 import { inferCopilotInitiator } from "@oh-my-pi/pi-ai/providers/github-copilot-headers";
-import { convertToLlm, wrapSteeringForModel } from "@oh-my-pi/pi-coding-agent/session/messages";
+import {
+	convertToLlm,
+	SKILL_PROMPT_MESSAGE_TYPE,
+	wrapSteeringForModel,
+} from "@oh-my-pi/pi-coding-agent/session/messages";
+import { COLLAB_PROMPT_MESSAGE_TYPE } from "@oh-my-pi/pi-wire";
 
 function expectAttribution(message: Message | undefined, expected: "user" | "agent" | undefined): void {
 	expect(message).toBeDefined();
@@ -50,7 +55,45 @@ describe("convertToLlm compaction summary", () => {
 			{ role: "compactionSummary", summary: "plain summary", tokensBefore: 1000, timestamp: Date.now() },
 		];
 		const converted = convertToLlm(messages);
-		expect((converted[0]?.content as unknown[]).length).toBe(1);
+		expect(converted[0]).toBeDefined();
+		expect((converted[0]!.content as unknown[]).length).toBe(1);
+	});
+});
+
+describe("assistant refusal replay policy", () => {
+	it("preserves API-level Anthropic refusals for summaries but drops them from provider replay", () => {
+		const messages: AgentMessage[] = [
+			{ role: "user", content: [{ type: "text", text: "trigger" }], timestamp: 1 },
+			{
+				role: "assistant",
+				content: [{ type: "text", text: "I can't assist with that request." }],
+				stopReason: "error",
+				stopDetails: { type: "refusal", category: "bio", explanation: "policy refusal" },
+				errorMessage: "Refusal (bio): policy refusal",
+				api: "anthropic",
+				provider: "anthropic",
+				model: "claude-opus-4",
+				usage: {
+					input: 0,
+					output: 0,
+					cacheRead: 0,
+					cacheWrite: 0,
+					totalTokens: 0,
+					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+				},
+				timestamp: 2,
+			},
+			{ role: "user", content: [{ type: "text", text: "recover" }], timestamp: 3 },
+		];
+
+		const converted = convertToLlm(messages);
+
+		expect(converted.map(message => message.role)).toEqual(["user", "assistant", "user"]);
+		expect(JSON.stringify(converted)).toContain("Refusal (bio)");
+
+		const replayed = filterProviderReplayMessages(converted);
+		expect(replayed.map(message => message.role)).toEqual(["user", "user"]);
+		expect(JSON.stringify(replayed)).not.toContain("Refusal (bio)");
 	});
 });
 
@@ -136,12 +179,79 @@ describe("convertToLlm custom message mapping", () => {
 		expect(text).toContain("export const config = {};");
 	});
 
-	it("allows custom messages to opt into user attribution", () => {
+	it("splits mixed text + image file mentions into developer + user messages (#3443)", () => {
+		// `developer` (and `system`) Responses messages reject `input_image` with
+		// `Invalid value: 'input_image'. Supported values are: 'input_text'.`
+		// `generateFileMentionMessages` packs every `@…` into one `fileMention`,
+		// so a `@notes.md @diagram.png` turn would have demoted the text payload
+		// to `user` (losing the instruction-priority intent) before #3443; now the
+		// text-only file stays on `developer` and only the image file rides as `user`.
+		const image: ImageContent = { type: "image", data: "aGVsbG8=", mimeType: "image/png" };
+		const messages: AgentMessage[] = [
+			{
+				role: "fileMention",
+				files: [
+					{ path: "notes/log.txt", content: "alpha\n", lineCount: 1 },
+					{ path: "diagram.png", content: "", image },
+				],
+				timestamp: Date.now(),
+			},
+		];
+
+		const converted = convertToLlm(messages);
+
+		expect(converted).toHaveLength(2);
+
+		const dev = converted[0];
+		expect(dev?.role).toBe("developer");
+		expectAttribution(dev, "user");
+		if (dev?.role !== "developer" || !Array.isArray(dev.content)) {
+			throw new Error("Expected developer array content for text mention");
+		}
+		const devText = dev.content.find(content => content.type === "text")?.text ?? "";
+		expect(devText).toContain('<file path="notes/log.txt">');
+		expect(devText).toContain("alpha");
+		expect(devText).not.toContain('<file path="diagram.png">');
+		expect(dev.content.some(content => content.type === "image")).toBe(false);
+
+		const user = converted[1];
+		expect(user?.role).toBe("user");
+		expectAttribution(user, "user");
+		if (user?.role !== "user" || !Array.isArray(user.content)) {
+			throw new Error("Expected user array content for image mention");
+		}
+		const userText = user.content.find(content => content.type === "text")?.text ?? "";
+		expect(userText).toContain('<file path="diagram.png">');
+		expect(userText).not.toContain('<file path="notes/log.txt">');
+		expect(user.content.filter(content => content.type === "image")).toEqual([image]);
+	});
+
+	it("emits a user-only message when every mention is an image (#3443)", () => {
+		const image: ImageContent = { type: "image", data: "aGVsbG8=", mimeType: "image/png" };
+		const messages: AgentMessage[] = [
+			{
+				role: "fileMention",
+				files: [{ path: "screenshot.png", content: "", image }],
+				timestamp: Date.now(),
+			},
+		];
+
+		const converted = convertToLlm(messages);
+
+		expect(converted).toHaveLength(1);
+		expect(converted[0]?.role).toBe("user");
+		if (converted[0]?.role !== "user" || !Array.isArray(converted[0].content)) {
+			throw new Error("Expected user array content");
+		}
+		expect(converted[0].content.filter(content => content.type === "image")).toEqual([image]);
+	});
+
+	it("keeps non-skill user-attributed custom messages on the developer role", () => {
 		const messages: AgentMessage[] = [
 			{
 				role: "custom",
-				customType: "skill-prompt",
-				content: "Run this skill with my arguments",
+				customType: "ultrathink-notice",
+				content: "User requested deeper reasoning",
 				display: true,
 				attribution: "user",
 				timestamp: Date.now(),
@@ -154,6 +264,83 @@ describe("convertToLlm custom message mapping", () => {
 		expect(converted[0]?.role).toBe("developer");
 		expectAttribution(converted[0], "user");
 		expect(inferCopilotInitiator(converted)).toBe("user");
+	});
+
+	it("maps user-invoked skill prompts to the user role", () => {
+		const messages: AgentMessage[] = [
+			{
+				role: "custom",
+				customType: SKILL_PROMPT_MESSAGE_TYPE,
+				content: "Run this skill with my arguments",
+				display: true,
+				attribution: "user",
+				timestamp: Date.now(),
+			},
+		];
+
+		const converted = convertToLlm(messages);
+
+		expect(converted).toHaveLength(1);
+		expect(converted[0]?.role).toBe("user");
+		expectAttribution(converted[0], "user");
+		expect(inferCopilotInitiator(converted)).toBe("user");
+		if (converted[0]?.role !== "user" || !Array.isArray(converted[0].content)) {
+			throw new Error("Expected user array content");
+		}
+		const text = converted[0].content.find(content => content.type === "text")?.text ?? "";
+		expect(text).toContain("Run this skill with my arguments");
+	});
+
+	it("keeps user-invoked skill prompt images in the user message", () => {
+		const image: ImageContent = { type: "image", data: "c2tpbGw=", mimeType: "image/png" };
+		const messages: AgentMessage[] = [
+			{
+				role: "custom",
+				customType: SKILL_PROMPT_MESSAGE_TYPE,
+				content: [{ type: "text", text: "Skill body" }, image],
+				display: true,
+				attribution: "user",
+				timestamp: Date.now(),
+			},
+		];
+
+		const converted = convertToLlm(messages);
+
+		expect(converted).toHaveLength(1);
+		expect(converted[0]?.role).toBe("user");
+		expectAttribution(converted[0], "user");
+		if (converted[0]?.role !== "user" || !Array.isArray(converted[0].content)) {
+			throw new Error("Expected user skill content");
+		}
+		expect(converted[0].content).toEqual([{ type: "text", text: "Skill body" }, image]);
+	});
+
+	it("routes non-user custom-message images through a user message", () => {
+		const image: ImageContent = { type: "image", data: "YWR2aXNvcg==", mimeType: "image/png" };
+		const messages: AgentMessage[] = [
+			{
+				role: "custom",
+				customType: "advisor",
+				content: [{ type: "text", text: "Advisor body" }, image],
+				display: true,
+				attribution: "agent",
+				timestamp: Date.now(),
+			},
+		];
+
+		const converted = convertToLlm(messages);
+
+		expect(converted.map(message => message.role)).toEqual(["developer", "user"]);
+		expectAttribution(converted[0], "agent");
+		expectAttribution(converted[1], "agent");
+		if (converted[0]?.role !== "developer" || !Array.isArray(converted[0].content)) {
+			throw new Error("Expected developer custom text");
+		}
+		expect(converted[0].content).toEqual([{ type: "text", text: "Advisor body" }]);
+		if (converted[1]?.role !== "user" || !Array.isArray(converted[1].content)) {
+			throw new Error("Expected user custom images");
+		}
+		expect(converted[1].content.filter(content => content.type === "image")).toEqual([image]);
 	});
 });
 
@@ -189,10 +376,41 @@ describe("wrapSteeringForModel", () => {
 		expect(wrapped[0]).not.toBe(message);
 		expect(message.content).toEqual([{ type: "text", text: rawText }]);
 		const wrappedText = getUserText(wrapped[0]);
-		expect(wrappedText).toContain("<user_interjection>");
-		expect(wrappedText).toContain("<message>\nUse <tag> & keep it literal\n</message>");
+		expect(wrappedText).toContain("<system-notice>");
+		expect(wrappedText).not.toContain("<message>");
+		expect(wrappedText).toContain("Use <tag> & keep it literal");
 		expect(wrappedText).not.toContain("&lt;tag&gt;");
 		expect(wrappedText).not.toContain("&amp;");
+	});
+
+	it("presents user-attributed collab prompts as wrapped user turns on every conversion path", () => {
+		const message: AgentMessage = {
+			role: "custom",
+			customType: COLLAB_PROMPT_MESSAGE_TYPE,
+			content: "Reply with exactly PONG",
+			display: true,
+			details: { from: "guest" },
+			attribution: "user",
+			timestamp: 1,
+		};
+
+		const directlyConverted = convertToLlm([message]);
+		const wrapped = wrapSteeringForModel([message]);
+		const primaryProviderMessages = convertToLlm(wrapped);
+
+		expect(directlyConverted).toHaveLength(1);
+		expect(directlyConverted[0]?.role).toBe("user");
+		expect(getUserText(directlyConverted[0])).toContain("<system-notice>");
+		expect(getUserText(directlyConverted[0])).toContain("Reply with exactly PONG");
+		expect(wrapped[0]?.role).toBe("user");
+		expect(getUserText(wrapped[0])).toContain("<system-notice>");
+		expect(getUserText(wrapped[0])).toContain("Reply with exactly PONG");
+		expect(primaryProviderMessages).toHaveLength(1);
+		expect(primaryProviderMessages[0]?.role).toBe("user");
+		expect(message).toMatchObject({
+			role: "custom",
+			details: { from: "guest" },
+		});
 	});
 
 	it("wraps buried steering messages too so wire bytes stay stable across turns", () => {
@@ -212,8 +430,8 @@ describe("wrapSteeringForModel", () => {
 		// the cached prefix stays valid instead of busting on the turn after a steer.
 		expect(wrapped).not.toBe(messages);
 		expect(wrapped[0]).not.toBe(buried);
-		expect(getUserText(wrapped[0])).toContain("<user_interjection>");
-		expect(getUserText(wrapped[0])).toContain("<message>\nold steer\n</message>");
+		expect(getUserText(wrapped[0])).toContain("<system-notice>");
+		expect(getUserText(wrapped[0])).toContain("old steer");
 		// Non-steering trailing message is untouched, and the persisted steer is not mutated.
 		expect(wrapped[1]).toBe(later);
 		expect(buried.content).toBe("old steer");
@@ -258,7 +476,7 @@ describe("wrapSteeringForModel", () => {
 		expect(wrapped).not.toBe(messages);
 		expect(wrapped[0]).not.toBe(first);
 		expect(wrapped[1]).not.toBe(second);
-		expect(getUserText(wrapped[0])).toContain("<message>\nfirst steer\n</message>");
-		expect(getUserText(wrapped[1])).toContain("<message>\nsecond steer\n</message>");
+		expect(getUserText(wrapped[0])).toContain("first steer");
+		expect(getUserText(wrapped[1])).toContain("second steer");
 	});
 });

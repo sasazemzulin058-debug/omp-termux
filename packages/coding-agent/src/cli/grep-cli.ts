@@ -6,7 +6,8 @@
 import * as path from "node:path";
 import { GrepOutputMode, grep } from "@oh-my-pi/pi-natives";
 import { APP_NAME } from "@oh-my-pi/pi-utils";
-import chalk from "chalk";
+import chalk from "@oh-my-pi/pi-utils/chalk";
+import { expandPath } from "../tools/path-utils";
 
 export interface GrepCommandArgs {
 	pattern: string;
@@ -73,7 +74,7 @@ export async function runGrepCommand(cmd: GrepCommandArgs): Promise<void> {
 		process.exit(1);
 	}
 
-	const searchPath = path.resolve(cmd.path);
+	const searchPath = path.resolve(expandPath(cmd.path));
 	console.log(chalk.dim(`Searching in: ${searchPath}`));
 	console.log(chalk.dim(`Pattern: ${cmd.pattern}`));
 	console.log(
@@ -150,7 +151,7 @@ ${chalk.bold("Options:")}
   --no-gitignore        Include files excluded by .gitignore
 
 ${chalk.bold("Environment:")}
-  PI_GREP_WORKERS=N    Set filesystem walker workers (default 4, 0 = auto)
+  PI_WALK_WORKERS=N    Set filesystem walker workers (default 4, 0 = auto)
 
 ${chalk.bold("Examples:")}
   ${APP_NAME} grep "import" src/

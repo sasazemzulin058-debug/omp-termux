@@ -23,36 +23,53 @@ export function createBundledReferenceMap<TApi extends Api>(
 	return references;
 }
 
-export function createReferenceResolver<TApi extends Api>(
-	providerRefs: Map<string, ModelSpec<TApi>>,
-): (modelId: string) => ModelSpec<TApi> | undefined {
-	const globalRefs = new Map<string, Model<Api>>();
+type ProviderReferenceSource<TApi extends Api> = Map<string, ModelSpec<TApi>> | (() => Map<string, ModelSpec<TApi>>);
+
+let globalReferences: Map<string, Model<Api>> | undefined;
+
+function getGlobalReferences(): Map<string, Model<Api>> {
+	if (globalReferences) {
+		return globalReferences;
+	}
+	const references = new Map<string, Model<Api>>();
 	for (const provider of getBundledProviders()) {
 		for (const model of getBundledModels(provider as Parameters<typeof getBundledModels>[0])) {
 			const candidate = model as Model<Api>;
 			if (isZeroCostXaiOAuthReference(candidate)) {
 				continue;
 			}
-			const existing = globalRefs.get(candidate.id);
+			const existing = references.get(candidate.id);
 			if (!existing) {
-				globalRefs.set(candidate.id, candidate);
+				references.set(candidate.id, candidate);
 			} else if (candidate.contextWindow !== existing.contextWindow) {
 				if ((candidate.contextWindow ?? 0) > (existing.contextWindow ?? 0)) {
-					globalRefs.set(candidate.id, candidate);
+					references.set(candidate.id, candidate);
 				}
 			} else if (candidate.maxTokens !== existing.maxTokens) {
 				if ((candidate.maxTokens ?? 0) > (existing.maxTokens ?? 0)) {
-					globalRefs.set(candidate.id, candidate);
+					references.set(candidate.id, candidate);
 				}
 			} else if (existing.provider !== "openai" && candidate.provider === "openai") {
-				globalRefs.set(candidate.id, candidate);
+				references.set(candidate.id, candidate);
 			}
 		}
 	}
+	globalReferences = references;
+	return references;
+}
+
+export function createReferenceResolver<TApi extends Api>(
+	providerReferenceSource: ProviderReferenceSource<TApi>,
+): (modelId: string) => ModelSpec<TApi> | undefined {
+	let lazyProviderReferences: Map<string, ModelSpec<TApi>> | undefined;
+	const getProviderReferences =
+		typeof providerReferenceSource === "function"
+			? () => (lazyProviderReferences ??= providerReferenceSource())
+			: () => providerReferenceSource;
 	return (modelId: string) => {
-		const providerRef = providerRefs.get(modelId);
+		const providerRef = getProviderReferences().get(modelId);
 		if (providerRef) return providerRef;
-		const globalRef = globalRefs.get(modelId);
+		const globalRef = getGlobalReferences().get(modelId);
 		return globalRef ? toModelSpec(globalRef as Model<TApi>) : undefined;
 	};
 }

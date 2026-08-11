@@ -1,5 +1,13 @@
 import { describe, expect, it } from "bun:test";
 import * as path from "node:path";
+import type { Model } from "@oh-my-pi/pi-ai";
+import { buildModel } from "@oh-my-pi/pi-catalog/build";
+import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { createAcpConnection } from "@oh-my-pi/pi-coding-agent/modes/acp/acp-mode";
+import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
+import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
+import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import { TempDir } from "@oh-my-pi/pi-utils";
 import {
 	type Client,
 	ClientSideConnection,
@@ -9,15 +17,7 @@ import {
 	type RequestPermissionRequest,
 	type RequestPermissionResponse,
 	type SessionNotification,
-} from "@agentclientprotocol/sdk";
-import type { Model } from "@oh-my-pi/pi-ai";
-import { buildModel } from "@oh-my-pi/pi-catalog/build";
-import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import { createAcpConnection } from "@oh-my-pi/pi-coding-agent/modes/acp/acp-mode";
-import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
-import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
-import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
-import { TempDir } from "@oh-my-pi/pi-utils";
+} from "@oh-my-pi/pi-utils/acp";
 
 const TEST_MODEL: Model = buildModel({
 	id: "claude-sonnet-4-20250514",
@@ -90,7 +90,6 @@ class LazyFakeSession {
 
 	setThinkingLevel(): void {}
 	setSlashCommands(): void {}
-	async refreshSshTool(): Promise<void> {}
 	async setModel(): Promise<void> {}
 	subscribe(): () => void {
 		return () => {};
@@ -252,13 +251,14 @@ describe("ACP lazy startup", () => {
 
 		const explicit = {
 			"task.isolation.mode": "rcopy",
+			"task.isolation.apply": false,
 			"task.isolation.merge": "branch",
 			"task.isolation.commits": "ai",
 			"task.eager": "always",
 			"task.batch": false,
 			"task.maxConcurrency": 4,
 			"task.maxRecursionDepth": 5,
-			"task.disabledAgents": ["explore"],
+			"task.disabledAgents": ["scout"],
 			"task.agentModelOverrides": { task: "claude-sonnet-4-20250514" },
 			"memory.backend": "local",
 			"memories.enabled": true,
@@ -492,6 +492,8 @@ describe("ACP lazy startup", () => {
 			const { runRootCommand } = await import("@oh-my-pi/pi-coding-agent/main");
 			const { createAgentSession } = await import("@oh-my-pi/pi-coding-agent/sdk");
 			let session: AgentSession | undefined;
+			let sessionHasUI: boolean | undefined;
+			let deferredUsageReserveConfirmation: boolean | undefined;
 
 			const stopped = runRootCommand(
 				{
@@ -514,6 +516,8 @@ describe("ACP lazy startup", () => {
 					discoverAuthStorage: async () => authStorage,
 					createAgentSession: options => {
 						const sessionOptions = options ?? {};
+						sessionHasUI = sessionOptions.hasUI;
+						deferredUsageReserveConfirmation = sessionOptions.deferUsageReserveConfirmation;
 						return createAgentSession({
 							...sessionOptions,
 							workspaceTree: sessionOptions.workspaceTree ?? emptyWorkspaceTree(sessionOptions.cwd ?? cwd),
@@ -533,6 +537,8 @@ describe("ACP lazy startup", () => {
 			}
 			expect(session.model.provider).toBe("runtime-provider");
 			expect(await session.modelRegistry.getApiKey(session.model)).toBe("cli-runtime-key");
+			expect(sessionHasUI).toBe(false);
+			expect(deferredUsageReserveConfirmation).toBe(true);
 			await session.dispose();
 		} finally {
 			authStorage.close();

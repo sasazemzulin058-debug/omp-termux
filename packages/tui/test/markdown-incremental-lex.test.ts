@@ -41,6 +41,28 @@ function assertIdenticalGrowth(full: string, width = 60, step = 13): void {
 	expect(streamLines).toEqual(renderCold(full, width));
 }
 
+/** Same as {@link assertIdenticalGrowth} but with a TRANSIENT streaming instance,
+ *  which activates Markdown's render-prefix cache (the transient path caches
+ *  content lines for the stable lex-prefix tokens and re-renders only the tail).
+ *  The split render must still be byte-identical to a cold full render at every
+ *  step — a faster-but-divergent split is a regression. */
+function assertIdenticalGrowthTransient(full: string, width = 60, step = 13): void {
+	const streaming = new Markdown("", 0, 0, THEME);
+	streaming.transientRenderCache = true;
+	for (let len = 1; len <= full.length; len += step) {
+		const slice = full.slice(0, len);
+		clearRenderCache();
+		streaming.setText(slice);
+		const streamLines = streaming.render(width);
+		const oracle = renderCold(slice, width);
+		expect(streamLines).toEqual(oracle);
+	}
+	clearRenderCache();
+	streaming.setText(full);
+	const streamLines = streaming.render(width);
+	expect(streamLines).toEqual(renderCold(full, width));
+}
+
 const PROSE =
 	"Para one with **bold** and _italic_ words and a `code span` for flavor.\n\n" +
 	"Para two continues the document with more sentences so the lexer has real\n" +
@@ -92,6 +114,18 @@ describe("Markdown incremental streaming lex (E2)", () => {
 
 	it("mixed multi-section corpus growth is byte-identical", () => {
 		assertIdenticalGrowth(MIXED, 80, 29);
+	});
+
+	it("transient render-prefix cache: prose split render is byte-identical", () => {
+		assertIdenticalGrowthTransient(PROSE);
+	});
+
+	it("transient render-prefix cache: fenced code split render is byte-identical", () => {
+		assertIdenticalGrowthTransient(FENCED);
+	});
+
+	it("transient render-prefix cache: mixed multi-section split render is byte-identical", () => {
+		assertIdenticalGrowthTransient(MIXED, 80, 29);
 	});
 
 	it("a width change mid-stream still matches a cold render at the new width", () => {
@@ -182,6 +216,23 @@ describe("Markdown incremental streaming lex (E2)", () => {
 		);
 	});
 
+	it("a transient non-append replacement with no block boundary is not served stale prefix lines", () => {
+		// Regression: the render-prefix cache guards on #streamPrefixText, which
+		// #freezeStablePrefix leaves untouched when the new text has no freezable
+		// "\n\n" boundary. Without clearing it on the fallback path, a transient
+		// replacement by single-line content emitted the OLD prefix's rendered lines.
+		const streaming = new Markdown("", 0, 0, THEME);
+		streaming.transientRenderCache = true;
+		clearRenderCache();
+		streaming.setText("# First document\n\nOriginal body paragraph one.\n\nOriginal body paragraph two.\n");
+		streaming.render(60);
+		// Replace with unrelated single-line content — no "\n\n" boundary to freeze.
+		clearRenderCache();
+		streaming.setText("a flat replacement with no double newline at all");
+		const replaced = streaming.render(60);
+		expect(replaced).toEqual(renderCold("a flat replacement with no double newline at all", 60));
+	});
+
 	it("CRLF text (fallback path) renders identically to a cold lex", () => {
 		const streaming = new Markdown("", 0, 0, THEME);
 		const crlf = "Para one with content.\r\n\r\nPara two with `code`.\r\n\r\nPara three tail.\r\n";
@@ -190,6 +241,89 @@ describe("Markdown incremental streaming lex (E2)", () => {
 			streaming.setText(crlf.slice(0, len));
 			const streamLines = streaming.render(60);
 			expect(streamLines).toEqual(renderCold(crlf.slice(0, len), 60));
+		}
+	});
+
+	// Closed-list lookahead: a "\n\n" boundary directly after a list token is
+	// freezable iff the tail cannot start a continuation item of that list
+	// (same bullet char, or 1-9 digits + same delimiter — marked's
+	// listItemRegex). These corpora cross list/non-list and
+	// list/incompatible-list boundaries; the divergence (and the freeze
+	// opportunity) is phase-sensitive, so each runs at step=1 and the
+	// production reveal granularity (step=3).
+	it("bullet list followed by a paragraph grows byte-identically", () => {
+		const doc =
+			"- alpha item with words\n- beta item with words\n- gamma item\n\n" +
+			"Closing paragraph that keeps streaming additional words to the end.";
+		assertIdenticalGrowth(doc, 60, 1);
+		assertIdenticalGrowth(doc, 60, 3);
+		assertIdenticalGrowthTransient(doc, 60, 3);
+	});
+
+	it("bullet list followed by a different-marker list stays two lists", () => {
+		const doc = "- alpha\n- beta\n\n* starred one\n* starred two\n\n+ plus one\n+ plus two";
+		assertIdenticalGrowth(doc, 60, 1);
+		assertIdenticalGrowth(doc, 60, 3);
+	});
+
+	it("ordered list followed by a paren-delimited list stays two lists", () => {
+		const doc = "1. dot one\n2. dot two\n\n1) paren one\n2) paren two";
+		assertIdenticalGrowth(doc, 60, 1);
+		assertIdenticalGrowth(doc, 60, 3);
+		assertIdenticalGrowthTransient(doc, 60, 3);
+	});
+
+	it("list followed by blockquote grows byte-identically", () => {
+		const doc = "- alpha\n- beta\n\n> quoted line one with words\n> quoted line two here";
+		assertIdenticalGrowth(doc, 60, 1);
+		assertIdenticalGrowth(doc, 60, 3);
+	});
+
+	it("list followed by heading grows byte-identically", () => {
+		const doc = "1. one\n2. two\n\n# Heading after the list\n\nTail prose keeps going on.";
+		assertIdenticalGrowth(doc, 60, 1);
+		assertIdenticalGrowth(doc, 60, 3);
+	});
+
+	it("list followed by fenced code grows byte-identically", () => {
+		const doc = "- alpha\n- beta\n\n```ts\nconst x = compute(a, b);\nreturn x;\n```\n\ntail text";
+		assertIdenticalGrowth(doc, 60, 1);
+		assertIdenticalGrowth(doc, 60, 3);
+	});
+
+	it("a same-marker list across a blank line still merges while growing", () => {
+		const bullets = "- a\n- b\n\n- c\n- d";
+		assertIdenticalGrowth(bullets, 60, 1);
+		assertIdenticalGrowth(bullets, 60, 3);
+	});
+
+	it("a list closed by a paragraph freezes at the boundary (streaming perf gate)", () => {
+		// The lookahead must actually fire here: the tail after the blank line
+		// is a paragraph, which cannot continue a `-` list, so the rendered
+		// list rows become settled (frozen prefix) on the transient path.
+		const doc = "- alpha\n- beta\n- gamma\n\nClosing paragraph after the list keeps going.";
+		const streaming = new Markdown("", 0, 0, THEME);
+		streaming.transientRenderCache = true;
+		clearRenderCache();
+		streaming.setText(doc);
+		const streamLines = streaming.render(60);
+		expect(streamLines).toEqual(renderCold(doc, 60));
+		expect(streaming.getLastRenderSettledRows()).toBeGreaterThan(0);
+	});
+
+	it("a document that is one still-growing list never freezes mid-list", () => {
+		// No (b)-style intra-list freezing shipped: loose/tight and ordered
+		// renumbering are whole-list properties, so no prefix of an open list
+		// is byte-stable. Settled rows must stay 0 for a pure-list document.
+		const doc = "- one two three\n- four five six\n\n- seven eight nine";
+		const streaming = new Markdown("", 0, 0, THEME);
+		streaming.transientRenderCache = true;
+		for (let len = 1; len <= doc.length; len += 1) {
+			clearRenderCache();
+			streaming.setText(doc.slice(0, len));
+			const streamLines = streaming.render(60);
+			expect(streamLines).toEqual(renderCold(doc.slice(0, len), 60));
+			expect(streaming.getLastRenderSettledRows()).toBe(0);
 		}
 	});
 });

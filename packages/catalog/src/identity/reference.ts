@@ -8,7 +8,7 @@
  * may strip `search`-style markers and prefers cache-pricing-complete
  * references, both of which would be wrong for canonical coalescing.
  */
-import type { Api, Model } from "../types";
+import type { Api, Model, ThinkingConfig } from "../types";
 import { getBracketStrippedModelIdCandidates, getLongestModelLikeIdSegment, getModelLikeIdSegments } from "./id";
 import { REFERENCE_TRAILING_MARKER_PATTERN } from "./markers";
 
@@ -137,8 +137,27 @@ function getReferenceCandidateIds(modelId: string): string[] {
 	return [...candidates];
 }
 
+/**
+ * Inherit bundled reference thinking only for same-provider matches. Wire routing
+ * (`effortRouting`) is provider-specific; cross-provider inheritance can rewrite
+ * gateway ids (e.g. Portkey `@modal/GLM-5-2-FP8` → devin `glm-5-2`).
+ */
+export function inheritReferenceThinking(
+	modelThinking: ThinkingConfig | undefined,
+	reference: Pick<Model<Api>, "provider" | "thinking"> | undefined,
+	provider: string,
+): ThinkingConfig | undefined {
+	if (modelThinking !== undefined) return modelThinking;
+	if (!reference?.thinking) return undefined;
+	if (reference.provider !== provider) return undefined;
+	return reference.thinking;
+}
+
 /** Resolve a (possibly proxied/affixed) model id to its bundled upstream reference. */
 export function resolveModelReference(modelId: string, index: ModelReferenceIndex): Model<Api> | undefined {
+	// Portkey/gateway wire ids (`@provider/model`) are opaque; fuzzy matching would
+	// map them to unrelated bundled entries (e.g. `@modal/GLM-5-2-FP8` → devin/glm-5-2).
+	if (modelId.startsWith("@")) return undefined;
 	for (const candidate of getReferenceCandidateIds(modelId)) {
 		const key = normalizeReferenceKey(candidate);
 		const reference = index.exact.get(key) ?? index.suffixAlias.get(key);

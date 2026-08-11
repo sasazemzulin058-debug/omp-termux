@@ -4,7 +4,7 @@
  * Where the OpenAI / Anthropic / Responses route modules translate foreign
  * wire shapes through pi-ai's canonical {@link Context}, this module accepts
  * the canonical shape *directly* — for clients that already speak pi-ai
- * (containerized omp, the swarm extension, robomp's sidecar auth-gateway).
+ * (containerized omp, robomp's sidecar auth-gateway).
  * Skipping the wire-format → Context → wire-format round-trip cuts
  * per-request CPU but, more importantly, avoids the quantization that those
  * translations impose on first-class pi-ai fields (service tier, cache
@@ -25,7 +25,9 @@
  *   200 JSON (stream=false): { message: AssistantMessage }
  *   4xx/5xx: { error: { type, message } }
  */
+
 import type { AuthGatewayStreamControl } from "../auth-gateway/types";
+import * as AIError from "../error";
 import type { AssistantMessageEventStream, Context, SimpleStreamOptions } from "../types";
 
 export interface PiNativeParsedRequest {
@@ -54,12 +56,15 @@ const ALLOWED_OPTION_KEYS: ReadonlySet<keyof SimpleStreamOptions> = new Set([
 	"stopSequences",
 	"maxTokens",
 	"cacheRetention",
+	"cachedContent",
 	"headers",
 	"initiatorOverride",
 	"maxRetryDelayMs",
 	"metadata",
 	"sessionId",
 	"promptCacheKey",
+	"promptCache",
+	"statefulResponses",
 	"streamFirstEventTimeoutMs",
 	"streamIdleTimeoutMs",
 	"reasoning",
@@ -72,6 +77,7 @@ const ALLOWED_OPTION_KEYS: ReadonlySet<keyof SimpleStreamOptions> = new Set([
 	"syntheticApiFormat",
 	"preferWebsockets",
 	"openrouterVariant",
+	"loopGuard",
 ] as const satisfies readonly (keyof SimpleStreamOptions)[]);
 
 // ---------------------------------------------------------------------------
@@ -91,7 +97,7 @@ const ALLOWED_OPTION_KEYS: ReadonlySet<keyof SimpleStreamOptions> = new Set([
  */
 export function parseRequest(body: unknown, _headers?: Headers): PiNativeParsedRequest {
 	if (typeof body !== "object" || body === null || Array.isArray(body)) {
-		throw new Error("Request body must be a JSON object");
+		throw new AIError.ValidationError("Request body must be a JSON object");
 	}
 	const obj = body as Record<string, unknown>;
 
@@ -104,21 +110,21 @@ export function parseRequest(body: unknown, _headers?: Headers): PiNativeParsedR
 		const m = obj.model as Record<string, unknown>;
 		if (typeof m.id === "string" && m.id.length > 0) modelId = m.id;
 	}
-	if (!modelId) throw new Error("Missing `modelId` (or `model.id`) field");
+	if (!modelId) throw new AIError.ValidationError("Missing `modelId` (or `model.id`) field");
 
 	const context = obj.context;
 	if (typeof context !== "object" || context === null || Array.isArray(context)) {
-		throw new Error("Missing `context` object");
+		throw new AIError.ValidationError("Missing `context` object");
 	}
 	const ctxObj = context as Record<string, unknown>;
 	if (!Array.isArray(ctxObj.messages)) {
-		throw new Error("`context.messages` must be an array");
+		throw new AIError.ValidationError("`context.messages` must be an array");
 	}
 	if (ctxObj.systemPrompt !== undefined && !Array.isArray(ctxObj.systemPrompt)) {
-		throw new Error("`context.systemPrompt` must be an array of strings when present");
+		throw new AIError.ValidationError("`context.systemPrompt` must be an array of strings when present");
 	}
 	if (ctxObj.tools !== undefined && !Array.isArray(ctxObj.tools)) {
-		throw new Error("`context.tools` must be an array when present");
+		throw new AIError.ValidationError("`context.tools` must be an array when present");
 	}
 
 	const options: SimpleStreamOptions = {};

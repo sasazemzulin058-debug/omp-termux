@@ -3,6 +3,7 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import * as url from "node:url";
+import { removeWithRetries } from "@oh-my-pi/pi-utils";
 import {
 	__resetProfileSnapshotForTests,
 	APP_NAME,
@@ -89,7 +90,7 @@ describe("global --profile flag", () => {
 		}
 		__resetProfileSnapshotForTests();
 		process.exitCode = 0;
-		await fs.rm(path.join(os.homedir(), configDir), { recursive: true, force: true });
+		await removeWithRetries(path.join(os.homedir(), configDir));
 	});
 
 	it("activates a profile before dispatching root flags", async () => {
@@ -267,9 +268,11 @@ describe("global --profile flag", () => {
 			expect(stdout).toContain("SENTINEL=work");
 			expect(stdout).not.toContain("SENTINEL=default");
 		} finally {
-			await fs.rm(root, { recursive: true, force: true });
+			await removeWithRetries(root);
 		}
-	});
+		// Spawns a probe that imports the command modules, so the cost is cold
+		// transpile of the CLI graph, not latency under test.
+	}, 30_000);
 
 	it("surfaces an invalid OMP_PROFILE env as a clean error, not an import crash", async () => {
 		const root = await fs.mkdtemp(path.join(os.tmpdir(), "omp-profile-cli-env-bad-"));
@@ -316,7 +319,9 @@ describe("global --profile flag", () => {
 			expect(stderr).toContain("Invalid OMP profile");
 			expect(exitCode).toBe(1);
 		} finally {
-			await fs.rm(root, { recursive: true, force: true });
+			await removeWithRetries(root);
 		}
-	});
+		// Same cold-spawn cost as the sibling above; it only escapes Bun's 5s
+		// default because that test warms the transpile cache first.
+	}, 30_000);
 });

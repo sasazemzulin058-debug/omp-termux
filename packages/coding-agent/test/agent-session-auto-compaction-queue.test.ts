@@ -8,11 +8,12 @@ import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { loadExtensions } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/loader";
 import { ExtensionRunner } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/runner";
-import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
+import { AgentSession, type AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import * as unexpectedStopClassifier from "@oh-my-pi/pi-coding-agent/session/unexpected-stop-classifier";
 import { getProjectAgentDir, TempDir, withTimeout } from "@oh-my-pi/pi-utils";
+import * as logger from "@oh-my-pi/pi-utils/logger";
 
 const runtimeSignalStoreKey = "__ompRuntimeSignals";
 
@@ -51,6 +52,10 @@ describe("AgentSession auto-compaction queue resume", () => {
 			[
 				"export default function(pi) {",
 				'\tpi.on("session_before_compact", async (event) => {',
+				`\t\tconst signals = globalThis.${runtimeSignalStoreKey} ?? (globalThis.${runtimeSignalStoreKey} = []);`,
+				'\t\tsignals.push("before_compact:enter");',
+				"\t\tconst gate = globalThis.__ompManualCompactGate;",
+				"\t\tif (gate) await gate;",
 				"\t\treturn {",
 				"\t\t\tcompaction: {",
 				'\t\t\t\tsummary: "compacted",',
@@ -92,10 +97,14 @@ describe("AgentSession auto-compaction queue resume", () => {
 			modelRegistry,
 		);
 
-		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
-		if (!model) {
+		const bundled = getBundledModel("anthropic", "claude-sonnet-4-5");
+		if (!bundled) {
 			throw new Error("Expected built-in anthropic model to exist");
 		}
+		// Pin the window and output reservation: the threshold/usage math below is
+		// tuned to a 200k/64k context-full budget and must stay stable across
+		// catalog regenerations.
+		const model = { ...bundled, contextWindow: 200_000, maxTokens: 64_000 };
 
 		const agent = new Agent({
 			initialState: {
@@ -119,7 +128,7 @@ describe("AgentSession auto-compaction queue resume", () => {
 			settings: Settings.isolated({
 				"compaction.autoContinue": false,
 				"todo.reminders": true,
-				"todo.reminders.max": 3,
+				"todo.remindersMax": 3,
 			}),
 			modelRegistry,
 			extensionRunner,
@@ -137,6 +146,8 @@ describe("AgentSession auto-compaction queue resume", () => {
 				await tempDir?.remove();
 			} finally {
 				getRuntimeSignals().length = 0;
+				(globalThis as typeof globalThis & { __ompManualCompactGate?: Promise<void> }).__ompManualCompactGate =
+					undefined;
 				vi.restoreAllMocks();
 			}
 		}
@@ -161,10 +172,13 @@ describe("AgentSession auto-compaction queue resume", () => {
 			session.agent.clearAllQueues();
 		});
 
-		// Wait for auto_compaction_end event to know when the async handler is done
+		// The continuation is already scheduled when the public agent_end arrives,
+		// so consumers must see it as a non-terminal scheduling pause.
+		const agentEndTerminalStates: Array<boolean | undefined> = [];
 		const { promise: compactionDone, resolve: onCompactionDone } = Promise.withResolvers<void>();
-		session.subscribe(event => {
+		session.subscribe((event: AgentSessionEvent) => {
 			if (event.type === "auto_compaction_end") onCompactionDone();
+			if (event.type === "agent_end") agentEndTerminalStates.push(event.isTerminal);
 		});
 
 		// Build a fake AssistantMessage with high token usage to trigger threshold
@@ -213,6 +227,169 @@ describe("AgentSession auto-compaction queue resume", () => {
 		const runtimeSignals = getRuntimeSignals();
 		expect(runtimeSignals).toContain("compaction:start:threshold");
 		expect(runtimeSignals.some(signal => signal.startsWith("compaction:end:"))).toBe(true);
+		expect(agentEndTerminalStates).toEqual([false]);
+	});
+
+	it("marks manual compaction active before abort teardown can yield", async () => {
+		session.settings.set("compaction.keepRecentTokens", 1);
+		sessionManager.appendMessage({
+			role: "assistant",
+			content: [{ type: "text", text: "previous answer" }],
+			api: "anthropic-messages",
+			provider: "anthropic",
+			model: "claude-sonnet-4-5",
+			stopReason: "stop",
+			usage: {
+				input: 1_000,
+				output: 100,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 1_100,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			timestamp: Date.now(),
+		});
+		sessionManager.appendMessage({
+			role: "user",
+			content: "second turn",
+			timestamp: Date.now(),
+		});
+
+		const abortEntered = Promise.withResolvers<void>();
+		const releaseAbort = Promise.withResolvers<void>();
+		let compactingDuringAbort: boolean | undefined;
+		vi.spyOn(session, "abort").mockImplementation(async () => {
+			compactingDuringAbort = session.isCompacting;
+			abortEntered.resolve();
+			await releaseAbort.promise;
+		});
+
+		const compactPromise = session.compact();
+		await abortEntered.promise;
+		releaseAbort.resolve();
+		await compactPromise;
+
+		expect(compactingDuringAbort).toBe(true);
+	});
+
+	it("resumes a message queued during manual compaction once it completes (#5800)", async () => {
+		// Regression for #5800 review: manual /compact disconnects the agent
+		// listener before `await abort()`, so the abort-finally stranded-message
+		// drain is suppressed while disconnected. Unlike /new (which resets the
+		// queue), compaction preserves the agent queues, so a steer/follow-up that
+		// arrives mid-compaction (async IRC, an xd:// mount notice, an SDK steer)
+		// would hang until the next explicit prompt unless compact() re-drains
+		// after reconnecting.
+		session.settings.set("compaction.keepRecentTokens", 1);
+		sessionManager.appendMessage({
+			role: "assistant",
+			content: [{ type: "text", text: "previous answer" }],
+			api: "anthropic-messages",
+			provider: "anthropic",
+			model: "claude-sonnet-4-5",
+			stopReason: "stop",
+			usage: {
+				input: 1_000,
+				output: 100,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 1_100,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			timestamp: Date.now(),
+		});
+		session.agent.replaceMessages(session.buildDisplaySessionContext().messages);
+
+		const continueSpy = vi.spyOn(session.agent, "continue").mockImplementation(async () => {
+			session.agent.clearAllQueues();
+		});
+
+		// Park compaction inside its awaited hook so we can queue a follow-up while
+		// the session is disconnected and abort has already run its finally.
+		const gate = Promise.withResolvers<void>();
+		(globalThis as typeof globalThis & { __ompManualCompactGate?: Promise<void> }).__ompManualCompactGate =
+			gate.promise;
+
+		const compactPromise = session.compact();
+		while (!getRuntimeSignals().includes("before_compact:enter")) {
+			await Promise.resolve();
+		}
+
+		// A message arrives DURING compaction (post-abort, still disconnected).
+		session.agent.followUp({
+			role: "user",
+			content: "please respond after compaction",
+			timestamp: Date.now(),
+		});
+		expect(session.agent.hasQueuedMessages()).toBe(true);
+
+		gate.resolve();
+		await compactPromise;
+		await session.waitForIdle();
+
+		// compact()'s finally re-drained the stranded queue after reconnecting.
+		expect(continueSpy).toHaveBeenCalledTimes(1);
+	});
+
+	it("cancels an in-flight auto-compaction when manual compact startup aborts", async () => {
+		// Give the branch something to summarize so auto-compaction reaches the
+		// awaited session_before_compact hook, where the test parks it.
+		session.settings.set("compaction.keepRecentTokens", 1);
+		sessionManager.appendMessage({
+			role: "assistant",
+			content: [{ type: "text", text: "previous answer" }],
+			api: "anthropic-messages",
+			provider: "anthropic",
+			model: "claude-sonnet-4-5",
+			stopReason: "stop",
+			usage: {
+				input: 1_000,
+				output: 100,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 1_100,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			timestamp: Date.now(),
+		});
+		sessionManager.appendMessage({ role: "user", content: "second turn", timestamp: Date.now() });
+
+		// Park the in-flight auto-compaction inside its awaited hook so
+		// #autoCompactionAbortController stays installed across the manual /compact
+		// startup abort below.
+		const gate = Promise.withResolvers<void>();
+		(globalThis as typeof globalThis & { __ompManualCompactGate?: Promise<void> }).__ompManualCompactGate =
+			gate.promise;
+
+		const appendCompactionSpy = vi.spyOn(sessionManager, "appendCompaction");
+		let autoAborted: boolean | undefined;
+		const autoEnded = Promise.withResolvers<void>();
+		session.subscribe(event => {
+			if (event.type === "auto_compaction_end") {
+				autoAborted = event.aborted;
+				autoEnded.resolve();
+			}
+		});
+
+		const autoPromise = session.runIdleCompaction();
+		while (!getRuntimeSignals().includes("before_compact:enter")) {
+			await Promise.resolve();
+		}
+
+		// Manual /compact startup performs exactly this internal abort while holding
+		// its own freshly installed #compactionAbortController. The auto signal is
+		// raised synchronously (before abort's first await), then the gate releases
+		// the parked pass so it observes the abort and unwinds.
+		const abortPromise = session.abort({ goalReason: "internal", preserveCompaction: true });
+		gate.resolve();
+		await abortPromise;
+		await autoPromise;
+		await autoEnded.promise;
+
+		// The in-flight auto pass MUST be cancelled so it cannot race the manual run
+		// and double-rewrite session history.
+		expect(autoAborted).toBe(true);
+		expect(appendCompactionSpy).not.toHaveBeenCalled();
 	});
 
 	it("runs threshold compaction for active goal turns that end with yield", async () => {
@@ -275,6 +452,93 @@ describe("AgentSession auto-compaction queue resume", () => {
 		expect(runtimeSignals.some(signal => signal.startsWith("compaction:end:"))).toBe(true);
 	});
 
+	it("runs active-goal threshold compaction after yield followed by a trailing empty stop", async () => {
+		const debugSpy = vi.spyOn(logger, "debug").mockImplementation(() => {});
+
+		const now = Date.now();
+		session.setGoalModeState({
+			enabled: true,
+			mode: "active",
+			goal: {
+				id: "goal-yield-empty-stop-threshold",
+				objective: "continue after compacting",
+				status: "active",
+				tokensUsed: 0,
+				timeUsedSeconds: 0,
+				createdAt: now,
+				updatedAt: now,
+			},
+		});
+
+		const yieldCall = {
+			type: "toolCall" as const,
+			id: "call_goal_yield_then_empty",
+			name: "yield",
+			arguments: { status: "progress" },
+		};
+		const yieldMsg = {
+			role: "assistant" as const,
+			content: [yieldCall],
+			api: "anthropic-messages" as const,
+			provider: "anthropic" as const,
+			model: "claude-sonnet-4-5",
+			stopReason: "toolUse" as const,
+			usage: {
+				input: 190000,
+				output: 1000,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 191000,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			timestamp: now,
+		};
+		const trailingEmptyStop = {
+			role: "assistant" as const,
+			content: [],
+			api: "anthropic-messages" as const,
+			provider: "anthropic" as const,
+			model: "claude-sonnet-4-5",
+			stopReason: "stop" as const,
+			usage: {
+				input: 191000,
+				output: 1,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 191001,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			timestamp: now + 1,
+		};
+
+		session.agent.emitExternalEvent({ type: "message_end", message: yieldMsg });
+		session.agent.emitExternalEvent({
+			type: "tool_execution_end",
+			toolCallId: yieldCall.id,
+			toolName: "yield",
+			isError: false,
+			result: {
+				content: [{ type: "text" as const, text: "Yielded." }],
+				details: { status: "success" },
+			},
+		});
+		session.agent.emitExternalEvent({ type: "message_end", message: trailingEmptyStop });
+		session.agent.emitExternalEvent({ type: "agent_end", messages: [yieldMsg, trailingEmptyStop] });
+
+		await session.waitForIdle();
+
+		const runtimeSignals = getRuntimeSignals();
+		expect(runtimeSignals).toContain("compaction:start:threshold");
+		expect(runtimeSignals.some(signal => signal.startsWith("compaction:end:"))).toBe(true);
+		expect(
+			debugSpy.mock.calls.some(([message, context]) => {
+				if (message !== "agent_end maintenance routing") return false;
+				if (context?.route !== "post-yield-trailing-stop-active-goal-checkCompaction") return false;
+				return context.successfulYield === true;
+			}),
+		).toBe(true);
+	});
+
 	it("triggers threshold compaction in active goals even when per-turn pruning shaves the post-prune estimate below threshold", async () => {
 		// Regression for #3174. Goal mode is the most common scenario: the agent
 		// runs many tool-result-heavy turns and the per-turn "useless" /
@@ -306,7 +570,7 @@ describe("AgentSession auto-compaction queue resume", () => {
 		const bigCallId = "call-big-useless";
 		sessionManager.appendMessage({
 			role: "assistant",
-			content: [{ type: "toolCall", id: bigCallId, name: "search", arguments: { pattern: "TODO" } }],
+			content: [{ type: "toolCall", id: bigCallId, name: "grep", arguments: { pattern: "TODO" } }],
 			api: "anthropic-messages",
 			provider: "anthropic",
 			model: "claude-sonnet-4-5",
@@ -324,7 +588,7 @@ describe("AgentSession auto-compaction queue resume", () => {
 		sessionManager.appendMessage({
 			role: "toolResult",
 			toolCallId: bigCallId,
-			toolName: "search",
+			toolName: "grep",
 			content: [{ type: "text", text: "match line\n".repeat(20000) }], // ~40k+ tokens
 			isError: false,
 			useless: true,
@@ -520,7 +784,9 @@ describe("AgentSession auto-compaction queue resume", () => {
 
 		const retryableError = {
 			role: "assistant" as const,
-			content: [{ type: "text" as const, text: "Transient provider failure." }],
+			// Thinking-only partial: a committed visible text block would classify the
+			// failed turn as replay-unsafe and suppress the retry this test depends on.
+			content: [{ type: "thinking" as const, thinking: "Transient provider failure." }],
 			api: "anthropic-messages" as const,
 			provider: "anthropic" as const,
 			model: "claude-sonnet-4-5",

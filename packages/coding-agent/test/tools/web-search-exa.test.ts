@@ -13,6 +13,7 @@ import {
 	searchExa,
 	synthesizeAnswer,
 } from "@oh-my-pi/pi-coding-agent/web/search/providers/exa";
+import { removeWithRetries } from "@oh-my-pi/pi-utils";
 
 async function withLocalAuthStorage<T>(run: (authStorage: AuthStorage) => Promise<T>): Promise<T> {
 	const dir = await fs.mkdtemp(path.join(os.tmpdir(), "web-search-exa-auth-"));
@@ -21,7 +22,7 @@ async function withLocalAuthStorage<T>(run: (authStorage: AuthStorage) => Promis
 		return await run(authStorage);
 	} finally {
 		authStorage.close();
-		await fs.rm(dir, { recursive: true, force: true });
+		await removeWithRetries(dir);
 	}
 }
 
@@ -294,6 +295,38 @@ describe("searchExa", () => {
 			numResults: 5,
 			type: "neural",
 			contents: { summary: { query: "shape test" } },
+		});
+	});
+	it("maps site:/before: directives to native Exa params with an operator-free query", async () => {
+		await withLocalAuthStorage(authStorage =>
+			new ExaProvider().search({
+				query: "vector db benchmarks site:qdrant.tech before:2025-01-01",
+				systemPrompt: "",
+				authStorage,
+				fetch: mockFetch(makeMockExaResponse()),
+			}),
+		);
+		expect(capturedRequestBody!.query).toBe("vector db benchmarks");
+		expect(capturedRequestBody!.includeDomains).toEqual(["qdrant.tech"]);
+		expect(capturedRequestBody!.endPublishedDate).toBe("2025-01-01");
+		expect(capturedRequestBody!.startPublishedDate).toBeUndefined();
+		expect(capturedRequestBody!.excludeDomains).toBeUndefined();
+	});
+
+	it("sends directive-free queries byte-identical with no domain/date params", async () => {
+		await withLocalAuthStorage(authStorage =>
+			new ExaProvider().search({
+				query: "plain natural language question",
+				systemPrompt: "",
+				authStorage,
+				fetch: mockFetch(makeMockExaResponse()),
+			}),
+		);
+		expect(capturedRequestBody).toEqual({
+			query: "plain natural language question",
+			numResults: 10,
+			type: "auto",
+			contents: { summary: { query: "plain natural language question" } },
 		});
 	});
 

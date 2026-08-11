@@ -81,6 +81,25 @@ const cliModel: Model<"google-gemini-cli"> = buildModel({
 	maxTokens: 32_000,
 });
 
+const ANTIGRAVITY_DAILY_ENDPOINT = "https://daily-cloudcode-pa.googleapis.com";
+const ANTIGRAVITY_SANDBOX_ENDPOINT = "https://daily-cloudcode-pa.sandbox.googleapis.com";
+
+const antigravityModel: Model<"google-gemini-cli"> = buildModel({
+	...cliModel,
+	provider: "google-antigravity",
+	baseUrl: ANTIGRAVITY_DAILY_ENDPOINT,
+});
+
+function withResponseUrl(response: Response, endpoint: string): Response {
+	Object.defineProperty(response, "url", { value: `${endpoint}/v1internal:streamGenerateContent?alt=sse` });
+	return response;
+}
+
+function endpointFromInput(input: Parameters<FetchImpl>[0]): string {
+	const url = input instanceof Request ? input.url : input.toString();
+	return url.startsWith(ANTIGRAVITY_SANDBOX_ENDPOINT) ? ANTIGRAVITY_SANDBOX_ENDPOINT : ANTIGRAVITY_DAILY_ENDPOINT;
+}
+
 describe("Google empty-response retry (public + Vertex path)", () => {
 	it("retries a STOP-with-empty-text response and delivers the real follow-up content", async () => {
 		let calls = 0;
@@ -235,6 +254,207 @@ describe("Google empty-response retry (Cloud Code Assist path)", () => {
 		void events;
 	});
 
+	it("retries after discarding a planning leak and delivers one structured function call", async () => {
+		let calls = 0;
+		const fetchMock: FetchImpl = async () => {
+			calls += 1;
+			const response =
+				calls === 1
+					? sse(ccaChunk('{\n  "thought": "inspect the project",\n  "call": "lookup"\n}'))
+					: sse({
+							response: {
+								candidates: [
+									{
+										content: {
+											parts: [{ functionCall: { name: "lookup", args: { q: "x" }, id: "call_1" } }],
+										},
+										finishReason: "STOP",
+									},
+								],
+							},
+						});
+			Object.defineProperty(response, "url", { value: "https://example.com/v1internal:streamGenerateContent" });
+			return response;
+		};
+
+		const stream = streamGoogleGeminiCli(cliModel, context, {
+			apiKey: JSON.stringify({ token: "token", projectId: "proj-123" }),
+			fetch: fetchMock,
+		});
+		const { events, starts } = await drain(stream);
+		const result = await stream.result();
+
+		expect(calls).toBe(2);
+		expect(starts).toBe(1);
+		expect(result.stopReason).toBe("toolUse");
+		expect(result.content).toHaveLength(1);
+		expect(result.content[0]).toMatchObject({
+			type: "toolCall",
+			id: "call_1",
+			name: "lookup",
+			arguments: { q: "x" },
+		});
+		expect(events.filter(e => e.type === "toolcall_start")).toHaveLength(1);
+	});
+
+	it("fails over to the sandbox endpoint after daily returns only empty successful streams", async () => {
+		const requestedEndpoints: string[] = [];
+		const fetchMock: FetchImpl = async input => {
+			const endpoint = endpointFromInput(input);
+			requestedEndpoints.push(endpoint);
+			const response = endpoint === ANTIGRAVITY_SANDBOX_ENDPOINT ? sse(ccaChunk("Recovered.")) : sse(ccaChunk(""));
+			return withResponseUrl(response, endpoint);
+		};
+
+		const stream = streamGoogleGeminiCli(antigravityModel, context, {
+			apiKey: JSON.stringify({ token: "token", projectId: "proj-123" }),
+			antigravityEndpointMode: "auto",
+			fetch: fetchMock,
+		});
+		const { starts } = await drain(stream);
+		const result = await stream.result();
+
+		expect(requestedEndpoints).toEqual([
+			ANTIGRAVITY_DAILY_ENDPOINT,
+			ANTIGRAVITY_DAILY_ENDPOINT,
+			ANTIGRAVITY_DAILY_ENDPOINT,
+			ANTIGRAVITY_SANDBOX_ENDPOINT,
+		]);
+		expect(starts).toBe(1);
+		expect(result.stopReason).toBe("stop");
+		expect(textOf(result)).toBe("Recovered.");
+	});
+
+	for (const { mode, endpoint } of [
+		{ mode: "production", endpoint: ANTIGRAVITY_DAILY_ENDPOINT },
+		{ mode: "sandbox", endpoint: ANTIGRAVITY_SANDBOX_ENDPOINT },
+	] as const) {
+		it(`keeps empty-response retries on the selected ${mode} endpoint`, async () => {
+			const requestedEndpoints: string[] = [];
+			const fetchMock: FetchImpl = async input => {
+				const requestedEndpoint = endpointFromInput(input);
+				requestedEndpoints.push(requestedEndpoint);
+				return withResponseUrl(sse(ccaChunk("")), requestedEndpoint);
+			};
+
+			const stream = streamGoogleGeminiCli(antigravityModel, context, {
+				apiKey: JSON.stringify({ token: "token", projectId: "proj-123" }),
+				antigravityEndpointMode: mode,
+				fetch: fetchMock,
+			});
+			const result = await stream.result();
+
+			expect(requestedEndpoints).toEqual([endpoint, endpoint, endpoint]);
+			expect(result.stopReason).toBe("error");
+			expect(result.errorMessage).toContain("empty response");
+		});
+	}
+
+	for (const { name, chunk, errorText } of [
+		{
+			name: "SAFETY finish",
+			chunk: { response: { candidates: [{ content: { parts: [] }, finishReason: "SAFETY" }] } },
+			errorText: "SAFETY",
+		},
+		{
+			name: "MALFORMED_FUNCTION_CALL finish",
+			chunk: {
+				response: { candidates: [{ content: { parts: [] }, finishReason: "MALFORMED_FUNCTION_CALL" }] },
+			},
+			errorText: "MALFORMED_FUNCTION_CALL",
+		},
+		{
+			name: "PROHIBITED_CONTENT block",
+			chunk: {
+				response: {
+					candidates: [],
+					promptFeedback: { blockReason: "PROHIBITED_CONTENT", blockReasonMessage: "policy blocked" },
+				},
+			},
+			errorText: "PROHIBITED_CONTENT",
+		},
+	] as const) {
+		it(`does not fail over after a terminal ${name}`, async () => {
+			const requestedEndpoints: string[] = [];
+			const fetchMock: FetchImpl = async input => {
+				const endpoint = endpointFromInput(input);
+				requestedEndpoints.push(endpoint);
+				return withResponseUrl(sse(chunk), endpoint);
+			};
+
+			const stream = streamGoogleGeminiCli(antigravityModel, context, {
+				apiKey: JSON.stringify({ token: "token", projectId: "proj-123" }),
+				antigravityEndpointMode: "auto",
+				fetch: fetchMock,
+			});
+			const result = await stream.result();
+
+			expect(requestedEndpoints).toEqual([ANTIGRAVITY_DAILY_ENDPOINT]);
+			expect(result.stopReason).toBe("error");
+			expect(result.errorMessage).toContain(errorText);
+		});
+	}
+
+	it("does not fail over after an account-verification HTTP 403", async () => {
+		const requestedEndpoints: string[] = [];
+		const fetchMock: FetchImpl = async input => {
+			const endpoint = endpointFromInput(input);
+			requestedEndpoints.push(endpoint);
+			return new Response(
+				JSON.stringify({
+					error: {
+						code: 403,
+						status: "PERMISSION_DENIED",
+						details: [
+							{
+								"@type": "type.googleapis.com/google.rpc.ErrorInfo",
+								reason: "VALIDATION_REQUIRED",
+								metadata: { validation_url: "https://accounts.google.com/verify" },
+							},
+						],
+					},
+				}),
+				{ status: 403 },
+			);
+		};
+
+		const stream = streamGoogleGeminiCli(antigravityModel, context, {
+			apiKey: JSON.stringify({ token: "token", projectId: "proj-123" }),
+			antigravityEndpointMode: "auto",
+			fetch: fetchMock,
+		});
+		const result = await stream.result();
+
+		expect(requestedEndpoints).toEqual([ANTIGRAVITY_DAILY_ENDPOINT]);
+		expect(result.stopReason).toBe("error");
+		expect(result.errorMessage).toContain("Account verification required");
+	});
+
+	it("does not fail over after partial output has started", async () => {
+		const requestedEndpoints: string[] = [];
+		const fetchMock: FetchImpl = async input => {
+			const endpoint = endpointFromInput(input);
+			requestedEndpoints.push(endpoint);
+			return withResponseUrl(
+				sse({ response: { candidates: [{ content: { parts: [{ text: "partial" }] } }] } }),
+				endpoint,
+			);
+		};
+
+		const stream = streamGoogleGeminiCli(antigravityModel, context, {
+			apiKey: JSON.stringify({ token: "token", projectId: "proj-123" }),
+			antigravityEndpointMode: "auto",
+			fetch: fetchMock,
+		});
+		const { starts } = await drain(stream);
+		const result = await stream.result();
+
+		expect(requestedEndpoints).toEqual([ANTIGRAVITY_DAILY_ENDPOINT]);
+		expect(starts).toBe(1);
+		expect(result.stopReason).toBe("error");
+		expect(textOf(result)).toBe("partial");
+	});
+
 	it("does not coalesce function-call thought signatures into the preceding text block", async () => {
 		const chunks = [
 			{ response: { candidates: [{ content: { parts: [{ text: "Done" }] } }] } },
@@ -279,5 +499,31 @@ describe("Google empty-response retry (Cloud Code Assist path)", () => {
 			arguments: { q: "x" },
 			thoughtSignature: "function-call-sig",
 		});
+	});
+
+	it("does not retry if finishReason is SAFETY and bubbles up the error", async () => {
+		let calls = 0;
+		const fetchMock: FetchImpl = async () => {
+			calls += 1;
+			const response = sse({
+				response: {
+					candidates: [{ content: { parts: [] }, finishReason: "SAFETY" }],
+				},
+			});
+			Object.defineProperty(response, "url", { value: "https://example.com/v1internal:streamGenerateContent" });
+			return response;
+		};
+
+		const stream = streamGoogleGeminiCli(cliModel, context, {
+			apiKey: JSON.stringify({ token: "token", projectId: "proj-123" }),
+			fetch: fetchMock,
+		});
+
+		await drain(stream);
+		const result = await stream.result();
+
+		expect(result.stopReason).toBe("error");
+		expect(result.errorMessage).toContain("Generation failed with finish reason: SAFETY");
+		expect(calls).toBe(1);
 	});
 });

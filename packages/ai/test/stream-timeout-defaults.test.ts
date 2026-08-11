@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import {
 	getOpenAIStreamFirstEventTimeoutMs,
 	getOpenAIStreamIdleTimeoutMs,
@@ -42,6 +42,7 @@ afterEach(() => {
 			Bun.env[key] = prior;
 		}
 	}
+	vi.useRealTimers();
 });
 
 describe("getStreamIdleTimeoutMs(fallbackMs)", () => {
@@ -100,8 +101,8 @@ describe("getStreamFirstEventTimeoutMs(idleTimeoutMs, fallbackMs)", () => {
 		expect(getStreamFirstEventTimeoutMs(undefined, 300_000)).toBeUndefined();
 	});
 
-	it("falls back to the 100s global default when no fallback or env is provided", () => {
-		expect(getStreamFirstEventTimeoutMs()).toBe(100_000);
+	it("falls back to the 300s global default when no fallback or env is provided", () => {
+		expect(getStreamFirstEventTimeoutMs()).toBe(300_000);
 	});
 });
 
@@ -119,7 +120,11 @@ describe("getOpenAIStreamFirstEventTimeoutMs(idleTimeoutMs, fallbackMs)", () => 
 
 	it("treats PI_OPENAI_STREAM_FIRST_EVENT_TIMEOUT_MS=0 as an explicit watchdog disable", () => {
 		Bun.env.PI_OPENAI_STREAM_FIRST_EVENT_TIMEOUT_MS = "0";
-		expect(getOpenAIStreamFirstEventTimeoutMs(1500, 100_000)).toBeUndefined();
+		expect(getOpenAIStreamFirstEventTimeoutMs(1500, 100_000)).toBe(0);
+	});
+
+	it("treats a zero per-provider fallback as a watchdog disable", () => {
+		expect(getOpenAIStreamFirstEventTimeoutMs(300_000, 0)).toBe(0);
 	});
 
 	it("falls back to the generic first-event env when OpenAI env vars are unset", () => {
@@ -129,7 +134,7 @@ describe("getOpenAIStreamFirstEventTimeoutMs(idleTimeoutMs, fallbackMs)", () => 
 
 	it("respects PI_STREAM_FIRST_EVENT_TIMEOUT_MS=0 disable when no OpenAI override is set", () => {
 		Bun.env.PI_STREAM_FIRST_EVENT_TIMEOUT_MS = "0";
-		expect(getOpenAIStreamFirstEventTimeoutMs(1500, 100_000)).toBeUndefined();
+		expect(getOpenAIStreamFirstEventTimeoutMs(1500, 100_000)).toBe(0);
 	});
 });
 
@@ -142,6 +147,14 @@ async function expectRejectsWithMessage(run: () => Promise<void>, message: strin
 	}
 	expect(caught).toBeInstanceOf(Error);
 	expect((caught as Error).message).toBe(message);
+}
+
+async function drainMicrotasksUntil(predicate: () => boolean, errorMessage: string): Promise<void> {
+	for (let i = 0; i < 1000; i++) {
+		if (predicate()) return;
+		await Promise.resolve();
+	}
+	throw new Error(errorMessage);
 }
 
 describe("iterateWithIdleTimeout", () => {
@@ -177,29 +190,39 @@ describe("iterateWithIdleTimeout", () => {
 		}
 	});
 
-	it("cleans first-item timers when the source throws before progress", async () => {
-		let firstItemTimedOut = false;
+	it("clears the first-item watchdog timer when the source rejects before progress", async () => {
+		vi.useFakeTimers();
+		const baselineTimers = vi.getTimerCount();
 
-		// biome-ignore lint/correctness/useYield: intentionally yields nothing — the test exercises the path where the source generator throws before its first yield.
-		async function* failingStream(): AsyncGenerator<string> {
-			throw new Error("stream failed");
-		}
+		// The first pull stays pending until we reject it, so the watchdog can be
+		// observed armed before the source errors. Rejecting a deferred promise is a
+		// microtask resolution, so the source error wins the watchdog race
+		// deterministically — with fake timers the watchdog never fires unless time is
+		// advanced, which this test never does.
+		const firstPull = Promise.withResolvers<IteratorResult<string>>();
+		const failingStream: AsyncIterable<string> = {
+			[Symbol.asyncIterator]: () => ({ next: () => firstPull.promise }),
+		};
 
-		await expectRejectsWithMessage(async () => {
-			for await (const _item of iterateWithIdleTimeout(failingStream(), {
+		const settled = expectRejectsWithMessage(async () => {
+			for await (const _item of iterateWithIdleTimeout(failingStream, {
 				firstItemTimeoutMs: 10,
 				errorMessage: "idle timeout",
 				firstItemErrorMessage: "first progress timeout",
-				onFirstItemTimeout: () => {
-					firstItemTimedOut = true;
-				},
 			})) {
 				// Unreachable.
 			}
 		}, "stream failed");
 
-		await Bun.sleep(20);
-		expect(firstItemTimedOut).toBe(false);
+		// The wrapper arms a first-item watchdog timer while it waits for the first pull.
+		await drainMicrotasksUntil(() => vi.getTimerCount() > baselineTimers, "first-item watchdog timer was not armed");
+
+		firstPull.reject(new Error("stream failed"));
+		await settled;
+
+		// Surfacing the source error must clear the watchdog timer rather than leave it
+		// pending to fire after the stream has already failed.
+		expect(vi.getTimerCount()).toBe(baselineTimers);
 	});
 
 	it("cleans first-item timers when the consumer returns before progress", async () => {

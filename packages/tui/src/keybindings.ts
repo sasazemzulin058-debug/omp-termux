@@ -288,8 +288,17 @@ export class KeybindingsManager {
 	matches(data: string, keybinding: Keybinding): boolean {
 		const parsed = parseKey(data);
 		if (parsed === undefined) return false;
-		const matchKeys = this.#matchKeysById.get(keybinding);
-		return matchKeys?.has(canonicalKeyId(parsed)) ?? false;
+		return this.matchesCanonical(canonicalKeyId(parsed), keybinding);
+	}
+
+	/**
+	 * Set-lookup variant of {@link matches} for hot input paths: the caller
+	 * parses `data` once (`parseKey` + `canonicalKeyId`) and probes many
+	 * bindings without re-parsing the raw sequence per probe.
+	 */
+	matchesCanonical(canonical: string | undefined, keybinding: Keybinding): boolean {
+		if (canonical === undefined) return false;
+		return this.#matchKeysById.get(keybinding)?.has(canonical) ?? false;
 	}
 
 	getKeys(keybinding: Keybinding): KeyId[] {

@@ -28,7 +28,8 @@
 				"noExplicitAny": "off",
 				"noControlCharactersInRegex": "off",
 				"noEmptyInterface": "off",
-				"noConstEnum": "off"
+				"noConstEnum": "off",
+				"noConfusingVoidType": "off"
 			}
 		}
 	},
@@ -53,9 +54,11 @@
 			"packages/*/src/**/*.ts",
 			"packages/*/src/**/*.tsx",
 			"packages/*/test/**/*.ts",
+			"packages/*/bench/**/*.ts",
 			"packages/*/examples/**/*.ts",
 			"packages/*/scripts/**/*.ts",
 			"packages/*/*.ts",
+			"scripts/**/*.ts",
 			"!packages/natives/native/index.d.ts",
 			"!**/vendor/**/*",
 			"!**/node_modules/**/*",

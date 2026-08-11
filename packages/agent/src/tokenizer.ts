@@ -15,3 +15,13 @@ export function countTokens(text: string | string[]): number {
 		return estimateTokens(text);
 	}
 }
+
+export function countTokensConservatively(text: string | string[]): number {
+	if (accurate) {
+		return countTokensNat(text);
+	} else if (Array.isArray(text)) {
+		return text.reduce((sum, value) => sum + Buffer.byteLength(value, "utf-8"), 0);
+	} else {
+		return Buffer.byteLength(text, "utf-8");
+	}
+}

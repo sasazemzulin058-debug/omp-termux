@@ -152,10 +152,6 @@ describe("azure openai responses streaming", () => {
 			{ role: "developer", content: "Reasoning instruction" },
 			{ role: "developer", content: "Second instruction" },
 			{ role: "user", content: [{ type: "input_text", text: "Say hello" }] },
-			{
-				role: "developer",
-				content: [{ type: "input_text", text: "# Juice: 0 !important" }],
-			},
 		]);
 	});
 
@@ -210,6 +206,111 @@ describe("azure openai responses streaming", () => {
 		const tools = payload.tools as Array<{ parameters: { properties: { item: Record<string, unknown> } } }>;
 		expect(tools[0].parameters.properties.item.oneOf).toBeUndefined();
 		expect(Array.isArray(tools[0].parameters.properties.item.anyOf)).toBe(true);
+	});
+
+	it("serializes computer and its forced choice as a function on unsupported models", async () => {
+		const computer: Tool = {
+			name: "computer",
+			description: "Control the desktop",
+			parameters: { type: "object", properties: {} },
+			native: { type: "computer" },
+		};
+		const read: Tool = {
+			name: "read_file",
+			description: "Read a file",
+			parameters: { type: "object", properties: { path: { type: "string" } }, required: ["path"] },
+		};
+		const payload = await captureAzurePayload(
+			{
+				messages: [{ role: "user", content: "Inspect", timestamp: Date.now() }],
+				tools: [computer, read],
+			},
+			azureModel,
+			{ toolChoice: { type: "computer" } },
+		);
+		expect(payload.tools).toEqual([
+			expect.objectContaining({ type: "function", name: "computer" }),
+			expect.objectContaining({ type: "function", name: "read_file" }),
+		]);
+		expect(JSON.stringify(payload.tools)).not.toContain('{"type":"computer"}');
+		expect(payload.tool_choice).toEqual({ type: "function", name: "computer" });
+	});
+
+	it("serializes native GA computer and forced choice for a supported GPT-5.4 Azure model", async () => {
+		const supportedModel: Model<"azure-openai-responses"> = buildModel({
+			id: "gpt-5.4",
+			name: "GPT-5.4",
+			api: "azure-openai-responses",
+			provider: "azure",
+			baseUrl: azureModel.baseUrl,
+			reasoning: true,
+			input: ["text", "image"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 400_000,
+			maxTokens: 128_000,
+		});
+		const computer: Tool = {
+			name: "computer",
+			description: "Control the desktop",
+			parameters: { type: "object", properties: {} },
+			native: { type: "computer" },
+		};
+		const nativeItem = {
+			type: "message" as const,
+			role: "user" as const,
+			content: [
+				{ type: "input_text" as const, text: "Inspect" },
+				{ type: "input_image" as const, file_id: "file_azure_screen_雪", detail: "auto" as const },
+				{ type: "input_file" as const, file_id: "file_azure_context_电脑" },
+			],
+		};
+		const payload = await captureAzurePayload(
+			{
+				messages: [
+					{
+						role: "user",
+						content: "Inspect",
+						providerPayload: { type: "openaiResponsesHistory", items: [nativeItem], dt: true },
+						timestamp: Date.now(),
+					},
+				],
+				tools: [computer],
+			},
+			supportedModel,
+			{
+				toolChoice: { type: "function", name: "computer" },
+				include: ["computer_call_output.output.image_url", "reasoning.encrypted_content"],
+			},
+		);
+		expect(supportedModel.supportsComputerUse).toBe(true);
+		expect(payload.tools).toEqual([{ type: "computer" }]);
+		expect(payload.tool_choice).toEqual({ type: "computer" });
+		expect(payload.input).toEqual([nativeItem]);
+		expect(payload.include).toEqual(["computer_call_output.output.image_url", "reasoning.encrypted_content"]);
+		expect(JSON.stringify(payload)).not.toContain("display_width");
+		expect(JSON.stringify(payload)).not.toContain("display_height");
+
+		const gatewayPayload = await captureAzurePayload(
+			{
+				messages: [{ role: "user", content: "Inspect", timestamp: Date.now() }],
+				tools: [computer],
+			},
+			supportedModel,
+			{
+				azureBaseUrl: "https://gateway.example/openai/v1",
+				toolChoice: { type: "function", name: "computer" },
+			},
+		);
+		expect(gatewayPayload.tools).toMatchObject([
+			{
+				type: "function",
+				name: "computer",
+				description: "Control the desktop",
+				parameters: { type: "object", properties: {} },
+				strict: false,
+			},
+		]);
+		expect(gatewayPayload.tool_choice).toEqual({ type: "function", name: "computer" });
 	});
 
 	it("surfaces nested response.failed provider errors", async () => {

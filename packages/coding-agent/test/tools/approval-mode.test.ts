@@ -8,7 +8,7 @@ import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { createAgentSession } from "@oh-my-pi/pi-coding-agent/sdk";
 import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
-import { Snowflake } from "@oh-my-pi/pi-utils";
+import { removeSyncWithRetries, Snowflake } from "@oh-my-pi/pi-utils";
 
 const BASE_SETTINGS = {
 	"async.enabled": false,
@@ -66,7 +66,7 @@ describe("tools.approvalMode setting", () => {
 		// Windows can briefly hold tempdir handles after session.dispose(); retry a few times.
 		for (let attempt = 0; attempt < 5; attempt++) {
 			try {
-				fs.rmSync(tempDir, { recursive: true, force: true });
+				removeSyncWithRetries(tempDir);
 				break;
 			} catch (err) {
 				const code = (err as NodeJS.ErrnoException).code;
@@ -178,6 +178,41 @@ describe("tools.approvalMode setting", () => {
 			} as AgentToolContext,
 		);
 		expect(textOf(result)).toContain("(no output)");
+	});
+
+	it("xd:// dispatch approval (xdevApproved) suppresses the tier-only re-prompt", async () => {
+		// The write tool's outer gate already prompted at the device tool's tier;
+		// without the flag this exact call rejects (see the always-ask test above).
+		const settings = approvalSettings({ "tools.approvalMode": "always-ask" });
+		const result = await bashTool().execute("xdev-tier", { command: "echo dispatched" }, undefined, undefined, {
+			settings,
+			xdevApproved: true,
+		} as AgentToolContext);
+		expect(textOf(result)).toContain("dispatched");
+	});
+
+	it("xdevApproved does not bypass explicit per-tool prompt or deny policies", async () => {
+		const promptSettings = approvalSettings({
+			"tools.approvalMode": "always-ask",
+			"tools.approval": { bash: "prompt" },
+		});
+		await expect(
+			bashTool().execute("xdev-explicit-prompt", { command: "echo blocked" }, undefined, undefined, {
+				settings: promptSettings,
+				xdevApproved: true,
+			} as AgentToolContext),
+		).rejects.toThrow(/requires approval but no interactive UI available/);
+
+		const denySettings = approvalSettings({
+			"tools.approvalMode": "always-ask",
+			"tools.approval": { bash: "deny" },
+		});
+		await expect(
+			bashTool().execute("xdev-denied", { command: "echo blocked" }, undefined, undefined, {
+				settings: denySettings,
+				xdevApproved: true,
+			} as AgentToolContext),
+		).rejects.toThrow(/blocked by user policy/);
 	});
 
 	it("constructs an extensionRunner unconditionally so the approval gate is always installed", async () => {

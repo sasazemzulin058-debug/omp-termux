@@ -4,6 +4,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { type MCPServer, mcpCapability } from "@oh-my-pi/pi-coding-agent/capability/mcp";
 import { loadCapability } from "@oh-my-pi/pi-coding-agent/discovery";
+import { removeWithRetries } from "@oh-my-pi/pi-utils";
 
 async function loadOpenCodeMcpConfig(cwd: string): Promise<MCPServer[]> {
 	const result = await loadCapability<MCPServer>(mcpCapability.id, {
@@ -21,7 +22,7 @@ describe("OpenCode MCP discovery", () => {
 	});
 
 	afterEach(async () => {
-		await fs.rm(tempDir, { recursive: true, force: true });
+		await removeWithRetries(tempDir);
 	});
 
 	test("normalizes array commands and OpenCode environment fields", async () => {
@@ -88,7 +89,8 @@ describe("OpenCode MCP discovery", () => {
 			}),
 		);
 
-		const [server] = await loadOpenCodeMcpConfig(tempDir);
+		const servers = await loadOpenCodeMcpConfig(tempDir);
+		const server = servers.find(item => item.name === "plain");
 
 		expect(server?.command).toBe("server-bin");
 		expect(server?.args).toBeUndefined();

@@ -3,6 +3,7 @@ import { type ChildProcess, execSync, spawn } from "node:child_process";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
+import { type } from "@oh-my-pi/omptype";
 import { Effort } from "@oh-my-pi/pi-ai";
 import { __resetVertexTokenCache } from "@oh-my-pi/pi-ai/providers/google-auth";
 import { complete, getEnvApiKey, stream } from "@oh-my-pi/pi-ai/stream";
@@ -10,7 +11,7 @@ import type { Api, Context, ImageContent, Model, OptionsForApi, Tool, ToolResult
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { $which } from "@oh-my-pi/pi-utils";
-import { type } from "arktype";
+import { removeWithRetries } from "../../utils/src/temp";
 import { e2eApiKey, resolveApiKey } from "./oauth";
 
 // Resolve OAuth tokens at module level (async, runs before tests)
@@ -24,14 +25,14 @@ const oauthTokens = await Promise.all([
 const [anthropicOAuthToken, githubCopilotToken, geminiCliToken, antigravityToken, openaiCodexToken] = oauthTokens;
 
 function hasBedrockCredentials(): boolean {
-	const region = Bun.env.AWS_REGION ?? Bun.env.AWS_DEFAULT_REGION;
+	const region = e2eApiKey("AWS_REGION") ?? e2eApiKey("AWS_DEFAULT_REGION");
 	if (!region) return false;
 
 	// Conservative check: Bedrock needs a region plus either explicit env creds or a profile.
-	// (There are other ways to authenticate, but we avoid running E2E tests accidentally.)
+	// Reads go through e2eApiKey so the live test only runs under E2E=1.
+	const awsProfile = e2eApiKey("AWS_PROFILE");
 	return Boolean(
-		(Bun.env.AWS_ACCESS_KEY_ID && Bun.env.AWS_SECRET_ACCESS_KEY) ||
-			(Bun.env.AWS_PROFILE && Bun.env.AWS_PROFILE.length > 0),
+		(e2eApiKey("AWS_ACCESS_KEY_ID") && e2eApiKey("AWS_SECRET_ACCESS_KEY")) || (awsProfile && awsProfile.length > 0),
 	);
 }
 
@@ -551,7 +552,11 @@ describe("Generate E2E Tests", () => {
 			}
 		});
 
-		it("routes Vertex Claude models through Anthropic rawPredict with ADC auth", async () => {
+		it.each([
+			{ location: "global", host: "aiplatform.googleapis.com" },
+			{ location: "eu", host: "aiplatform.eu.rep.googleapis.com" },
+			{ location: "us", host: "aiplatform.us.rep.googleapis.com" },
+		] as const)("routes Vertex Claude rawPredict to $host for location $location", async ({ location, host }) => {
 			const originalProject = Bun.env.GOOGLE_CLOUD_PROJECT;
 			const originalGcpProject = Bun.env.GCP_PROJECT;
 			const originalGcloudProject = Bun.env.GCLOUD_PROJECT;
@@ -565,7 +570,7 @@ describe("Generate E2E Tests", () => {
 			// Without this the test reads ~/.config/gcloud/application_default_credentials.json
 			// when present and hangs on the OAuth exchange (form body, not JSON).
 			const homedirSpy = spyOn(os, "homedir").mockReturnValue(
-				path.join(os.tmpdir(), `vertex-adc-absent-${Date.now()}`),
+				path.join(os.tmpdir(), `vertex-adc-absent-${location}-${Date.now()}`),
 			);
 			const model: Model<"anthropic-messages"> = buildModel({
 				id: "claude-sonnet-4@20250514",
@@ -590,7 +595,7 @@ describe("Generate E2E Tests", () => {
 			try {
 				__resetVertexTokenCache();
 				Bun.env.GOOGLE_CLOUD_PROJECT = "vertex-project";
-				Bun.env.GOOGLE_VERTEX_LOCATION = "global";
+				Bun.env.GOOGLE_VERTEX_LOCATION = location;
 				delete Bun.env.GCP_PROJECT;
 				delete Bun.env.GCLOUD_PROJECT;
 				delete Bun.env.GOOGLE_CLOUD_LOCATION;
@@ -620,7 +625,9 @@ describe("Generate E2E Tests", () => {
 								betaHeader: headers.get("anthropic-beta"),
 								body: JSON.parse(bodyText),
 							});
-							return new Response(JSON.stringify({ error: { message: "stop after capture" } }), { status: 400 });
+							return new Response(JSON.stringify({ error: { message: "stop after capture" } }), {
+								status: 400,
+							});
 						},
 					},
 				);
@@ -629,8 +636,11 @@ describe("Generate E2E Tests", () => {
 				}
 
 				const request = await captured.promise;
+				// Placeholder baseUrl + GOOGLE_VERTEX_LOCATION must rewrite through
+				// resolveVertexRequest: multi-region eu/us hit REP hosts, not the
+				// invalid {location}-aiplatform.googleapis.com regional pattern.
 				expect(request.url).toBe(
-					"https://aiplatform.googleapis.com/v1/projects/vertex-project/locations/global/publishers/anthropic/models/claude-sonnet-4@20250514:streamRawPredict",
+					`https://${host}/v1/projects/vertex-project/locations/${location}/publishers/anthropic/models/claude-sonnet-4@20250514:streamRawPredict`,
 				);
 				expect(request.authorization).toBe("Bearer vertex-token");
 				expect(request.body).toMatchObject({
@@ -776,7 +786,7 @@ describe("Generate E2E Tests", () => {
 				expect(request.authorization).toBe("Bearer impersonated-token");
 			} finally {
 				__resetVertexTokenCache();
-				await fs.rm(tmpDir, { recursive: true, force: true });
+				await removeWithRetries(tmpDir);
 				if (originalProject === undefined) delete Bun.env.GOOGLE_CLOUD_PROJECT;
 				else Bun.env.GOOGLE_CLOUD_PROJECT = originalProject;
 				if (originalGcpProject === undefined) delete Bun.env.GCP_PROJECT;
@@ -798,9 +808,9 @@ describe("Generate E2E Tests", () => {
 	});
 
 	describe("Google Vertex Provider (gemini-3-flash-preview)", () => {
-		const vertexApiKey = Bun.env.GOOGLE_CLOUD_API_KEY;
-		const vertexProject = Bun.env.GOOGLE_CLOUD_PROJECT || Bun.env.GCLOUD_PROJECT;
-		const vertexLocation = Bun.env.GOOGLE_CLOUD_LOCATION;
+		const vertexApiKey = e2eApiKey("GOOGLE_CLOUD_API_KEY");
+		const vertexProject = e2eApiKey("GOOGLE_CLOUD_PROJECT") || e2eApiKey("GCLOUD_PROJECT");
+		const vertexLocation = e2eApiKey("GOOGLE_CLOUD_LOCATION");
 		const isVertexConfigured = Boolean(vertexProject && vertexLocation);
 		const vertexOptions = { project: vertexProject, location: vertexLocation } as const;
 		const llm = getBundledModel("google-vertex", "gemini-3-flash-preview");
@@ -1764,7 +1774,7 @@ describe("Generate E2E Tests", () => {
 						tools: [calculatorTool],
 					},
 					{
-						reasoning: Effort.XHigh,
+						reasoning: Effort.Max,
 						interleavedThinking: true,
 						onPayload: payload => {
 							capturedPayload = payload;

@@ -6,7 +6,14 @@ import type { SourceMeta } from "@oh-my-pi/pi-coding-agent/capability/types";
 import type { MCPServerConfig } from "@oh-my-pi/pi-coding-agent/mcp/types";
 import { MCPCommandController } from "@oh-my-pi/pi-coding-agent/modes/controllers/mcp-command-controller";
 import { initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
-import { getConfigRootDir, getMCPConfigPath, getProjectDir, setAgentDir, setProjectDir } from "@oh-my-pi/pi-utils";
+import {
+	getConfigRootDir,
+	getMCPConfigPath,
+	getProjectDir,
+	removeWithRetries,
+	setAgentDir,
+	setProjectDir,
+} from "@oh-my-pi/pi-utils";
 
 const originalProjectDir = getProjectDir();
 const originalAgentDir = process.env.PI_CODING_AGENT_DIR;
@@ -46,6 +53,7 @@ function createController() {
 	const controller = new MCPCommandController({
 		chatContainer: { addChild: vi.fn() },
 		present: vi.fn(),
+		presentCommandOutput: vi.fn(),
 		ui: { requestRender: vi.fn() },
 		editor: {},
 		showError: vi.fn(),
@@ -97,8 +105,8 @@ describe("/mcp enable and disable", () => {
 		vi.restoreAllMocks();
 		setProjectDir(originalProjectDir);
 		restoreAgentDir();
-		await fs.rm(projectDir, { recursive: true, force: true });
-		await fs.rm(agentDir, { recursive: true, force: true });
+		await removeWithRetries(projectDir);
+		await removeWithRetries(agentDir);
 	});
 
 	test("disabling one configured server does not reload other MCP servers", async () => {

@@ -1,6 +1,6 @@
 # github
 
-> Dispatch GitHub CLI operations for repositories, issues, pull requests, search, and Actions run watching.
+> Dispatch GitHub CLI operations for repositories, repository files, pull requests, search, and Actions run watching.
 
 ## Source
 - Entry: `packages/coding-agent/src/tools/gh.ts`
@@ -13,13 +13,20 @@
   - `packages/coding-agent/src/sdk.ts` — session artifact allocation hook.
   - `packages/coding-agent/src/session/artifacts.ts` — artifact filename format `<id>.<toolType>.log`.
 
+## Availability and approval
+
+- `github.enabled` defaults to `false`; enable the GitHub CLI tool in **Settings → Tools** before use.
+- The tool is discoverable and strict-schema, and is created only when `gh` is available on `PATH`. Authentication is checked by the CLI when an operation runs.
+- `repo_view`, `file_read`, every `search_*` operation, and `run_watch` request read approval. `pr_create`, `pr_checkout`, and `pr_push` request execution approval.
+
 ## Inputs
 
 | Field | Type | Required | Description |
 | --- | --- | --- | --- |
-| `op` | `"repo_view" \| "pr_create" \| "pr_checkout" \| "pr_push" \| "search_issues" \| "search_prs" \| "search_code" \| "search_commits" \| "search_repos" \| "run_watch"` | Yes | Dispatch selector. `GithubTool.execute()` switches only on this field. |
+| `op` | `"repo_view" \| "file_read" \| "pr_create" \| "pr_checkout" \| "pr_push" \| "search_issues" \| "search_prs" \| "search_code" \| "search_commits" \| "search_repos" \| "run_watch"` | Yes | Dispatch selector. `GithubTool.execute()` switches only on this field. |
 | `repo` | `string` | No | `owner/repo` override. Ignored when the identifier argument is already a full GitHub URL. For `search_issues`/`search_prs`/`search_code`/`search_commits`, defaults to the current checkout's `owner/repo` when omitted (skipped when the query already contains a `repo:`/`org:`/`user:`/`owner:` qualifier or when current-repo resolution fails). Required in practice when `gh` cannot infer repo context from the current checkout. |
-| `branch` | `string` | No | Used by `repo_view`, `pr_push`, and `run_watch`. `run_watch` falls back to current git branch when `run` is omitted; `pr_push` falls back to current branch. |
+| `branch` | `string` | No | Used by `repo_view`, `file_read`, `pr_push`, and `run_watch`. `file_read` omits the ref to use the repository's default branch; `run_watch` falls back to the current git branch when `run` is omitted; `pr_push` falls back to the current branch. |
+| `path` | `string` | No | Required by `file_read`. Repository-relative path to a file in the GitHub repository; leading `/` is rejected. |
 | `pr` | `string \| string[]` | No | Used by `pr_checkout`. Each item may be a PR number, branch name, or GitHub PR URL. Array form enables batching. Omitted means current branch PR. |
 | `force` | `boolean` | No | Used only by `pr_checkout`. Defaults to `false`; allows resetting an existing `pr-<number>` local branch to the PR head commit. |
 | `forceWithLease` | `boolean` | No | Used only by `pr_push`; passed through to git push. |
@@ -44,7 +51,7 @@
 The tool returns a single text result built by `buildTextResult()` in `packages/coding-agent/src/tools/gh.ts`.
 
 - `content`: one text block. Multi-item ops join sections with blank lines and `---` separators.
-- `sourceUrl`: set for single repo/PR/run results when a canonical URL is known.
+- `sourceUrl`: set for repository/file/PR/run results when a canonical URL is known.
 - `details`: optional structured metadata used by the TUI renderer.
   - Common fields: `artifactId`, `repo`, `branch`, `worktreePath`, `remote`, `remoteBranch`, `headSha`, `runId`, `runIds`, `status`, `conclusion`, `failedJobs`.
   - `pr_checkout` adds `checkouts: GhPrCheckoutSummary[]`.
@@ -63,7 +70,7 @@ The tool returns a single text result built by `buildTextResult()` in `packages/
    - trims stdout/stderr unless `trimOutput: false`;
    - maps common auth/repo-context failures into tool-facing `ToolError` messages;
    - `json()` rejects empty or invalid JSON.
-5. Read-style ops (`repo_view`, `search_*`) fetch JSON and format Markdown-like text summaries. Single-issue and single-PR views were moved out of the tool and now resolve through the `issue://` / `pr://` internal URL schemes, which share the same SQLite cache.
+5. Read-style ops (`repo_view`, `file_read`, `search_*`) fetch repository data and return text or formatted Markdown-like summaries. `file_read` uses GitHub's contents API with the raw-media accept header and preserves the response bytes as text. Single-issue and single-PR views were moved out of the tool and now resolve through the `issue://` / `pr://` internal URL schemes, which share the same SQLite cache.
 6. PR diffs moved out of the tool. `pr://<N>/diff` lists changed files, `pr://<N>/diff/<i>` slices a single file, and `pr://<N>/diff/all` returns the full unified diff — see `docs/tools/read.md`. All three variants share one `gh pr diff` invocation through the `pr-diff` cache row.
 7. `pr_checkout` resolves PR metadata first, then enters `git.withRepoLock()` before any git mutation so parallel checkout calls for the same primary repo do not race on shared `.git` state.
 8. `pr_push` reads PR head metadata back from git branch config, derives a refspec, pushes with `git.push()`, then invalidates the cached `pr://` rows for the pushed PR via `invalidateAllForNumber()` so the next `pr://` read reflects the push.
@@ -84,6 +91,18 @@ The tool returns a single text result built by `buildTextResult()` in `packages/
 | Output | `# <owner/repo>` header, description, URL, default branch, requested branch, visibility, permission, primary language, stars, forks, archive/fork flags, updated timestamp, homepage, topics. `sourceUrl = data.url`. |
 
 If `repo` is omitted, `gh` repository resolution is used.
+
+### `file_read`
+
+| Aspect | Value |
+| --- | --- |
+| Required fields | `op`, `path` |
+| Optional fields | `repo`, `branch` |
+| `gh` command | `gh api /repos/<repo>/contents/<encoded-path> --method GET -H "Accept: application/vnd.github.raw+json" [-f ref=<branch>]` |
+| Batching | None |
+| Output | The file content exactly as returned by the contents API (`trimOutput: false`). `sourceUrl` points to `https://github.com/<repo>/blob/<branch-or-HEAD>/<encoded-path>`; `details` contains the resolved `repo` and optional `branch`. |
+
+`repo` defaults to the current checkout's GitHub repository. Omitting `branch` asks GitHub for the repository's default branch. Every path segment is URL-encoded independently. The operation rejects an empty path or one beginning with `/`; GitHub reports missing files, directories, and invalid refs through the normal CLI error mapping. The model-facing prompt requires this operation, rather than `curl` or `wget`, for files hosted in GitHub repositories.
 
 Single-issue and single-PR reads live in the `issue://<N>` / `pr://<N>` URL schemes (see `docs/tools/read.md`). They share `~/.omp/cache/github-cache.db` (override via `OMP_GITHUB_CACHE_DB`) and the `github.cache.softTtlSec` / `github.cache.hardTtlSec` / `github.cache.enabled` settings. The cache retains rendered Markdown plus the raw JSON payload returned by `gh`, including private bodies, comments, reviews, and review comments when comments are enabled; rows are scoped by the local GitHub credential fingerprint. Root and repo-scoped reads (`issue://`, `pr://owner/repo`) issue a live `gh issue list` / `gh pr list` for browsing; query params `state`, `limit`, `author`, `label` pass through to `gh` (`issue://` accepts `state=open|closed|all`; `pr://` also accepts `merged`). PR diffs ride the same cache under `pr://<N>/diff[/…]`: the listing, full diff, and per-file slices all share one `pr-diff` row keyed by repo and PR number.
 
@@ -114,7 +133,7 @@ Branches:
 
 Worktree and metadata behavior:
 - Local branch name is always `pr-<number>`.
-- Worktree path is `getWorktreeDir("<number>-<repo-hash>")` = `path.join(getWorktreesDir(), "<number>-<repo-hash>")`, where `getWorktreesDir()` is `~/.omp/wt`, `<number>` is the PR number, and `<repo-hash>` is `hashPath(primaryRepoRoot)` (a 7-hex digest of the primary repo root); effective path is `~/.omp/wt/<number>-<repo-hash>`. `resolveAvailableWorktreePath()` appends a `-2`/`-3`… suffix when that path is already registered with git or present on disk.
+- Worktree path is `getWorktreeDir("<number>-<repo-hash>")` = `path.join(getWorktreesDir(), "<number>-<repo-hash>")`, where `<number>` is the PR number and `<repo-hash>` is `hashPath(primaryRepoRoot)` (a 7-hex digest of the primary repo root). `getWorktreesDir()` resolves the base in this order: a valid `OMP_WORKTREE_DIR`, the applied `worktree.base` setting, then the profile/XDG-aware data-root default (normally `~/.omp/wt`). Both overrides expand a leading `~` and must resolve to an absolute path; an invalid relative value is ignored and resolution falls through. `resolveAvailableWorktreePath()` appends a `-2`/`-3`… suffix when the resulting path is already registered with git or present on disk.
 - Existing worktree detection is by branch ref `refs/heads/pr-<number>` from `git.worktree.list()`.
 - New worktree creation calls `git.worktree.add(repoRoot, finalWorktreePath, localBranch, { signal })` after verifying the path is neither already registered nor already present on disk.
 - For same-repo PRs, remote is `origin`. For cross-repo PRs, the tool resolves a clone URL for the head repo, reuses an existing remote with the same URL when possible, or creates `fork-<owner>` / `fork-<owner>-<n>`.
@@ -223,7 +242,7 @@ Watch flow:
 ## Side Effects
 - Filesystem
   - `pr_create` may create a temp dir under `os.tmpdir()` named `gh-pr-body-*`, write `body.md`, then remove the dir in `finally`.
-  - `pr_checkout` may create worktree directories named `<pr-number>-<repo-hash>` directly under `~/.omp/wt/` and add git worktrees there.
+  - `pr_checkout` may create worktree directories named `<pr-number>-<repo-hash>` under the base selected by `OMP_WORKTREE_DIR`, then `worktree.base`, then the profile/XDG-aware default (normally `~/.omp/wt`), and add git worktrees there.
   - `run_watch` may write a session artifact with full failed-job logs.
 - Network
   - Every op shells out to `gh`, which then talks to GitHub APIs except `pr_push`.
@@ -244,7 +263,7 @@ Watch flow:
 ## Limits & Caps
 - Search result default: `10` (`SEARCH_LIMIT_DEFAULT` in `packages/coding-agent/src/tools/gh.ts`).
 - Search result max: `50` (`SEARCH_LIMIT_MAX`).
-- PR file preview inside the `pr://` view: first `50` files only (`FILE_PREVIEW_LIMIT` in `gh.ts`).
+- PR file preview inside the `pr://` view: first `50` files only (`FILE_PREVIEW_LIMIT` in `gh.ts`). For aggregate diffs rejected at GitHub's 20,000-line limit, the `pr://<N>/diff` fetcher falls back to the paginated files API (`100` files per page, at most `3000` files); binary or individually oversized patches remain listed with an unavailable-patch marker.
 - Run-watch poll interval: `3s` for the first `60s`, then `15s` (`RUN_WATCH_INTERVAL_DEFAULT`, `RUN_WATCH_FAST_WINDOW_MS`, `RUN_WATCH_INTERVAL_SLOW`); commit mode with no runs gives up after `90s` (`RUN_WATCH_NO_RUNS_GIVE_UP_MS`); up to `5` consecutive rate-limited poll failures are tolerated (`RUN_WATCH_MAX_POLL_FAILURES`).
 - Run-watch failure grace period: `5s` (`RUN_WATCH_GRACE_DEFAULT`).
 - Run-watch failed-log tail default: `15` lines (`RUN_WATCH_TAIL_DEFAULT`).
@@ -263,7 +282,7 @@ Watch flow:
   - otherwise stderr/stdout text, or fallback `GitHub CLI command failed: gh ...`
 - `json()` also throws on empty stdout or invalid JSON.
 - Local validation errors throw `ToolError`, including:
-  - missing required per-op fields (`query` for `search_code`, `title unless fill=true`)
+  - missing required per-op fields (`path` for `file_read`, `query` for `search_code`, `title` unless `fill=true`)
   - invalid numeric `limit` / `tail`
   - invalid `since` / `until` date bound
   - invalid `run` format
@@ -271,6 +290,7 @@ Watch flow:
   - missing git repo / branch / HEAD context for checkout, push, or watch
   - `pr_push` on a branch without `ompPrHeadRef` metadata
   - conflicting existing worktree path or branch without `force`
+  - an absolute `file_read` path (a leading `/`)
 - `run_watch` treats failed-job log fetches specially: missing log content does not fail the watch; it marks that log `available: false` and prints `Log tail unavailable.` / `Full log unavailable.`.
 - `pr_create` swallows only the post-create best-effort `gh pr view` refresh; the create step itself still fails normally.
 

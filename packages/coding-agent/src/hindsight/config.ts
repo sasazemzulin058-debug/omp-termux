@@ -42,6 +42,15 @@ export interface HindsightConfig {
 
 	debug: boolean;
 
+	/** Default per-request client deadline (ms) for ops without a specific override. */
+	requestTimeoutMs: number;
+	/** Client deadline (ms) for reflect (agentic synthesis; costlier than a metadata fetch). */
+	reflectTimeoutMs: number;
+	/** Client deadline (ms) for recall. */
+	recallTimeoutMs: number;
+	/** Client deadline (ms) for retain / retainBatch. */
+	retainTimeoutMs: number;
+
 	mentalModelsEnabled: boolean;
 	mentalModelAutoSeed: boolean;
 	mentalModelRefreshIntervalMs: number;
@@ -115,6 +124,10 @@ export function loadHindsightConfig(settings: Settings, env: NodeJS.ProcessEnv =
 	const recallContextTurnsEnv = envInt(env.HINDSIGHT_RECALL_CONTEXT_TURNS);
 	const recallMaxQueryCharsEnv = envInt(env.HINDSIGHT_RECALL_MAX_QUERY_CHARS);
 	const retainEveryNTurnsEnv = envInt(env.HINDSIGHT_RETAIN_EVERY_N_TURNS);
+	const requestTimeoutMsEnv = envInt(env.HINDSIGHT_REQUEST_TIMEOUT_MS);
+	const reflectTimeoutMsEnv = envInt(env.HINDSIGHT_REFLECT_TIMEOUT_MS);
+	const recallTimeoutMsEnv = envInt(env.HINDSIGHT_RECALL_TIMEOUT_MS);
+	const retainTimeoutMsEnv = envInt(env.HINDSIGHT_RETAIN_TIMEOUT_MS);
 
 	// Read from settings (each falls back to its schema default).
 	const settingsRetainMode = pickRetainMode(settings.get("hindsight.retainMode"));
@@ -157,6 +170,11 @@ export function loadHindsightConfig(settings: Settings, env: NodeJS.ProcessEnv =
 		recallPromptPreamble: DEFAULT_PREAMBLE,
 
 		debug: debugEnv ?? settings.get("hindsight.debug"),
+
+		requestTimeoutMs: requestTimeoutMsEnv ?? settings.get("hindsight.requestTimeoutMs"),
+		reflectTimeoutMs: reflectTimeoutMsEnv ?? settings.get("hindsight.reflectTimeoutMs"),
+		recallTimeoutMs: recallTimeoutMsEnv ?? settings.get("hindsight.recallTimeoutMs"),
+		retainTimeoutMs: retainTimeoutMsEnv ?? settings.get("hindsight.retainTimeoutMs"),
 
 		mentalModelsEnabled: settings.get("hindsight.mentalModelsEnabled"),
 		mentalModelAutoSeed: settings.get("hindsight.mentalModelAutoSeed"),

@@ -1,12 +1,23 @@
 import type { AssistantMessage, ImageContent } from "@oh-my-pi/pi-ai";
-import { Container, Image, type ImageBudget, ImageProtocol, Markdown, Spacer, TERMINAL, Text } from "@oh-my-pi/pi-tui";
+import {
+	Container,
+	Image,
+	type ImageBudget,
+	ImageProtocol,
+	Markdown,
+	replaceTabs,
+	Spacer,
+	TERMINAL,
+	Text,
+} from "@oh-my-pi/pi-tui";
 import { formatNumber } from "@oh-my-pi/pi-utils";
-import chalk from "chalk";
+import chalk from "@oh-my-pi/pi-utils/chalk";
 import type { AssistantThinkingRenderer } from "../../extensibility/extensions/types";
 import { getMarkdownTheme, theme } from "../../modes/theme/theme";
-import { resolveAbortLabel, shouldRenderAbortReason } from "../../session/messages";
-import { getPreviewLines, resolveImageOptions, TRUNCATE_LENGTHS } from "../../tools/render-utils";
+import { expandKeyHint, getPreviewLines, resolveImageOptions, TRUNCATE_LENGTHS } from "../../tools/render-utils";
+import { convertImageToPng } from "../../utils/image-loading";
 import { canonicalizeMessage, formatThinkingForDisplay, hasDisplayableThinking } from "../../utils/thinking-display";
+import { resolveAssistantErrorPresentation } from "../utils/transcript-render-helpers";
 import { type CacheInvalidation, CacheInvalidationMarkerComponent } from "./cache-invalidation-marker";
 
 /**
@@ -18,15 +29,6 @@ import { type CacheInvalidation, CacheInvalidationMarkerComponent } from "./cach
  */
 const MAX_TRANSCRIPT_ERROR_LINES = 8;
 
-/**
- * A GFM table delimiter row (`| --- | :--: |`, with or without bounding pipes).
- * The header row alone does not render a table — this delimiter is what makes
- * Markdown lay one out, and a streaming table re-aligns its columns as rows
- * arrive. Requires at least one column pipe so a bare thematic break (`---`)
- * does not match.
- */
-const MARKDOWN_TABLE_DELIMITER = /^ {0,3}\|?(?:[ \t]*:?-+:?[ \t]*\|)+[ \t]*:?-*:?[ \t]*$/;
-
 /** Opening or closing fence of a code block: ≥3 backticks/tildes plus info string. */
 const CODE_FENCE_LINE = /^ {0,3}(`{3,}|~{3,})(.*)$/;
 
@@ -34,29 +36,29 @@ type ThinkingContentBlock = Extract<AssistantMessage["content"][number], { type:
 type DisplayThinkingContentBlock = ThinkingContentBlock & { rawThinking?: string };
 
 function resolveThinkingDisplay(block: ThinkingContentBlock, proseOnly: boolean): { text: string; visible: boolean } {
-	const rawThinking = (block as DisplayThinkingContentBlock).rawThinking ?? block.thinking;
-	const formatted = formatThinkingForDisplay(block.thinking, proseOnly);
+	const rawThinking = (block as DisplayThinkingContentBlock).rawThinking;
+	// When rawThinking is set, `block.thinking` is already the formatted display
+	// text that buildDisplayMessage produced (then revealed/sliced by the
+	// streaming controller) — re-running the formatter would double-process it,
+	// and the growing revealed slice would never hit the per-tick memo. Only
+	// format raw (non-display) thinking blocks.
+	const formatted = rawThinking !== undefined ? block.thinking : formatThinkingForDisplay(block.thinking, proseOnly);
 	return {
 		text: formatted.trim(),
-		visible: hasDisplayableThinking(rawThinking, formatted),
+		visible: hasDisplayableThinking(rawThinking ?? block.thinking, formatted),
 	};
 }
 
 /**
- * Whether `text` currently contains reflowing Markdown whose layout is not yet
- * permanent: an open ` ```mermaid ` fence (the diagram reshapes as source
- * arrives) or a GFM table (columns re-align as rows arrive). Used by
- * {@link AssistantMessageComponent.isTranscriptBlockCommitStable}.
- *
- * Fence-aware: a mermaid block is detected by its opener, and table delimiters
- * inside ordinary fenced code (shell pipes, ASCII separators, doc examples) are
- * ignored so a long streamed code block is never held out of native scrollback.
- * A delimiter counts only directly under a pipe-bearing header row, outside any
- * code fence.
+ * Whether `text` contains a ` ```mermaid ` fence (open or closed) outside
+ * ordinary code fences. Mermaid defers native-scrollback settling wholesale
+ * (see {@link AssistantMessageComponent.getTranscriptBlockSettledRows}): its
+ * ASCII rendering resolves asynchronously, so even a completed fence can
+ * re-layout rows that already looked settled. Fence-aware so a mermaid
+ * example inside a regular code block never triggers the deferral.
  */
-function detectLiveReflowingMarkdown(text: string): boolean {
+function containsMermaidFence(text: string): boolean {
 	let fence: string | null = null;
-	let prevLine = "";
 	for (const line of text.split("\n")) {
 		const fenceMatch = CODE_FENCE_LINE.exec(line);
 		if (fence !== null) {
@@ -74,11 +76,7 @@ function detectLiveReflowingMarkdown(text: string): boolean {
 		if (fenceMatch) {
 			if (/^mermaid\b/.test(fenceMatch[2]!.trim())) return true;
 			fence = fenceMatch[1]!;
-			prevLine = "";
-			continue;
 		}
-		if (prevLine.includes("|") && MARKDOWN_TABLE_DELIMITER.test(line)) return true;
-		prevLine = line;
 	}
 	return false;
 }
@@ -186,17 +184,21 @@ export class AssistantMessageComponent extends Container {
 	#lastMessage?: AssistantMessage;
 	#toolImagesByCallId = new Map<string, ImageContent[]>();
 	#convertedKittyImages = new Map<string, ImageContent>();
+	#showImages = true;
+	#showToolResultImages = true;
 	#kittyConversionsInFlight = new Set<string>();
 	#transcriptBlockFinalized: boolean;
 	/**
-	 * True while a non-finalized text item carries reflowing Markdown — a
-	 * ` ```mermaid ` fence or a GFM table — whose layout re-flows every frame as
-	 * source arrives (a diagram reshaping, a table re-aligning its columns), so
-	 * no prefix is byte-stable until the message finalizes. See
-	 * {@link isTranscriptBlockCommitStable}. Recomputed in {@link updateContent}
-	 * ahead of the fast-path return, so it tracks every stream tick.
+	 * True while any rendered item carries a ` ```mermaid ` fence. Mermaid's
+	 * ASCII form resolves asynchronously and can re-layout rows that already
+	 * looked settled, so settling defers until the message finalizes. See
+	 * {@link getTranscriptBlockSettledRows}. Recomputed in
+	 * {@link updateContent} ahead of the fast-path return, so it tracks every
+	 * stream tick. Streaming GFM tables need no gate: they live in markdown's
+	 * unfrozen tail while re-aligning and render deterministically once their
+	 * block completes.
 	 */
-	#hasLiveReflowingMarkdown = false;
+	#containsMermaidSource = false;
 	/**
 	 * When true, the turn-ending `Error: …` line for `stopReason === "error"` is
 	 * suppressed because the same error is currently shown in the pinned banner
@@ -206,6 +208,22 @@ export class AssistantMessageComponent extends Container {
 	 * transcript keeps the error in history.
 	 */
 	#errorPinned = false;
+	/**
+	 * Whether the inline turn-ending error block renders its full body instead of
+	 * the {@link MAX_TRANSCRIPT_ERROR_LINES}-capped preview. Toggled by
+	 * {@link setExpanded} so Ctrl+O (tool-output expansion) reveals a long
+	 * provider error whose tail would otherwise be unreachable in the live TUI.
+	 */
+	#errorExpanded = false;
+	/**
+	 * True when the current {@link updateContent} message carries a truncatable
+	 * inline provider error (the `#appendErrorBlock` path) — set whether or not
+	 * the inline block was actually drawn, so it stays true even while the error
+	 * is suppressed under a pinned banner. Gates {@link setExpanded} so toggling
+	 * expansion only re-renders assistant turns that carry such an error, not
+	 * every message in the transcript.
+	 */
+	#hasTruncatableError = false;
 	/**
 	 * Monotonic content version reported to the transcript container via
 	 * {@link getTranscriptBlockVersion}. Bumped by {@link updateContent} — the
@@ -217,6 +235,9 @@ export class AssistantMessageComponent extends Container {
 	/** Whether the last updateContent carried an in-flight streaming partial; such
 	 *  renders bypass the markdown module LRU (see Markdown.transientRenderCache). */
 	#lastUpdateTransient = false;
+	/** Width of the most recent render(); the settled-rows walk reads child
+	 *  renders at exactly this width (L1 cache hits). */
+	#lastRenderWidth = 0;
 	// Fast-path state: reuse Markdown children when message shape is stable during streaming.
 	#fastPathKey: string | undefined;
 	#fastPathItems:
@@ -242,6 +263,11 @@ export class AssistantMessageComponent extends Container {
 	 *  on a fresh block that has no live token throughput of its own. */
 	#thinkingRateLive = false;
 
+	#textColorTransform?: (text: string) => string;
+
+	setTextColorTransform(transform?: (text: string) => string): void {
+		this.#textColorTransform = transform;
+	}
 	constructor(
 		message?: AssistantMessage,
 		private hideThinkingBlock = false,
@@ -294,6 +320,11 @@ export class AssistantMessageComponent extends Container {
 		}
 	}
 
+	override render(width: number): readonly string[] {
+		this.#lastRenderWidth = width;
+		return super.render(width);
+	}
+
 	setHideThinkingBlock(hide: boolean): void {
 		this.hideThinkingBlock = hide;
 	}
@@ -329,17 +360,18 @@ export class AssistantMessageComponent extends Container {
 	#thinkingDotsLabel(): string {
 		const glyph = THINKING_DOTS_FRAMES[this.#thinkingDotsFrame % THINKING_DOTS_FRAMES.length] ?? "…";
 		const coloredGlyph = theme.fg("thinkingText", glyph);
+		const thinkingLabel = theme.fg("muted", " Thinking");
 		const rate = Math.min(SPEED_MAX, sharedSpeedTracker.getSpeed());
 		// The numeric badge ("<total> · <rate> toks/s") only renders while this block
 		// is genuinely streaming provider tokens. A block that has observed no token
 		// delta (e.g. a provider that reports usage only at turn end) or whose rate
-		// has decayed to zero (a streaming lull) drops it entirely — the bare pulse
-		// keeps signalling that the model is thinking. The liveness flag also stops
-		// the session-wide gauge from leaking a previous turn's rate onto a fresh
-		// token-less block.
-		if (!this.#thinkingRateLive || rate < 0.05) return coloredGlyph;
+		// has decayed to zero (a streaming lull) drops it entirely — the persistent
+		// text label keeps the pulse descriptive for terminals and screen readers.
+		// The liveness flag also stops the session-wide gauge from leaking a previous
+		// turn's rate onto a fresh token-less block.
+		if (!this.#thinkingRateLive || rate < 0.05) return coloredGlyph + thinkingLabel;
 		// Total provider tokens, dimmed, sit next to the pulse.
-		const totalSpan = this.#thinkingTokens > 0 ? theme.fg("dim", ` ${formatNumber(this.#thinkingTokens)}`) : "";
+		const totalSpan = this.#thinkingTokens > 0 ? theme.fg("dim", ` · ${formatNumber(this.#thinkingTokens)}`) : "";
 		// Speed badge color: dim gray at rest, brightening toward the theme accent as
 		// streaming speed climbs (gray → bright accent). Ease (sqrt) so typical
 		// mid-stream rates already read as clearly accent-tinted instead of staying
@@ -348,7 +380,7 @@ export class AssistantMessageComponent extends Container {
 		const hex = lerpHex(theme.getColorHex("dim"), theme.getAccentColorHex(), ratio);
 		const rateText = ` · ${rate.toFixed(1)} toks/s`;
 		const rateSpan = theme.getColorMode() === "truecolor" ? chalk.hex(hex)(rateText) : theme.fg("muted", rateText);
-		return coloredGlyph + totalSpan + rateSpan;
+		return coloredGlyph + thinkingLabel + totalSpan + rateSpan;
 	}
 
 	#startThinkingAnimation(): void {
@@ -404,23 +436,65 @@ export class AssistantMessageComponent extends Container {
 		}
 	}
 
+	/**
+	 * Expand or collapse the inline turn-ending error block so Ctrl+O
+	 * (tool-output expansion) can reveal a long provider error's hidden tail.
+	 * Only re-renders when the current message carries a truncatable error, so
+	 * toggling expansion across the transcript skips ordinary turns. Works even
+	 * while the error is pinned in the banner: the inline block is drawn (in full)
+	 * when expanded so the complete body is reachable without sending a message.
+	 */
+	setExpanded(expanded: boolean): void {
+		if (this.#errorExpanded === expanded) return;
+		this.#errorExpanded = expanded;
+		if (this.#hasTruncatableError && this.#lastMessage) {
+			this.updateContent(this.#lastMessage, { transient: this.#lastUpdateTransient });
+		}
+	}
+
 	isTranscriptBlockFinalized(): boolean {
 		return this.#transcriptBlockFinalized;
 	}
 
 	/**
-	 * Whether this still-live block's scrolled-off rows may be committed to
-	 * immutable native scrollback (the {@link TranscriptContainer} durable-
-	 * snapshot path). Reflowing Markdown — a streaming mermaid diagram or a GFM
-	 * table — re-lays-out its body as source arrives (the diagram reshapes, the
-	 * table re-aligns its columns), so committing an intermediate layout strands
-	 * a stale fragment in native scrollback that only a full repaint (Ctrl+L) can
-	 * clear. While such content is still streaming the block therefore stays
-	 * wholly in the repaintable live region and commits once, at its final
-	 * layout, when the turn finalizes.
+	 * Settled leading rows for mid-stream native-scrollback commits (see
+	 * `FinalizableBlock.getTranscriptBlockSettledRows`). Completed content
+	 * blocks render in final form (non-transient) and settle in full; the
+	 * actively streaming markdown contributes its rendered frozen-token
+	 * prefix. The walk stops at the first child that is not declared
+	 * byte-stable (the animated thinking pulse, extension components, images,
+	 * error rows), and a cache-invalidation marker above the content defers
+	 * settling entirely. Mermaid anywhere defers wholesale — its ASCII
+	 * rendering resolves asynchronously and can re-layout settled-looking
+	 * rows. Reads only L1-cached child renders at the width recorded by this
+	 * frame's render().
 	 */
-	isTranscriptBlockCommitStable(): boolean {
-		return this.#transcriptBlockFinalized || !this.#hasLiveReflowingMarkdown;
+	getTranscriptBlockSettledRows(): number {
+		if (this.#transcriptBlockFinalized || !this.#lastUpdateTransient) return 0;
+		if (this.#containsMermaidSource) return 0;
+		if (this.#markerSlot.children.length > 0) return 0;
+		const items = this.#fastPathItems;
+		const width = this.#lastRenderWidth;
+		if (!items || items.length === 0 || width <= 0) return 0;
+		const streaming = items[items.length - 1]!.md;
+		// Items are captured in child order: match completed mds positionally.
+		let itemIndex = 0;
+		let settled = 0;
+		for (const child of this.#contentContainer.children) {
+			if (child === streaming) return settled + streaming.getLastRenderSettledRows();
+			if (itemIndex < items.length - 1 && items[itemIndex]!.md === child) {
+				itemIndex++;
+				settled += child.render(width).length;
+				continue;
+			}
+			if (child instanceof Spacer) {
+				settled += child.render(width).length;
+				continue;
+			}
+			// Not declared byte-stable: the boundary stops here.
+			return settled;
+		}
+		return settled;
 	}
 
 	getTranscriptBlockVersion(): number {
@@ -439,19 +513,78 @@ export class AssistantMessageComponent extends Container {
 		}
 	}
 
+	applyRetryRecovery(retryRecovery: AssistantMessage["retryRecovery"]): void {
+		if (!this.#lastMessage || !retryRecovery) return;
+		this.setErrorPinned(false);
+		this.updateContent({ ...this.#lastMessage, retryRecovery });
+	}
+
+	messagePersistenceKey(): string | undefined {
+		if (!this.#lastMessage) return undefined;
+		return [
+			"assistant",
+			this.#lastMessage.timestamp,
+			this.#lastMessage.provider,
+			this.#lastMessage.model,
+			this.#lastMessage.responseId ?? "",
+			this.#lastMessage.stopReason,
+		].join(":");
+	}
+
 	/**
-	 * Render a turn-ending provider error inline. Drops blank lines, clamps the
-	 * line count to {@link MAX_TRANSCRIPT_ERROR_LINES}, and width-truncates each
-	 * line so a pathological body — e.g. the HTML page a proxy returns on a 502 —
-	 * can't flood the transcript. Mirrors {@link ErrorBannerComponent}.
+	 * Render a turn-ending provider error inline. Collapsed (default), it drops
+	 * blank lines, clamps the line count to {@link MAX_TRANSCRIPT_ERROR_LINES},
+	 * and width-truncates each line so a pathological body — e.g. the HTML page a
+	 * proxy returns on a 502 — can't flood the transcript, appending a dim
+	 * `ctrl+o`/expand hint when lines were hidden. Expanded (via
+	 * {@link setExpanded}), it renders the full body — tabs replaced, blank lines
+	 * preserved — letting {@link Text} word-wrap each line to the render width so
+	 * the complete message is reachable. Mirrors {@link ErrorBannerComponent}.
 	 */
 	#appendErrorBlock(message: string): void {
+		if (this.#errorExpanded) {
+			const [first = "Unknown error", ...rest] = replaceTabs(message.replace(/\s+$/, "")).split("\n");
+			this.#contentContainer.addChild(new Text(theme.fg("error", `Error: ${first}`), 1, 0));
+			for (const line of rest) {
+				this.#contentContainer.addChild(new Text(theme.fg("error", `  ${line}`), 1, 0));
+			}
+			return;
+		}
+		const total = message.split("\n").filter(l => l.trim()).length;
 		const lines = getPreviewLines(message, MAX_TRANSCRIPT_ERROR_LINES, TRUNCATE_LENGTHS.LINE);
 		if (lines.length === 0) lines.push("Unknown error");
-		this.#contentContainer.addChild(new Spacer(1));
+		// The caller owns the separating Spacer; adding one here doubled the gap.
 		this.#contentContainer.addChild(new Text(theme.fg("error", `Error: ${lines[0]}`), 1, 0));
 		for (const line of lines.slice(1)) {
 			this.#contentContainer.addChild(new Text(theme.fg("error", `  ${line}`), 1, 0));
+		}
+		if (total > lines.length) {
+			const hidden = total - lines.length;
+			this.#contentContainer.addChild(
+				new Text(
+					theme.fg("dim", `  … +${hidden} more line${hidden === 1 ? "" : "s"} (${expandKeyHint()} to expand)`),
+					1,
+					0,
+				),
+			);
+		}
+	}
+
+	/** Toggle rendering for assistant-native and tool-result images. */
+	setImagesVisible(visible: boolean): void {
+		if (this.#showImages === visible) return;
+		this.#showImages = visible;
+		if (this.#lastMessage) {
+			this.updateContent(this.#lastMessage, { transient: this.#lastUpdateTransient });
+		}
+	}
+
+	/** Toggle only images produced by tool results; assistant-native images remain governed by setImagesVisible. */
+	setToolResultImagesVisible(visible: boolean): void {
+		if (this.#showToolResultImages === visible) return;
+		this.#showToolResultImages = visible;
+		if (this.#lastMessage) {
+			this.updateContent(this.#lastMessage, { transient: this.#lastUpdateTransient });
 		}
 	}
 
@@ -472,31 +605,23 @@ export class AssistantMessageComponent extends Container {
 			this.#toolImagesByCallId.delete(toolCallId);
 		} else {
 			this.#toolImagesByCallId.set(toolCallId, validImages);
-			this.#convertToolImagesForKitty(toolCallId, validImages);
+			this.#convertImagesForKitty(validImages.map((image, index) => ({ image, key: `${toolCallId}:${index}` })));
 		}
 		if (this.#lastMessage) {
 			this.updateContent(this.#lastMessage, { transient: this.#lastUpdateTransient });
 		}
 	}
 
-	#convertToolImagesForKitty(toolCallId: string, images: ImageContent[]): void {
+	#convertImagesForKitty(entries: Array<{ image: ImageContent; key: string }>): void {
 		if (TERMINAL.imageProtocol !== ImageProtocol.Kitty) return;
-		for (let index = 0; index < images.length; index++) {
-			const image = images[index];
-			if (!image || image.mimeType === "image/png") continue;
-			const key = `${toolCallId}:${index}`;
+		for (const { image, key } of entries) {
+			if (image.mimeType === "image/png") continue;
 			if (this.#convertedKittyImages.has(key) || this.#kittyConversionsInFlight.has(key)) continue;
 			this.#kittyConversionsInFlight.add(key);
-			new Bun.Image(Buffer.from(image.data, "base64"))
-				.png()
-				.toBase64()
-				.then(data => {
+			convertImageToPng(image)
+				.then(converted => {
 					this.#kittyConversionsInFlight.delete(key);
-					this.#convertedKittyImages.set(key, {
-						type: "image",
-						data,
-						mimeType: "image/png",
-					});
+					this.#convertedKittyImages.set(key, converted);
 					if (this.#lastMessage) {
 						this.updateContent(this.#lastMessage, { transient: this.#lastUpdateTransient });
 					}
@@ -508,14 +633,12 @@ export class AssistantMessageComponent extends Container {
 		}
 	}
 
-	#renderToolImages(): void {
-		const imageEntries = Array.from(this.#toolImagesByCallId.entries()).flatMap(([toolCallId, images]) =>
-			images.map((image, index) => ({ image, key: `${toolCallId}:${index}` })),
-		);
-		if (imageEntries.length === 0) return;
+	#renderImageEntries(entries: Array<{ image: ImageContent; key: string }>, withLeadingSpacer: boolean): void {
+		if (!this.#showImages || entries.length === 0) return;
+		this.#convertImagesForKitty(entries);
 
-		this.#contentContainer.addChild(new Spacer(1));
-		for (const { image, key } of imageEntries) {
+		if (withLeadingSpacer) this.#contentContainer.addChild(new Spacer(1));
+		for (const { image, key } of entries) {
 			const displayImage =
 				TERMINAL.imageProtocol === ImageProtocol.Kitty && image.mimeType !== "image/png"
 					? this.#convertedKittyImages.get(key)
@@ -533,6 +656,14 @@ export class AssistantMessageComponent extends Container {
 			}
 			this.#contentContainer.addChild(new Text(theme.fg("toolOutput", `[Image: ${image.mimeType}]`), 1, 0));
 		}
+	}
+
+	#renderToolImages(): void {
+		if (!this.#showToolResultImages) return;
+		const entries = Array.from(this.#toolImagesByCallId.entries()).flatMap(([toolCallId, images]) =>
+			images.map((image, index) => ({ image, key: `${toolCallId}:${index}` })),
+		);
+		this.#renderImageEntries(entries, true);
 	}
 
 	#appendThinkingExtensions(contentIndex: number, thinkingIndex: number, text: string): void {
@@ -578,18 +709,17 @@ export class AssistantMessageComponent extends Container {
 
 	#canFastPath(message: AssistantMessage): boolean {
 		for (const content of message.content) {
-			if (content.type === "toolCall") return false;
+			if (content.type === "toolCall" || content.type === "image") return false;
 		}
 		if (this.#toolImagesByCallId.size > 0) return false;
-		if (message.stopReason === "aborted" && shouldRenderAbortReason(message.errorMessage)) return false;
-		if (message.stopReason === "error" && !this.#errorPinned) return false;
+		const errorPresentation = resolveAssistantErrorPresentation(message);
+		if (errorPresentation.kind === "compact-recovered") return false;
 		if (
-			message.errorMessage &&
-			shouldRenderAbortReason(message.errorMessage) &&
-			message.stopReason !== "aborted" &&
-			message.stopReason !== "error"
-		)
+			errorPresentation.kind === "full" &&
+			!(message.stopReason === "error" && this.#errorPinned && !this.#errorExpanded)
+		) {
 			return false;
+		}
 		// Extension stability: if thinking renderers exist and any tracked thinking
 		// block's text changed, extensions may produce a different child count.
 		if (this.thinkingRenderers.length > 0 && this.#fastPathItems) {
@@ -620,8 +750,9 @@ export class AssistantMessageComponent extends Container {
 		}
 		const transient = opts?.transient === true;
 		// Shape is identical — setText only on Markdown children whose source changed.
-		for (const item of this.#fastPathItems) {
-			item.md.transientRenderCache = transient;
+		this.#applyItemTransience(transient);
+		for (let i = 0; i < this.#fastPathItems.length; i++) {
+			const item = this.#fastPathItems[i]!;
 			const content = message.content[item.contentIndex];
 			if (!content) {
 				this.#fastPathKey = undefined;
@@ -639,6 +770,14 @@ export class AssistantMessageComponent extends Container {
 				return false;
 			}
 			if (newText !== item.lastText) {
+				// Only the last (actively streaming) block may mutate in place: a
+				// delta into an earlier block would invalidate rows the settled
+				// walk already declared final, so tear down and rebuild instead.
+				if (i < this.#fastPathItems.length - 1) {
+					this.#fastPathKey = undefined;
+					this.#fastPathItems = undefined;
+					return false;
+				}
 				item.md.setText(newText);
 				item.lastText = newText;
 			}
@@ -692,21 +831,27 @@ export class AssistantMessageComponent extends Container {
 			this.#thinkingRateLive = false;
 		}
 
-		// Streaming reflowing Markdown (a mermaid diagram reshaping, a GFM table
-		// re-aligning columns) re-lays-out its body each frame; see
-		// isTranscriptBlockCommitStable. Detect it from raw text — a Markdown
-		// parser only resolves these once the closing fence / delimiter row
-		// arrives, but the stale native-scrollback commits happen mid-stream.
-		this.#hasLiveReflowingMarkdown = message.content.some(
-			content => content.type === "text" && detectLiveReflowingMarkdown(content.text),
-		);
+		// Mermaid ASCII rendering resolves asynchronously, so a fence anywhere
+		// in the rendered source (text or visible thinking) defers settling; see
+		// getTranscriptBlockSettledRows. Detected from raw source — a Markdown
+		// parser only resolves the fence once it closes, but the stale commits
+		// would happen mid-stream.
+		this.#containsMermaidSource = message.content.some(content => {
+			if (content.type === "text") return containsMermaidFence(content.text);
+			if (content.type === "thinking" && !this.hideThinkingBlock) {
+				const display = resolveThinkingDisplay(content, this.proseOnlyThinking);
+				return display.visible && containsMermaidFence(display.text);
+			}
+			return false;
+		});
 
 		// Fast path: reuse Markdown children when shape is stable during streaming
-		if (this.#tryFastPathUpdate(message)) return;
+		if (this.#tryFastPathUpdate(message, opts)) return;
 
 		// Clear content container
 		this.#contentContainer.clear();
 		this.#thinkingDots = undefined;
+		this.#hasTruncatableError = false;
 
 		// Determine if we should capture Markdown instances for next fast path
 		const shouldCapture = this.#canFastPath(message);
@@ -717,6 +862,7 @@ export class AssistantMessageComponent extends Container {
 		const hasVisibleContent = message.content.some(
 			c =>
 				(c.type === "text" && canonicalizeMessage(c.text)) ||
+				(c.type === "image" && c.data && c.mimeType) ||
 				(!this.hideThinkingBlock &&
 					c.type === "thinking" &&
 					resolveThinkingDisplay(c, this.proseOnlyThinking).visible),
@@ -724,15 +870,17 @@ export class AssistantMessageComponent extends Container {
 
 		// Render content in order
 		let thinkingIndex = 0;
+		let hasRenderedContent = false;
 		for (let i = 0; i < message.content.length; i++) {
 			const content = message.content[i];
 			if (content.type === "text" && canonicalizeMessage(content.text)) {
 				// Set paddingY=0 to avoid extra spacing before tool executions
 				const trimmed = content.text.trim();
-				const md = new Markdown(trimmed, 1, 0, getMarkdownTheme());
-				md.transientRenderCache = this.#lastUpdateTransient;
+				const mdOptions = this.#textColorTransform ? { color: this.#textColorTransform } : undefined;
+				const md = new Markdown(trimmed, 1, 0, getMarkdownTheme(), mdOptions, 0);
 				this.#contentContainer.addChild(md);
 				captureItems?.push({ md, contentIndex: i, blockType: "text", lastText: trimmed });
+				hasRenderedContent = true;
 			} else if (content.type === "thinking" && resolveThinkingDisplay(content, this.proseOnlyThinking).visible) {
 				const thinkingText = resolveThinkingDisplay(content, this.proseOnlyThinking).text;
 				if (this.hideThinkingBlock) {
@@ -746,6 +894,7 @@ export class AssistantMessageComponent extends Container {
 					.some(
 						c =>
 							(c.type === "text" && canonicalizeMessage(c.text)) ||
+							(c.type === "image" && c.data && c.mimeType) ||
 							(c.type === "thinking" && resolveThinkingDisplay(c, this.proseOnlyThinking).visible),
 					);
 
@@ -758,10 +907,14 @@ export class AssistantMessageComponent extends Container {
 				this.#contentContainer.addChild(md);
 				captureItems?.push({ md, contentIndex: i, blockType: "thinking", lastText: thinkingText });
 				this.#appendThinkingExtensions(i, thinkingIndex, thinkingText);
+				hasRenderedContent = true;
 				thinkingIndex += 1;
 				if (hasVisibleContentAfter) {
 					this.#contentContainer.addChild(new Spacer(1));
 				}
+			} else if (content.type === "image" && content.data && content.mimeType) {
+				this.#renderImageEntries([{ image: content, key: `native:${i}` }], hasRenderedContent);
+				hasRenderedContent ||= this.#showImages;
 			}
 		}
 
@@ -775,37 +928,51 @@ export class AssistantMessageComponent extends Container {
 		}
 
 		this.#renderToolImages();
-		// Check if aborted - show after partial content
-		// But only if there are no tool calls (tool execution components will show the error)
+		const errorPresentation = resolveAssistantErrorPresentation(message);
 		const hasToolCalls = message.content.some(c => c.type === "toolCall");
-		if (!hasToolCalls) {
-			if (message.stopReason === "aborted" && shouldRenderAbortReason(message.errorMessage)) {
-				const abortMessage = resolveAbortLabel(message.errorMessage);
-				if (hasVisibleContent) {
+		if (errorPresentation.kind === "compact-recovered") {
+			this.#contentContainer.addChild(new Spacer(1));
+			this.#contentContainer.addChild(new Text(theme.fg("dim", errorPresentation.text), 1, 0));
+		} else if (!hasToolCalls && errorPresentation.kind === "full") {
+			if (message.stopReason === "aborted") {
+				this.#contentContainer.addChild(new Spacer(1));
+				this.#contentContainer.addChild(new Text(theme.fg("error", errorPresentation.text), 1, 0));
+			} else {
+				// Non-aborted provider error: a truncatable inline block. Mark it so
+				// setExpanded re-renders even while the same error is pinned above.
+				this.#hasTruncatableError = true;
+				// Suppress the inline block only while pinned AND collapsed — the
+				// banner already shows the capped error there. When expanded, draw
+				// the inline block in full so the complete body is reachable without
+				// sending a message; the pinned banner stays a short reminder.
+				if (!(message.stopReason === "error" && this.#errorPinned) || this.#errorExpanded) {
 					this.#contentContainer.addChild(new Spacer(1));
-				} else {
-					this.#contentContainer.addChild(new Spacer(1));
+					this.#appendErrorBlock(errorPresentation.text);
 				}
-				this.#contentContainer.addChild(new Text(theme.fg("error", abortMessage), 1, 0));
-			} else if (message.stopReason === "error" && !this.#errorPinned) {
-				this.#appendErrorBlock(message.errorMessage || "Unknown error");
 			}
-		}
-		if (
-			message.errorMessage &&
-			shouldRenderAbortReason(message.errorMessage) &&
-			message.stopReason !== "aborted" &&
-			message.stopReason !== "error"
-		) {
-			this.#appendErrorBlock(message.errorMessage);
 		}
 		// Store fast-path state for next call
 		if (shouldCapture) {
 			this.#fastPathItems = captureItems;
 			this.#fastPathKey = this.#computeShapeKey(message);
+			this.#applyItemTransience(this.#lastUpdateTransient);
 		} else {
 			this.#fastPathKey = undefined;
 			this.#fastPathItems = undefined;
+		}
+	}
+
+	/**
+	 * Only the actively streaming (last) markdown renders in transient mode;
+	 * completed blocks render final — syntax-highlighted, module-LRU-cached,
+	 * byte-stable — so their rows can settle into native scrollback mid-turn
+	 * and are byte-identical to the finalize render.
+	 */
+	#applyItemTransience(transient: boolean): void {
+		const items = this.#fastPathItems;
+		if (!items) return;
+		for (let i = 0; i < items.length; i++) {
+			items[i]!.md.transientRenderCache = transient && i === items.length - 1;
 		}
 	}
 }

@@ -6,7 +6,14 @@ import type { FileEntry, SessionHeader } from "@oh-my-pi/pi-coding-agent/session
 import { findMostRecentSession, resolveResumableSession } from "@oh-my-pi/pi-coding-agent/session/session-listing";
 import { loadEntriesFromFile } from "@oh-my-pi/pi-coding-agent/session/session-loader";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
-import { getConfigRootDir, getSessionsDir, Snowflake, setAgentDir } from "@oh-my-pi/pi-utils";
+import {
+	getConfigRootDir,
+	getSessionsDir,
+	removeSyncWithRetries,
+	resolveEquivalentPath,
+	Snowflake,
+	setAgentDir,
+} from "@oh-my-pi/pi-utils";
 
 describe("loadEntriesFromFile", () => {
 	let tempDir: string;
@@ -17,7 +24,7 @@ describe("loadEntriesFromFile", () => {
 	});
 
 	afterEach(() => {
-		fs.rmSync(tempDir, { recursive: true, force: true });
+		removeSyncWithRetries(tempDir);
 	});
 
 	it("loads valid session file", async () => {
@@ -55,7 +62,7 @@ describe("findMostRecentSession", () => {
 	});
 
 	afterEach(() => {
-		fs.rmSync(tempDir, { recursive: true, force: true });
+		removeSyncWithRetries(tempDir);
 	});
 
 	it("returns single valid session file", async () => {
@@ -99,7 +106,7 @@ describe("resolveResumableSession", () => {
 	});
 
 	afterEach(() => {
-		fs.rmSync(tempDir, { recursive: true, force: true });
+		removeSyncWithRetries(tempDir);
 	});
 
 	function writeSession(fileName: string, headerCwd: string, id: string = Snowflake.next()): string {
@@ -185,7 +192,7 @@ describe("SessionManager temp cwd session dirs", () => {
 			setAgentDir(fallbackAgentDir);
 			delete process.env.PI_CODING_AGENT_DIR;
 		}
-		fs.rmSync(testAgentDir, { recursive: true, force: true });
+		removeSyncWithRetries(testAgentDir);
 	});
 
 	it("stores temp-root cwd sessions under -tmp-prefixed directories", () => {
@@ -216,6 +223,33 @@ describe("SessionManager temp cwd session dirs", () => {
 		expect(fs.existsSync(legacyDir)).toBe(false);
 		expect(path.dirname(sessionFile)).toBe(expectedDir);
 		expect(fs.existsSync(path.join(expectedDir, "carried.jsonl"))).toBe(true);
+	});
+
+	it("migrates hashed-scheme session dirs back into legacy names", () => {
+		const tempCwd = path.join(testAgentDir, `hashed-cwd-${Snowflake.next()}`);
+		fs.mkdirSync(tempCwd, { recursive: true });
+
+		// Reconstruct the 17.2.5-17.2.8 hashed dir name (reverted PR #7397).
+		const canonicalCwd = resolveEquivalentPath(path.resolve(tempCwd));
+		const normalized = canonicalCwd.replaceAll("\\", "/");
+		const readable = path
+			.basename(canonicalCwd)
+			.replace(/[^a-zA-Z0-9._-]+/g, "-")
+			.replace(/^-+|-+$/g, "")
+			.slice(-80);
+		const digest = Bun.SHA256.hash(normalized, "hex");
+		const hashedDir = path.join(getSessionsDir(), `tmp-${readable || "project"}-${digest}`);
+		fs.mkdirSync(hashedDir, { recursive: true });
+		fs.writeFileSync(path.join(hashedDir, "stranded.jsonl"), "stranded\n");
+
+		const session = SessionManager.create(tempCwd);
+		const sessionFile = session.getSessionFile();
+		if (!sessionFile) throw new Error("Expected session file path");
+
+		const expectedDir = path.join(getSessionsDir(), expectedTempSessionDirName(tempCwd));
+		expect(fs.existsSync(hashedDir)).toBe(false);
+		expect(path.dirname(sessionFile)).toBe(expectedDir);
+		expect(fs.existsSync(path.join(expectedDir, "stranded.jsonl"))).toBe(true);
 	});
 });
 
@@ -251,7 +285,7 @@ describe("SessionManager legacy session migration persistence", () => {
 	});
 
 	afterEach(() => {
-		fs.rmSync(tempDir, { recursive: true, force: true });
+		removeSyncWithRetries(tempDir);
 	});
 
 	it("keeps legacy migration in memory until later persisted activity rewrites the file", async () => {

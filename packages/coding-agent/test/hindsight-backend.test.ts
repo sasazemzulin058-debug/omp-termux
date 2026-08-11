@@ -338,6 +338,42 @@ describe("hindsightBackend first-turn injection", () => {
 		expect(session.getHindsightSessionState()?.lastRecallSnippet).toBe(block);
 	});
 
+	it("does not let agent_start preempt first-turn recall injection", async () => {
+		const settings = Settings.isolated({
+			"memory.backend": "hindsight",
+			"hindsight.apiUrl": "http://localhost:8888",
+		});
+		const session = makeFakeSession({
+			sessionId: "s-race",
+			entries: [{ role: "user", text: "What is the canary phrase?" }],
+		});
+		await hindsightBackend.start({
+			session: session as never,
+			settings,
+			modelRegistry: {} as never,
+			agentDir: "/tmp",
+			taskDepth: 0,
+		});
+
+		vi.spyOn(HindsightApi.prototype, "recall").mockResolvedValue({
+			results: [{ id: "1", text: "The canary phrase is PURPLE-OTTER-9931." }],
+		} as never);
+
+		// The agent loop fires agent_start once the turn begins. This must NOT run
+		// its own recall: doing so consumed the shared first-turn flag and left
+		// injection to a racing background prompt rebuild that a fast turn outran,
+		// dropping recalled memory from the model's prompt (#7568).
+		session.emit({ type: "agent_start" });
+		for (let i = 0; i < 50; i++) await Promise.resolve();
+
+		expect(session.getHindsightSessionState()?.hasRecalledForFirstTurn).toBe(false);
+
+		// beforeAgentStartPrompt is the sole, awaited injection path.
+		const block = await hindsightBackend.beforeAgentStartPrompt?.(session as never, "What is the canary phrase?");
+		expect(block).toContain("PURPLE-OTTER-9931");
+		expect(session.getHindsightSessionState()?.hasRecalledForFirstTurn).toBe(true);
+	});
+
 	it("keeps the <memories> wrapper in buildDeveloperInstructions", async () => {
 		const settings = Settings.isolated({
 			"memory.backend": "hindsight",

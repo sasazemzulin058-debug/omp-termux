@@ -48,6 +48,54 @@ describe("lm studio local provider discovery", () => {
 		expect(text?.input).toEqual(["text"]);
 	});
 
+	test("prefers the loaded context window over the architectural maximum", async () => {
+		const fetchMock: FetchImpl = vi.fn(async input => {
+			const url = String(input);
+			if (url === "http://127.0.0.1:1234/api/v0/models") {
+				return new Response(
+					JSON.stringify({
+						data: [
+							{
+								id: "loaded-small",
+								type: "llm",
+								state: "loaded",
+								max_context_length: 262144,
+								loaded_context_length: 81920,
+							},
+							{
+								id: "unloaded",
+								type: "llm",
+								state: "not-loaded",
+								max_context_length: 262144,
+								loaded_context_length: null,
+							},
+						],
+					}),
+					{ status: 200, headers: { "Content-Type": "application/json" } },
+				);
+			}
+			if (url === "http://127.0.0.1:1234/v1/models") {
+				return new Response(
+					JSON.stringify({
+						data: [
+							{ id: "loaded-small", object: "model" },
+							{ id: "unloaded", object: "model" },
+						],
+					}),
+					{ status: 200, headers: { "Content-Type": "application/json" } },
+				);
+			}
+			throw new Error(`Unexpected URL: ${url}`);
+		});
+
+		const models = await lmStudioModelManagerOptions({ fetch: fetchMock }).fetchDynamicModels?.();
+		const loaded = models?.find(model => model.id === "loaded-small");
+		const unloaded = models?.find(model => model.id === "unloaded");
+
+		expect(loaded?.contextWindow).toBe(81920);
+		expect(unloaded?.contextWindow).toBe(262144);
+	});
+
 	test("falls back to the OpenAI-compatible catalog when native metadata hangs", async () => {
 		let nativeAborted = false;
 		let openAiCatalogStartedBeforeAbort = false;

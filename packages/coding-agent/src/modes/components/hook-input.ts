@@ -81,7 +81,7 @@ export class HookInputComponent extends Container {
 		this.#input.pasteText(text);
 	}
 
-	dispose(): void {
+	override dispose(): void {
 		this.#countdown?.dispose();
 	}
 }

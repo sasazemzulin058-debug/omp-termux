@@ -1,4 +1,4 @@
-import { afterEach, beforeAll, beforeEach, describe, expect, test } from "bun:test";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, test } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -9,6 +9,7 @@ import { ToolExecutionComponent } from "@oh-my-pi/pi-coding-agent/modes/componen
 import { theme as activeTheme, initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
 import { previewWindowRows } from "@oh-my-pi/pi-coding-agent/tools/render-utils";
 import { TUI, visibleWidth } from "@oh-my-pi/pi-tui";
+import { removeWithRetries } from "@oh-my-pi/pi-utils";
 import { VirtualTerminal } from "../../tui/test/virtual-terminal";
 
 // The streaming edit preview is a fixed-height tail window ("cursor"): the last
@@ -37,6 +38,24 @@ describe("streaming edit preview height (stable, full tail window)", () => {
 	let file: string;
 	let themed = false;
 
+	// The streaming edit window is sized as min(EDIT_STREAMING_PREVIEW_LINES,
+	// previewWindowRows()), and previewWindowRows() reads process.stdout.rows.
+	// Pin a tall, stable viewport so the "full window of real diff" height
+	// assertions don't shrink (and flake) under a short ambient terminal when the
+	// file runs inside the full suite. Restored in afterAll.
+	let originalRowsDescriptor: PropertyDescriptor | undefined;
+	beforeAll(() => {
+		originalRowsDescriptor = Object.getOwnPropertyDescriptor(process.stdout, "rows");
+		Object.defineProperty(process.stdout, "rows", { value: 50, configurable: true });
+	});
+	afterAll(() => {
+		if (originalRowsDescriptor) {
+			Object.defineProperty(process.stdout, "rows", originalRowsDescriptor);
+		} else {
+			delete (process.stdout as { rows?: number }).rows;
+		}
+	});
+
 	beforeEach(async () => {
 		if (!themed) {
 			await initTheme();
@@ -51,7 +70,7 @@ describe("streaming edit preview height (stable, full tail window)", () => {
 
 	afterEach(async () => {
 		resetSettingsForTest();
-		await fs.rm(tmpDir, { recursive: true, force: true });
+		await removeWithRetries(tmpDir);
 	});
 
 	// Char-by-char partials of the new function body.
@@ -125,7 +144,7 @@ describe("streaming edit preview height (stable, full tail window)", () => {
 		const tool = { mode: "replace" } as unknown as AgentTool;
 		const component = new ToolExecutionComponent(
 			"edit",
-			{ path: file, edits: [{ old_text: oldBlock, new_text: fullNew.slice(0, 1) }] },
+			{ path: file, old_string: oldBlock, new_string: fullNew.slice(0, 1) },
 			{},
 			tool,
 			tui,
@@ -176,11 +195,11 @@ describe("streaming edit preview height (stable, full tail window)", () => {
 		const bigLines = bigNew.split("\n");
 		const bigPartials = bigLines.map((_v, i) => bigLines.slice(0, i + 1).join("\n"));
 
-		const uiStub = { requestRender() {} } as unknown as TUI;
+		const uiStub = { requestRender() {}, requestComponentRender() {} } as unknown as TUI;
 		const tool = { mode: "replace" } as unknown as AgentTool;
 		const component = new ToolExecutionComponent(
 			"edit",
-			{ path: bigFile, edits: [{ old_text: bigOld, new_text: bigNew.slice(0, 1) }] },
+			{ path: bigFile, old_string: bigOld, new_string: bigNew.slice(0, 1) },
 			{},
 			tool,
 			uiStub,
@@ -206,7 +225,7 @@ describe("streaming edit preview height (stable, full tail window)", () => {
 		const heights: number[] = [];
 		let maxTrailingBlank = 0;
 		for (const newText of bigPartials) {
-			component.updateArgs({ path: bigFile, edits: [{ old_text: bigOld, new_text: newText }] });
+			component.updateArgs({ path: bigFile, old_string: bigOld, new_string: newText });
 			await component.whenPreviewSettled();
 			const rows = component.render(RENDER_WIDTH_WIDE);
 			heights.push(rows.length);
@@ -265,7 +284,7 @@ describe("streaming edit preview height (stable, full tail window)", () => {
 			const streamingStepCount = streamedReplacements.length;
 			const lifecycleSteps = [
 				...streamedReplacements.map((newText, i) => () => {
-					component.updateArgs({ path: file, edits: [{ old_text: oldBlock, new_text: newText }] });
+					component.updateArgs({ path: file, old_string: oldBlock, new_string: newText });
 					if (i % 4 === 1) {
 						component.setExpanded(true);
 					} else if (i % 4 === 3) {
@@ -348,7 +367,7 @@ describe("streaming edit preview height (stable, full tail window)", () => {
 		const rawLineCounts: number[] = [];
 		for (const newText of partials) {
 			const previews = await EDIT_MODE_STRATEGIES.replace.computeDiffPreview(
-				{ path: file, edits: [{ old_text: oldBlock, new_text: newText }] },
+				{ path: file, old_string: oldBlock, new_string: newText },
 				ctx,
 			);
 			const first = previews?.[0];
@@ -363,7 +382,7 @@ describe("streaming edit preview height (stable, full tail window)", () => {
 describe("streaming tool call preview height (bounded across renderers)", () => {
 	beforeAll(async () => {
 		// `evalToolRenderer.renderCall` walks the theme during highlighting; the
-		// bash/ssh/eval pending previews exercised below DO NOT read
+		// bash/eval pending previews exercised below DO NOT read
 		// `settings.*`, so the global Settings singleton is intentionally left
 		// untouched here. Resetting/initialising it in `beforeEach` raced with
 		// parallel test files that do the same dance (issue #2582), flipping the
@@ -382,6 +401,14 @@ describe("streaming tool call preview height (bounded across renderers)", () => 
 		}
 	}
 
+	function getRenderedLines(lines: readonly string[]): string[] {
+		return lines
+			.map(line => Bun.stripANSI(line).trim())
+			.filter(line => line.startsWith("│") && line.endsWith("│"))
+			.map(line => line.slice(1, -1).trim())
+			.filter(line => line !== "" && !line.includes("earlier lines"));
+	}
+
 	test("framed inline tool previews span the full tool width", () => {
 		const width = 80;
 		const { lines } = renderPending("bash", { command: "echo hi" });
@@ -394,8 +421,8 @@ describe("streaming tool call preview height (bounded across renderers)", () => 
 		expect(visibleWidth(topBorder ?? "")).toBe(width);
 	});
 
-	test("bash/ssh pending previews stay short even with very long multiline args", () => {
-		// bash/ssh window the collapsed command to a viewport-sized TAIL: the end
+	test("bash pending previews stay short even with very long multiline args", () => {
+		// bash windows the collapsed command to a viewport-sized TAIL: the end
 		// (the live edge while args stream) stays visible behind an "… N earlier
 		// lines" marker on top; the head is elided.
 		const window = previewWindowRows();
@@ -406,19 +433,16 @@ describe("streaming tool call preview height (bounded across renderers)", () => 
 		const lastHidden = `line-${hidden - 1}`;
 		const firstVisible = `line-${hidden}`;
 		const lastVisible = `line-${total - 1}`;
-		const cases: Array<{ name: string; args: unknown }> = [
-			{ name: "bash", args: { command: longLines.join("\n") } },
-			{ name: "ssh", args: { host: "example", command: longLines.join("\n") } },
-		];
+		const cases: Array<{ name: string; args: unknown }> = [{ name: "bash", args: { command: longLines.join("\n") } }];
 
 		for (const testCase of cases) {
 			const { lines, text } = renderPending(testCase.name, testCase.args);
 			expect(lines.length, `${testCase.name} preview should stay bounded`).toBeLessThan(window + 10);
-			for (const needle of [firstVisible, lastVisible]) {
-				expect(text, `${testCase.name} preview should keep ${needle}`).toContain(needle);
-			}
-			expect(text, `${testCase.name} preview should elide line-0`).not.toContain("line-0");
-			expect(text, `${testCase.name} preview should elide ${lastHidden}`).not.toContain(lastHidden);
+			const renderedLines = getRenderedLines(lines);
+			expect(renderedLines, `${testCase.name} preview should keep ${firstVisible}`).toContain(firstVisible);
+			expect(renderedLines, `${testCase.name} preview should keep ${lastVisible}`).toContain(lastVisible);
+			expect(renderedLines, `${testCase.name} preview should elide line-0`).not.toContain("line-0");
+			expect(renderedLines, `${testCase.name} preview should elide ${lastHidden}`).not.toContain(lastHidden);
 			expect(text, `${testCase.name} preview should advertise the elided head`).toContain(
 				`… ${hidden} earlier lines`,
 			);
@@ -427,13 +451,15 @@ describe("streaming tool call preview height (bounded across renderers)", () => 
 
 	test("eval pending preview windows the code to the viewport tail", () => {
 		// Eval cell code is capped to the same viewport-sized TAIL window as
-		// bash/ssh: the live edge stays visible behind an "… N earlier lines"
+		// bash: the live edge stays visible behind an "… N earlier lines"
 		// marker on top; ctrl+o uncaps. Unlike bash, the marker row sits above
 		// the window, so previewWindowRows() code lines stay visible.
 		const window = previewWindowRows();
 		const total = window + 5;
 		const hidden = total - window;
-		const longLines = Array.from({ length: total }, (_, i) => `line-${i}`);
+		// Underscore identifiers: the display formatter would space `line-1` as a
+		// subtraction, and this test asserts windowing, not operator layout.
+		const longLines = Array.from({ length: total }, (_, i) => `line_${i}`);
 		const { lines, text } = renderPending("eval", {
 			language: "js",
 			title: "big",
@@ -441,10 +467,11 @@ describe("streaming tool call preview height (bounded across renderers)", () => 
 		});
 
 		expect(lines.length, "eval code preview should stay bounded").toBeLessThan(window + 10);
-		expect(text).toContain(`const line-${total - 1} = 1;`);
-		expect(text).toContain(`const line-${hidden} = 1;`);
-		expect(text).not.toContain("const line-0 = 1;");
-		expect(text).not.toContain(`const line-${hidden - 1} = 1;`);
+		const renderedLines = getRenderedLines(lines);
+		expect(renderedLines).toContain(`const line_${total - 1} = 1;`);
+		expect(renderedLines).toContain(`const line_${hidden} = 1;`);
+		expect(renderedLines).not.toContain("const line_0 = 1;");
+		expect(renderedLines).not.toContain(`const line_${hidden - 1} = 1;`);
 		expect(text).toContain(`… ${hidden} earlier lines`);
 	}, 30_000);
 });

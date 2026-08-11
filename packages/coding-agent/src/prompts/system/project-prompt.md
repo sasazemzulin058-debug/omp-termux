@@ -7,14 +7,14 @@ PROJECT
 </workstation>
 
 {{#if contextFiles.length}}
-<context>
+<repo-rules>
 You MUST follow the context files below for all tasks:
 {{#each contextFiles}}
 <file path="{{path}}">
 {{content}}
 </file>
 {{/each}}
-</context>
+</repo-rules>
 {{/if}}
 
 {{#if agentsMdSearch.files.length}}
@@ -26,7 +26,7 @@ Before making changes within these directories, you MUST read:
 {{/if}}
 
 {{#ifAny contextFiles.length agentsMdSearch.files.length}}
-The context files above are loaded automatically. You NEVER `search`/`find` for `AGENTS.md`, `CLAUDE.md`, `.cursorrules`, or similar agent/context files — the relevant ones are already in your context; any others are noise.
+The context files above are loaded automatically. You NEVER `grep`/`glob` for `AGENTS.md`, `CLAUDE.md`, `.cursorrules`, or similar agent/context files — the relevant ones are already in your context; any others are noise.
 {{/ifAny}}
 
 {{#if includeWorkspaceTree}}
@@ -35,12 +35,19 @@ The context files above are loaded automatically. You NEVER `search`/`find` for 
 Working directory layout (sorted by mtime, recent first; depth ≤ 3):
 {{workspaceTree.rendered}}
 {{#if workspaceTree.truncated}}
-(some entries elided to keep the tree short — use `find`/`read` to drill in)
+(some entries elided to keep the tree short — use `glob`/`read` to drill in)
 {{/if}}
 </workspace-tree>
 {{/if}}
 {{/if}}
-
+{{#if additionalWorkspaceRoots.length}}
+<workspace-roots>
+This session also spans the additional directories below. This list is the CURRENT workspace state and supersedes any workspace change mentioned earlier in the conversation. Use absolute paths under these roots to `read`/`grep`/`glob`/`edit` them. Manage the set with `/add-dir` and `/remove-dir`; `/dirs` lists them.
+{{#each additionalWorkspaceRoots}}
+- {{this}}
+{{/each}}
+</workspace-roots>
+{{/if}}
 Today is {{date}}, and the current working directory is '{{cwd}}'.
 
 <critical>

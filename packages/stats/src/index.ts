@@ -8,6 +8,7 @@ import { startServer } from "./server";
 
 export {
 	getDashboardStats,
+	getToolDashboardStats,
 	getTotalMessageCount,
 	type SyncOptions,
 	type SyncProgress,
@@ -15,7 +16,14 @@ export {
 	syncAllSessions,
 } from "./aggregator";
 export { closeDb } from "./db";
+export { getGainDashboardStats } from "./gain-aggregator";
 export { startServer } from "./server";
+export type {
+	GainDashboardStats,
+	GainSource,
+	GainSourceTotals,
+	GainTimeSeriesPoint,
+} from "./shared-types";
 export type {
 	AggregatedStats,
 	DashboardStats,
@@ -25,6 +33,10 @@ export type {
 	ModelStats,
 	ModelTimeSeriesPoint,
 	TimeSeriesPoint,
+	ToolDashboardStats,
+	ToolModelStats,
+	ToolTimeSeriesPoint,
+	ToolUsageStats,
 } from "./types";
 
 /**
@@ -159,8 +171,8 @@ Examples:
 
 		// Start server
 		const port = parseInt(values.port || "3847", 10);
-		const { port: actualPort } = await startServer(port);
-		console.log(`Dashboard available at: http://localhost:${actualPort}`);
+		const { hostname, port: actualPort } = await startServer(port);
+		console.log(`Dashboard available at: http://${hostname}:${actualPort}`);
 		console.log("Press Ctrl+C to stop\n");
 
 		// Keep process running

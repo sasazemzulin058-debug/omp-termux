@@ -7,8 +7,14 @@
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import { type Component, Text } from "@oh-my-pi/pi-tui";
 import { formatBytes, formatDuration } from "@oh-my-pi/pi-utils";
-import { type CustomMessage, type FileMentionMessage, isSilentAbort, resolveAbortLabel } from "../../session/messages";
-import { createIrcMessageCard } from "../../tools/irc";
+import {
+	type CustomMessage,
+	type FileMentionMessage,
+	resolveAbortLabel,
+	shouldRenderAbortReason,
+} from "../../session/messages";
+import { createIrcMessageCard } from "../../tools/hub";
+import { replaceTabs, TRUNCATE_LENGTHS, truncateToWidth } from "../../tools/render-utils";
 import { canonicalizeMessage } from "../../utils/thinking-display";
 import { TranscriptBlock } from "../components/transcript-container";
 import { theme } from "../theme/theme";
@@ -99,9 +105,9 @@ export function buildFileMentionBlock(files: FileMentionMessage["files"], indent
 	const block = new TranscriptBlock();
 	for (const file of files) {
 		let suffix: string;
-		if (file.skippedReason === "tooLarge") {
+		if (file.skippedReason === "tooLarge" || file.skippedReason === "binary") {
 			const size = typeof file.byteSize === "number" ? formatBytes(file.byteSize) : "unknown size";
-			suffix = `(skipped: ${size})`;
+			suffix = file.skippedReason === "binary" ? `(skipped: binary, ${size})` : `(skipped: ${size})`;
 		} else {
 			suffix = file.image
 				? "(image)"
@@ -119,15 +125,70 @@ export function buildFileMentionBlock(files: FileMentionMessage["files"], indent
 }
 
 /**
- * Whether an assistant turn has visible text or thinking content (after
- * canonicalization) — i.e. content that closes the current read-tool run.
+ * Whether an assistant turn has visible text, thinking, or image content — i.e.
+ * content that closes the current read-tool run.
  */
 export function assistantHasVisibleContent(message: AssistantAgentMessage): boolean {
 	return message.content.some(
 		content =>
+			content.type === "image" ||
 			(content.type === "text" && canonicalizeMessage(content.text)) ||
 			(content.type === "thinking" && canonicalizeMessage(content.thinking)),
 	);
+}
+
+/**
+ * Split mixed assistant turns into visible text before tool execution and
+ * visible text segments that must render immediately after the preceding tool.
+ * Cursor can return intro text, tool calls, progress text, and the final answer
+ * in one assistant message; keeping every text block in the leading assistant
+ * block buries post-tool text above tool results in the transcript.
+ */
+export function splitAssistantMessageToolTimeline(message: AssistantAgentMessage): {
+	beforeTools: AssistantAgentMessage;
+	afterToolCalls: ReadonlyMap<string, AssistantAgentMessage>;
+	hasToolCalls: boolean;
+} {
+	const beforeTools: AssistantAgentMessage["content"] = [];
+	const afterToolCalls = new Map<string, AssistantAgentMessage>();
+	let pendingAfterTool: AssistantAgentMessage["content"] = [];
+	let lastToolCallId: string | undefined;
+	let sawToolCall = false;
+
+	const displaySegment = (content: AssistantAgentMessage["content"]): AssistantAgentMessage => ({
+		...message,
+		content,
+		stopReason: "stop",
+		errorMessage: undefined,
+		retryRecovery: undefined,
+	});
+
+	const flushPendingAfterTool = () => {
+		if (!lastToolCallId || pendingAfterTool.length === 0) return;
+		afterToolCalls.set(lastToolCallId, displaySegment(pendingAfterTool));
+		pendingAfterTool = [];
+	};
+
+	for (const content of message.content) {
+		if (content.type === "toolCall") {
+			flushPendingAfterTool();
+			sawToolCall = true;
+			lastToolCallId = content.id;
+			continue;
+		}
+		if (sawToolCall) {
+			pendingAfterTool.push(content);
+		} else {
+			beforeTools.push(content);
+		}
+	}
+	flushPendingAfterTool();
+
+	if (!sawToolCall) {
+		return { beforeTools: message, afterToolCalls, hasToolCalls: false };
+	}
+
+	return { beforeTools: displaySegment(beforeTools), afterToolCalls, hasToolCalls: true };
 }
 
 /**
@@ -138,20 +199,57 @@ export function normalizeToolArgs(args: unknown): Record<string, unknown> {
 	return args && typeof args === "object" && !Array.isArray(args) ? (args as Record<string, unknown>) : {};
 }
 
+export type AssistantErrorPresentation =
+	| { kind: "none" }
+	| { kind: "full"; text: string; isError: true }
+	| { kind: "compact-recovered"; text: string; isError: false };
+
+function sanitizeRecoveredRetryNote(note: string): string {
+	const normalized = replaceTabs(note).replace(/\s+/g, " ").trim();
+	return truncateToWidth(normalized || "retried", TRUNCATE_LENGTHS.CONTENT);
+}
+
 /**
- * Resolve the inline error label, if any, for a turn-ending assistant message.
- * Silent aborts yield no label. `retryAttempt` tunes the abort label wording.
+ * Resolve the turn-ending assistant error presentation, if any.
+ * Silent and user-interrupt aborts yield no label. Recovered retry attempts
+ * render a compact note; attempts superseded by an exhausted budget are hidden
+ * while the final terminal error keeps its full presentation.
  */
-export function resolveAssistantErrorMessage(
+export function resolveAssistantErrorPresentation(
 	message: AssistantAgentMessage,
 	retryAttempt = 0,
-): { hasErrorStop: boolean; errorMessage: string | null } {
-	const isAbortedSilently = message.stopReason === "aborted" && isSilentAbort(message.errorMessage);
-	const hasErrorStop = !isAbortedSilently && (message.stopReason === "aborted" || message.stopReason === "error");
-	const errorMessage = hasErrorStop
-		? message.stopReason === "aborted"
-			? resolveAbortLabel(message.errorMessage, retryAttempt)
-			: message.errorMessage || "Error"
-		: null;
-	return { hasErrorStop, errorMessage };
+): AssistantErrorPresentation {
+	if (message.retryRecovery?.status === "superseded") return { kind: "none" };
+	if (message.retryRecovery?.status === "recovered") {
+		return {
+			kind: "compact-recovered",
+			text: sanitizeRecoveredRetryNote(message.retryRecovery.note),
+			isError: false,
+		};
+	}
+	if (message.stopReason === "aborted") {
+		if (!shouldRenderAbortReason(message)) return { kind: "none" };
+		return { kind: "full", text: resolveAbortLabel(message, retryAttempt), isError: true };
+	}
+	if (message.stopReason === "error") {
+		return { kind: "full", text: message.errorMessage || "Error", isError: true };
+	}
+	if (message.errorMessage && shouldRenderAbortReason(message)) {
+		return { kind: "full", text: message.errorMessage, isError: true };
+	}
+	return { kind: "none" };
+}
+
+/**
+ * Whether an assistant turn's `usage` reflects work the operator was billed
+ * for. Empty automated turns from providers that emit `usage: 0` collapse to
+ * `false`, but any input, output, cache, or premium request keeps the row so
+ * cost transparency survives — the live path and the resume/rebuild path
+ * agree turn-by-turn.
+ */
+export function assistantUsageIsBilled(usage: AssistantAgentMessage["usage"]): boolean {
+	if (usage.input > 0 || usage.output > 0) return true;
+	if (usage.cacheRead > 0 || usage.cacheWrite > 0) return true;
+	if ((usage.premiumRequests ?? 0) > 0) return true;
+	return false;
 }

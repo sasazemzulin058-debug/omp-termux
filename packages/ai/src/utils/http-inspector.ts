@@ -1,5 +1,6 @@
 import * as path from "node:path";
-import { extractHttpStatusFromError, getLogsDir, isBunTestRuntime } from "@oh-my-pi/pi-utils";
+import { getLogsDir, isBunTestRuntime } from "@oh-my-pi/pi-utils";
+import * as AIError from "../error/flags";
 import { isCopilotTransientModelError } from "./retry.js";
 import { formatErrorMessageWithRetryAfter } from "./retry-after.js";
 
@@ -22,23 +23,50 @@ export type CapturedHttpErrorResponse = {
 
 const SENSITIVE_HEADERS = ["authorization", "x-api-key", "api-key", "cookie", "set-cookie", "proxy-authorization"];
 
+/**
+ * Build the JSON persisted for a rejected request. Request fields stay at the
+ * top level (so existing dump parsers still read `body`); the provider's error
+ * is added under `errorResponse` so a failed request is diagnosable from the
+ * dump file rather than the request alone.
+ */
+export function buildHttp400DumpPayload(
+	dump: RawHttpRequestDump,
+	error: unknown,
+	message: string,
+): RawHttpRequestDump & { errorResponse: { status: number | undefined; message: string } } {
+	return {
+		...sanitizeDump(dump),
+		errorResponse: { status: AIError.status(error), message },
+	};
+}
+
+/** HTTP statuses whose rejected request we persist for post-hoc diagnosis: the
+ *  request-content rejections that wedge a session. 400 (bad request) and 413
+ *  (payload too large — an oversized image / snapcompact frame payload that 413s
+ *  and empties the turn). Auth (401/403), not-found (404), rate limits and 5xx
+ *  are excluded: 429/5xx are retried, so persisting them here would write one
+ *  dump per attempt. */
+export function shouldDumpRejectedRequest(error: unknown): boolean {
+	const status = AIError.status(error);
+	return status === 400 || status === 413;
+}
+
 export async function appendRawHttpRequestDumpFor400(
 	message: string,
 	error: unknown,
 	dump: RawHttpRequestDump | undefined,
 ): Promise<string> {
 	// Never persist dumps under the test runner: providers exercise the 400 path
-	// with mocked fetch responses, which would otherwise litter the real ~/.omp logs.
-	if (!dump || isBunTestRuntime() || extractHttpStatusFromError(error) !== 400) {
+	if (!dump || isBunTestRuntime() || !shouldDumpRejectedRequest(error)) {
 		return message;
 	}
 
-	const sanitizedDump = sanitizeDump(dump);
-	const fileName = `${Date.now()}-${Bun.hash(JSON.stringify(sanitizedDump)).toString(36)}.json`;
+	const payload = buildHttp400DumpPayload(dump, error, message);
+	const fileName = `${Date.now()}-${Bun.hash(JSON.stringify(payload)).toString(36)}.json`;
 	const filePath = path.join(getLogsDir(), "http-400-requests", fileName);
 
 	try {
-		await Bun.write(filePath, `${JSON.stringify(sanitizedDump, null, 2)}\n`);
+		await Bun.write(filePath, `${JSON.stringify(payload, null, 2)}\n`);
 		return `${message}\nraw-http-request=${filePath}`;
 	} catch (writeError) {
 		const writeMessage = writeError instanceof Error ? writeError.message : String(writeError);
@@ -67,9 +95,9 @@ export async function finalizeErrorMessage(
  * Rewrite error message for GitHub Copilot request failures.
  * Must run AFTER finalizeErrorMessage since it replaces the message entirely.
  *
- * 400 `model_not_supported` = Copilot routing rollout gap for our OAuth client.
- *        A preview model (gpt-5.3-codex, gpt-5.4*, ...) flaps between 200 and
- *        400 because only some of Copilot's backends have the model. After the
+ * 400 `model_not_supported` = Copilot fleet skew. A model that `/models`
+ *        advertises can flap between 200 and 400 because only part of
+ *        Copilot's fleet has it in the integrator allowlist. After the
  *        in-request retry exhausts, surface guidance rather than the raw error.
  * 401 = token invalid/expired → credential removal is safe, prompt re-login.
  * 403 = token valid but access denied (plan, model policy, org restriction) →
@@ -77,7 +105,7 @@ export async function finalizeErrorMessage(
  */
 export function rewriteCopilotError(errorMessage: string, error: unknown, provider: string): string {
 	if (provider !== "github-copilot") return errorMessage;
-	const status = extractHttpStatusFromError(error);
+	const status = AIError.status(error);
 	if (status === 401) {
 		return `GitHub Copilot authentication failed (HTTP 401). Your token may have been revoked. Please re-login with /login github-copilot`;
 	}
@@ -85,7 +113,7 @@ export function rewriteCopilotError(errorMessage: string, error: unknown, provid
 		return `GitHub Copilot access denied (HTTP 403). Your account may not have access to this model or feature. Check your Copilot plan or model policy settings.`;
 	}
 	if (isCopilotTransientModelError(error)) {
-		return `GitHub Copilot rejected this model (HTTP 400 model_not_supported) after retries. This is a known intermittent rollout gap for preview models on OAuth clients other than VS Code. Try again in a few seconds, switch to a GA model (gpt-5-mini, gpt-5.2), or run this model from VS Code.`;
+		return `GitHub Copilot rejected this model (HTTP 400) after retries: only part of its fleet currently serves this model id, even though /models advertises it. Try again in a few seconds or switch to a model Copilot serves fleet-wide (claude-opus-4.7, claude-sonnet-4.5, gpt-4.1).`;
 	}
 	return errorMessage;
 }

@@ -2,24 +2,26 @@ import { afterAll, describe, expect, it } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
+import { toolWireSchema } from "@oh-my-pi/pi-ai/utils/schema";
+import { Type as TypeBoxShimType } from "@oh-my-pi/pi-coding-agent/extensibility/legacy-typebox";
 import {
 	installLegacyPiSpecifierShim,
 	loadLegacyPiModule,
 } from "@oh-my-pi/pi-coding-agent/extensibility/plugins/legacy-pi-compat";
-import { Type as TypeBoxShimType } from "@oh-my-pi/pi-coding-agent/extensibility/typebox";
+import { removeWithRetries } from "@oh-my-pi/pi-utils";
 
 // The remap installs a Bun.plugin onResolve hook plus an explicit
 // rewrite branch inside `rewriteBareImportsForLegacyExtension` that
-// redirects bare `@sinclair/typebox` specifiers to the in-repo Zod-backed
-// shim. Extensions that authored against TypeBox should keep working
-// unchanged without `@sinclair/typebox` ever needing to be installed.
+// redirects bare `@sinclair/typebox` specifiers to the omptype-backed
+// compatibility surface. Extensions should keep working unchanged without
+// `@sinclair/typebox` ever needing to be installed.
 installLegacyPiSpecifierShim();
 
 const tempRoots: string[] = [];
 
 afterAll(async () => {
 	for (const dir of tempRoots) {
-		await fs.rm(dir, { recursive: true, force: true });
+		await removeWithRetries(dir);
 	}
 });
 
@@ -56,17 +58,32 @@ describe("legacy-pi TypeBox remap", () => {
 			[
 				'import { Type } from "typebox";',
 				"export const probe = Type;",
-				"export const enumSchema = Type.Enum(['upstream', 'downstream']);",
+				"export const schema = Type.Unsafe({ type: 'object', properties: { path: { type: 'string' } }, required: ['path'] });",
 			].join("\n"),
 		);
 
 		const loaded = (await loadLegacyPiModule(entry)) as {
 			probe: typeof TypeBoxShimType;
-			enumSchema: { safeParse: (input: unknown) => { success: boolean } };
+			schema: Record<string, unknown>;
 		};
 
 		expect(loaded.probe).toBe(TypeBoxShimType);
-		expect(loaded.enumSchema.safeParse("upstream").success).toBe(true);
-		expect(loaded.enumSchema.safeParse("sideways").success).toBe(false);
+		expect(toolWireSchema({ name: "fixture", description: "", parameters: loaded.schema })).toEqual({
+			type: "object",
+			properties: { path: { type: "string" } },
+			required: ["path"],
+		});
+	});
+
+	it("redirects minified bare typebox imports without whitespace around from", async () => {
+		const entry = await writeFixtureExtension(
+			'import{Type}from"typebox";export const schema=Type.Object({name:Type.String()});',
+		);
+
+		const loaded = (await loadLegacyPiModule(entry)) as {
+			schema: { safeParse: (input: unknown) => { success: boolean } };
+		};
+		expect(loaded.schema.safeParse({ name: "ok" }).success).toBe(true);
+		expect(loaded.schema.safeParse({}).success).toBe(false);
 	});
 });

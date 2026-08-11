@@ -63,6 +63,7 @@ function urlOf(input: string | URL | Request): string {
 
 function makeConfig(discoverProject: GoogleOAuthFlowConfig["discoverProject"]): GoogleOAuthFlowConfig {
 	return {
+		provider: "google-gemini-cli",
 		clientId: "client-id",
 		clientSecret: "client-secret",
 		authUrl: "https://accounts.example.com/o/oauth2/auth",

@@ -4,14 +4,32 @@
  * Automatically detects OAuth requirements from MCP server responses
  * and extracts authentication endpoints.
  */
+import * as AIError from "@oh-my-pi/pi-ai/error";
 import type { FetchImpl } from "@oh-my-pi/pi-ai/types";
+import { withTimeoutSignal } from "../utils/fetch-timeout";
+
+/** Per-request abort deadline for each OAuth discovery metadata fetch. */
+const DISCOVERY_FETCH_TIMEOUT_MS = 10_000;
 
 export interface OAuthEndpoints {
 	authorizationUrl: string;
 	tokenUrl: string;
 	clientId?: string;
+	/** Dynamic client registration endpoint advertised by the authorization server. */
+	registrationUrl?: string;
 	scopes?: string;
 	resource?: string;
+}
+
+function readRegistrationUrl(metadata: Record<string, unknown>): string | undefined {
+	const value =
+		metadata.registration_endpoint ??
+		metadata.registrationEndpoint ??
+		metadata.registration_url ??
+		metadata.registrationUrl ??
+		metadata.registration_uri ??
+		metadata.registrationUri;
+	return typeof value === "string" && value.trim() !== "" ? value : undefined;
 }
 
 export interface AuthDetectionResult {
@@ -20,11 +38,19 @@ export interface AuthDetectionResult {
 	oauth?: OAuthEndpoints;
 	authServerUrl?: string;
 	resourceMetadataUrl?: string;
+	/**
+	 * OAuth scopes advertised by the challenge (RFC 6750 `scope=` on
+	 * `WWW-Authenticate`) or by protected-resource metadata. Passed through
+	 * `discoverOAuthEndpoints` as `protectedScopes` so the eventual
+	 * authorization request carries them even when the auth-server metadata
+	 * document itself omits `scopes_supported`.
+	 */
+	scopes?: string;
 	message?: string;
 }
 
-function parseMcpAuthServerUrl(errorMessage: string, serverUrl?: string): string | undefined {
-	const match = errorMessage.match(/Mcp-Auth-Server:\s*([^;\]\s]+)/i);
+export function extractMcpAuthServerUrl(error: Error, serverUrl?: string): string | undefined {
+	const match = error.message.match(/Mcp-Auth-Server:\s*([^;\]\s]+)/i);
 	if (!match?.[1]) return undefined;
 
 	try {
@@ -34,30 +60,23 @@ function parseMcpAuthServerUrl(errorMessage: string, serverUrl?: string): string
 	}
 }
 
-export function extractMcpAuthServerUrl(error: Error, serverUrl?: string): string | undefined {
-	return parseMcpAuthServerUrl(error.message, serverUrl);
-}
-
 /**
- * Detect if an error indicates authentication is required.
- * Checks for common auth error patterns.
+ * Pull the `scope`/`scopes` parameter out of a `WWW-Authenticate` challenge
+ * embedded in the error message. RFC 6750 lets servers advertise the missing
+ * scopes when they reject a bearer token with `insufficient_scope`, and RFC
+ * 8414-adjacent MCP gateways sometimes list the required scopes there rather
+ * than in `scopes_supported`. Returns the raw space-separated value, or
+ * `undefined` when the challenge does not carry one.
  */
-export function detectAuthError(error: Error): boolean {
-	const errorMsg = error.message.toLowerCase();
-
-	// Check for HTTP auth status codes
-	if (
-		errorMsg.includes("401") ||
-		errorMsg.includes("403") ||
-		errorMsg.includes("unauthorized") ||
-		errorMsg.includes("forbidden") ||
-		errorMsg.includes("authentication required") ||
-		errorMsg.includes("authentication failed")
-	) {
-		return true;
+export function extractOAuthChallengeScopes(error: Error): string | undefined {
+	const entries = error.message.matchAll(/([a-zA-Z_][a-zA-Z0-9_-]*)="([^"]+)"/g);
+	for (const [, rawKey, value] of entries) {
+		const key = rawKey.toLowerCase();
+		if ((key === "scope" || key === "scopes") && value.trim() !== "") {
+			return value;
+		}
 	}
-
-	return false;
+	return undefined;
 }
 
 /**
@@ -100,7 +119,7 @@ export function extractOAuthEndpoints(error: Error): OAuthEndpoints | null {
 			(obj.resource_uri as string | undefined) ||
 			(obj.resourceUri as string | undefined);
 
-		return { authorizationUrl, tokenUrl, clientId, scopes, resource };
+		return { authorizationUrl, tokenUrl, registrationUrl: readRegistrationUrl(obj), clientId, scopes, resource };
 	};
 
 	const clientIdFromAuthUrl = (authorizationUrl: string): string | undefined => {
@@ -173,6 +192,10 @@ export function extractOAuthEndpoints(error: Error): OAuthEndpoints | null {
 			return {
 				authorizationUrl,
 				tokenUrl,
+				registrationUrl:
+					challengeValues.get("registration_endpoint") ||
+					challengeValues.get("registration_url") ||
+					challengeValues.get("registration_uri"),
 				clientId: challengeValues.get("client_id") || clientIdFromAuthUrl(authorizationUrl),
 				scopes: challengeValues.get("scope") || challengeValues.get("scopes") || scopeFromAuthUrl(authorizationUrl),
 				resource,
@@ -200,7 +223,8 @@ export function extractOAuthEndpoints(error: Error): OAuthEndpoints | null {
  * Returns structured info about what auth is needed.
  */
 export function analyzeAuthError(error: Error, serverUrl?: string): AuthDetectionResult {
-	if (!detectAuthError(error)) {
+	// No auth required unless the error carries an HTTP auth status / auth-failure phrasing.
+	if (!AIError.is(AIError.classify(error), AIError.Flag.AuthFailed)) {
 		return { requiresAuth: false };
 	}
 
@@ -211,14 +235,22 @@ export function analyzeAuthError(error: Error, serverUrl?: string): AuthDetectio
 
 	// Try to extract OAuth endpoints
 	const oauth = extractOAuthEndpoints(error);
+	const challengeScopes = extractOAuthChallengeScopes(error);
 
 	if (oauth) {
+		const mergedScopes = oauth.scopes ?? challengeScopes;
+		// Callers on the JSON-error-body path use `authResult.oauth` directly and
+		// skip `discoverOAuthEndpoints`; without merging the challenge scope back
+		// into the returned endpoints, `/mcp reauth` and `/mcp add` still mint a
+		// scope-less grant when the challenge advertised `scope="…"`.
+		const mergedOAuth: OAuthEndpoints = mergedScopes === oauth.scopes ? oauth : { ...oauth, scopes: mergedScopes };
 		return {
 			requiresAuth: true,
 			authType: "oauth",
-			oauth,
+			oauth: mergedOAuth,
 			authServerUrl,
 			resourceMetadataUrl,
+			scopes: mergedScopes,
 			message: "Server requires OAuth authentication. Launching authorization flow...",
 		};
 	}
@@ -236,6 +268,7 @@ export function analyzeAuthError(error: Error, serverUrl?: string): AuthDetectio
 			authType: "apikey",
 			authServerUrl,
 			resourceMetadataUrl,
+			scopes: challengeScopes,
 			message: "Server requires API key authentication.",
 		};
 	}
@@ -246,8 +279,93 @@ export function analyzeAuthError(error: Error, serverUrl?: string): AuthDetectio
 		authType: "unknown",
 		authServerUrl,
 		resourceMetadataUrl,
+		scopes: challengeScopes,
 		message: "Server requires authentication but type could not be determined.",
 	};
+}
+
+/**
+ * Normalize an OAuth issuer URL for RFC 8414 §3.3 comparison: lowercase
+ * scheme/host (URL parser already does this), drop fragment/query, strip a
+ * trailing slash on the path. The path is otherwise case-sensitive.
+ */
+function normalizeIssuerUrl(value: string): string | undefined {
+	try {
+		const u = new URL(value);
+		const path = u.pathname.replace(/\/+$/, "");
+		return `${u.protocol}//${u.host}${path}`;
+	} catch {
+		return undefined;
+	}
+}
+
+/**
+ * RFC 8414 §3.3: an authorization-server metadata document's `issuer` MUST
+ * equal the URL the client used to construct the metadata URL. When a server
+ * hosts metadata for several issuers under one origin (Plane serves a root
+ * issuer `https://mcp.plane.so/` at `/.well-known/oauth-authorization-server`
+ * *and* a path-scoped issuer `https://mcp.plane.so/http` at the path-prefixed
+ * well-known URL), accepting the first hit silently routes the grant to the
+ * wrong `/authorize` endpoint and produces opaque `server_error` redirects.
+ *
+ * Returns true when the metadata is safe to use:
+ *   - the document has no `issuer` field (nonstandard / legacy servers — keep
+ *     today's permissive behavior), or
+ *   - the issuer matches `baseUrl` after trailing-slash normalization.
+ */
+function issuerMatchesBase(metadataIssuer: unknown, baseUrl: string): boolean {
+	if (typeof metadataIssuer !== "string" || !metadataIssuer.trim()) {
+		return true;
+	}
+	const normalizedIssuer = normalizeIssuerUrl(metadataIssuer);
+	const normalizedBase = normalizeIssuerUrl(baseUrl);
+	if (!normalizedIssuer || !normalizedBase) return true;
+	return normalizedIssuer === normalizedBase;
+}
+
+/**
+ * Read space-separated OAuth scopes off a metadata document. Accepts either
+ * an array (RFC 8414 `scopes_supported`) or a space-separated string
+ * (`scopes` / `scope`), matching what MCP gateways emit under
+ * `/.well-known/oauth-*`.
+ */
+function readMetadataScopes(metadata: Record<string, unknown>): string | undefined {
+	if (Array.isArray(metadata.scopes_supported)) {
+		const joined = metadata.scopes_supported.filter((scope): scope is string => typeof scope === "string").join(" ");
+		if (joined) return joined;
+	}
+	if (typeof metadata.scopes === "string" && metadata.scopes.trim() !== "") return metadata.scopes;
+	if (typeof metadata.scope === "string" && metadata.scope.trim() !== "") return metadata.scope;
+	return undefined;
+}
+
+/**
+ * Fetch the RFC 9728 protected-resource metadata document at
+ * {@link resourceMetadataUrl} and return any scopes it advertises. Used by
+ * `/mcp add` / `/mcp reauth` on the JSON-error-body path, where the caller
+ * already holds usable OAuth endpoints but the required scopes live only in
+ * the advertised protected-resource metadata — a case `discoverOAuthEndpoints`
+ * normally handles but that path is skipped when the body carried endpoints.
+ * Returns `undefined` on any error or when no scopes are advertised.
+ */
+export async function fetchResourceMetadataScopes(
+	resourceMetadataUrl: string,
+	opts?: { fetch?: FetchImpl; signal?: AbortSignal },
+): Promise<string | undefined> {
+	const fetchImpl: FetchImpl = opts?.fetch ?? fetch;
+	try {
+		const resp = await fetchImpl(resourceMetadataUrl, {
+			method: "GET",
+			headers: { Accept: "application/json" },
+			redirect: "follow",
+			signal: withTimeoutSignal(DISCOVERY_FETCH_TIMEOUT_MS, opts?.signal),
+		});
+		if (!resp.ok) return undefined;
+		const meta = (await resp.json()) as Record<string, unknown>;
+		return readMetadataScopes(meta);
+	} catch {
+		return undefined;
+	}
 }
 
 /**
@@ -258,7 +376,7 @@ export async function discoverOAuthEndpoints(
 	serverUrl: string,
 	authServerUrl?: string,
 	resourceMetadataUrl?: string,
-	opts?: { fetch?: FetchImpl; protectedResource?: string },
+	opts?: { fetch?: FetchImpl; protectedResource?: string; protectedScopes?: string; signal?: AbortSignal },
 ): Promise<OAuthEndpoints | null> {
 	const fetchImpl: FetchImpl = opts?.fetch ?? fetch;
 	const wellKnownPaths = [
@@ -269,10 +387,16 @@ export async function discoverOAuthEndpoints(
 		"/.mcp/auth",
 		"/authorize", // Some MCP servers expose OAuth config here
 	];
-	const urlsToQuery: string[] = [];
+	const urlsToQuery: Array<{ url: string; issuerCandidate: boolean }> = [];
 	const visitedAuthServers = new Set<string>();
 
 	let protectedResource = opts?.protectedResource;
+	let protectedScopes = opts?.protectedScopes;
+	const addDiscoveryBase = (url: string | undefined, issuerCandidate: boolean): void => {
+		if (!url || visitedAuthServers.has(url)) return;
+		urlsToQuery.push({ url, issuerCandidate });
+		visitedAuthServers.add(url);
+	};
 
 	// Step 1: If a resource_metadata URL was provided, fetch it to discover auth servers.
 	// This follows the RFC 9728 chain: resource_metadata → authorization_servers.
@@ -283,9 +407,11 @@ export async function discoverOAuthEndpoints(
 				method: "GET",
 				headers: { Accept: "application/json" },
 				redirect: "follow",
+				signal: withTimeoutSignal(DISCOVERY_FETCH_TIMEOUT_MS, opts?.signal),
 			});
 			if (metaResp.ok) {
 				const meta = (await metaResp.json()) as Record<string, unknown>;
+				protectedScopes = readMetadataScopes(meta) ?? protectedScopes;
 				if (typeof meta.resource === "string" && meta.resource.trim() !== "") {
 					protectedResource = meta.resource;
 				}
@@ -293,10 +419,7 @@ export async function discoverOAuthEndpoints(
 					? meta.authorization_servers.filter((entry): entry is string => typeof entry === "string")
 					: [];
 				for (const s of authServers) {
-					if (!visitedAuthServers.has(s)) {
-						urlsToQuery.push(s);
-						visitedAuthServers.add(s);
-					}
+					addDiscoveryBase(s, true);
 				}
 			}
 		} catch {
@@ -304,24 +427,18 @@ export async function discoverOAuthEndpoints(
 		}
 	}
 
-	// Step 2: Add explicit authServerUrl and serverUrl (deduped against visited)
-	for (const url of [authServerUrl, serverUrl].filter((v): v is string => Boolean(v))) {
-		if (!visitedAuthServers.has(url)) {
-			urlsToQuery.push(url);
-			visitedAuthServers.add(url);
-		}
-	}
+	// Step 2: Add explicit authServerUrl as an issuer candidate, then the resource server fallback.
+	addDiscoveryBase(authServerUrl, true);
+	addDiscoveryBase(serverUrl, false);
 
 	const findEndpoints = (metadata: Record<string, unknown>): OAuthEndpoints | null => {
 		if (metadata.authorization_endpoint && metadata.token_endpoint) {
-			const scopesSupported = Array.isArray(metadata.scopes_supported)
-				? metadata.scopes_supported.filter((scope): scope is string => typeof scope === "string").join(" ")
-				: undefined;
 			const resource = typeof metadata.resource === "string" ? metadata.resource : protectedResource;
 
 			return {
 				authorizationUrl: String(metadata.authorization_endpoint),
 				tokenUrl: String(metadata.token_endpoint),
+				registrationUrl: readRegistrationUrl(metadata),
 				clientId:
 					typeof metadata.client_id === "string"
 						? metadata.client_id
@@ -332,13 +449,7 @@ export async function discoverOAuthEndpoints(
 								: typeof metadata.public_client_id === "string"
 									? metadata.public_client_id
 									: undefined,
-				scopes:
-					scopesSupported ||
-					(typeof metadata.scopes === "string"
-						? metadata.scopes
-						: typeof metadata.scope === "string"
-							? metadata.scope
-							: undefined),
+				scopes: readMetadataScopes(metadata) ?? protectedScopes,
 				resource,
 			};
 		}
@@ -351,6 +462,7 @@ export async function discoverOAuthEndpoints(
 				return {
 					authorizationUrl: oauthData.authorization_url || String(oauthData.authorizationUrl),
 					tokenUrl: oauthData.token_url || String(oauthData.tokenUrl),
+					registrationUrl: readRegistrationUrl(oauthData),
 					clientId:
 						typeof oauthData.client_id === "string"
 							? oauthData.client_id
@@ -361,12 +473,7 @@ export async function discoverOAuthEndpoints(
 									: typeof oauthData.public_client_id === "string"
 										? oauthData.public_client_id
 										: undefined,
-					scopes:
-						typeof oauthData.scopes === "string"
-							? oauthData.scopes
-							: typeof oauthData.scope === "string"
-								? oauthData.scope
-								: undefined,
+					scopes: readMetadataScopes(oauthData) ?? protectedScopes,
 					resource,
 				};
 			}
@@ -375,21 +482,32 @@ export async function discoverOAuthEndpoints(
 		return null;
 	};
 
-	for (const baseUrl of urlsToQuery) {
+	for (const base of urlsToQuery) {
 		for (const path of wellKnownPaths) {
 			// Try each well-known path at both the absolute origin and relative
-			const urlsToTry = buildWellKnownUrls(path, baseUrl);
+			const urlsToTry = buildWellKnownUrls(path, base.url);
 			for (const url of urlsToTry) {
 				try {
 					const response = await fetchImpl(url.toString(), {
 						method: "GET",
 						headers: { Accept: "application/json" },
 						redirect: "follow",
+						signal: withTimeoutSignal(DISCOVERY_FETCH_TIMEOUT_MS, opts?.signal),
 					});
 
 					if (response.ok) {
 						const metadata = (await response.json()) as Record<string, unknown>;
-						const endpoints = findEndpoints(metadata);
+						// Authorization-server / OpenID Connect metadata documents carry an
+						// `issuer` field that MUST equal the queried base URL only when that
+						// URL came from an auth-server source (RFC 8414 §3.3, OIDC Discovery
+						// §4.3). Resource-server fallback probes can legitimately return
+						// cross-host issuer metadata.
+						const requireIssuerMatch =
+							base.issuerCandidate &&
+							(path === "/.well-known/oauth-authorization-server" ||
+								path === "/.well-known/openid-configuration");
+						const issuerOk = requireIssuerMatch ? issuerMatchesBase(metadata.issuer, base.url) : true;
+						const endpoints = issuerOk ? findEndpoints(metadata) : null;
 						if (endpoints) return endpoints;
 
 						if (path === "/.well-known/oauth-protected-resource") {
@@ -409,6 +527,8 @@ export async function discoverOAuthEndpoints(
 								const discovered = await discoverOAuthEndpoints(serverUrl, discoveredAuthServer, undefined, {
 									fetch: fetchImpl,
 									protectedResource: discoveredProtectedResource,
+									protectedScopes: readMetadataScopes(metadata) ?? protectedScopes,
+									signal: opts?.signal,
 								});
 								if (discovered) return discovered;
 							}

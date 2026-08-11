@@ -11,8 +11,10 @@ to short-circuit the network.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
+import time
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
@@ -23,6 +25,7 @@ from robomp.git_ops import GitCommandError, HeadDriftError, PushResult
 from robomp.github_client import (
     CommentInfo,
     GitHubError,
+    IssueIndexEntry,
     IssueInfo,
     IssueSummary,
     PullRequestFileInfo,
@@ -118,6 +121,8 @@ class GitHubProxyClient:
             timeout=self._timeout,
         )
 
+    _TRANSIENT_RETRY_DELAYS = (1.0, 3.0, 10.0)
+
     async def _request(
         self,
         method: str,
@@ -127,30 +132,38 @@ class GitHubProxyClient:
         json_body: Mapping[str, Any] | None = None,
     ) -> Any:
         body_bytes = b"" if json_body is None else json.dumps(json_body).encode("utf-8")
-        async with self._async_client() as client:
-            # Build the request first so httpx canonicalizes the URL once;
-            # we then sign against the encoded query string the wire will
-            # carry. Signing before this point would mean re-implementing
-            # httpx's param encoding, with a high risk of byte-level drift
-            # from the server's `request.url.query`.
-            req = client.build_request(
-                method,
-                path,
-                params=params,
-                content=body_bytes if json_body is not None else None,
-            )
-            target = req.url.path
-            if req.url.query:
-                target = f"{target}?{req.url.query.decode('ascii')}"
-            req.headers.update(_signed_headers(method, target, body_bytes, self._key))
-            if json_body is not None:
-                req.headers["Content-Type"] = "application/json"
-            resp = await client.send(req)
-        if resp.status_code >= 400:
-            raise _decode_error(resp)
-        if resp.status_code == 204 or not resp.content:
-            return None
-        return resp.json()
+        last_exc: Exception | None = None
+        for attempt, delay in enumerate((*self._TRANSIENT_RETRY_DELAYS, None)):
+            try:
+                async with self._async_client() as client:
+                    req = client.build_request(
+                        method,
+                        path,
+                        params=params,
+                        content=body_bytes if json_body is not None else None,
+                    )
+                    target = req.url.path
+                    if req.url.query:
+                        target = f"{target}?{req.url.query.decode('ascii')}"
+                    req.headers.update(_signed_headers(method, target, body_bytes, self._key))
+                    if json_body is not None:
+                        req.headers["Content-Type"] = "application/json"
+                    resp = await client.send(req)
+                if resp.status_code >= 400:
+                    raise _decode_error(resp)
+                if resp.status_code == 204 or not resp.content:
+                    return None
+                return resp.json()
+            except (httpx.ConnectError, httpx.TimeoutException) as exc:
+                last_exc = exc
+                if delay is None:
+                    break
+                log.warning(
+                    "proxy client transient error, retrying",
+                    extra={"method": method, "path": path, "attempt": attempt + 1, "delay": delay, "error": str(exc)},
+                )
+                await asyncio.sleep(delay)
+        raise last_exc  # type: ignore[misc]
 
     # ---- reads ----
     async def get_repo(self, repo: str) -> RepoInfo:
@@ -191,6 +204,28 @@ class GitHubProxyClient:
             params={"repo": repo, "state": state, "limit": limit},
         )
         return [_issue_summary_from(item) for item in (data.get("items") if isinstance(data, dict) else None) or []]
+
+    async def search_issues(self, repo: str, query: str, *, limit: int = 10) -> list[IssueSummary]:
+        data = await self._request(
+            "GET",
+            "/gh/v1/search_issues",
+            params={"repo": repo, "q": query, "limit": limit},
+        )
+        return [_issue_summary_from(item) for item in (data.get("items") if isinstance(data, dict) else None) or []]
+
+    async def list_issue_index_entries(
+        self,
+        repo: str,
+        *,
+        since: str | None = None,
+        page: int = 1,
+        per_page: int = 100,
+    ) -> list[IssueIndexEntry]:
+        params: dict[str, Any] = {"repo": repo, "page": page, "per_page": per_page}
+        if since:
+            params["since"] = since
+        data = await self._request("GET", "/gh/v1/issue_index_entries", params=params)
+        return [_index_entry_from(item) for item in (data.get("items") if isinstance(data, dict) else None) or []]
 
     async def list_comments(self, repo: str, number: int) -> list[CommentInfo]:
         data = await self._request("GET", "/gh/v1/comments", params={"repo": repo, "number": number})
@@ -372,18 +407,33 @@ class ProxyGitTransport:
             timeout=self._timeout,
         )
 
+    _TRANSIENT_RETRY_DELAYS = (2.0, 5.0, 15.0)
+
     def _post(self, path: str, body: Mapping[str, Any]) -> Mapping[str, Any]:
         body_bytes = json.dumps(body).encode("utf-8")
-        headers = _signed_headers("POST", path, body_bytes, self._key)
-        headers["Content-Type"] = "application/json"
-        with self._client() as client:
-            resp = client.request("POST", path, content=body_bytes, headers=headers)
-        if resp.status_code >= 400:
-            raise _decode_error(resp)
-        if resp.status_code == 204 or not resp.content:
-            return {}
-        data = resp.json()
-        return data if isinstance(data, dict) else {}
+        last_exc: Exception | None = None
+        for attempt, delay in enumerate((*self._TRANSIENT_RETRY_DELAYS, None)):
+            try:
+                headers = _signed_headers("POST", path, body_bytes, self._key)
+                headers["Content-Type"] = "application/json"
+                with self._client() as client:
+                    resp = client.request("POST", path, content=body_bytes, headers=headers)
+                if resp.status_code >= 400:
+                    raise _decode_error(resp)
+                if resp.status_code == 204 or not resp.content:
+                    return {}
+                data = resp.json()
+                return data if isinstance(data, dict) else {}
+            except (httpx.ConnectError, httpx.TimeoutException) as exc:
+                last_exc = exc
+                if delay is None:
+                    break
+                log.warning(
+                    "proxy transport transient error, retrying",
+                    extra={"path": path, "attempt": attempt + 1, "delay": delay, "error": str(exc)},
+                )
+                time.sleep(delay)
+        raise last_exc  # type: ignore[misc]
 
     def clone_pool(self, *, repo: str, clone_url: str, default_branch: str, target: Path) -> None:
         del target  # remote-resolved on the proxy side from `repo`
@@ -470,6 +520,29 @@ def _issue_summary_from(data: Any) -> IssueSummary:
         comments=int(data.get("comments") or 0),
         updated_at=str(data.get("updated_at") or ""),
         created_at=str(data.get("created_at") or ""),
+        html_url=str(data.get("html_url") or ""),
+        state_reason=str(data.get("state_reason") or ""),
+        is_pull_request=bool(data.get("is_pull_request")),
+    )
+
+
+def _index_entry_from(data: Any) -> IssueIndexEntry:
+    if not isinstance(data, dict):
+        raise GitHubError(500, "proxy returned malformed issue index payload")
+    return IssueIndexEntry(
+        repo=str(data["repo"]),
+        number=int(data["number"]),
+        is_pull_request=bool(data.get("is_pull_request")),
+        title=str(data.get("title") or ""),
+        body=str(data.get("body") or ""),
+        state=str(data.get("state") or ""),
+        state_reason=str(data.get("state_reason") or ""),
+        merged_at=str(data.get("merged_at") or ""),
+        author=str(data.get("author") or ""),
+        labels=tuple(str(x) for x in (data.get("labels") or [])),
+        comments=int(data.get("comments") or 0),
+        created_at=str(data.get("created_at") or ""),
+        updated_at=str(data.get("updated_at") or ""),
         html_url=str(data.get("html_url") or ""),
     )
 

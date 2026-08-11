@@ -2,10 +2,11 @@ import { afterEach, describe, expect, test, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import type { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { AgentDashboard } from "@oh-my-pi/pi-coding-agent/modes/components/agent-dashboard";
 import { initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
 import * as discovery from "@oh-my-pi/pi-coding-agent/task/discovery";
+import { removeWithRetries } from "@oh-my-pi/pi-utils";
 
 const ANSI_PATTERN = /\x1b\[[0-?]*[ -/]*[@-~]/g;
 const tempDirs: string[] = [];
@@ -36,8 +37,8 @@ function stubStdoutGeometry(cols: number): { setRows(n: number): void; restore()
 	const rowsDesc = Object.getOwnPropertyDescriptor(process.stdout, "rows");
 	const colsDesc = Object.getOwnPropertyDescriptor(process.stdout, "columns");
 	let rows = 24;
-	Object.defineProperty(process.stdout, "rows", { configurable: true, get: () => rows });
-	Object.defineProperty(process.stdout, "columns", { configurable: true, get: () => cols });
+	Object.defineProperty(process.stdout, "rows", { configurable: true, get: () => rows, set: () => {} });
+	Object.defineProperty(process.stdout, "columns", { configurable: true, get: () => cols, set: () => {} });
 	const restoreOne = (key: "rows" | "columns", desc: PropertyDescriptor | undefined) => {
 		if (desc) Object.defineProperty(process.stdout, key, desc);
 		else Object.defineProperty(process.stdout, key, { configurable: true, value: undefined, writable: true });
@@ -55,7 +56,7 @@ function stubStdoutGeometry(cols: number): { setRows(n: number): void; restore()
 
 afterEach(async () => {
 	vi.restoreAllMocks();
-	await Promise.all(tempDirs.splice(0).map(dir => fs.rm(dir, { recursive: true, force: true })));
+	await Promise.all(tempDirs.splice(0).map(dir => removeWithRetries(dir)));
 });
 
 describe("AgentDashboard create editor", () => {
@@ -233,5 +234,21 @@ describe("AgentDashboard tab navigation", () => {
 		} finally {
 			geo.restore();
 		}
+	});
+});
+
+describe("AgentDashboard prewalk", () => {
+	test("shows the bundled task prewalk default when task.prewalk is enabled", async () => {
+		await initTheme(false);
+		vi.spyOn(discovery, "discoverAgents").mockResolvedValue({
+			projectAgentsDir: null,
+			agents: [{ name: "task", description: "Generic task agent", systemPrompt: "", source: "bundled" }],
+		});
+		const settings = Settings.isolated({ "task.prewalk": true });
+		const dashboard = await AgentDashboard.create(await makeTempCwd(), settings, 24, {});
+		const rendered = dashboard.render(100).join("\n").replace(ANSI_PATTERN, "");
+
+		expect(rendered).toContain("Prewalk: on");
+		expect(rendered).not.toContain("Prewalk: off");
 	});
 });

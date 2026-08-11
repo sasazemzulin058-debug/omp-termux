@@ -50,10 +50,11 @@ function getMessageText(message: AgentMessage): string {
 	if (!("content" in message)) return "";
 	if (typeof message.content === "string") return message.content;
 	if (!Array.isArray(message.content)) return "";
-	return message.content
-		.filter(isTextContentBlock)
-		.map(content => content.text)
-		.join("\n");
+	const text: string[] = [];
+	for (const content of message.content) {
+		if (isTextContentBlock(content)) text.push(content.text);
+	}
+	return text.join("\n");
 }
 
 function createAssistantResponse(text: string) {
@@ -133,8 +134,13 @@ describe("AgentSession approved-plan reference re-injection after compaction (is
 			resolve: (call: ObservedPromptCall) => void;
 		}> = [];
 
-		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
-		if (!model) throw new Error("Expected claude-sonnet-4-5 model to exist");
+		const bundled = getBundledModel("anthropic", "claude-sonnet-4-5");
+		if (!bundled) throw new Error("Expected claude-sonnet-4-5 model to exist");
+		// Pin the context window so the fixed 191k high-usage turn stays above the
+		// compaction threshold across catalog regenerations: claude-sonnet-4-5's
+		// bundled window grew to 1M, which a 191k turn no longer trips. Mirrors
+		// agent-session-eager-compaction / -auto-compaction-queue.
+		const model = { ...bundled, contextWindow: 200_000, maxTokens: 64_000 };
 
 		const authStorage = await AuthStorage.create(path.join(tempDir.path(), `testauth-${cleanups.length}.db`));
 		authStorage.setRuntimeApiKey("anthropic", "test-key");
@@ -203,6 +209,29 @@ describe("AgentSession approved-plan reference re-injection after compaction (is
 		fs.writeFileSync(resolved, content);
 	}
 
+	/**
+	 * Post-compaction auto-continuation only runs while real work remains
+	 * (#5715): a terminal text answer with no queued work or active goal no
+	 * longer opens a synthetic primary turn. Give the session an active goal so
+	 * the continuation — the vehicle this regression rides on — still fires.
+	 */
+	function activateOngoingGoal(session: AgentSession, id: string): void {
+		const now = Date.now();
+		session.setGoalModeState({
+			enabled: true,
+			mode: "active",
+			goal: {
+				id,
+				objective: "finish the ongoing work",
+				status: "active",
+				tokensUsed: 0,
+				timeUsedSeconds: 0,
+				createdAt: now,
+				updatedAt: now,
+			},
+		});
+	}
+
 	it("re-injects the approved plan reference on the auto-continuation turn", async () => {
 		const { session, sessionManager, observedCalls, waitForCall } = await createHarness();
 
@@ -215,6 +244,7 @@ describe("AgentSession approved-plan reference re-injection after compaction (is
 		session.setPlanReferencePath(planUrl);
 		session.markPlanReferenceSent();
 
+		activateOngoingGoal(session, "plan-ref-context-full");
 		stubCompaction();
 
 		// First executor turn: reference already sent, so it is NOT re-delivered here.
@@ -228,9 +258,10 @@ describe("AgentSession approved-plan reference re-injection after compaction (is
 		emitHighUsageTurn(session);
 		const continuation = await waitForCall(call => call.messageTexts.some(text => text.includes(CONTINUE_MARKER)));
 
-		// The post-compaction continuation MUST carry the plan reference again.
-		expect(continuation.messageTexts.some(text => text.includes(planMarker))).toBe(true);
-		expect(continuation.messageTexts.some(text => text.includes(`<plan path="${planUrl}">`))).toBe(true);
+		// The post-compaction continuation MUST carry the durable plan reference again.
+		expect(continuation.messageTexts.some(text => text.includes(planMarker))).toBe(false);
+		expect(continuation.messageTexts.some(text => text.includes(planUrl))).toBe(true);
+		expect(continuation.messageTexts.some(text => text.includes(`MUST read \`${planUrl}\``))).toBe(true);
 	});
 
 	it("re-injects the approved plan reference after snapcompact auto-compaction", async () => {
@@ -242,7 +273,7 @@ describe("AgentSession approved-plan reference re-injection after compaction (is
 
 		session.setPlanReferencePath(planUrl);
 		session.markPlanReferenceSent();
-
+		activateOngoingGoal(session, "plan-ref-snapcompact");
 		await session.prompt("continue executing the approved snapcompact plan");
 		const firstCall = observedCalls[0];
 		expect(firstCall).toBeDefined();
@@ -251,8 +282,9 @@ describe("AgentSession approved-plan reference re-injection after compaction (is
 		emitHighUsageTurn(session);
 		const continuation = await waitForCall(call => call.messageTexts.some(text => text.includes(CONTINUE_MARKER)));
 
-		expect(continuation.messageTexts.some(text => text.includes(planMarker))).toBe(true);
-		expect(continuation.messageTexts.some(text => text.includes(`<plan path="${planUrl}">`))).toBe(true);
+		expect(continuation.messageTexts.some(text => text.includes(planMarker))).toBe(false);
+		expect(continuation.messageTexts.some(text => text.includes(planUrl))).toBe(true);
+		expect(continuation.messageTexts.some(text => text.includes(`MUST read \`${planUrl}\``))).toBe(true);
 	});
 
 	// Blast-radius guard: clearing the flag on every compaction must NOT start
@@ -260,6 +292,7 @@ describe("AgentSession approved-plan reference re-injection after compaction (is
 	// default `local://PLAN.md` path has no file on disk.
 	it("does not inject a plan reference after compaction when no plan file exists", async () => {
 		const { session, waitForCall } = await createHarness();
+		activateOngoingGoal(session, "plan-ref-none");
 		stubCompaction();
 
 		await session.prompt("do some ordinary work");

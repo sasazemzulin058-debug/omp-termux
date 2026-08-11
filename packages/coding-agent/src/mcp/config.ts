@@ -9,7 +9,7 @@ import { mcpCapability } from "../capability/mcp";
 import type { SourceMeta } from "../capability/types";
 import type { MCPServer } from "../discovery";
 import { loadCapability } from "../discovery";
-import { readDisabledServers } from "./config-writer";
+import { readDisabledServers, readEnabledServers } from "./config-writer";
 import type { MCPServerConfig } from "./types";
 
 /** Options for loading MCP configs */
@@ -41,6 +41,7 @@ function convertToLegacyConfig(server: MCPServer): MCPServerConfig {
 	const shared = {
 		enabled: server.enabled,
 		timeout: server.timeout,
+		requestIdFormat: server.requestIdFormat,
 		auth: server.auth,
 		oauth: server.oauth,
 	};
@@ -53,6 +54,7 @@ function convertToLegacyConfig(server: MCPServer): MCPServerConfig {
 		};
 		if (server.args) config.args = server.args;
 		if (server.env) config.env = server.env;
+		if (server.envPolicy) config.envPolicy = server.envPolicy;
 		if (server.cwd) config.cwd = server.cwd;
 		return config;
 	}
@@ -64,6 +66,7 @@ function convertToLegacyConfig(server: MCPServer): MCPServerConfig {
 			url: server.url ?? "",
 		};
 		if (server.headers) config.headers = server.headers;
+		if (server.headerPolicy) config.headerPolicy = server.headerPolicy;
 		return config;
 	}
 
@@ -74,6 +77,7 @@ function convertToLegacyConfig(server: MCPServer): MCPServerConfig {
 			url: server.url ?? "",
 		};
 		if (server.headers) config.headers = server.headers;
+		if (server.headerPolicy) config.headerPolicy = server.headerPolicy;
 		return config;
 	}
 
@@ -97,25 +101,41 @@ export async function loadAllMCPConfigs(cwd: string, options?: LoadMCPConfigsOpt
 	const filterExa = options?.filterExa ?? true;
 	const filterBrowser = options?.filterBrowser ?? false;
 
-	// Load MCP servers via capability system
-	const result = await loadCapability<MCPServer>(mcpCapability.id, { cwd });
+	// Load user-level disable/force-enable lists. The denylist always wins; the
+	// allowlist overrides a non-writable source config's `enabled: false`.
+	const userPath = getMCPConfigPath("user", cwd);
+	const [disabledServers, forcedEnabled] = await Promise.all([
+		readDisabledServers(userPath).then(list => new Set(list)),
+		readEnabledServers(userPath).then(list => new Set(list)),
+	]);
 
-	// Filter out project-level configs if disabled
-	const servers = enableProjectConfig
-		? result.items
-		: result.items.filter(server => server._source.level !== "project");
+	// Scope exclusions drop entries entirely BEFORE deduplication: with project
+	// config disabled, a project entry must not shadow anything.
+	const includeServer = (server: MCPServer & { _source: SourceMeta }): boolean =>
+		enableProjectConfig || server._source.level !== "project";
 
-	// Load user-level disabled servers list
-	const disabledServers = new Set(await readDisabledServers(getMCPConfigPath("user", cwd)));
-	// Convert to legacy format and preserve source metadata
+	// Disabled servers are suppressed rather than dropped: they still own their
+	// name at key-level dedupe (a disabled project `foo` keeps a same-named,
+	// lower-priority user `foo` disabled), but never equivalence-shadow a
+	// differently-named enabled server — otherwise the disabled alias would be
+	// removed downstream and starve the surviving connection.
+	const suppressServer = (server: MCPServer & { _source: SourceMeta }): boolean => {
+		if (disabledServers.has(server.name)) return true;
+		if (server.enabled === false && !forcedEnabled.has(server.name)) return true;
+		return false;
+	};
+
+	const result = await loadCapability<MCPServer>(mcpCapability.id, {
+		cwd,
+		filter: includeServer,
+		suppress: suppressServer,
+	});
+
+	// Convert to legacy format and preserve source metadata.
 	let configs: Record<string, MCPServerConfig> = {};
 	let sources: Record<string, SourceMeta> = {};
-	for (const server of servers) {
-		const config = convertToLegacyConfig(server);
-		if (config.enabled === false || disabledServers.has(server.name)) {
-			continue;
-		}
-		configs[server.name] = config;
+	for (const server of result.items) {
+		configs[server.name] = convertToLegacyConfig(server);
 		sources[server.name] = server._source;
 	}
 

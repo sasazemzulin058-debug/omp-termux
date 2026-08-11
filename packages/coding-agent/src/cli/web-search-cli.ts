@@ -4,8 +4,10 @@
  * Handles `omp q`/`omp web-search` subcommands for testing web search providers.
  */
 
-import { APP_NAME } from "@oh-my-pi/pi-utils";
-import chalk from "chalk";
+import { APP_NAME, getProjectDir } from "@oh-my-pi/pi-utils";
+import chalk from "@oh-my-pi/pi-utils/chalk";
+import { applyProviderGlobalsFromSettings } from "../config/provider-globals";
+import { Settings } from "../config/settings";
 import { initTheme, theme } from "../modes/theme/theme";
 import { runSearchQuery, type SearchQueryParams } from "../web/search/index";
 import { SEARCH_PROVIDER_ORDER } from "../web/search/provider";
@@ -85,6 +87,9 @@ export async function runSearchCommand(cmd: SearchCommandArgs): Promise<void> {
 		process.exit(1);
 	}
 
+	const settings = await Settings.init({ cwd: getProjectDir() });
+	applyProviderGlobalsFromSettings(settings);
+
 	await initTheme();
 
 	const params: SearchQueryParams = {
@@ -120,13 +125,20 @@ ${chalk.bold("Arguments:")}
 
 ${chalk.bold("Options:")}
   --provider <name>   Provider: ${PROVIDERS.join(", ")}
-  --recency <value>   Recency filter (Brave/Perplexity): ${RECENCY_OPTIONS.join(", ")}
+  --recency <value>   Recency filter (when supported): ${RECENCY_OPTIONS.join(", ")}
   -l, --limit <n>     Max results to return
   --compact           Render condensed output
   -h, --help          Show this help
 
+${chalk.bold("Query directives:")}
+  site:/-site:  after:/before: (YYYY-MM-DD)  inurl:  intitle:  filetype:
+  "exact phrase"  -term  OR
+  Mapped to native provider filters where available, otherwise applied as a
+  lenient post-filter (a constraint matching nothing is relaxed, not fatal).
+
 ${chalk.bold("Examples:")}
   ${APP_NAME} q --provider=exa "what's the color of the sky"
   ${APP_NAME} q --provider=brave --recency=week "latest TypeScript 5.7 changes"
+  ${APP_NAME} q 'transformer scaling site:arxiv.org after:2024 -site:reddit.com'
 `);
 }

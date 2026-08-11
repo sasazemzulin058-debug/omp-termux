@@ -1,3 +1,5 @@
+import { mmrRerankIndices } from "@oh-my-pi/pi-natives";
+
 export interface MmrResult {
 	readonly content?: string;
 	readonly score?: number;
@@ -32,6 +34,34 @@ export function mmrRerank<T extends MmrResult>(
 	const sortedResults = results.slice().sort((left, right) => (right.score ?? 0) - (left.score ?? 0));
 	const first = sortedResults[0];
 	if (first === undefined) return [];
+
+	// Native batch kernel: one N-API crossing selects all indices. Only valid
+	// for the default Jaccard similarity; custom similarity functions stay in
+	// TS. Lone-surrogate contents also stay in TS: N-API converts them to
+	// U+FFFD, which would merge distinct tokens. NaN topK stays in TS so the
+	// pre-native contract (loop guard is false, first result still returned)
+	// is preserved.
+	if (
+		similarityFn === jaccardSimilarity &&
+		!Number.isNaN(limit) &&
+		sortedResults.every(result => (result.content ?? "").isWellFormed())
+	) {
+		// Pre-lowercase with JS semantics so contextual mappings (Final_Sigma:
+		// "ΟΣ" -> "ος") are applied before the context-insensitive native
+		// lowercase, which is idempotent on already-lowercased text.
+		const contents = sortedResults.map(result => (result.content ?? "").toLowerCase());
+		const scores = Float64Array.from(sortedResults, result => result.score ?? 0);
+		// Clamp before the u32 N-API boundary: Infinity or >= 2**32 would
+		// otherwise wrap (ToUint32) and silently return nothing.
+		const nativeLimit = Math.min(limit, sortedResults.length);
+		const picked = mmrRerankIndices(contents, scores, lambdaParam, nativeLimit);
+		const out: T[] = [];
+		for (const index of picked) {
+			const item = sortedResults[index];
+			if (item !== undefined) out.push(item);
+		}
+		return out;
+	}
 
 	const selected: T[] = [first];
 	const remaining = sortedResults.slice(1);

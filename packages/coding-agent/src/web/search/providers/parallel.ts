@@ -9,6 +9,7 @@ import {
 	parseParallelErrorResponse,
 	parseParallelSearchPayload,
 } from "../../parallel";
+import { formatQuery, parseSearchQuery, type StructuredQuery } from "../query";
 import { clampNumResults } from "../utils";
 import type { SearchParams } from "./base";
 import { SearchProvider } from "./base";
@@ -17,15 +18,53 @@ import { classifyProviderHttpError, toSearchSources, withHardTimeout } from "./u
 const DEFAULT_NUM_RESULTS = 10;
 const MAX_NUM_RESULTS = 40;
 
+/** Query-string caps for Parallel: natural-language objective, no field operators. */
+const PARALLEL_QUERY_SYNTAX = { phrases: true, negation: true, or: true } as const;
+
+/** Parallel `source_policy` (beta Search API): bare-host allow/deny lists + freshness floor. */
+interface ParallelSourcePolicy {
+	include_domains?: string[];
+	exclude_domains?: string[];
+	after_date?: string;
+}
+
+/** Site values may carry paths (`github.com/anthropics`); Parallel takes bare hosts. */
+function toHosts(sites: readonly string[]): string[] {
+	const hosts = new Set<string>();
+	for (const site of sites) {
+		const host = site.split("/", 1)[0];
+		if (host) hosts.add(host);
+	}
+	return [...hosts];
+}
+
+/**
+ * Map parsed `site:`/`-site:`/`after:` directives onto Parallel's
+ * `source_policy`. Per Parallel docs, `exclude_domains` is ignored when
+ * `include_domains` is set, so exclusions are only sent without an allow
+ * list (the central lenient filter enforces them regardless).
+ */
+function toSourcePolicy(parsed: StructuredQuery): ParallelSourcePolicy | undefined {
+	const policy: ParallelSourcePolicy = {};
+	const include = toHosts(parsed.sites);
+	const exclude = toHosts(parsed.excludedSites);
+	if (include.length) policy.include_domains = include;
+	else if (exclude.length) policy.exclude_domains = exclude;
+	if (parsed.after) policy.after_date = parsed.after;
+	return Object.keys(policy).length ? policy : undefined;
+}
+
 async function searchWithAuthStorage(
 	objective: string,
 	queries: string[],
 	params: {
 		signal?: AbortSignal;
+		timeoutMs?: number;
 		fetch?: FetchImpl;
 	},
 	authStorage: AuthStorage,
 	sessionId?: string,
+	sourcePolicy?: ParallelSourcePolicy,
 ): Promise<ParallelSearchResult> {
 	const apiKey = await authStorage.getApiKey("parallel", sessionId, { signal: params.signal });
 	if (!apiKey) {
@@ -57,8 +96,9 @@ async function searchWithAuthStorage(
 					excerpts: {
 						max_chars_per_result: 10_000,
 					},
+					...(sourcePolicy && { source_policy: sourcePolicy }),
 				}),
-				signal: withHardTimeout(params.signal),
+				signal: withHardTimeout(params.signal, params.timeoutMs),
 			});
 
 			if (!response.ok) {
@@ -77,23 +117,31 @@ export async function searchParallel(
 		query: string;
 		num_results?: number;
 		signal?: AbortSignal;
+		timeoutMs?: number;
 		fetch?: FetchImpl;
+		parsedQuery?: StructuredQuery;
 	},
 	authStorage: AuthStorage,
 	sessionId?: string,
 ): Promise<SearchResponse> {
 	const numResults = clampNumResults(params.num_results, DEFAULT_NUM_RESULTS, MAX_NUM_RESULTS);
+	const parsed = params.parsedQuery ?? parseSearchQuery(params.query);
+	// Back-compat: without directives the upstream request is byte-identical.
+	const query = parsed.hasDirectives ? formatQuery(parsed, PARALLEL_QUERY_SYNTAX) : params.query;
+	const sourcePolicy = parsed.hasDirectives ? toSourcePolicy(parsed) : undefined;
 
 	try {
 		const result = await searchWithAuthStorage(
-			params.query,
-			[params.query],
+			query,
+			[query],
 			{
 				signal: params.signal,
+				timeoutMs: params.timeoutMs,
 				fetch: params.fetch,
 			},
 			authStorage,
 			sessionId,
+			sourcePolicy,
 		);
 
 		return {
@@ -127,7 +175,9 @@ export class ParallelProvider extends SearchProvider {
 				query: params.query,
 				num_results: params.numSearchResults ?? params.limit,
 				signal: params.signal,
+				timeoutMs: params.timeoutMs,
 				fetch: params.fetch,
+				parsedQuery: params.parsedQuery,
 			},
 			params.authStorage,
 			params.sessionId,

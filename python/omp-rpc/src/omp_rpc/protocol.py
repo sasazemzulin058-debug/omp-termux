@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import base64
 import mimetypes
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Final, Literal, NotRequired, TypedDict, TypeAlias, cast
 
@@ -11,15 +11,19 @@ JsonValue: TypeAlias = JsonPrimitive | list["JsonValue"] | dict[str, "JsonValue"
 JsonObject: TypeAlias = dict[str, JsonValue]
 
 Attribution: TypeAlias = Literal["user", "agent"]
-Effort: TypeAlias = Literal["minimal", "low", "medium", "high", "xhigh"]
-ThinkingLevel: TypeAlias = Literal["off", "minimal", "low", "medium", "high", "xhigh"]
+Effort: TypeAlias = Literal["minimal", "low", "medium", "high", "xhigh", "max"]
+ThinkingLevel: TypeAlias = Literal[
+    "off", "minimal", "low", "medium", "high", "xhigh", "max"
+]
 StreamingBehavior: TypeAlias = Literal["steer", "followUp"]
 SteeringMode: TypeAlias = Literal["all", "one-at-a-time"]
 InterruptMode: TypeAlias = Literal["immediate", "wait"]
 StopReason: TypeAlias = Literal["stop", "length", "toolUse", "error", "aborted"]
 NotifyType: TypeAlias = Literal["info", "warning", "error"]
 WidgetPlacement: TypeAlias = Literal["aboveEditor", "belowEditor"]
-TodoStatus: TypeAlias = Literal["pending", "in_progress", "completed", "abandoned"]
+TodoStatus: TypeAlias = Literal[
+    "pending", "in_progress", "completed", "abandoned", "blocked"
+]
 ExtensionUiMethod: TypeAlias = Literal[
     "select",
     "confirm",
@@ -31,17 +35,30 @@ ExtensionUiMethod: TypeAlias = Literal[
     "setWidget",
     "setTitle",
     "set_editor_text",
+    "open_url",
 ]
 InteractiveExtensionUiMethod: TypeAlias = Literal[
     "select", "confirm", "input", "editor"
 ]
 PassiveExtensionUiMethod: TypeAlias = Literal[
-    "notify", "setStatus", "setWidget", "setTitle", "set_editor_text"
+    "notify",
+    "setStatus",
+    "setWidget",
+    "setTitle",
+    "set_editor_text",
+    "open_url",
 ]
 ValueExtensionUiMethod: TypeAlias = Literal["select", "input", "editor"]
 
 PASSIVE_EXTENSION_UI_METHODS: Final[frozenset[PassiveExtensionUiMethod]] = frozenset(
-    {"notify", "setStatus", "setWidget", "setTitle", "set_editor_text"}
+    {
+        "notify",
+        "setStatus",
+        "setWidget",
+        "setTitle",
+        "set_editor_text",
+        "open_url",
+    }
 )
 INTERACTIVE_EXTENSION_UI_METHODS: Final[frozenset[InteractiveExtensionUiMethod]] = (
     frozenset({"select", "confirm", "input", "editor"})
@@ -50,7 +67,7 @@ VALUE_EXTENSION_UI_METHODS: Final[frozenset[ValueExtensionUiMethod]] = frozenset
     {"select", "input", "editor"}
 )
 _EFFORT_VALUES: Final[frozenset[str]] = frozenset(
-    {"minimal", "low", "medium", "high", "xhigh"}
+    {"minimal", "low", "medium", "high", "xhigh", "max"}
 )
 _THINKING_LEVEL_VALUES: Final[frozenset[str]] = _EFFORT_VALUES | frozenset({"off"})
 _STEERING_MODE_VALUES: Final[frozenset[str]] = frozenset({"all", "one-at-a-time"})
@@ -63,7 +80,7 @@ _WIDGET_PLACEMENT_VALUES: Final[frozenset[str]] = frozenset(
     {"aboveEditor", "belowEditor"}
 )
 _TODO_STATUS_VALUES: Final[frozenset[str]] = frozenset(
-    {"pending", "in_progress", "completed", "abandoned"}
+    {"pending", "in_progress", "completed", "abandoned", "blocked"}
 )
 _EXTENSION_UI_METHOD_VALUES: Final[frozenset[str]] = frozenset(
     {
@@ -77,6 +94,7 @@ _EXTENSION_UI_METHOD_VALUES: Final[frozenset[str]] = frozenset(
         "setWidget",
         "setTitle",
         "set_editor_text",
+        "open_url",
     }
 )
 _AGENT_MESSAGE_ROLE_VALUES: Final[frozenset[str]] = frozenset(
@@ -115,10 +133,10 @@ _ASSISTANT_DONE_REASON_VALUES: Final[frozenset[str]] = frozenset(
 )
 _ASSISTANT_ERROR_REASON_VALUES: Final[frozenset[str]] = frozenset({"aborted", "error"})
 _AUTO_COMPACTION_REASON_VALUES: Final[frozenset[str]] = frozenset(
-    {"threshold", "overflow", "idle"}
+    {"threshold", "overflow", "idle", "incomplete"}
 )
 _AUTO_COMPACTION_ACTION_VALUES: Final[frozenset[str]] = frozenset(
-    {"context-full", "handoff"}
+    {"context-full", "handoff", "shake", "snapcompact"}
 )
 
 
@@ -179,6 +197,13 @@ def _require_str(payload: JsonObject, field: str) -> str:
     return value
 
 
+def _require_bool(payload: JsonObject, field: str) -> bool:
+    value = payload.get(field)
+    if not isinstance(value, bool):
+        raise ValueError(f"{field} must be a boolean")
+    return value
+
+
 def _optional_str(payload: JsonObject, field: str) -> str | None:
     value = payload.get(field)
     if value is None:
@@ -227,6 +252,15 @@ def _optional_int(payload: JsonObject, field: str) -> int | None:
     if isinstance(value, bool) or not isinstance(value, int):
         raise ValueError(f"{field} must be an integer")
     return value
+
+
+def _optional_float(payload: JsonObject, field: str) -> float | None:
+    value = payload.get(field)
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ValueError(f"{field} must be a number")
+    return float(value)
 
 
 def _tuple_of_strings(values: object, *, field: str) -> tuple[str, ...] | None:
@@ -743,6 +777,8 @@ class TodoItem:
     status: TodoStatus
     notes: str | None = None
     details: str | None = None
+    # What a `blocked` task is waiting on; None for all other statuses.
+    blocker: str | None = None
 
 
 @dataclass(slots=True, frozen=True)
@@ -750,6 +786,13 @@ class TodoPhase:
     id: str
     name: str
     tasks: tuple[TodoItem, ...]
+
+
+@dataclass(slots=True, frozen=True)
+class ContextUsage:
+    tokens: int
+    context_window: int
+    percent: float
 
 
 @dataclass(slots=True, frozen=True)
@@ -770,6 +813,10 @@ class SessionState:
     todo_phases: tuple[TodoPhase, ...] = ()
     system_prompt: tuple[str, ...] = ()
     dump_tools: tuple[ToolDescriptor, ...] = ()
+    fast_mode_enabled: bool = False
+    fast_mode_active: bool = False
+    tokens_per_second: float | None = None
+    context_usage: ContextUsage | None = None
 
 
 @dataclass(slots=True, frozen=True)
@@ -783,6 +830,12 @@ class BashResult:
     output_lines: int
     output_bytes: int
     artifact_id: str | None = None
+
+
+@dataclass(slots=True, frozen=True)
+class FastModeResult:
+    enabled: bool
+    active: bool
 
 
 @dataclass(slots=True, frozen=True)
@@ -849,7 +902,18 @@ class SessionStats:
 
 @dataclass(slots=True, frozen=True)
 class ReadyEvent:
+    protocol_version: int | None = None
+    supported_protocol_versions: tuple[int, ...] | None = None
+    max_frame_bytes: int | None = None
+    max_reassembled_frame_bytes: int | None = None
     type: Literal["ready"] = "ready"
+
+
+@dataclass(slots=True, frozen=True)
+class MessagesPage:
+    messages: tuple[AgentMessage, ...]
+    total_messages: int
+    next_cursor: str | None
 
 
 @dataclass(slots=True, frozen=True)
@@ -871,6 +935,9 @@ class ExtensionUiRequest:
     widget_lines: tuple[str, ...] | None = None
     widget_placement: WidgetPlacement | None = None
     text: str | None = None
+    url: str | None = None
+    launch_url: str | None = None
+    instructions: str | None = None
     type: Literal["extension_ui_request"] = "extension_ui_request"
 
     def is_passive(self) -> bool:
@@ -903,6 +970,8 @@ class AgentStartEvent:
 class AgentEndEvent:
     messages: tuple[AgentMessage, ...]
     type: Literal["agent_end"] = "agent_end"
+    message_count: int | None = field(default=None, kw_only=True)
+    is_terminal: bool | None = field(default=None, kw_only=True)
 
 
 @dataclass(slots=True, frozen=True)
@@ -965,14 +1034,14 @@ class ToolExecutionEndEvent:
 
 @dataclass(slots=True, frozen=True)
 class AutoCompactionStartEvent:
-    reason: Literal["threshold", "overflow", "idle"]
-    action: Literal["context-full", "handoff"]
+    reason: Literal["threshold", "overflow", "idle", "incomplete"]
+    action: Literal["context-full", "handoff", "shake", "snapcompact"]
     type: Literal["auto_compaction_start"] = "auto_compaction_start"
 
 
 @dataclass(slots=True, frozen=True)
 class AutoCompactionEndEvent:
-    action: Literal["context-full", "handoff"]
+    action: Literal["context-full", "handoff", "shake", "snapcompact"]
     result: CompactionResult | None
     aborted: bool
     will_retry: bool
@@ -1036,6 +1105,7 @@ class TodoAutoClearEvent:
 class UnknownNotification:
     payload: JsonObject
     type: Literal["unknown"] = "unknown"
+    parse_error: str | None = field(default=None, kw_only=True)
 
 
 RpcAgentEvent: TypeAlias = (
@@ -1142,7 +1212,10 @@ def _parse_thinking_config(payload: object) -> ThinkingConfig | None:
     if not isinstance(raw_efforts, list):
         raise ValueError("model.thinking.efforts must be a list")
     efforts: tuple[Effort, ...] = tuple(
-        cast(Effort, _require_literal(item, _EFFORT_VALUES, field="model.thinking.efforts[]"))
+        cast(
+            Effort,
+            _require_literal(item, _EFFORT_VALUES, field="model.thinking.efforts[]"),
+        )
         for item in raw_efforts
     )
     return ThinkingConfig(
@@ -1243,6 +1316,7 @@ def parse_todo_item(payload: JsonObject) -> TodoItem:
         ),
         notes=_optional_str(payload, "notes"),
         details=_optional_str(payload, "details"),
+        blocker=_optional_str(payload, "blocker"),
     )
 
 
@@ -1322,6 +1396,14 @@ def parse_session_state(payload: JsonObject) -> SessionState:
         ),
         system_prompt=_optional_str_list(payload, "systemPrompt"),
         dump_tools=dump_tools,
+        fast_mode_enabled=bool(payload.get("fastModeEnabled", False)),
+        fast_mode_active=bool(payload.get("fastModeActive", False)),
+        tokens_per_second=_optional_float(payload, "tokensPerSecond"),
+        context_usage=parse_context_usage(
+            _optional_json_object(
+                payload.get("contextUsage"), field="sessionState.contextUsage"
+            )
+        ),
     )
 
 
@@ -1336,6 +1418,13 @@ def parse_bash_result(payload: JsonObject) -> BashResult:
         output_lines=int(payload.get("outputLines", 0)),
         output_bytes=int(payload.get("outputBytes", 0)),
         artifact_id=_optional_str(payload, "artifactId"),
+    )
+
+
+def parse_fast_mode_result(payload: JsonObject) -> FastModeResult:
+    return FastModeResult(
+        enabled=_require_bool(payload, "enabled"),
+        active=_require_bool(payload, "active"),
     )
 
 
@@ -1426,6 +1515,16 @@ def parse_session_stats(payload: JsonObject) -> SessionStats:
     )
 
 
+def parse_context_usage(payload: JsonObject | None) -> ContextUsage | None:
+    if payload is None:
+        return None
+    return ContextUsage(
+        tokens=int(payload.get("tokens", 0)),
+        context_window=int(payload.get("contextWindow", 0)),
+        percent=float(payload.get("percent", 0.0)),
+    )
+
+
 def parse_extension_ui_request(payload: JsonObject) -> ExtensionUiRequest:
     return ExtensionUiRequest(
         id=_require_str(payload, "id"),
@@ -1470,6 +1569,9 @@ def parse_extension_ui_request(payload: JsonObject) -> ExtensionUiRequest:
             ),
         ),
         text=_optional_str(payload, "text"),
+        url=_optional_str(payload, "url"),
+        launch_url=_optional_str(payload, "launchUrl"),
+        instructions=_optional_str(payload, "instructions"),
     )
 
 
@@ -1484,7 +1586,23 @@ def parse_extension_error(payload: JsonObject) -> ExtensionError:
 def parse_notification(payload: JsonObject) -> RpcNotification:
     event_type = payload.get("type")
     if event_type == "ready":
-        return ReadyEvent()
+        raw_versions = payload.get("supportedProtocolVersions")
+        supported_versions: tuple[int, ...] | None = None
+        if raw_versions is not None:
+            if not isinstance(raw_versions, list) or any(
+                not isinstance(version, int) or isinstance(version, bool)
+                for version in raw_versions
+            ):
+                raise ValueError("ready.supportedProtocolVersions must be integers")
+            supported_versions = tuple(raw_versions)
+        return ReadyEvent(
+            protocol_version=_optional_int(payload, "protocolVersion"),
+            supported_protocol_versions=supported_versions,
+            max_frame_bytes=_optional_int(payload, "maxFrameBytes"),
+            max_reassembled_frame_bytes=_optional_int(
+                payload, "maxReassembledFrameBytes"
+            ),
+        )
     if event_type == "extension_ui_request":
         return parse_extension_ui_request(payload)
     if event_type == "extension_error":
@@ -1495,7 +1613,9 @@ def parse_notification(payload: JsonObject) -> RpcNotification:
         return AgentEndEvent(
             messages=parse_agent_messages(
                 cast(JsonValue | None, payload.get("messages"))
-            )
+            ),
+            message_count=_optional_int(payload, "messageCount"),
+            is_terminal=_optional_bool(payload, "isTerminal"),
         )
     if event_type == "turn_start":
         return TurnStartEvent()
@@ -1587,7 +1707,7 @@ def parse_notification(payload: JsonObject) -> RpcNotification:
     if event_type == "auto_compaction_start":
         return AutoCompactionStartEvent(
             reason=cast(
-                Literal["threshold", "overflow", "idle"],
+                Literal["threshold", "overflow", "idle", "incomplete"],
                 _require_literal(
                     payload.get("reason", "threshold"),
                     _AUTO_COMPACTION_REASON_VALUES,
@@ -1595,7 +1715,7 @@ def parse_notification(payload: JsonObject) -> RpcNotification:
                 ),
             ),
             action=cast(
-                Literal["context-full", "handoff"],
+                Literal["context-full", "handoff", "shake", "snapcompact"],
                 _require_literal(
                     payload.get("action", "context-full"),
                     _AUTO_COMPACTION_ACTION_VALUES,
@@ -1607,7 +1727,7 @@ def parse_notification(payload: JsonObject) -> RpcNotification:
         result_payload = payload.get("result")
         return AutoCompactionEndEvent(
             action=cast(
-                Literal["context-full", "handoff"],
+                Literal["context-full", "handoff", "shake", "snapcompact"],
                 _require_literal(
                     payload.get("action", "context-full"),
                     _AUTO_COMPACTION_ACTION_VALUES,

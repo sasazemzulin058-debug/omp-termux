@@ -4,7 +4,7 @@
  * Provides a normalized schema to represent multiple limit windows, model tiers,
  * and shared quotas across providers.
  */
-import { type } from "arktype";
+import { type } from "@oh-my-pi/omptype";
 import type { FetchImpl, Provider } from "./types";
 export type UsageUnit = "percent" | "tokens" | "requests" | "usd" | "minutes" | "bytes" | "unknown";
 
@@ -20,6 +20,12 @@ export interface UsageWindow {
 	durationMs?: number;
 	/** Absolute reset timestamp in milliseconds since epoch. */
 	resetsAt?: number;
+	/**
+	 * Verb rendered before the {@link resetsAt} countdown (e.g. "tick", "regen").
+	 * Defaults to "resets" — override for rolling windows where the timestamp is
+	 * an incremental regeneration step rather than a full window reset.
+	 */
+	resetLabel?: string;
 }
 
 /** Quantitative usage data. */
@@ -64,6 +70,23 @@ export interface UsageLimit {
 }
 
 /**
+ * Per-credit detail for a saved/banked rate-limit reset.
+ *
+ * Populated when the provider's listing endpoint returns individual credit
+ * metadata (e.g. OpenAI Codex `wham/rate-limit-reset-credits`). Callers that
+ * only need the count can ignore this; display layers use `expiresAt` to show
+ * when banked resets expire ([#3339](https://github.com/can1357/oh-my-pi/issues/3339)).
+ */
+export interface UsageResetCreditDetail {
+	/** ISO timestamp when the credit was granted. */
+	grantedAt?: string;
+	/** ISO timestamp when the credit expires and can no longer be redeemed. */
+	expiresAt?: string;
+	/** Backend status, e.g. `available`, `redeemed`. */
+	status?: string;
+}
+
+/**
  * Saved/banked rate-limit resets an account can redeem on demand.
  *
  * Surfaced by providers that let users defer a usage-window reset and spend it
@@ -73,6 +96,8 @@ export interface UsageLimit {
 export interface UsageResetCredits {
 	/** Number of resets available to redeem right now. */
 	availableCount: number;
+	/** Individual credit details (expiry dates, etc.) when the provider exposes them. */
+	credits?: UsageResetCreditDetail[];
 }
 
 /** Aggregated usage report for a provider. */
@@ -82,6 +107,13 @@ export interface UsageReport {
 	limits: UsageLimit[];
 	/** Saved rate-limit resets the account can redeem, when the provider reports them. */
 	resetCredits?: UsageResetCredits;
+	/**
+	 * Provider-wide disclaimers shown once above per-account sections.
+	 * Use this for caveats that apply to every limit (e.g. "OMP-observed
+	 * spend only"). Per-limit notes that differ per window (e.g. "Overage
+	 * requests: N") stay on {@link UsageLimit.notes}.
+	 */
+	notes?: string[];
 	metadata?: Record<string, unknown>;
 	raw?: unknown;
 }
@@ -153,6 +185,61 @@ export interface UsageCostHistoryQuery {
 	sinceMs?: number;
 }
 
+/**
+ * Aggregated request usage a client observed for one (provider, model) pair.
+ * Clients fold every completed request into per-pair buckets and flush them to
+ * the auth broker on a short cadence, so the broker can attribute token burn
+ * to the install that produced it.
+ */
+export interface ObservedUsageEntry {
+	/** Epoch ms of the newest request folded into this bucket. */
+	at: number;
+	provider: Provider;
+	model: string;
+	/** Completed requests folded into this bucket. */
+	requests: number;
+	inputTokens: number;
+	outputTokens: number;
+	cacheReadTokens: number;
+	cacheWriteTokens: number;
+	/** Estimated USD cost of the folded requests (0 when unknown). */
+	costUsd: number;
+}
+
+/** One client's observed-usage report, keyed by its stable install id. */
+export interface ClientUsageReport {
+	/** Stable per-machine install id — the client primary key. */
+	installId: string;
+	/** Human-readable machine name for display surfaces. */
+	hostname?: string;
+	entries: ObservedUsageEntry[];
+}
+
+/** Per-provider aggregate of one client's recorded usage. */
+export interface ClientProviderUsage {
+	provider: string;
+	requests: number;
+	inputTokens: number;
+	outputTokens: number;
+	cacheReadTokens: number;
+	cacheWriteTokens: number;
+	costUsd: number;
+}
+
+/** One known client with its usage aggregates over the queried window. */
+export interface ClientUsageClientSummary {
+	installId: string;
+	hostname?: string;
+	firstSeen: number;
+	lastSeen: number;
+	providers: ClientProviderUsage[];
+}
+
+/** Aggregated per-client usage recorded by the broker host. */
+export interface ClientUsageSummary {
+	clients: ClientUsageClientSummary[];
+}
+
 // ─── Zod schemas (wire-shape validation for the broker `/v1/usage` endpoint) ─
 
 export const usageUnitSchema = type("'percent' | 'tokens' | 'requests' | 'usd' | 'minutes' | 'bytes' | 'unknown'");
@@ -163,6 +250,7 @@ export const usageWindowSchema = type({
 	label: "string",
 	"durationMs?": "number",
 	"resetsAt?": "number",
+	"resetLabel?": "string",
 });
 
 export const usageAmountSchema = type({
@@ -195,8 +283,15 @@ export const usageLimitSchema = type({
 	"notes?": "string[]",
 });
 
+export const usageResetCreditDetailSchema = type({
+	"grantedAt?": "string",
+	"expiresAt?": "string",
+	"status?": "string",
+});
+
 export const usageResetCreditsSchema = type({
 	availableCount: "number",
+	"credits?": usageResetCreditDetailSchema.array(),
 });
 
 export const usageReportSchema = type({
@@ -204,6 +299,7 @@ export const usageReportSchema = type({
 	fetchedAt: "number",
 	limits: usageLimitSchema.array(),
 	"resetCredits?": usageResetCreditsSchema,
+	"notes?": "string[]",
 	"metadata?": { "[string]": "unknown" },
 	// `raw` is provider-specific and may be anything; the broker strips it before
 	// sending the report over the wire, so accept-but-ignore here.
@@ -226,6 +322,10 @@ export interface UsageCredential {
 	accountId?: string;
 	projectId?: string;
 	email?: string;
+	/** Organization/workspace the credential is scoped to (see OAuthCredentials.orgId). */
+	orgId?: string;
+	/** Human-readable organization name for display. */
+	orgName?: string;
 	enterpriseUrl?: string;
 	metadata?: Record<string, unknown>;
 	apiEndpoint?: string;
@@ -259,6 +359,8 @@ export interface UsageProvider {
 	supports?(params: UsageFetchParams): boolean;
 	/** True when fetchUsage contacts upstream and can authenticate the credential for health checks. */
 	validatesCredentials?: boolean;
+	/** Whether a failed refresh may serve the previous successful report. Defaults to true. */
+	retainLastGoodOnFailure?: boolean;
 }
 
 /** Request context used when ranking usage for a specific model. */
@@ -289,6 +391,16 @@ export interface CredentialRankingStrategy {
 	 * not block unrelated families on the same OAuth credential.
 	 */
 	blockScope?(context?: CredentialRankingContext): string | undefined;
+	/**
+	 * Scopes that apply to a request, most specific first. With a context, the
+	 * request's own scope plus any legacy catch-all scope whose blocks still
+	 * apply to everything. Without one — reconciliation runs with no request —
+	 * every scope whose blocks must be healed.
+	 *
+	 * A provider that scopes backoff by model family must implement this, or a
+	 * block written under one scope is invisible to requests and to healing.
+	 */
+	blockScopes?(context?: CredentialRankingContext): string[];
 	/** Fallback window durations (ms) when limits don't specify durationMs. */
 	windowDefaults: {
 		primaryMs: number;

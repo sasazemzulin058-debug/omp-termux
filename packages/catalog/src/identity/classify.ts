@@ -106,15 +106,20 @@ export const parseGeminiModel = parser((modelId): GeminiModel | null => {
 });
 
 export const parseAnthropicModel = parser((modelId): AnthropicModel | null => {
-	const match = /claude-(opus|sonnet|fable|mythos)-(\d{1,2}(?:[.-]\d{1,2}){0,2})\b/.exec(modelId);
-	if (!match) {
+	const kindFirst = /claude-(opus|sonnet|fable|mythos)-(\d{1,2}(?:[.-]\d{1,2}){0,2})\b/.exec(modelId);
+	const versionFirst = kindFirst
+		? null
+		: /claude-(\d{1,2}(?:[.-]\d{1,2}){0,2})-(opus|sonnet|fable|mythos)\b/.exec(modelId);
+	const kind = kindFirst?.[1] ?? versionFirst?.[2];
+	const versionInput = kindFirst?.[2] ?? versionFirst?.[1];
+	if (!kind || !versionInput) {
 		return null;
 	}
-	const version = parseSemVer(match[2]);
+	const version = parseSemVer(versionInput);
 	if (!version) {
 		return null;
 	}
-	return { family: "anthropic", kind: match[1] as AnthropicKind, version };
+	return { family: "anthropic", kind: kind as AnthropicKind, version };
 });
 
 export const parseOpenAIModel = parser((modelId): OpenAIModel | null => {
@@ -156,6 +161,20 @@ export const parseGlmModel = parser((modelId): GlmModel | null => {
 
 export function isFableOrMythos(kind: AnthropicKind): boolean {
 	return kind === "fable" || kind === "mythos";
+}
+
+/**
+ * Returns true if the parsed Anthropic model is part of the adaptive-thinking
+ * Claude generation at or above a specific capability threshold.
+ * - Opus has a configurable minimum version floor (e.g. "4.6", "4.7", "4.8").
+ * - Sonnet, Fable, and Mythos all require version 5 or higher.
+ */
+export function isAnthropicAdaptiveGenAtLeast(parsed: AnthropicModel, opusMin: "4.6" | "4.7" | "4.8"): boolean {
+	if (parsed.kind === "opus") {
+		return semverGte(parsed.version, opusMin);
+	}
+	// Sonnet 5+, Fable 5+, Mythos 5+, and any future gen-5+ models
+	return semverGte(parsed.version, "5");
 }
 
 function createSemVer(major: number, minor: number, patch = 0): SemVer {

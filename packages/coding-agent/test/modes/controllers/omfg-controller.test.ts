@@ -9,6 +9,7 @@ import { OmfgController } from "@oh-my-pi/pi-coding-agent/modes/controllers/omfg
 import { initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
 import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
 import { Container, type TUI } from "@oh-my-pi/pi-tui";
+import { removeWithRetries } from "@oh-my-pi/pi-utils";
 
 const PROJECT_OPTION = "This project (.omp/rules)";
 const GLOBAL_OPTION = "Global — all projects (~/.omp/agent/rules)";
@@ -165,7 +166,7 @@ afterEach(async () => {
 	while (tempRoots.length > 0) {
 		const root = tempRoots.pop();
 		if (root) {
-			await fs.rm(root, { recursive: true, force: true });
+			await removeWithRetries(root);
 		}
 	}
 });
@@ -286,6 +287,38 @@ describe("OmfgController", () => {
 		expect(await Bun.file(path.join(harness.projectDir, ".omp", "rules", "ts-no-explicit-any.md")).exists()).toBe(
 			true,
 		);
+	});
+	it("returns to save selection when amendment input is cancelled", async () => {
+		const reply = createRule("ts-no-any", ": any|as any", "tool:edit(*.ts)");
+		const runEphemeralTurn = vi.fn<RunEphemeralTurn>(async () => ({
+			replyText: reply,
+			assistantMessage: createAssistantMessage([{ type: "text", text: reply }]),
+		}));
+		const harness = await createHarness({
+			runEphemeralTurn,
+			messages: createMatchingMessages(),
+			selectorChoices: [AMEND_OPTION, PROJECT_OPTION],
+			inputChoice: undefined,
+		});
+		const controller = new OmfgController(harness.ctx);
+
+		await controller.start("Stop using any");
+		const savedPath = path.join(harness.projectDir, ".omp", "rules", "ts-no-any.md");
+		await waitFor(() => harness.ttsrAddRule.mock.calls.length === 1);
+
+		expect(harness.showHookSelector.mock.calls).toEqual([
+			["Save TTSR rule where?", [PROJECT_OPTION, GLOBAL_OPTION, AMEND_OPTION]],
+			["Save TTSR rule where?", [PROJECT_OPTION, GLOBAL_OPTION, AMEND_OPTION]],
+		]);
+		expect(runEphemeralTurn).toHaveBeenCalledTimes(1);
+		expect(await Bun.file(savedPath).text()).toBe(
+			expectedRuleMarkdown("ts-no-any", ": any|as any", "tool:edit(*.ts)"),
+		);
+		expect(harness.ttsrAddRule.mock.calls[0]?.[0].path).toBe(savedPath);
+		expect(controller.hasActiveRequest()).toBe(true);
+		expect(controller.handleEscape()).toBe(true);
+		expect(harness.container.children).toHaveLength(0);
+		expect(controller.hasActiveRequest()).toBe(false);
 	});
 
 	it("guards empty complaints and missing models before model calls", async () => {

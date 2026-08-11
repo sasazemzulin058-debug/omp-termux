@@ -6,26 +6,29 @@ import type {
 	StoppingCriteria as TransformersStoppingCriteria,
 } from "@huggingface/transformers";
 import { getTinyModelsCacheDir, prompt } from "@oh-my-pi/pi-utils";
-import tinyTitleSystemPrompt from "../prompts/system/tiny-title-system.md" with { type: "text" };
+import titleSystemPrompt from "../prompts/system/title-system.md" with { type: "text" };
 import {
 	errorMessage,
 	errorText,
+	formatOnnxRuntimeCudaDiagnostics,
 	getTransformersVersionSpec,
 	loadTransformersRuntime,
 	MemoizedRuntime,
 	replayCachedReady,
 	sendLog,
 	sendProgress,
+	type TransformersRuntimeMetadata,
 } from "../subprocess/worker-runtime";
 import { resolveTinyModelDevicePreference, type TinyModelDevice, tinyModelDeviceLoadOrder } from "./device";
 import { resolveTinyModelDtypeOverride, type TinyModelDtype } from "./dtype";
+import { formatTitleUserMessage } from "./message-preproc";
 import {
 	getTinyLocalModelSpec,
 	type TinyLocalModelKey,
 	type TinyTitleLocalModelKey,
 	type TinyTitleLocalModelSpec,
 } from "./models";
-import { formatTitleUserMessage, normalizeGeneratedTitle } from "./text";
+import { normalizeGeneratedTitle } from "./text";
 import type { TinyTitleTransport, TinyTitleWorkerInbound } from "./title-protocol";
 
 const TITLE_PREFILL = "<title>";
@@ -34,12 +37,12 @@ const TITLE_MAX_NEW_TOKENS = 20;
 const STOP_DECODE_WINDOW_TOKENS = 32;
 const MEMORY_COMPLETION_DEFAULT_MAX_NEW_TOKENS = 256;
 const COMPLETION_MAX_NEW_TOKENS = 1024;
-const TINY_TITLE_SYSTEM_PROMPT = prompt.render(tinyTitleSystemPrompt);
+const TINY_TITLE_SYSTEM_PROMPT = prompt.render(titleSystemPrompt);
 
 const tinyModelDevicePreference = resolveTinyModelDevicePreference();
 const tinyModelDtypeOverride = resolveTinyModelDtypeOverride();
 
-interface TransformersRuntime {
+interface TransformersRuntime extends TransformersRuntimeMetadata {
 	env: {
 		cacheDir?: string;
 		allowLocalModels?: boolean;
@@ -91,7 +94,7 @@ function createStopOnTextCriteria(
 			this.#text = text;
 		}
 
-		_call(inputIds: number[][]): boolean[] {
+		override _call(inputIds: number[][]): boolean[] {
 			return inputIds.map(ids => {
 				const tail = ids.slice(-STOP_DECODE_WINDOW_TOKENS);
 				const decoded = this.#tokenizer.decode(tail, {
@@ -136,6 +139,7 @@ async function loadPipelineWithDeviceFallback(
 			device: devices[0],
 		});
 	}
+	let cudaDiagnostics: string | null = null;
 	for (let i = 0; i < devices.length; i += 1) {
 		const device = devices[i]!;
 		try {
@@ -144,15 +148,22 @@ async function loadPipelineWithDeviceFallback(
 				device,
 			};
 		} catch (error) {
-			if (i === devices.length - 1) throw error;
+			const deviceDiagnostics = await formatOnnxRuntimeCudaDiagnostics(transformers, device, error);
+			if (deviceDiagnostics) cudaDiagnostics = deviceDiagnostics;
+			if (i === devices.length - 1) {
+				if (cudaDiagnostics) throw new Error(`${errorText(error)}\n${cudaDiagnostics}`);
+				throw error;
+			}
 			const fallbackDevice = devices[i + 1]!;
-			sendLog(transport, "warn", "tiny-model: accelerated device failed; falling back", {
+			const meta: Record<string, unknown> = {
 				modelKey,
 				repo: spec.repo,
 				device,
 				fallbackDevice,
 				error: errorMessage(error),
-			});
+			};
+			if (deviceDiagnostics) meta.cudaDiagnostics = deviceDiagnostics;
+			sendLog(transport, "warn", "tiny-model: accelerated device failed; falling back", meta);
 		}
 	}
 	throw new Error("No tiny model devices configured");
@@ -217,14 +228,16 @@ function buildPrompt(generator: TextGenerationPipeline, message: string, systemP
 	return `${generator.tokenizer.apply_chat_template(chat, chatTemplateOptions)}${TITLE_PREFILL}`;
 }
 
-function extractTinyTitle(text: string): string | null {
+function extractTinyTitle(text: string, sourceText: string): string | null {
 	const titleStart = text.lastIndexOf(TITLE_PREFILL);
 	const withoutPrefix = titleStart >= 0 ? text.slice(titleStart + TITLE_PREFILL.length) : text;
+	// Self-closing tag: <title/> or <title /> (only when the prefill is present).
+	if (titleStart >= 0 && /^\s*\/>/.test(withoutPrefix)) return null;
 	const closeIndex = withoutPrefix.indexOf(TITLE_CLOSE);
 	const withoutClose = closeIndex >= 0 ? withoutPrefix.slice(0, closeIndex) : withoutPrefix;
 	const tagIndex = withoutClose.indexOf("<");
 	const withoutTag = tagIndex >= 0 ? withoutClose.slice(0, tagIndex) : withoutClose;
-	return normalizeGeneratedTitle(withoutTag);
+	return normalizeGeneratedTitle(withoutTag, sourceText);
 }
 
 async function generateTitle(
@@ -249,7 +262,7 @@ async function generateTitle(
 		return_full_text: false,
 		stopping_criteria: createStopOnTextCriteria(transformers, generator.tokenizer, TITLE_CLOSE),
 	})) as TextGenerationStringOutput;
-	return extractTinyTitle(output[0]?.generated_text ?? "");
+	return extractTinyTitle(output[0]?.generated_text ?? "", message);
 }
 
 function buildCompletionPrompt(generator: TextGenerationPipeline, promptText: string): string {

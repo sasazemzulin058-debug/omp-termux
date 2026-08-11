@@ -3,5 +3,4 @@ export * from "./asr-protocol";
 export * from "./downloader";
 export * from "./models";
 export * from "./stt-controller";
-export * from "./transcriber";
-export * from "./wav";
+export * from "./submit-trigger";

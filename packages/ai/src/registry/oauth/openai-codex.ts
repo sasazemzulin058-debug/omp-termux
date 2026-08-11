@@ -3,6 +3,7 @@
  */
 
 import { OPENAI_HEADER_VALUES } from "@oh-my-pi/pi-catalog/wire/codex";
+import * as AIError from "../../error";
 import type { FetchImpl } from "../../types";
 import { isRecord } from "../../utils";
 import { OAuthCallbackFlow, type OAuthCallbackFlowOptions } from "./callback-server";
@@ -30,6 +31,7 @@ const DEVICE_MAX_POLLS = 120;
 type JwtPayload = {
 	[JWT_CLAIM_PATH]?: {
 		chatgpt_account_id?: string;
+		chatgpt_plan_type?: string;
 	};
 	[JWT_PROFILE_CLAIM]?: {
 		email?: string;
@@ -49,14 +51,27 @@ export function decodeJwt<T = Record<string, unknown>>(token: string): T | null 
 	}
 }
 
-function getTokenProfile(accessToken: string): { accountId?: string; email?: string } {
+/**
+ * Identity slice decoded from the token claims. The ChatGPT workspace
+ * (`chatgpt_account_id`) is the subscription pool the token draws limits
+ * from — one account email can hold several (e.g. a personal Pro plan plus a
+ * Team seat). `chatgpt_plan_type` may only be present on the `id_token`.
+ */
+function getTokenProfile(
+	accessToken: string,
+	idToken?: string,
+): { accountId?: string; email?: string; planType?: string } {
 	const payload = decodeJwt<JwtPayload>(accessToken);
+	const idPayload = idToken ? decodeJwt<JwtPayload>(idToken) : null;
 	const auth = payload?.[JWT_CLAIM_PATH];
+	const idAuth = idPayload?.[JWT_CLAIM_PATH];
 	const accountId = auth?.chatgpt_account_id;
 	const email = payload?.[JWT_PROFILE_CLAIM]?.email?.trim().toLowerCase();
+	const planType = (auth?.chatgpt_plan_type ?? idAuth?.chatgpt_plan_type)?.trim().toLowerCase();
 	return {
 		accountId: typeof accountId === "string" && accountId.length > 0 ? accountId : undefined,
 		email: typeof email === "string" && email.length > 0 ? email : undefined,
+		planType: typeof planType === "string" && planType.length > 0 ? planType : undefined,
 	};
 }
 
@@ -175,22 +190,26 @@ async function exchangeCodeForToken(
 
 	if (!tokenResponse.ok) {
 		const bodyText = await tokenResponse.text();
-		throw new Error(`Token exchange failed: ${formatOpenAICodexTokenEndpointError(tokenResponse.status, bodyText)}`);
+		throw new AIError.OAuthError(
+			`Token exchange failed: ${formatOpenAICodexTokenEndpointError(tokenResponse.status, bodyText)}`,
+			{ kind: "token-exchange", status: tokenResponse.status },
+		);
 	}
 
 	const tokenData = (await tokenResponse.json()) as {
 		access_token?: string;
 		refresh_token?: string;
+		id_token?: string;
 		expires_in?: number;
 	};
 
 	if (!tokenData.access_token || !tokenData.refresh_token || typeof tokenData.expires_in !== "number") {
-		throw new Error("Token response missing required fields");
+		throw new AIError.OAuthError("Token response missing required fields", { kind: "validation" });
 	}
 
-	const { accountId, email } = getTokenProfile(tokenData.access_token);
+	const { accountId, email, planType } = getTokenProfile(tokenData.access_token, tokenData.id_token);
 	if (!accountId) {
-		throw new Error("Failed to extract accountId from token");
+		throw new AIError.OAuthError("Failed to extract accountId from token", { kind: "validation" });
 	}
 
 	return {
@@ -199,6 +218,8 @@ async function exchangeCodeForToken(
 		expires: Date.now() + tokenData.expires_in * 1000,
 		accountId,
 		email,
+		orgId: accountId,
+		orgName: planType,
 	};
 }
 
@@ -235,7 +256,10 @@ export async function loginOpenAICodexDevice(ctrl: OAuthController): Promise<OAu
 	});
 
 	if (!initResponse.ok) {
-		throw new Error(`Device authorization initiation failed: ${initResponse.status}`);
+		throw new AIError.OAuthError(`Device authorization initiation failed: ${initResponse.status}`, {
+			kind: "device-auth",
+			status: initResponse.status,
+		});
 	}
 
 	const initData = (await initResponse.json()) as {
@@ -245,7 +269,7 @@ export async function loginOpenAICodexDevice(ctrl: OAuthController): Promise<OAu
 	};
 
 	if (!initData.device_auth_id || !initData.user_code) {
-		throw new Error("Device authorization response missing required fields");
+		throw new AIError.OAuthError("Device authorization response missing required fields", { kind: "validation" });
 	}
 
 	const userCode = initData.user_code;
@@ -267,7 +291,7 @@ export async function loginOpenAICodexDevice(ctrl: OAuthController): Promise<OAu
 		await Bun.sleep(poll === 0 ? Math.min(pollIntervalMs, DEVICE_POLL_INTERVAL_MS) : pollIntervalMs);
 
 		if (ctrl.signal?.aborted) {
-			throw new Error("Device authorization cancelled");
+			throw new AIError.LoginCancelledError("Device authorization cancelled");
 		}
 
 		const pollResponse = await fetch(DEVICE_TOKEN_URL, {
@@ -286,7 +310,10 @@ export async function loginOpenAICodexDevice(ctrl: OAuthController): Promise<OAu
 		}
 
 		if (!pollResponse.ok) {
-			throw new Error(`Device token polling failed: ${pollResponse.status}`);
+			throw new AIError.OAuthError(`Device token polling failed: ${pollResponse.status}`, {
+				kind: "polling",
+				status: pollResponse.status,
+			});
 		}
 
 		const pollData = (await pollResponse.json()) as {
@@ -295,14 +322,18 @@ export async function loginOpenAICodexDevice(ctrl: OAuthController): Promise<OAu
 		};
 
 		if (!pollData.authorization_code || !pollData.code_verifier) {
-			throw new Error("Device token response missing authorization_code or code_verifier");
+			throw new AIError.OAuthError("Device token response missing authorization_code or code_verifier", {
+				kind: "validation",
+			});
 		}
 
 		ctrl.onProgress?.("Exchanging authorization code for tokens…");
 		return exchangeCodeForToken(pollData.authorization_code, pollData.code_verifier, DEVICE_REDIRECT_URI);
 	}
 
-	throw new Error("Device authorization timed out — user did not complete login in time");
+	throw new AIError.OAuthError("Device authorization timed out — user did not complete login in time", {
+		kind: "timeout",
+	});
 }
 
 /**
@@ -322,8 +353,9 @@ export async function refreshOpenAICodexToken(refreshToken: string): Promise<OAu
 
 	if (!response.ok) {
 		const bodyText = await response.text();
-		throw new Error(
+		throw new AIError.OAuthError(
 			`OpenAI Codex token refresh failed: ${formatOpenAICodexTokenEndpointError(response.status, bodyText)}`,
+			{ kind: "token-refresh", status: response.status },
 		);
 	}
 
@@ -334,11 +366,14 @@ export async function refreshOpenAICodexToken(refreshToken: string): Promise<OAu
 	};
 
 	if (!tokenData.access_token || !tokenData.refresh_token || typeof tokenData.expires_in !== "number") {
-		throw new Error("Token response missing required fields");
+		throw new AIError.OAuthError("Token response missing required fields", { kind: "validation" });
 	}
 
 	const { accountId, email } = getTokenProfile(tokenData.access_token);
 
+	// Deliberately no org fields on the result: the workspace a credential is
+	// scoped to is fixed at login. Callers merge refresh results over the
+	// stored credential, so omitting org here preserves it verbatim.
 	return {
 		access: tokenData.access_token,
 		refresh: tokenData.refresh_token || refreshToken,

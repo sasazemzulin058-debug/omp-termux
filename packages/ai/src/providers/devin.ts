@@ -28,7 +28,8 @@ import {
 	StopReason,
 } from "@oh-my-pi/pi-catalog/discovery/devin-gen/exa/codeium_common_pb/codeium_common_pb";
 import { calculateCost } from "@oh-my-pi/pi-catalog/models";
-import { extractHttpStatusFromError, logger } from "@oh-my-pi/pi-utils";
+import { logger, parseStreamingJson, parseStreamingJsonThrottled } from "@oh-my-pi/pi-utils";
+import * as AIError from "../error";
 import type {
 	Api,
 	AssistantMessage,
@@ -42,11 +43,12 @@ import type {
 	Tool,
 	ToolCall,
 } from "../types";
+import { normalizeSystemPrompts } from "../utils";
+import { isDemotedThinking } from "../utils/block-symbols";
 import { deterministicUuid } from "../utils/deterministic-id";
 import { AssistantMessageEventStream } from "../utils/event-stream";
-import { parseStreamingJson } from "../utils/json-parse";
-import { formatErrorMessageWithRetryAfter } from "../utils/retry-after";
 import { toolWireSchema } from "../utils/schema/wire";
+import { transformMessages } from "./transform-messages";
 
 /** Base host for Codeium/Windsurf's Cascade chat API (Connect protocol over HTTP/1.1). */
 export const DEVIN_API_URL = "https://server.codeium.com";
@@ -70,6 +72,22 @@ const DEVIN_DEFAULT_STOP_PATTERNS = ["<|user|>", "<|bot|>", "<|context_request|>
 /** Connect streaming framing: flag byte bit 0x01 = gzip payload, 0x02 = end-of-stream JSON trailers. */
 const CONNECT_COMPRESSED_FLAG = 0x01;
 const CONNECT_END_STREAM_FLAG = 0x02;
+/**
+ * Hard upper bound on a single Connect frame payload. The 4-byte length prefix
+ * is otherwise attacker-controlled (up to `2**32 - 1`), so a malicious or buggy
+ * peer could force {@link streamDevin}'s reader to buffer gigabytes via
+ * `Buffer.concat` before the idle-timeout wrapper aborts. Well above any
+ * legitimate Cascade response but tight enough that a corrupt length prefix
+ * fails fast instead of consuming memory.
+ */
+const MAX_CONNECT_FRAME_PAYLOAD = 16 * 1024 * 1024;
+/**
+ * Recovery heuristic for opaque Devin `invalid_argument` trailers. This is not
+ * asserted to be the backend's hard limit: small requests can hit the same
+ * intermittent error, while compactable message history this large is likely
+ * to benefit from the existing context-overflow maintenance path.
+ */
+const LARGE_HISTORY_RECOVERY_BYTES = 512 * 1024;
 
 export const streamDevin: StreamFunction<"devin-agent"> = (
 	model: Model<"devin-agent">,
@@ -79,7 +97,7 @@ export const streamDevin: StreamFunction<"devin-agent"> = (
 	const stream = new AssistantMessageEventStream();
 
 	(async () => {
-		const startTime = Date.now();
+		const startTime = performance.now();
 		let firstTokenTime: number | undefined;
 
 		const output: AssistantMessage = {
@@ -106,11 +124,16 @@ export const streamDevin: StreamFunction<"devin-agent"> = (
 		// accumulated per id (kept out of the content object so finalized tool calls stay clean).
 		const toolBlocks = new Map<string, ToolCall>();
 		const toolPartialJson = new Map<string, string>();
+		// Last-parsed argument-buffer length per tool-call id — bounds the
+		// mid-stream parse work to O(N) via `parseStreamingJsonThrottled`; the
+		// authoritative final parse still runs unconditionally in the toolcall_end
+		// loop below.
+		const toolLastParseLen = new Map<string, number>();
 		let activeToolCallId: string | undefined;
 		let latestStopReason = StopReason.UNSPECIFIED;
 
 		const markFirstToken = () => {
-			if (firstTokenTime === undefined) firstTokenTime = Date.now();
+			if (firstTokenTime === undefined) firstTokenTime = performance.now();
 		};
 
 		const endTextBlock = () => {
@@ -144,10 +167,14 @@ export const streamDevin: StreamFunction<"devin-agent"> = (
 			const auth = await fetchDevinAuthMetadata(apiKey, baseUrl, fetchImpl, options?.signal);
 			const chatBaseUrl = auth.baseUrl ?? baseUrl;
 			const request = buildDevinChatRequest(model, context, options, apiKey, auth.userJwt);
-			logger.debug("devin: sending chat request", { model: model.id, tools: context.tools?.length ?? 0 });
-
 			const reqBytes = toBinary(GetChatMessageRequestSchema, request);
 			const gz = gzipSync(reqBytes);
+			logger.debug("devin: sending chat request", {
+				model: model.id,
+				tools: context.tools?.length ?? 0,
+				requestBytes: reqBytes.byteLength,
+				compressedBytes: gz.byteLength,
+			});
 			const frame = Buffer.alloc(5 + gz.length);
 			frame[0] = CONNECT_COMPRESSED_FLAG;
 			frame.writeUInt32BE(gz.length, 1);
@@ -170,12 +197,16 @@ export const streamDevin: StreamFunction<"devin-agent"> = (
 
 			if (!response.ok) {
 				const text = await response.text();
-				throw Object.assign(new Error(`Devin API error ${response.status} ${response.statusText}: ${text}`), {
-					status: response.status,
-				});
+				throw new AIError.DevinApiError(
+					`Devin API error ${response.status} ${response.statusText}: ${text}`,
+					response.status,
+				);
 			}
 			if (!response.body) {
-				throw new Error("Devin API error: response body is empty");
+				throw new AIError.ProviderResponseError("Devin API error: response body is empty", {
+					provider: model.provider,
+					kind: "empty-body",
+				});
 			}
 			const body = response.body;
 
@@ -187,12 +218,23 @@ export const streamDevin: StreamFunction<"devin-agent"> = (
 			for (;;) {
 				const { done, value } = await reader.read();
 				if (value && value.length > 0) {
-					pending = Buffer.concat([pending, value]);
+					// Steady state drains fully per chunk; view the fresh reader chunk
+					// instead of copying it through Buffer.concat (see aws-eventstream.ts).
+					pending =
+						pending.length === 0
+							? Buffer.from(value.buffer, value.byteOffset, value.byteLength)
+							: Buffer.concat([pending, value]);
 				}
 
 				while (pending.length >= 5) {
 					const flag = pending[0];
 					const len = pending.readUInt32BE(1);
+					if (len > MAX_CONNECT_FRAME_PAYLOAD) {
+						throw new AIError.ProviderResponseError(
+							`Devin Connect frame length ${len} exceeds ${MAX_CONNECT_FRAME_PAYLOAD}-byte cap`,
+							{ provider: model.provider, kind: "envelope" },
+						);
+					}
 					if (pending.length < 5 + len) break;
 					const payload = pending.subarray(5, 5 + len);
 					pending = pending.subarray(5 + len);
@@ -200,7 +242,53 @@ export const streamDevin: StreamFunction<"devin-agent"> = (
 					if (flag & CONNECT_END_STREAM_FLAG) {
 						const trailerBytes = flag & CONNECT_COMPRESSED_FLAG ? gunzipSync(payload) : payload;
 						const trailerError = readConnectTrailerError(trailerBytes.toString("utf8").trim());
-						if (trailerError) throw new Error(trailerError);
+						if (trailerError) {
+							const error = new AIError.ValidationError(trailerError.formatted);
+							if (
+								firstTokenTime === undefined &&
+								trailerError.code.toLowerCase() === "invalid_argument" &&
+								/\binternal error\b/i.test(trailerError.message)
+							) {
+								// The full protobuf also contains the system prompt and tool
+								// schemas, which history maintenance cannot shrink. Re-encode
+								// only the repeated history field before choosing recovery.
+								let activeTailCount = 0;
+								const lastRole = context.messages.at(-1)?.role;
+								if (lastRole === "user" || lastRole === "developer") {
+									activeTailCount = 1;
+									// A trailing developer message can accompany the current user
+									// prompt. Earlier user-role records may instead be flushed
+									// execution history and must remain eligible for compaction.
+									if (lastRole === "developer") {
+										for (let i = context.messages.length - 2; i >= 0; i--) {
+											const role = context.messages[i].role;
+											if (role !== "user" && role !== "developer") break;
+											activeTailCount++;
+										}
+									}
+								}
+								const shrinkablePrompts =
+									activeTailCount > 0
+										? request.chatMessagePrompts.slice(0, -activeTailCount)
+										: request.chatMessagePrompts;
+								const historyBytes = toBinary(
+									GetChatMessageRequestSchema,
+									create(GetChatMessageRequestSchema, {
+										chatMessagePrompts: shrinkablePrompts,
+									}),
+								).byteLength;
+								if (historyBytes >= LARGE_HISTORY_RECOVERY_BYTES) {
+									AIError.attach(error, AIError.create(AIError.Flag.ContextOverflow));
+									logger.warn("devin: treating large-history invalid_argument as context overflow", {
+										model: model.id,
+										historyBytes,
+										requestBytes: reqBytes.byteLength,
+										compressedBytes: gz.byteLength,
+									});
+								}
+							}
+							throw error;
+						}
 						continue;
 					}
 
@@ -276,7 +364,11 @@ export const streamDevin: StreamFunction<"devin-agent"> = (
 								: previousJson + tc.argumentsJson;
 							const delta = accumulated.slice(previousJson.length);
 							toolPartialJson.set(toolCallId, accumulated);
-							block.arguments = parseStreamingJson(accumulated);
+							const throttled = parseStreamingJsonThrottled(accumulated, toolLastParseLen.get(toolCallId) ?? 0);
+							if (throttled) {
+								block.arguments = throttled.value;
+								toolLastParseLen.set(toolCallId, throttled.parsedLen);
+							}
 							stream.push({
 								type: "toolcall_delta",
 								contentIndex: output.content.indexOf(block),
@@ -295,7 +387,8 @@ export const streamDevin: StreamFunction<"devin-agent"> = (
 						output.usage.output = Number(msg.usage.outputTokens);
 						output.usage.cacheRead = Number(msg.usage.cacheReadTokens);
 						output.usage.cacheWrite = Number(msg.usage.cacheWriteTokens);
-						output.usage.totalTokens = output.usage.input + output.usage.output;
+						output.usage.totalTokens =
+							output.usage.input + output.usage.output + output.usage.cacheRead + output.usage.cacheWrite;
 					}
 				}
 
@@ -319,20 +412,21 @@ export const streamDevin: StreamFunction<"devin-agent"> = (
 			output.stopReason = doneReason;
 
 			calculateCost(model, output.usage);
-			output.duration = Date.now() - startTime;
+			output.duration = performance.now() - startTime;
 			if (firstTokenTime) output.ttft = firstTokenTime - startTime;
 
 			stream.push({ type: "done", reason: doneReason, message: output });
 			stream.end();
 		} catch (error) {
 			logger.error("devin: stream failed", { error: String(error) });
-			const errorReason: "aborted" | "error" = options?.signal?.aborted ? "aborted" : "error";
-			output.stopReason = errorReason;
-			output.errorStatus = extractHttpStatusFromError(error);
-			output.errorMessage = formatErrorMessageWithRetryAfter(error);
-			output.duration = Date.now() - startTime;
+			const result = await AIError.finalize(error, { api: model.api, signal: options?.signal });
+			output.stopReason = result.stopReason;
+			output.errorStatus = result.status;
+			output.errorId = result.id;
+			output.errorMessage = result.message;
+			output.duration = performance.now() - startTime;
 			if (firstTokenTime) output.ttft = firstTokenTime - startTime;
-			stream.push({ type: "error", reason: errorReason, error: output });
+			stream.push({ type: "error", reason: result.stopReason, error: output });
 			stream.end();
 		}
 	})();
@@ -373,14 +467,17 @@ async function fetchDevinAuthMetadata(
 	});
 	const payload = new Uint8Array(await response.arrayBuffer());
 	if (!response.ok) {
-		throw Object.assign(
-			new Error(`Devin auth error ${response.status} ${response.statusText}: ${new TextDecoder().decode(payload)}`),
-			{ status: response.status },
+		throw new AIError.DevinApiError(
+			`Devin auth error ${response.status} ${response.statusText}: ${new TextDecoder().decode(payload)}`,
+			response.status,
 		);
 	}
 	const decoded = decodeDevinUserJwtResponse(payload);
 	if (!decoded.userJwt) {
-		throw new Error("Devin auth error: GetUserJwt returned an empty user JWT");
+		throw new AIError.ProviderResponseError("Devin auth error: GetUserJwt returned an empty user JWT", {
+			provider: "devin",
+			kind: "runtime",
+		});
 	}
 	const customBaseUrl = decoded.customApiServerUrl.trim();
 	return { userJwt: decoded.userJwt, ...(customBaseUrl ? { baseUrl: customBaseUrl.replace(/\/+$/, "") } : undefined) };
@@ -411,6 +508,7 @@ function buildDevinChatRequest(
 		options?.stopSequences && options.stopSequences.length > 0
 			? [...DEVIN_DEFAULT_STOP_PATTERNS, ...options.stopSequences]
 			: DEVIN_DEFAULT_STOP_PATTERNS;
+	const messages = transformMessages(context.messages, model);
 	return create(GetChatMessageRequestSchema, {
 		metadata: create(MetadataSchema, {
 			apiKey,
@@ -421,8 +519,8 @@ function buildDevinChatRequest(
 			extensionVersion: DEVIN_EXTENSION_VERSION,
 			locale: "en",
 		}),
-		prompt: (context.systemPrompt ?? []).join("\n\n"),
-		chatMessagePrompts: buildChatMessagePrompts(context.messages, cascadeId),
+		prompt: normalizeSystemPrompts(context.systemPrompt).join("\n\n"),
+		chatMessagePrompts: buildChatMessagePrompts(messages, cascadeId, model),
 		chatModelUid: options?.chatModelUid ?? model.requestModelId ?? model.id,
 		requestType: ChatMessageRequestType.CASCADE,
 		plannerMode: ConversationalPlannerMode.DEFAULT,
@@ -454,7 +552,11 @@ function buildDevinChatRequest(
 }
 
 /** Map omp `Message` history onto Cascade `ChatMessagePrompt`s (USER / SYSTEM / TOOL channels). */
-function buildChatMessagePrompts(messages: Message[], cascadeId: string): ChatMessagePrompt[] {
+function buildChatMessagePrompts(
+	messages: Message[],
+	cascadeId: string,
+	model: Model<"devin-agent">,
+): ChatMessagePrompt[] {
 	const prompts: ChatMessagePrompt[] = [];
 	// messageId seeds are `cascadeId\0index\0role[...]` — prompt text is excluded
 	// so ids stay stable across content edits / history rebuilds.
@@ -482,16 +584,18 @@ function buildChatMessagePrompts(messages: Message[], cascadeId: string): ChatMe
 				}),
 			);
 		} else if (msg.role === "assistant") {
+			const isNativeDevinMessage =
+				msg.api === model.api && msg.provider === model.provider && msg.model === model.id;
 			let promptText = "";
 			let thinkingText = "";
 			let signature = "";
 			const toolCalls: ChatToolCall[] = [];
 			for (const part of msg.content) {
 				if (part.type === "text") {
-					promptText += part.text;
+					promptText += `${part.text}${isDemotedThinking(part) ? "\n" : ""}`;
 				} else if (part.type === "thinking") {
 					thinkingText += part.thinking;
-					if (!signature && part.thinkingSignature) signature = part.thinkingSignature;
+					if (isNativeDevinMessage && !signature && part.thinkingSignature) signature = part.thinkingSignature;
 				} else if (part.type === "toolCall") {
 					toolCalls.push(
 						create(ChatToolCallSchema, {
@@ -502,9 +606,13 @@ function buildChatMessagePrompts(messages: Message[], cascadeId: string): ChatMe
 					);
 				}
 			}
+			if (!promptText && !thinkingText && !signature && toolCalls.length === 0) continue;
 			prompts.push(
 				create(ChatMessagePromptSchema, {
-					messageId: msg.responseId ?? `bot-${deterministicUuid(`${cascadeId}\0${index}\0assistant`)}`,
+					messageId:
+						isNativeDevinMessage && msg.responseId
+							? msg.responseId
+							: `bot-${deterministicUuid(`${cascadeId}\0${index}\0assistant`)}`,
 					source: ChatMessageSource.SYSTEM,
 					prompt: promptText,
 					thinking: thinkingText,
@@ -538,12 +646,18 @@ function buildChatMessagePrompts(messages: Message[], cascadeId: string): ChatMe
 	return prompts;
 }
 
+interface ConnectTrailerError {
+	code: string;
+	message: string;
+	formatted: string;
+}
+
 /**
- * Parse a Connect end-of-stream JSON trailer and return a human-readable error
- * string when it carries `{ error: { code, message } }`, else `null`. The trailer
- * is untrusted server output, so the shape is checked with guards rather than asserted.
+ * Parse a Connect end-of-stream JSON trailer and return its structured error
+ * when it carries `{ error: { code, message } }`, else `null`. The trailer is
+ * untrusted server output, so the shape is checked with guards rather than asserted.
  */
-function readConnectTrailerError(text: string): string | null {
+function readConnectTrailerError(text: string): ConnectTrailerError | null {
 	if (text.length === 0) return null;
 	let parsed: unknown;
 	try {
@@ -557,5 +671,9 @@ function readConnectTrailerError(text: string): string | null {
 	const code = "code" in err && typeof err.code === "string" ? err.code : "";
 	const message = "message" in err && typeof err.message === "string" ? err.message : "";
 	if (!code && !message) return null;
-	return `Devin stream error${code ? ` ${code}` : ""}: ${message}`;
+	return {
+		code,
+		message,
+		formatted: `Devin stream error${code ? ` ${code}` : ""}: ${message}`,
+	};
 }

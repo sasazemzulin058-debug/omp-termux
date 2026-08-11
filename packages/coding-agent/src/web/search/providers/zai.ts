@@ -5,9 +5,10 @@
  * the unified SearchResponse shape used by the web search tool.
  */
 import { type ApiKey, type AuthStorage, type FetchImpl, getEnvApiKey, withAuth } from "@oh-my-pi/pi-ai";
-import { asRecord, asString } from "../../../web/scrapers/utils";
+import { isRecord } from "@oh-my-pi/pi-utils";
 import type { SearchResponse, SearchSource } from "../../../web/search/types";
 import { SearchProviderError } from "../../../web/search/types";
+import { formatQuery, parseSearchQuery, type QuerySyntax } from "../query";
 import { dateToAgeSeconds } from "../utils";
 import type { SearchParams } from "./base";
 import { SearchProvider } from "./base";
@@ -17,10 +18,27 @@ const ZAI_MCP_URL = "https://api.z.ai/api/mcp/web_search_prime/mcp";
 const ZAI_TOOL_NAME = "web_search_prime";
 const DEFAULT_NUM_RESULTS = 10;
 
+/**
+ * webSearchPrime exposes no native filter args (the Web Search API's
+ * `search_domain_filter`/`search_recency_filter` are scoped to the
+ * `search_pro_jina` engine, not `search-prime`), but its Bing-flavored
+ * backend parses the common inline operators. Dates and language are left
+ * to the central lenient post-filter.
+ */
+const ZAI_QUERY_SYNTAX: QuerySyntax = {
+	phrases: true,
+	negation: true,
+	site: true,
+	inTitle: true,
+	inUrl: true,
+	filetype: true,
+};
+
 export interface ZaiSearchParams {
 	query: string;
 	num_results?: number;
 	signal?: AbortSignal;
+	timeoutMs?: number;
 	fetch?: FetchImpl;
 	authStorage: AuthStorage;
 	sessionId?: string;
@@ -54,49 +72,24 @@ interface JsonRpcPayload {
 	error?: JsonRpcError;
 }
 
-/** Resolve Z.AI API credentials through the unified auth storage pipeline. */
-export async function findApiKey(
-	authStorage: AuthStorage,
-	sessionId?: string,
-	signal?: AbortSignal,
-): Promise<string | null> {
-	return (await authStorage.getApiKey("zai", sessionId, { signal })) ?? null;
+interface ZaiMcpPostResult {
+	parsed?: unknown;
+	sessionId?: string;
 }
 
-async function callZaiTool(
-	apiKey: string,
-	args: Record<string, unknown>,
-	signal: AbortSignal | undefined,
-	fetchImpl: FetchImpl,
-): Promise<unknown> {
-	const response = await fetchImpl(ZAI_MCP_URL, {
-		method: "POST",
-		headers: {
-			Authorization: `Bearer ${apiKey}`,
-			"Content-Type": "application/json",
-			Accept: "application/json, text/event-stream",
-		},
-		body: JSON.stringify({
-			jsonrpc: "2.0",
-			id: crypto.randomUUID(),
-			method: "tools/call",
-			params: {
-				name: ZAI_TOOL_NAME,
-				arguments: args,
-			},
-		}),
-		signal: withHardTimeout(signal),
-	});
+const ZAI_MCP_PROTOCOL_VERSION = "2025-03-26";
+const ZAI_MCP_CLIENT_INFO = {
+	name: "omp-coding-agent",
+	version: "1.0.0",
+};
 
-	if (!response.ok) {
-		const errorText = await response.text();
-		const classified = classifyProviderHttpError("zai", response.status, errorText);
-		if (classified) throw classified;
-		throw new SearchProviderError("zai", `Z.AI MCP error (${response.status}): ${errorText}`, response.status);
-	}
+function asString(value: unknown): string | null {
+	if (typeof value !== "string") return null;
+	const trimmed = value.trim();
+	return trimmed.length > 0 ? trimmed : null;
+}
 
-	const rawText = await response.text();
-
+function parseZaiMcpResponse(rawText: string): unknown {
 	const parsedMessages: unknown[] = [];
 	for (const line of rawText.split("\n")) {
 		const trimmed = line.trim();
@@ -118,8 +111,65 @@ async function callZaiTool(
 		}
 	}
 
-	const parsed = parsedMessages[parsedMessages.length - 1];
-	const parsedRecord = asRecord(parsed);
+	return parsedMessages[parsedMessages.length - 1];
+}
+
+async function postZaiMcp(
+	apiKey: string,
+	method: string,
+	params: Record<string, unknown>,
+	sessionId: string | undefined,
+	signal: AbortSignal | undefined,
+	fetchImpl: FetchImpl,
+	expectResponse: boolean,
+	timeoutMs?: number,
+): Promise<ZaiMcpPostResult> {
+	const headers: Record<string, string> = {
+		Authorization: `Bearer ${apiKey}`,
+		"Content-Type": "application/json",
+		Accept: "application/json, text/event-stream",
+	};
+	if (sessionId) {
+		headers["Mcp-Session-Id"] = sessionId;
+	}
+
+	const body: Record<string, unknown> = {
+		jsonrpc: "2.0",
+		method,
+		params,
+	};
+	if (expectResponse) {
+		body.id = crypto.randomUUID();
+	}
+
+	const response = await fetchImpl(ZAI_MCP_URL, {
+		method: "POST",
+		headers,
+		body: JSON.stringify(body),
+		signal: withHardTimeout(signal, timeoutMs),
+	});
+
+	if (!response.ok) {
+		const errorText = await response.text();
+		const classified = classifyProviderHttpError("zai", response.status, errorText);
+		if (classified) throw classified;
+		throw new SearchProviderError("zai", `Z.AI MCP error (${response.status}): ${errorText}`, response.status);
+	}
+
+	const nextSessionId = response.headers.get("Mcp-Session-Id") ?? sessionId;
+	if (!expectResponse) {
+		await response.body?.cancel();
+		return { sessionId: nextSessionId };
+	}
+
+	return {
+		parsed: parseZaiMcpResponse(await response.text()),
+		sessionId: nextSessionId,
+	};
+}
+
+function readJsonRpcPayload(parsed: unknown): JsonRpcPayload {
+	const parsedRecord = isRecord(parsed) ? parsed : null;
 	const directErrorCode = typeof parsedRecord?.code === "number" ? parsedRecord.code : undefined;
 	const directErrorSuccess = parsedRecord?.success;
 	const directErrorMessage =
@@ -132,6 +182,10 @@ async function callZaiTool(
 		);
 	}
 
+	if (!isRecord(parsed)) {
+		throw new SearchProviderError("zai", "Failed to parse Z.AI MCP response", 500);
+	}
+
 	const payload = parsed as JsonRpcPayload;
 	if (payload.error) {
 		const status = typeof payload.error.code === "number" ? payload.error.code : 400;
@@ -142,11 +196,76 @@ async function callZaiTool(
 		);
 	}
 
-	const resultRecord = asRecord(payload.result);
+	return payload;
+}
+
+/** Resolve Z.AI API credentials through the unified auth storage pipeline. */
+export async function findApiKey(
+	authStorage: AuthStorage,
+	sessionId?: string,
+	signal?: AbortSignal,
+): Promise<string | null> {
+	return (await authStorage.getApiKey("zai", sessionId, { signal })) ?? null;
+}
+
+async function callZaiTool(
+	apiKey: string,
+	args: Record<string, unknown>,
+	signal: AbortSignal | undefined,
+	fetchImpl: FetchImpl,
+	timeoutMs?: number,
+): Promise<unknown> {
+	const initialized = await postZaiMcp(
+		apiKey,
+		"initialize",
+		{
+			protocolVersion: ZAI_MCP_PROTOCOL_VERSION,
+			capabilities: {},
+			clientInfo: ZAI_MCP_CLIENT_INFO,
+		},
+		undefined,
+		signal,
+		fetchImpl,
+		true,
+		timeoutMs,
+	);
+	if (initialized.parsed !== undefined) {
+		readJsonRpcPayload(initialized.parsed);
+	}
+
+	await postZaiMcp(
+		apiKey,
+		"notifications/initialized",
+		{},
+		initialized.sessionId,
+		signal,
+		fetchImpl,
+		false,
+		timeoutMs,
+	);
+
+	const toolCall = await postZaiMcp(
+		apiKey,
+		"tools/call",
+		{
+			name: ZAI_TOOL_NAME,
+			arguments: args,
+		},
+		initialized.sessionId,
+		signal,
+		fetchImpl,
+		true,
+		timeoutMs,
+	);
+	const payload = readJsonRpcPayload(toolCall.parsed);
+	const resultRecord = isRecord(payload.result) ? payload.result : null;
 	if (resultRecord?.isError === true) {
 		const content = Array.isArray(resultRecord.content) ? resultRecord.content : [];
 		const errorText = content
-			.map(item => asString(asRecord(item)?.text))
+			.map(item => {
+				if (!isRecord(item)) return null;
+				return asString(item.text);
+			})
 			.filter((text): text is string => text != null)
 			.join("\n")
 			.trim();
@@ -159,7 +278,7 @@ async function callZaiTool(
 		return payload.result;
 	}
 
-	return parsed;
+	return toolCall.parsed;
 }
 
 async function callZaiSearch(apiKey: string, params: ZaiSearchParams): Promise<unknown> {
@@ -174,7 +293,7 @@ async function callZaiSearch(apiKey: string, params: ZaiSearchParams): Promise<u
 	let lastError: unknown;
 	for (let i = 0; i < attempts.length; i++) {
 		try {
-			return await callZaiTool(apiKey, attempts[i], params.signal, fetchImpl);
+			return await callZaiTool(apiKey, attempts[i], params.signal, fetchImpl, params.timeoutMs);
 		} catch (error) {
 			lastError = error;
 			const isLastAttempt = i === attempts.length - 1;
@@ -204,8 +323,8 @@ function getSearchResults(value: unknown): ZaiSearchResult[] {
 	if (Array.isArray(value)) {
 		return value as ZaiSearchResult[];
 	}
-	const obj = asRecord(value);
-	if (!obj) return [];
+	if (!isRecord(value)) return [];
+	const obj = value;
 
 	const searchResult = obj.search_result;
 	if (Array.isArray(searchResult)) return searchResult as ZaiSearchResult[];
@@ -224,23 +343,30 @@ function parseSearchPayload(rawResult: unknown): {
 	const candidates: unknown[] = [rawResult];
 	const textParts: string[] = [];
 
-	const root = asRecord(rawResult);
-	if (root) {
-		if (root.structuredContent) candidates.push(root.structuredContent);
-		if (root.data) candidates.push(root.data);
-		if (root.result) candidates.push(root.result);
+	if (isRecord(rawResult)) {
+		if (rawResult.structuredContent) candidates.push(rawResult.structuredContent);
+		if (rawResult.data) candidates.push(rawResult.data);
+		if (rawResult.result) candidates.push(rawResult.result);
 
-		const content = root.content;
+		const content = rawResult.content;
 		if (Array.isArray(content)) {
 			for (const part of content) {
-				const partObj = asRecord(part);
-				const text = asString(partObj?.text);
+				const text = isRecord(part) ? asString(part.text) : null;
 				if (!text) continue;
-				textParts.push(text);
 				try {
-					candidates.push(JSON.parse(text));
+					let parsed: unknown = JSON.parse(text);
+					if (typeof parsed === "string") {
+						try {
+							parsed = JSON.parse(parsed);
+						} catch {
+							// The decoded string is answer text rather than another JSON payload.
+						}
+					}
+					candidates.push(parsed);
+					if (getSearchResults(parsed).length === 0) textParts.push(text);
 				} catch {
-					// Not JSON payload; keep as fallback answer text.
+					// Non-JSON content is preserved as answer text.
+					textParts.push(text);
 				}
 			}
 		}
@@ -249,7 +375,7 @@ function parseSearchPayload(rawResult: unknown): {
 	for (const candidate of candidates) {
 		const results = getSearchResults(candidate);
 		if (results.length > 0) {
-			const obj = asRecord(candidate) as ZaiWebSearchResponse | null;
+			const obj = isRecord(candidate) ? (candidate as ZaiWebSearchResponse) : null;
 			return {
 				results,
 				answer: textParts.length > 0 ? textParts.join("\n\n") : undefined,
@@ -321,10 +447,12 @@ export class ZaiProvider extends SearchProvider {
 
 	search(params: SearchParams): Promise<SearchResponse> {
 		const { fetch: fetchOverride } = params as ZaiProviderSearchParams;
+		const parsed = params.parsedQuery ?? parseSearchQuery(params.query);
 		return searchZai({
-			query: params.query,
+			query: parsed.hasDirectives ? formatQuery(parsed, ZAI_QUERY_SYNTAX) : params.query,
 			num_results: params.numSearchResults ?? params.limit,
 			signal: params.signal,
+			timeoutMs: params.timeoutMs,
 			authStorage: params.authStorage,
 			sessionId: params.sessionId,
 			fetch: fetchOverride,

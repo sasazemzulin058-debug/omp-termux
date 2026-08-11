@@ -4,7 +4,8 @@
  * Implements JSON-RPC 2.0 over HTTP POST with optional SSE streaming.
  * Based on MCP spec 2025-03-26.
  */
-import { logger, readSseJson, Snowflake } from "@oh-my-pi/pi-utils";
+import * as AIError from "@oh-my-pi/pi-ai/error";
+import { logger, readSseJson } from "@oh-my-pi/pi-utils";
 import type {
 	JsonRpcError,
 	JsonRpcMessage,
@@ -16,7 +17,9 @@ import type {
 	MCPTransport,
 } from "../../mcp/types";
 import { toJsonRpcError } from "../../mcp/types";
+import { RequestIdAllocator } from "../request-id";
 import { createMCPTimeout, getNeverAbortSignal, isMCPTimeoutEnabled, resolveMCPTimeoutMs } from "../timeout";
+import { type MCPFetchInit, mcpFetch } from "./header-policy";
 
 const HTTP_SSE_CONNECT_TIMEOUT_MS = 1_000;
 /**
@@ -41,6 +44,7 @@ export class HttpTransport implements MCPTransport {
 	#connected = false;
 	#sessionId: string | null = null;
 	#sseConnection: AbortController | null = null;
+	readonly #requestIds = new RequestIdAllocator();
 
 	onClose?: () => void;
 	onError?: (error: Error) => void;
@@ -50,6 +54,16 @@ export class HttpTransport implements MCPTransport {
 	onAuthError?: () => Promise<Record<string, string> | null>;
 
 	constructor(private config: MCPHttpServerConfig | MCPSseServerConfig) {}
+
+	/** Fetch the configured endpoint with header precedence and origin policy. */
+	#fetch(init: MCPFetchInit, generated: Record<string, string>): Promise<Response> {
+		return mcpFetch(
+			this.config.url,
+			init,
+			{ generated, configured: this.config.headers },
+			this.config.headerPolicy === "origin-locked",
+		);
+	}
 
 	get connected(): boolean {
 		return this.#connected;
@@ -78,13 +92,12 @@ export class HttpTransport implements MCPTransport {
 		if (this.#sseConnection) return;
 
 		this.#sseConnection = new AbortController();
-		const headers: Record<string, string> = {
+		const generated: Record<string, string> = {
 			Accept: "text/event-stream",
-			...this.config.headers,
 		};
 
 		if (this.#sessionId) {
-			headers["Mcp-Session-Id"] = this.#sessionId;
+			generated["Mcp-Session-Id"] = this.#sessionId;
 		}
 
 		let response: Response | null;
@@ -92,11 +105,7 @@ export class HttpTransport implements MCPTransport {
 		let startupFinished = false;
 		const connection = this.#sseConnection;
 		const startupTimeoutMs = resolveSSEConnectTimeoutMs(this.config.timeout);
-		const fetchPromise = fetch(this.config.url, {
-			method: "GET",
-			headers,
-			signal: connection.signal,
-		});
+		const fetchPromise = this.#fetch({ method: "GET", signal: connection.signal }, generated);
 		const timeoutPromise =
 			startupTimeoutMs > 0
 				? new Promise<null>(resolve => {
@@ -186,7 +195,8 @@ export class HttpTransport implements MCPTransport {
 			return await this.#executeRequest<T>(method, params, options);
 		} catch (error) {
 			// Retry once on auth failure if onAuthError is wired
-			if (this.onAuthError && error instanceof Error && /^HTTP (401|403):/.test(error.message)) {
+			const status = error instanceof Error ? AIError.status(error) : undefined;
+			if (this.onAuthError && (status === 401 || status === 403)) {
 				const newHeaders = await this.onAuthError();
 				if (newHeaders) {
 					// Persist refreshed headers so subsequent requests use them directly
@@ -207,7 +217,7 @@ export class HttpTransport implements MCPTransport {
 			throw new Error("Transport not connected");
 		}
 
-		const id = Snowflake.next();
+		const id = this.#requestIds.next(this.config.requestIdFormat);
 		const body = {
 			jsonrpc: "2.0" as const,
 			id,
@@ -215,28 +225,23 @@ export class HttpTransport implements MCPTransport {
 			params: params ?? {},
 		};
 
-		const headers: Record<string, string> = {
+		const generated: Record<string, string> = {
 			"Content-Type": "application/json",
 			Accept: "application/json, text/event-stream",
-			...this.config.headers,
 		};
 
 		if (this.#sessionId) {
-			headers["Mcp-Session-Id"] = this.#sessionId;
+			generated["Mcp-Session-Id"] = this.#sessionId;
 		}
 
 		const timeout = resolveMCPTimeoutMs(this.config.timeout);
 		const operation = createMCPTimeout(timeout, options?.signal);
 
 		try {
-			const response = await fetch(this.config.url, {
-				method: "POST",
-				headers,
-				body: JSON.stringify(body),
-				signal: operation.signal,
-			});
-
-			operation.clear();
+			const response = await this.#fetch(
+				{ method: "POST", body: JSON.stringify(body), signal: operation.signal },
+				generated,
+			);
 
 			// Check for session ID in response
 			const newSessionId = response.headers.get("Mcp-Session-Id");
@@ -274,11 +279,12 @@ export class HttpTransport implements MCPTransport {
 
 			return result.result as T;
 		} catch (error) {
-			operation.clear();
 			if (operation.isTimeoutAbort(error)) {
 				throw new Error(`Request timeout after ${timeout}ms`);
 			}
 			throw error;
+		} finally {
+			operation.clear();
 		}
 	}
 
@@ -362,24 +368,18 @@ export class HttpTransport implements MCPTransport {
 		const body = error
 			? { jsonrpc: "2.0" as const, id, error }
 			: { jsonrpc: "2.0" as const, id, result: result ?? {} };
-		const headers: Record<string, string> = {
+		const generated: Record<string, string> = {
 			"Content-Type": "application/json",
 			Accept: "application/json, text/event-stream",
-			...this.config.headers,
 		};
 		if (this.#sessionId) {
-			headers["Mcp-Session-Id"] = this.#sessionId;
+			generated["Mcp-Session-Id"] = this.#sessionId;
 		}
+		const payload = JSON.stringify(body);
 		const timeout = resolveMCPTimeoutMs(this.config.timeout);
-		let operation = createMCPTimeout(timeout);
+		const operation = createMCPTimeout(timeout);
 		try {
-			const resp = await fetch(this.config.url, {
-				method: "POST",
-				headers,
-				body: JSON.stringify(body),
-				signal: operation.signal,
-			});
-			operation.clear();
+			const resp = await this.#fetch({ method: "POST", body: payload, signal: operation.signal }, generated);
 			// Retry once on auth failure if onAuthError is wired
 			if (this.onAuthError && (resp.status === 401 || resp.status === 403)) {
 				await resp.body?.cancel();
@@ -387,23 +387,25 @@ export class HttpTransport implements MCPTransport {
 				if (newHeaders) {
 					this.config.headers ??= {};
 					Object.assign(this.config.headers, newHeaders);
-					Object.assign(headers, newHeaders);
-					operation = createMCPTimeout(timeout);
-					const retry = await fetch(this.config.url, {
-						method: "POST",
-						headers,
-						body: JSON.stringify(body),
-						signal: operation.signal,
-					});
 					operation.clear();
-					await retry.body?.cancel();
+					const retryOperation = createMCPTimeout(timeout);
+					try {
+						const retry = await this.#fetch(
+							{ method: "POST", body: payload, signal: retryOperation.signal },
+							generated,
+						);
+						await retry.body?.cancel();
+					} finally {
+						retryOperation.clear();
+					}
 					return;
 				}
 			}
 			await resp.body?.cancel();
 		} catch {
-			operation.clear();
 			// Best-effort response delivery — server may have disconnected
+		} finally {
+			operation.clear();
 		}
 	}
 
@@ -418,28 +420,23 @@ export class HttpTransport implements MCPTransport {
 			params: params ?? {},
 		};
 
-		const headers: Record<string, string> = {
+		const generated: Record<string, string> = {
 			"Content-Type": "application/json",
 			Accept: "application/json, text/event-stream",
-			...this.config.headers,
 		};
 
 		if (this.#sessionId) {
-			headers["Mcp-Session-Id"] = this.#sessionId;
+			generated["Mcp-Session-Id"] = this.#sessionId;
 		}
 
 		const timeout = resolveMCPTimeoutMs(this.config.timeout);
 		const operation = createMCPTimeout(timeout);
 
 		try {
-			const response = await fetch(this.config.url, {
-				method: "POST",
-				headers,
-				body: JSON.stringify(body),
-				signal: operation.signal,
-			});
-
-			operation.clear();
+			const response = await this.#fetch(
+				{ method: "POST", body: JSON.stringify(body), signal: operation.signal },
+				generated,
+			);
 
 			// 202 Accepted is success for notifications
 			if (!response.ok && response.status !== 202) {
@@ -463,11 +460,12 @@ export class HttpTransport implements MCPTransport {
 				await response.body?.cancel();
 			}
 		} catch (error) {
-			operation.clear();
 			if (operation.isTimeoutAbort(error)) {
 				throw new Error(`Notify timeout after ${timeout}ms`);
 			}
 			throw error;
+		} finally {
+			operation.clear();
 		}
 	}
 
@@ -486,16 +484,7 @@ export class HttpTransport implements MCPTransport {
 			const timeout = resolveMCPTimeoutMs(this.config.timeout);
 			const operation = createMCPTimeout(timeout);
 			try {
-				const headers: Record<string, string> = {
-					...this.config.headers,
-					"Mcp-Session-Id": this.#sessionId,
-				};
-
-				await fetch(this.config.url, {
-					method: "DELETE",
-					headers,
-					signal: operation.signal,
-				});
+				await this.#fetch({ method: "DELETE", signal: operation.signal }, { "Mcp-Session-Id": this.#sessionId });
 				operation.clear();
 			} catch {
 				operation.clear();

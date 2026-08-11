@@ -14,13 +14,18 @@ import {
 	parseKnownModel,
 	semverEqual,
 } from "../src/identity/classify";
-import { buildCanonicalModelIndex, buildCanonicalReferenceData } from "../src/identity/equivalence";
 import { isMimoModelIdOrName } from "../src/identity/family";
 import { getLongestModelLikeIdSegment } from "../src/identity/id";
 import { buildModelReferenceIndex, resolveModelReference } from "../src/identity/reference";
 import { resolveModelThinking } from "../src/model-thinking";
+import { isOllamaCloudOutputCapped, OLLAMA_CLOUD_MAX_OUTPUT_TOKENS } from "../src/provider-models/ollama";
+import {
+	ALIBABA_TOKEN_PLAN_STATIC_MODELS,
+	resolveWaferServerlessThinkingFormat,
+} from "../src/provider-models/openai-compat";
 import type { Api, Model, ModelSpec } from "../src/types";
 import { isVariantCollapsedSpec } from "../src/variant-collapse";
+import { buildCanonicalModelIndex, buildCanonicalReferenceData } from "./equivalence";
 
 const CLOUDFLARE_AI_GATEWAY_BASE_URL = "https://gateway.ai.cloudflare.com/v1/<account>/<gateway>/anthropic";
 
@@ -46,6 +51,91 @@ export const CLOUDFLARE_FALLBACK_MODEL: ModelSpec<"anthropic-messages"> = {
 	contextWindow: 200000,
 	maxTokens: 64000,
 };
+
+/**
+ * `stencil.so` currently lists `jp.anthropic.claude-opus-5`, but AWS's own
+ * Bedrock model card documents only `anthropic.claude-opus-5` plus the `us.`,
+ * `eu.`, `au.`, and `global.` Geo/Global inference-profile IDs under
+ * Programmatic Access; Japan regions are marked unsupported for Geo inference
+ * in the same card's regional-availability table. Bedrock rejects an
+ * undocumented inference-profile ID outright, so drop this specific upstream
+ * row rather than ship a selector that 4xxs on first use (PR #6591 review).
+ * https://docs.aws.amazon.com/bedrock/latest/userguide/model-card-anthropic-claude-opus-5.html
+ */
+export function dropUnsupportedBedrockGeoIds(models: readonly ModelSpec[]): ModelSpec[] {
+	return models.filter(model => !(model.provider === "amazon-bedrock" && model.id === "jp.anthropic.claude-opus-5"));
+}
+
+const BEDROCK_MANTLE_OPENAI_MODEL_IDS: Record<string, true> = {
+	"openai.gpt-5.4": true,
+	"openai.gpt-5.5": true,
+	"openai.gpt-5.6-luna": true,
+	"openai.gpt-5.6-sol": true,
+	"openai.gpt-5.6-terra": true,
+};
+
+/**
+ * models.dev exposes these Responses-only models under amazon-bedrock, whose
+ * descriptor uses Converse. The working Mantle rows come from the static seed.
+ */
+export function dropBedrockMantleOpenAIModels(models: readonly ModelSpec[]): ModelSpec[] {
+	return models.filter(model => !(model.provider === "amazon-bedrock" && BEDROCK_MANTLE_OPENAI_MODEL_IDS[model.id]));
+}
+
+/** True when any component of a model's per-million-token cost is nonzero. */
+export function hasBillableCost(cost: ModelSpec["cost"]): boolean {
+	return cost.input !== 0 || cost.output !== 0 || cost.cacheRead !== 0 || cost.cacheWrite !== 0;
+}
+
+/**
+ * Providers whose first-party list prices back-fill Antigravity's unpriced
+ * rows, in lookup order. Antigravity discovery reports no pricing (the
+ * subscription bills upstream), so without this the whole provider surfaces
+ * $0 cost for every request. Antigravity bills through Google, so Vertex
+ * prices outrank Anthropic list prices for Claude ids.
+ */
+const ANTIGRAVITY_PRICING_PEERS = ["google", "google-vertex", "anthropic"] as const;
+
+/**
+ * Antigravity ids whose Google peer ships under a different id: Gemini
+ * previews carry a `-preview` suffix on the Google API, Claude ids carry a
+ * Vertex `@<version>` suffix. A dangling alias (retired Vertex id) falls back
+ * to the plain-id lookup, i.e. Anthropic list prices for Claude.
+ */
+const ANTIGRAVITY_PRICING_ID_ALIASES: Readonly<Record<string, string>> = {
+	"gemini-3-flash": "gemini-3-flash-preview",
+	"gemini-3-pro": "gemini-3-pro-preview",
+	"gemini-3.1-pro": "gemini-3.1-pro-preview",
+	"claude-opus-4-5": "claude-opus-4-5@20251101",
+	"claude-opus-4-6": "claude-opus-4-6@default",
+	"claude-sonnet-4-5": "claude-sonnet-4-5@20250929",
+	"claude-sonnet-4-6": "claude-sonnet-4-6@default",
+};
+
+/**
+ * Price `google-antigravity` models at their first-party equivalents: Gemini
+ * ids at Google API list prices, Claude ids at Google Vertex list prices
+ * (falling back to Anthropic). Models without a priced peer (gpt-oss,
+ * internal tab models) keep zero cost.
+ */
+export function applyAntigravityPricingFallback(models: readonly ModelSpec[]): ModelSpec[] {
+	const peerCosts = new Map<string, ModelSpec["cost"]>();
+	for (const peer of ANTIGRAVITY_PRICING_PEERS) {
+		for (const model of models) {
+			if (model.provider === peer && hasBillableCost(model.cost) && !peerCosts.has(model.id)) {
+				peerCosts.set(model.id, model.cost);
+			}
+		}
+	}
+	return models.map(model => {
+		if (model.provider !== "google-antigravity" || hasBillableCost(model.cost)) {
+			return model;
+		}
+		const alias = ANTIGRAVITY_PRICING_ID_ALIASES[model.id];
+		const cost = (alias ? peerCosts.get(alias) : undefined) ?? peerCosts.get(model.id);
+		return cost ? { ...model, cost: { ...cost } } : model;
+	});
+}
 
 const CODEX_GPT_5_4_PRIORITY_BY_VARIANT: Partial<Record<OpenAIVariant, number>> = {
 	base: 0,
@@ -77,11 +167,18 @@ export function applyGeneratedModelPolicies(models: ModelSpec<Api>[]): void {
  * Recompute `thinking` from the canonical deriver, replacing any baked value.
  * Mirrors `buildModel`'s trust-or-derive resolution with trust disabled: the
  * generator is the authority that produces the trusted values. Collapsed
- * effort-tier variants are exempt — their collapse table authored the
- * routing/off-suppression metadata and the deriver cannot reproduce it.
+ * effort-tier variants and provider-authored wire ladders are exempt because
+ * the generic deriver cannot reproduce that routing metadata.
  */
 export function rebakeModelThinking(model: ModelSpec<Api>): void {
 	if (isVariantCollapsedSpec(model)) return;
+	if (
+		model.provider === "alibaba-token-plan" &&
+		(model.id === "qwen3.8-max-preview" || model.id === "qwen3.8-max") &&
+		model.thinking
+	) {
+		return;
+	}
 	const requiresProviderAuthoredEffort =
 		model.provider === "umans" && (model.thinking?.requiresEffort === true || model.id === "umans-kimi-k2.7");
 	const thinking = resolveModelThinking({ ...model, thinking: undefined }, buildCompat(model));
@@ -201,11 +298,35 @@ export function applyCanonicalLimitFallback(models: ModelSpec<Api>[]): void {
 	}
 }
 
+/**
+ * Pin the max-output figure for Ollama Cloud models whose deployment enforces a
+ * lower ceiling than their advertised window.
+ *
+ * Ollama's `/api/show` never reports a per-model output cap, so discovery and
+ * previous snapshots leave `maxTokens` at the full context window (or a stale
+ * conservative fallback, as with `deepseek-v4-flash:0731`). DeepSeek V4
+ * Pro/Flash deployments actually reject any output budget above
+ * {@link OLLAMA_CLOUD_MAX_OUTPUT_TOKENS} (ollama/ollama#16890, #3392/#3394), so
+ * pin those ids to `min(contextWindow, ceiling)` — the true amount the endpoint
+ * accepts (#7266). Other cloud models keep their discovered limits.
+ */
+export function applyOllamaCloudOutputCap(models: ModelSpec<Api>[]): void {
+	for (const model of models) {
+		if (model.provider !== "ollama-cloud" || model.contextWindow === null) continue;
+		if (!isOllamaCloudOutputCapped(model.id)) continue;
+		model.maxTokens = Math.min(model.contextWindow, OLLAMA_CLOUD_MAX_OUTPUT_TOKENS);
+	}
+}
+
 function applyGeneratedModelPolicy(model: ModelSpec<Api>): void {
 	const copilotLimits = model.provider === "github-copilot" ? COPILOT_GENERATED_LIMITS[model.id] : undefined;
 	if (copilotLimits) {
 		model.contextWindow = copilotLimits.contextWindow;
 		model.maxTokens = copilotLimits.maxTokens;
+	}
+	if (model.provider === "alibaba-token-plan") {
+		const reference = ALIBABA_TOKEN_PLAN_STATIC_MODELS.find(candidate => candidate.id === model.id);
+		if (reference) model.name = reference.name;
 	}
 
 	if (model.provider === "ollama-cloud") {
@@ -246,6 +367,17 @@ function applyGeneratedModelPolicy(model: ModelSpec<Api>): void {
 		};
 		delete model.compat.thinkingFormat;
 	}
+	if (model.api === "openai-completions" && model.provider === "wafer-serverless" && model.reasoning) {
+		const thinkingFormat = resolveWaferServerlessThinkingFormat(model.id, undefined);
+		if (thinkingFormat === "zai") {
+			model.compat = {
+				...(model.compat ?? {}),
+				thinkingFormat,
+				reasoningContentField: "reasoning_content",
+				supportsDeveloperRole: false,
+			};
+		}
+	}
 	if (model.api === "openai-completions" && model.provider === "opencode-go" && isMimoModelIdOrName(model.id)) {
 		model.compat = {
 			...(model.compat ?? {}),
@@ -266,6 +398,7 @@ function applyGeneratedModelPolicy(model: ModelSpec<Api>): void {
 		model.compat = {
 			...(model.compat ?? {}),
 			supportsToolChoice: false,
+			maxTokensField: "max_tokens",
 			reasoningContentField: "reasoning_content",
 			requiresReasoningContentForToolCalls: true,
 		};
@@ -286,7 +419,7 @@ function applyGeneratedModelPolicy(model: ModelSpec<Api>): void {
 }
 
 function applyAnthropicCatalogPolicy(model: ModelSpec<Api>, parsedModel: AnthropicModel): void {
-	// Claude Opus 4.5: models.dev reports 3x the correct cache pricing.
+	// Claude Opus 4.5: stencil.so reports 3x the correct cache pricing.
 	if (model.provider === "anthropic" && parsedModel.kind === "opus" && semverEqual(parsedModel.version, "4.5")) {
 		model.cost.cacheRead = 0.5;
 		model.cost.cacheWrite = 6.25;
@@ -301,7 +434,7 @@ function applyAnthropicCatalogPolicy(model: ModelSpec<Api>, parsedModel: Anthrop
 	}
 
 	// Claude Fable/Mythos 5: Anthropic's /v1/models omits token limits and
-	// pricing, and models.dev lags new releases. Pin authoritative values from
+	// pricing, and stencil.so lags new releases. Pin authoritative values from
 	// the model card (1M context / 128k output) and pricing docs ($10 in / $50
 	// out per MTok).
 	if (model.provider === "anthropic" && isFableOrMythos(parsedModel.kind)) {
@@ -348,5 +481,13 @@ function applyOpenAICatalogPolicy(model: ModelSpec<Api>, parsedModel: OpenAIMode
 		if (parsedModel.variant === "mini" || parsedModel.variant === "nano") {
 			model.contextWindow = 272000;
 		}
+	}
+	// GPT-5.6 luna/sol/terra on the Codex transport: OpenAI's Codex model
+	// registry declares context_window = max_context_window = 372000, but Codex
+	// discovery omits `context_window` for these SKUs and falls back to
+	// DEFAULT_CONTEXT_WINDOW (272000, src/discovery/codex.ts), which regressed
+	// the bundled hard capacity (#5705). Pin the true 372K input window.
+	if (model.api === "openai-codex-responses" && semverEqual(parsedModel.version, "5.6")) {
+		model.contextWindow = 372000;
 	}
 }

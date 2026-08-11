@@ -1,3 +1,5 @@
+import { vectorIndexTopK } from "@oh-my-pi/pi-natives";
+
 export interface ExactVectorSearchHit<TId> {
 	id: TId;
 	score: number;
@@ -66,19 +68,16 @@ export function searchExactVectorIndex<TId>(
 		queryNormSq += value * value;
 	}
 	if (queryNormSq <= 0) return [];
-	const queryNorm = Math.sqrt(queryNormSq);
-	const queryDimensions = Math.min(query.length, index.dimensions);
+	// Native batch kernel: one N-API crossing scores every row and ranks the
+	// top k with the same stable ordering as the TS sort. TS guards above
+	// (finite query, positive norm, non-empty index) are preserved. Clamp k to
+	// the row count before the u32 boundary: Infinity or >= 2**32 would
+	// otherwise wrap (ToUint32) and return no hits.
+	const topK = vectorIndexTopK(index.matrix, index.dimensions, Float64Array.from(query), Math.min(k, index.count));
 	const hits: ExactVectorSearchHit<TId>[] = [];
-
-	for (let row = 0; row < index.count; row += 1) {
-		const offset = row * index.dimensions;
-		let score = 0;
-		for (let col = 0; col < queryDimensions; col += 1) {
-			score += index.matrix[offset + col] * ((query[col] ?? 0) / queryNorm);
-		}
-		hits.push({ id: index.ids[row] as TId, score });
+	for (let i = 0; i < topK.indices.length; i += 1) {
+		const row = topK.indices[i] ?? 0;
+		hits.push({ id: index.ids[row] as TId, score: topK.scores[i] ?? 0 });
 	}
-
-	hits.sort((a, b) => b.score - a.score);
-	return hits.slice(0, Math.min(k, hits.length));
+	return hits;
 }

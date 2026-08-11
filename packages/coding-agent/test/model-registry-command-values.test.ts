@@ -2,9 +2,11 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import type { Api, Model } from "@oh-my-pi/pi-ai/types";
+import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
-import { Snowflake } from "@oh-my-pi/pi-utils";
+import { removeSyncWithRetries, Snowflake } from "@oh-my-pi/pi-utils";
 
 function stdoutCommand(value: string): string {
 	return `${JSON.stringify(process.execPath)} -e ${JSON.stringify(`process.stdout.write(${JSON.stringify(value)})`)}`;
@@ -26,7 +28,7 @@ describe("ModelRegistry command-resolved models.yml values", () => {
 		authStorage.close();
 		if (!tempDir || !fs.existsSync(tempDir)) return;
 		try {
-			fs.rmSync(tempDir, { recursive: true, force: true });
+			removeSyncWithRetries(tempDir);
 		} catch (error) {
 			if ((error as NodeJS.ErrnoException).code !== "EBUSY") throw error;
 		}
@@ -48,6 +50,8 @@ describe("ModelRegistry command-resolved models.yml values", () => {
 		);
 
 		const registry = new ModelRegistry(authStorage, modelsPath);
+		expect(registry.hasCommandBackedApiKey("anthropic")).toBe(true);
+		expect(registry.hasCommandBackedApiKey("openai")).toBe(false);
 		const models = registry.getAll().filter(model => model.provider === "anthropic");
 
 		expect(models.length).toBeGreaterThan(1);
@@ -83,5 +87,51 @@ describe("ModelRegistry command-resolved models.yml values", () => {
 		expect(model).toBeDefined();
 		expect(model?.headers?.["X-Model-Key"]).toBe("cmd-model-header");
 		expect(model?.headers?.Authorization).toBe("Bearer cmd-api-key");
+	});
+
+	test("resolveCommandConfig caches failed executions so they do not retry", async () => {
+		const counterFile = path.join(tempDir, "counter.txt");
+		fs.writeFileSync(counterFile, "0");
+
+		// Command increments a counter and then fails (exit 1).
+		const trackingCommand = `node -e "const fs=require('fs'); fs.writeFileSync('${counterFile.replace(/\\/g, "/")}', String(Number(fs.readFileSync('${counterFile.replace(/\\/g, "/")}', 'utf8')) + 1)); process.exit(1);"`;
+
+		fs.writeFileSync(
+			modelsPath,
+			JSON.stringify({
+				providers: {
+					"custom-proxy": {
+						baseUrl: "https://custom-proxy.example.com/v1",
+						api: "openai-completions",
+						apiKey: `!${trackingCommand}`,
+					},
+				},
+			}),
+		);
+
+		// Init triggers the first command resolution.
+		const registry = new ModelRegistry(authStorage, modelsPath);
+
+		const dummyModel: Model<Api> = buildModel({
+			id: "foo",
+			name: "foo",
+			api: "openai-completions",
+			provider: "custom-proxy",
+			baseUrl: "a",
+			reasoning: false,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 4096,
+			maxTokens: 1024,
+		});
+
+		// Trigger the fallback resolver which also calls resolveConfigValue.
+		await registry.getApiKey(dummyModel);
+
+		// Another call to ensure it hits cache multiple times.
+		await registry.getApiKey(dummyModel);
+
+		// The command should have only run once.
+		expect(fs.readFileSync(counterFile, "utf8")).toBe("1");
 	});
 });

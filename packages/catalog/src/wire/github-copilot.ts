@@ -45,6 +45,14 @@ export function isPublicGitHubHost(host: string): boolean {
 	return PUBLIC_GITHUB_HOSTS.has(host.trim().toLowerCase());
 }
 
+/** Canonical personal-Copilot API host. */
+export const PERSONAL_GITHUB_COPILOT_BASE_URL = "https://api.githubcopilot.com" as const;
+
+/** `true` when the resolved base URL is the canonical personal-Copilot host. */
+export function isPersonalGitHubCopilotBaseUrl(baseUrl: string | undefined): boolean {
+	return baseUrl === PERSONAL_GITHUB_COPILOT_BASE_URL;
+}
+
 export function normalizeGitHubCopilotEnterpriseDomain(input: string | undefined): string | undefined {
 	const trimmed = input?.trim();
 	if (!trimmed) return undefined;

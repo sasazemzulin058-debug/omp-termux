@@ -1,8 +1,7 @@
 import type { UsageCostHistoryEntry, UsageLimit, UsageProvider, UsageWindow } from "../usage";
+import { DAY_MS, HOUR_MS } from "./shared";
 
 const OPENCODE_GO_PROVIDER = "opencode-go";
-const HOUR_MS = 60 * 60 * 1000;
-const DAY_MS = 24 * HOUR_MS;
 const OPENCODE_GO_LIMITS = [
 	{ id: "rolling-5h", label: "5 Hour", durationMs: 5 * HOUR_MS, limitUsd: 12 },
 	{ id: "weekly", label: "Weekly", durationMs: 7 * DAY_MS, limitUsd: 30 },
@@ -62,7 +61,6 @@ function buildWindowLimit(
 			unit: "usd",
 		},
 		status: resolveStatus(usedFraction),
-		notes: ["OMP-observed spend only; OpenCode usage outside OMP is not included."],
 	};
 }
 
@@ -80,6 +78,7 @@ export const opencodeGoUsageProvider: UsageProvider = {
 			provider: OPENCODE_GO_PROVIDER,
 			fetchedAt: nowMs,
 			limits: OPENCODE_GO_LIMITS.map(limit => buildWindowLimit(limit, entries, nowMs)),
+			notes: ["OMP-observed spend only; OpenCode usage outside OMP is not included."],
 			metadata: {
 				planType: "OpenCode Go",
 				source: "omp-observed-request-costs",

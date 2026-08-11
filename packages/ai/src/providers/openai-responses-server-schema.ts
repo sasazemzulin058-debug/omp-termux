@@ -8,7 +8,7 @@
  * is a worse outcome than dropping them on the floor.
  */
 
-import { type } from "arktype";
+import { type } from "@oh-my-pi/omptype";
 import type {
 	EasyInputMessage,
 	ResponseCreateParams,
@@ -34,7 +34,7 @@ const plainTextSchema = type({
 
 const inputImageBlockSchema = type({
 	type: "'input_image'",
-	"detail?": "'auto' | 'low' | 'high'",
+	"detail?": "'auto' | 'low' | 'high' | 'original'",
 	"image_url?": "string",
 	"file_id?": "string",
 }).narrow((v, ctx) => {
@@ -50,6 +50,7 @@ const inputFileBlockSchema = type({
 	"file_id?": "string",
 	"filename?": "string",
 	"file_data?": "string",
+	"file_url?": "string",
 });
 
 const outputTextSchema = type({
@@ -92,8 +93,11 @@ const systemMessageItemSchema = type({
 
 const assistantMessageItemSchema = type({
 	"type?": "'message'",
+	"id?": "string",
 	role: "'assistant'",
 	"content?": type("string").or(outputContentBlockSchema.array()),
+	"status?": "'in_progress' | 'completed' | 'incomplete'",
+	"phase?": "'commentary' | 'final_answer' | null",
 });
 
 const reasoningItemSchema = type({
@@ -134,6 +138,112 @@ const customToolCallOutputItemSchema = type({
 	output: "string",
 });
 
+const computerSafetyCheckSchema = type({
+	id: "string >= 1",
+	"code?": "string | null",
+	"message?": "string | null",
+});
+
+// Desktop coordinates cross the native boundary as i32 and must be
+// nonnegative; scroll deltas are signed i32. Out-of-range numbers fail
+// closed here instead of truncating downstream.
+const computerCoordinate = type("0 <= number.integer <= 2147483647");
+const computerScrollDelta = type("-2147483648 <= number.integer <= 2147483647");
+
+const computerClickActionSchema = type({
+	type: "'click'",
+	button: "'left' | 'right' | 'wheel' | 'back' | 'forward'",
+	x: computerCoordinate,
+	y: computerCoordinate,
+	"keys?": "string[] | null",
+});
+
+const computerDoubleClickActionSchema = type({
+	type: "'double_click'",
+	x: computerCoordinate,
+	y: computerCoordinate,
+	keys: "string[] | null",
+});
+
+const computerDragActionSchema = type({
+	type: "'drag'",
+	path: type({ x: computerCoordinate, y: computerCoordinate }).array(),
+	"keys?": "string[] | null",
+});
+
+const computerKeypressActionSchema = type({ type: "'keypress'", keys: "string[]" });
+const computerMoveActionSchema = type({
+	type: "'move'",
+	x: computerCoordinate,
+	y: computerCoordinate,
+	"keys?": "string[] | null",
+});
+const computerScreenshotActionSchema = type({ type: "'screenshot'" });
+const computerScrollActionSchema = type({
+	type: "'scroll'",
+	x: computerCoordinate,
+	y: computerCoordinate,
+	scroll_x: computerScrollDelta,
+	scroll_y: computerScrollDelta,
+	"keys?": "string[] | null",
+});
+const computerTypeActionSchema = type({ type: "'type'", text: "string" });
+const computerWaitActionSchema = type({ type: "'wait'" });
+
+const computerActionSchema = computerClickActionSchema
+	.or(computerDoubleClickActionSchema)
+	.or(computerDragActionSchema)
+	.or(computerKeypressActionSchema)
+	.or(computerMoveActionSchema)
+	.or(computerScreenshotActionSchema)
+	.or(computerScrollActionSchema)
+	.or(computerTypeActionSchema)
+	.or(computerWaitActionSchema);
+
+const computerCallItemSchema = type({
+	type: "'computer_call'",
+	id: "string >= 1",
+	call_id: "string >= 1",
+	"action?": computerActionSchema,
+	"actions?": computerActionSchema.array(),
+	pending_safety_checks: computerSafetyCheckSchema.array(),
+	status: "'in_progress' | 'completed' | 'incomplete'",
+}).narrow((v, ctx) => v.action !== undefined || v.actions !== undefined || ctx.mustBe("`action` or `actions`"));
+
+const computerScreenshotImageUrlSchema = type({
+	type: "'computer_screenshot'",
+	image_url: "string",
+});
+
+const computerScreenshotFileIdSchema = type({
+	type: "'computer_screenshot'",
+	file_id: "string",
+});
+
+const computerCallOutputItemSchema = type({
+	type: "'computer_call_output'",
+	"id?": "string | null",
+	call_id: "string >= 1",
+	output: computerScreenshotImageUrlSchema.or(computerScreenshotFileIdSchema),
+	"acknowledged_safety_checks?": computerSafetyCheckSchema.array().or(type("null")),
+	"status?": "'in_progress' | 'completed' | 'incomplete' | 'failed' | null",
+});
+
+const BRIDGED_INPUT_ITEM_TYPES: Record<string, true> = {
+	message: true,
+	reasoning: true,
+	function_call: true,
+	function_call_output: true,
+	custom_tool_call: true,
+	custom_tool_call_output: true,
+	computer_call: true,
+	computer_call_output: true,
+};
+
+const unbridgedInputItemSchema = type({ type: "string" }).narrow((value, ctx) =>
+	value.type in BRIDGED_INPUT_ITEM_TYPES ? ctx.mustBe("a valid bridged Responses input item") : true,
+);
+
 /**
  * Direct mapping to standard types.
  */
@@ -145,8 +255,10 @@ export const inputItemSchema = userMessageItemSchema
 	.or(functionCallOutputItemSchema)
 	.or(customToolCallItemSchema)
 	.or(customToolCallOutputItemSchema)
+	.or(computerCallItemSchema)
+	.or(computerCallOutputItemSchema)
 	// Tolerated but not bridged (file_search_call, web_search_call, …).
-	.or(type({ type: "string" }));
+	.or(unbridgedInputItemSchema);
 
 // Variant types alias the canonical SDK union members so the walker can
 // narrow them cleanly. The convenience "message" shape (no `type` field) maps
@@ -161,6 +273,8 @@ export type OpenAIResponsesFunctionCallOutputItem = ResponseInputItem.FunctionCa
 /** Inferred shape of the custom tool call input item (no canonical SDK alias). */
 export type OpenAIResponsesCustomToolCallItem = typeof customToolCallItemSchema.infer;
 export type OpenAIResponsesCustomToolCallOutputItem = typeof customToolCallOutputItemSchema.infer;
+export type OpenAIResponsesComputerCallItem = typeof computerCallItemSchema.infer;
+export type OpenAIResponsesComputerCallOutputItem = typeof computerCallOutputItemSchema.infer;
 export type OpenAIResponsesInputImageBlock = typeof inputImageBlockSchema.infer;
 export type OpenAIResponsesInputFileBlock = typeof inputFileBlockSchema.infer;
 export type OpenAIResponsesOutputRefusalBlock = typeof outputRefusalSchema.infer;
@@ -175,16 +289,20 @@ export const toolSchema = type({
 	"strict?": "boolean",
 });
 
+const computerToolSchema = type({ type: "'computer'" });
+
+const BRIDGED_TOOL_TYPES: Record<string, true> = { function: true, computer: true };
+
 // Built-in / hosted tool entries (web_search_preview, file_search, …) — accepted
 // but skipped by the walker.
-const builtinToolSchema = type({
-	type: "string",
-});
+const builtinToolSchema = type({ type: "string" }).narrow((value, ctx) =>
+	value.type in BRIDGED_TOOL_TYPES ? ctx.mustBe("a valid bridged Responses tool") : true,
+);
 
 // ─── Tool choice ────────────────────────────────────────────────────────────
 
 const hostedToolType = type(
-	"'web_search_preview' | 'file_search' | 'computer_use_preview' | 'code_interpreter' | 'image_generation' | 'mcp'",
+	"'web_search_preview' | 'file_search' | 'computer' | 'computer_use_preview' | 'code_interpreter' | 'image_generation' | 'mcp'",
 );
 
 const allowedToolEntrySchema = type({
@@ -238,7 +356,7 @@ export const openaiResponsesRequestSchema = type({
 	model: "string >= 1",
 	"input?": type("string").or(inputItemSchema.array()),
 	"instructions?": "string | null",
-	"tools?": toolSchema.or(builtinToolSchema).array(),
+	"tools?": toolSchema.or(computerToolSchema).or(builtinToolSchema).array(),
 	"tool_choice?": toolChoiceSchema,
 	"max_output_tokens?": "number",
 	"temperature?": "number",
@@ -255,10 +373,10 @@ export const openaiResponsesRequestSchema = type({
 	"service_tier?": "string",
 	"presence_penalty?": "number",
 	"frequency_penalty?": "number",
-	// Accepted-but-ignored: include `reasoning.encrypted_content` is the canonical
-	// way to request reasoning replay — silently accept and drop.
+	// `reasoning.encrypted_content` and computer screenshot refs must survive
+	// the gateway bridge so the resolved Responses transport can request them.
 	"background?": "unknown",
-	"include?": "unknown",
+	"include?": "string[] | null",
 	"prompt?": "unknown",
 	"safety_identifier?": "unknown",
 	"text?": "unknown",

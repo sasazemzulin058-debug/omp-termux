@@ -2,6 +2,16 @@
 
 ## [Unreleased]
 
+## [16.3.0] - 2026-07-02
+
+### Breaking Changes
+
+- Upgraded the collaboration protocol to version 3. Guests using version 2 will now be rejected during the handshake with a protocol-mismatch error.
+
+### Added
+
+- Added support for interactive UI request and response frames, enabling browser guests to respond to prompts initiated by the host.
+
 ## [16.1.8] - 2026-06-20
 
 ### Breaking Changes

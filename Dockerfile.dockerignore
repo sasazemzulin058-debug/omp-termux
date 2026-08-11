@@ -3,8 +3,9 @@
 # Dockerfile.robomp.dockerignore alongside.
 
 # Heavy build outputs — must never reach the build context. `target/` alone is
-# >100 GB on a dev machine.
+# >100 GB on a dev machine; `bazel-*` symlinks point at the bazel output base.
 target/
+bazel-*
 **/node_modules
 dist/
 runs/

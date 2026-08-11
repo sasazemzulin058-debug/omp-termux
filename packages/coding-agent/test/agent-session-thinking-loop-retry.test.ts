@@ -11,13 +11,15 @@ import type {
 	TextContent,
 	ThinkingContent,
 } from "@oh-my-pi/pi-ai";
+import * as AIError from "@oh-my-pi/pi-ai/error";
 import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
 import { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream";
-import { THINKING_LOOP_ERROR_MARKER, withGeminiThinkingLoopGuard } from "@oh-my-pi/pi-ai/utils/thinking-loop";
+import { withGeminiThinkingLoopGuard } from "@oh-my-pi/pi-ai/utils/thinking-loop";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { AgentSession, type AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
+import { type CustomMessage, convertToLlm } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { TempDir } from "@oh-my-pi/pi-utils";
 
@@ -89,25 +91,21 @@ function successStream(model: Model<Api>): AssistantMessageEventStream {
 	return stream;
 }
 
-function legacyContentfulLoopErrorStream(model: Model<Api>): AssistantMessageEventStream {
+function errorIdOnlyThinkingLoopStream(model: Model<Api>): AssistantMessageEventStream {
 	const stream = new AssistantMessageEventStream();
 	queueMicrotask(() => {
-		const text: TextContent = { type: "text", text: "Looping visible reasoning garbage." };
 		const partial: AssistantMessage = {
 			role: "assistant",
-			content: [text],
+			content: [],
 			api: model.api,
 			provider: model.provider,
 			model: model.id,
 			usage: emptyUsage(),
 			stopReason: "error",
-			errorMessage: `${THINKING_LOOP_ERROR_MARKER}: the model repeated near-identical content. Non-retryable because output was already streamed.`,
+			errorMessage: "loop guard stopped repeated reasoning",
+			errorId: AIError.create(AIError.Flag.ThinkingLoop),
 			timestamp: Date.now(),
 		};
-		stream.push({ type: "start", partial });
-		stream.push({ type: "text_start", contentIndex: 0, partial });
-		stream.push({ type: "text_delta", contentIndex: 0, delta: text.text, partial });
-		stream.push({ type: "text_end", contentIndex: 0, content: text.text, partial });
 		stream.push({ type: "error", reason: "error", error: partial });
 	});
 	return stream;
@@ -182,8 +180,10 @@ describe("AgentSession thinking-loop retry", () => {
 
 		expect(calls).toEqual(["openrouter/google/gemini-3.5-flash", "openrouter/google/gemini-3.5-flash"]);
 		expect(retryStartEvents).toHaveLength(1);
-		expect(retryStartEvents[0].errorMessage).toContain(THINKING_LOOP_ERROR_MARKER);
-		expect(retryEndEvents).toEqual([{ type: "auto_retry_end", success: true, attempt: 1 }]);
+		expect(AIError.is(retryStartEvents[0].errorId, AIError.Flag.ThinkingLoop)).toBe(true);
+		expect(retryEndEvents).toHaveLength(1);
+		expect(retryEndEvents[0]).toMatchObject({ type: "auto_retry_end", success: true, attempt: 1 });
+		expect(retryEndEvents[0].retryErrors).toBeArray();
 		const assistants = session.agent.state.messages.filter(
 			(message): message is AssistantMessage => message.role === "assistant",
 		);
@@ -193,7 +193,7 @@ describe("AgentSession thinking-loop retry", () => {
 		expect(assistants[0].errorMessage).toBeUndefined();
 	});
 
-	it("starts retry for loop-marker errors even without transient wording", async () => {
+	it("starts retry for thinking-loop errorId even without transient wording", async () => {
 		const model = createMockModel({ provider: "openrouter", id: "google/gemini-3.5-flash" }).model;
 		const modelRegistry = new ModelRegistry(authStorage);
 		const calls: string[] = [];
@@ -207,7 +207,7 @@ describe("AgentSession thinking-loop retry", () => {
 			},
 			streamFn: requestedModel => {
 				calls.push(`${requestedModel.provider}/${requestedModel.id}`);
-				return calls.length === 1 ? legacyContentfulLoopErrorStream(requestedModel) : successStream(requestedModel);
+				return calls.length === 1 ? errorIdOnlyThinkingLoopStream(requestedModel) : successStream(requestedModel);
 			},
 		});
 		const settings = Settings.isolated({
@@ -232,12 +232,144 @@ describe("AgentSession thinking-loop retry", () => {
 			if (event.type === "auto_retry_start") retryStartEvents.push(event);
 		});
 
-		await session.prompt("Trigger legacy loop marker once");
+		await session.prompt("Trigger errorId-only loop once");
 		await session.waitForIdle();
 
 		expect(calls).toEqual(["openrouter/google/gemini-3.5-flash", "openrouter/google/gemini-3.5-flash"]);
 		expect(retryStartEvents).toHaveLength(1);
-		expect(retryStartEvents[0].errorMessage).toContain("Non-retryable because output was already streamed");
+		expect(AIError.is(retryStartEvents[0].errorId, AIError.Flag.ThinkingLoop)).toBe(true);
+		const assistants = session.agent.state.messages.filter(
+			(message): message is AssistantMessage => message.role === "assistant",
+		);
+		expect(assistants).toHaveLength(1);
+		expect(assistants[0].content).toEqual([{ type: "text", text: "Recovered after retry." }]);
+	});
+
+	it("injects a redirect notice into the retried turn after a thinking loop", async () => {
+		const model = createMockModel({ provider: "openrouter", id: "google/gemini-3.5-flash" }).model;
+		const modelRegistry = new ModelRegistry(authStorage);
+		const calls: string[] = [];
+		const contexts: Context[] = [];
+		const agent = new Agent({
+			getApiKey: requestedModel => `${requestedModel.provider}-test-key`,
+			initialState: {
+				model,
+				systemPrompt: ["Test"],
+				tools: [],
+				messages: [],
+			},
+			convertToLlm,
+			streamFn: (requestedModel, context, _options?: SimpleStreamOptions) => {
+				calls.push(`${requestedModel.provider}/${requestedModel.id}`);
+				contexts.push(context);
+				return calls.length === 1 ? errorIdOnlyThinkingLoopStream(requestedModel) : successStream(requestedModel);
+			},
+		});
+		const settings = Settings.isolated({
+			"compaction.enabled": false,
+			"retry.enabled": true,
+			"retry.baseDelayMs": 0,
+			"retry.maxDelayMs": 5_000,
+			"retry.maxRetries": 1,
+			"retry.modelFallback": false,
+			"todo.enabled": false,
+			"model.loopGuard.enabled": true,
+		});
+		settings.setModelRole("default", `${model.provider}/${model.id}`);
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings,
+			modelRegistry,
+		});
+		vi.spyOn(scheduler, "wait").mockResolvedValue(undefined);
+
+		await session.prompt("Trigger redirect injection after thinking loop");
+		await session.waitForIdle();
+		const retryContext = contexts[1];
+		const extractText = (content: string | Array<{ type: string; text?: string }>): string =>
+			typeof content === "string"
+				? content
+				: content.map(part => (part.type === "text" ? (part.text ?? "") : "")).join("");
+		const redirectDevMsgs = retryContext.messages.filter(
+			message => message.role === "developer" && extractText(message.content).includes("thinking_loop_detected"),
+		);
+		expect(redirectDevMsgs).toHaveLength(1);
+
+		const redirects = session.agent.state.messages.filter(
+			(message): message is CustomMessage =>
+				message.role === "custom" && message.customType === "thinking-loop-redirect",
+		);
+		expect(redirects).toHaveLength(1);
+		expect(redirects[0].display).toBe(false);
+		expect(redirects[0].attribution).toBe("agent");
+		expect(typeof redirects[0].content).toBe("string");
+		expect(redirects[0].content).toContain("thinking_loop_detected");
+
+		const assistants = session.agent.state.messages.filter(
+			(message): message is AssistantMessage => message.role === "assistant",
+		);
+		expect(assistants).toHaveLength(1);
+		expect(assistants[0].content).toEqual([{ type: "text", text: "Recovered after retry." }]);
+	});
+
+	it("injects a redirect notice on each consecutive thinking-loop retry", async () => {
+		const model = createMockModel({ provider: "openrouter", id: "google/gemini-3.5-flash" }).model;
+		const modelRegistry = new ModelRegistry(authStorage);
+		const calls: string[] = [];
+		const contexts: Context[] = [];
+		const agent = new Agent({
+			getApiKey: requestedModel => `${requestedModel.provider}-test-key`,
+			initialState: {
+				model,
+				systemPrompt: ["Test"],
+				tools: [],
+				messages: [],
+			},
+			convertToLlm,
+			streamFn: (requestedModel, context, _options?: SimpleStreamOptions) => {
+				calls.push(`${requestedModel.provider}/${requestedModel.id}`);
+				contexts.push(context);
+				return calls.length <= 2 ? errorIdOnlyThinkingLoopStream(requestedModel) : successStream(requestedModel);
+			},
+		});
+		const settings = Settings.isolated({
+			"compaction.enabled": false,
+			"retry.enabled": true,
+			"retry.baseDelayMs": 0,
+			"retry.maxDelayMs": 5_000,
+			"retry.maxRetries": 2,
+			"retry.modelFallback": false,
+			"todo.enabled": false,
+			"model.loopGuard.enabled": true,
+		});
+		settings.setModelRole("default", `${model.provider}/${model.id}`);
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings,
+			modelRegistry,
+		});
+		vi.spyOn(scheduler, "wait").mockResolvedValue(undefined);
+
+		await session.prompt("Trigger redirect injection after two thinking loops");
+		await session.waitForIdle();
+
+		expect(calls).toHaveLength(3);
+		const redirects = session.agent.state.messages.filter(
+			(message): message is CustomMessage =>
+				message.role === "custom" && message.customType === "thinking-loop-redirect",
+		);
+		expect(redirects).toHaveLength(2);
+		const extractText = (content: string | Array<{ type: string; text?: string }>): string =>
+			typeof content === "string"
+				? content
+				: content.map(part => (part.type === "text" ? (part.text ?? "") : "")).join("");
+		const thirdAttemptRedirectDevMsgs = contexts[2].messages.filter(
+			message => message.role === "developer" && extractText(message.content).includes("thinking_loop_detected"),
+		);
+		expect(thirdAttemptRedirectDevMsgs).toHaveLength(2);
+
 		const assistants = session.agent.state.messages.filter(
 			(message): message is AssistantMessage => message.role === "assistant",
 		);

@@ -30,6 +30,8 @@ import {
 	wrapTextWithAnsi,
 } from "../native/index.js";
 
+const addonUrl = new URL("../native/index.js", import.meta.url).href;
+
 let testDir: string;
 
 async function setupFixtures() {
@@ -613,6 +615,72 @@ describe("pi-natives", () => {
 	});
 
 	describe("pty", () => {
+		it("passes executable arguments without shell quoting", async () => {
+			const scriptPath = path.join(testDir, "pty-argv.ts");
+			const expected = ["argument with spaces", 'quote"inside', "backslash\\end"];
+			await Bun.write(scriptPath, 'process.stdout.write(JSON.stringify(process.argv.slice(2)) + "\\n");\n');
+			const session = new PtySession();
+			let output = "";
+			let callbackError: Error | null = null;
+			const result = await session.startArgv(
+				{
+					application: process.execPath,
+					args: [scriptPath, ...expected],
+					cwd: testDir,
+					timeoutMs: 5_000,
+					cols: 80,
+					rows: 24,
+				},
+				(error, chunk) => {
+					callbackError = error;
+					output += chunk;
+				},
+			);
+
+			expect(callbackError).toBeNull();
+			expect(result.exitCode).toBe(0);
+			expect(result.timedOut).toBeFalse();
+			// ConPTY interleaves terminal negotiation with the child's own bytes
+			// (`ESC[6n`, SGR reset, an OSC 0 title set, cursor show), so strip the
+			// escape sequences before parsing the payload. The OSC body match is
+			// non-greedy: `[^\u0007]` also matches ESC, so a greedy run would eat
+			// past an ST (`ESC \`) terminator to the last one in the buffer,
+			// over-stripping everything between two ST-terminated OSCs.
+			const payload = output
+				.replace(/\u001b\][^\u0007]*?(?:\u0007|\u001b\\)|\u001b\[[0-9;?]*[ -/]*[@-~]/g, "")
+				.trim();
+			expect(JSON.parse(payload)).toEqual(expected);
+		});
+
+		it("reports the child PID as soon as the PTY process starts", async () => {
+			const session = new PtySession();
+			const started = Promise.withResolvers<{ error: Error | null; pid: number }>();
+			const run = session.startArgv(
+				{
+					application: process.execPath,
+					args: ["-e", "process.stdin.resume()"],
+					cwd: testDir,
+					timeoutMs: 5_000,
+					cols: 80,
+					rows: 24,
+				},
+				undefined,
+				(error, pid) => started.resolve({ error, pid }),
+			);
+
+			const spawned = await started.promise;
+			let alive = false;
+			try {
+				process.kill(spawned.pid, 0);
+				alive = true;
+			} catch {}
+			expect(spawned.error).toBeNull();
+			expect(spawned.pid).toBeGreaterThan(0);
+			expect(alive).toBeTrue();
+			session.kill();
+			expect((await run).cancelled).toBeTrue();
+		});
+
 		it("should time out detached background workloads without hanging", async () => {
 			if (process.platform === "win32" || !Bun.which("bash")) {
 				return;
@@ -743,6 +811,86 @@ describe("pi-natives", () => {
 			expect(cleaned).toContain("Main content");
 			// Navigation/footer may or may not be removed depending on preprocessing
 		});
+
+		it("should reject depth-truncated HTML", async () => {
+			const html = `${"<div>".repeat(90)}<p>deep-content</p>${"</div>".repeat(90)}`;
+
+			await expect(htmlToMarkdown(html, { cleanContent: true })).rejects.toThrow(
+				/Conversion error: .*effective depth limit of 64/,
+			);
+		});
+
+		it("should survive pathologically deep HTML", async () => {
+			const script = `
+import { htmlToMarkdown } from ${JSON.stringify(addonUrl)};
+
+const cases = [
+	{
+		label: "balanced-div",
+		input: "<div>".repeat(5_000) + "leaf" + "</div>".repeat(5_000),
+	},
+	{
+		label: "malformed-table",
+		input: "<table><tr>" + "<td>leaf".repeat(20_000),
+	},
+];
+
+for (const { label, input } of cases) {
+	console.error("case=" + label + ":start");
+	const pending = htmlToMarkdown(input, { cleanContent: true });
+	if (pending === null || typeof pending.then !== "function") {
+		throw new TypeError("htmlToMarkdown did not return a Promise for " + label);
+	}
+
+	let rejected = false;
+	let value;
+	try {
+		value = await pending;
+	} catch {
+		rejected = true;
+	}
+	if (!rejected && typeof value !== "string") {
+		throw new TypeError("htmlToMarkdown fulfilled with a non-string for " + label);
+	}
+	console.error("case=" + label + ":done");
+}
+
+console.log("ok");
+`;
+			const child = Bun.spawn([process.execPath, "--eval", script], {
+				stdout: "pipe",
+				stderr: "pipe",
+			});
+			const pid = child.pid;
+			let watchdogFired = false;
+			// A real deadline is required because the child may hang inside native code and never emit an event.
+			const timer = setTimeout(() => {
+				if (child.exitCode === null) {
+					watchdogFired = true;
+					child.kill("SIGKILL");
+				}
+			}, 25_000);
+			const exited = child.exited.finally(() => clearTimeout(timer));
+			let stdout = "";
+			let stderr = "";
+			let exitCode: number | null = null;
+
+			try {
+				[stdout, stderr, exitCode] = await Promise.all([
+					new Response(child.stdout).text(),
+					new Response(child.stderr).text(),
+					exited,
+				]);
+			} finally {
+				clearTimeout(timer);
+			}
+
+			if (watchdogFired || exitCode !== 0 || stdout.trim() !== "ok") {
+				throw new Error(
+					`deep HTML child failed: pid=${pid}, exitCode=${exitCode}, signalCode=${child.signalCode}, watchdogFired=${watchdogFired}, stderr=${stderr}`,
+				);
+			}
+		}, 30_000);
 	});
 
 	describe("MacOSPowerAssertion", () => {
