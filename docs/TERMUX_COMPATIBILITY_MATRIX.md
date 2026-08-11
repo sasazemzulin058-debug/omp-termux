@@ -25,8 +25,8 @@
 *   **Скрипт установки:** [quickstart.sh](https://raw.githubusercontent.com/sasazemzulin058-debug/omp-termux/main/quickstart.sh)
 *   **Документация по адаптации:** [port-changes.md](https://github.com/sasazemzulin058-debug/omp-termux/blob/main/android/docs/port-changes.md)
 *   **Текущее состояние проекта:** [TERMUX_PROJECT_STATE.md](https://github.com/sasazemzulin058-debug/omp-termux/blob/main/docs/TERMUX_PROJECT_STATE.md)
-*   **Баг-трекер Bun (Android EACCES/seccomp):** [Oven-sh/bun#16238](https://github.com/Oven-sh/bun/issues/16238), [Oven-sh/bun#16452](https://github.com/Oven-sh/bun/issues/16452)
-*   **Документация Termux по безопасности и ограничениям:** [Termux Wiki: Android 10 Restricted Access](https://wiki.termux.com/wiki/ANDROID_10)
+*   **Баг-трекер Bun (Android):** [#30859 EACCES/cwd](https://github.com/oven-sh/bun/issues/30859), [#30766 seccomp/SIGSYS](https://github.com/oven-sh/bun/issues/30766), [#30666 Termux support](https://github.com/oven-sh/bun/issues/30666), [PR #29675 Android target](https://github.com/oven-sh/bun/pull/29675)
+*   **Документация Termux:** [execution environment](https://github.com/termux/termux-packages/wiki/Termux-execution-environment), [filesystem layout](https://github.com/termux/termux-packages/wiki/Termux-file-system-layout)
 
 ### Фактическое состояние репозитория и CI
 1.  **Последний успешный стабильный релиз:** `v0.1.6` (`НЕ ПРОВЕРЕНО` на физическом устройстве в полном объеме).
