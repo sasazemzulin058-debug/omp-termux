@@ -100,16 +100,16 @@ jobs:
       - name: Cross-compile native addon (NDK clang)
         env:
           ANDROID_NDK_ROOT: ${{ steps.ndk.outputs.ndk-path }}
-          CARGO_BUILD_JOBS: 2
+          CARGO_BUILD_JOBS: 1
           CARGO_PROFILE_CI_LTO: "false"
-          CARGO_PROFILE_CI_CODEGEN_UNITS: "16"
+          CARGO_PROFILE_CI_CODEGEN_UNITS: "256"
           CARGO_PROFILE_CI_DEBUG: "false"
-          RUSTFLAGS: "-C debuginfo=0"
+          RUSTFLAGS: "-C debuginfo=0 -C link-args=-Wl,--as-needed"
           OPUS_NO_PKG_CONFIG: "1"
           CMAKE_GENERATOR: Ninja
           CMAKE_MAKE_PROGRAM: /usr/bin/ninja
           CMAKE_ARGS: -DCMAKE_MAKE_PROGRAM=/usr/bin/ninja
-          CARGO_INCREMENTAL: "1"
+          CARGO_INCREMENTAL: "0"
         run: bash android/scripts/build-android-ci.sh
 
       - name: Upload addon artifact
