@@ -56,7 +56,7 @@ def process(text):
 
 def builtins(text):
     old = '#[cfg(target_os = "linux")]\nfn ps_total_memory_bytes()'
-    text = once(text, old, '#[cfg(any(target_os = "linux", target_os = "android"))]\nfn ps_total_memory_bytes()', "ps.rs")
+    text = once(text, old, '#[cfg(any(target_os = "linux", target_os = "android"))]\nfn ps_total_memory_bytes()', "proc_snapshot.rs")
     old = '#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]'
     if text.count(old) != 4:
         raise SystemExit(f"overlay marker mismatch: proc_snapshot cfg count: {text.count(old)}")
