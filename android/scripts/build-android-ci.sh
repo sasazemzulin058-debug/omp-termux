@@ -22,10 +22,17 @@ ADDON="$NATIVE_DIR/pi_natives.android-arm64.node"
 JOBS="${CARGO_BUILD_JOBS:-2}"
 export CARGO_BUILD_JOBS="$JOBS"
 
-NDK_CLANG="$ANDROID_NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android24-clang"
-NDK_AR="$ANDROID_NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-ar"
-NDK_RANLIB="$ANDROID_NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-ranlib"
-NDK_STRIP="$ANDROID_NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-strip"
+ARCH_NAME="$(uname -m)"
+case "$ARCH_NAME" in
+	x86_64) NDK_HOST_TAG="linux-x86_64" ;;
+	aarch64|arm64) NDK_HOST_TAG="linux-aarch64" ;;
+	*) echo "error: unsupported host arch: $ARCH_NAME" >&2; exit 1 ;;
+esac
+
+NDK_CLANG="$ANDROID_NDK_ROOT/toolchains/llvm/prebuilt/$NDK_HOST_TAG/bin/aarch64-linux-android24-clang"
+NDK_AR="$ANDROID_NDK_ROOT/toolchains/llvm/prebuilt/$NDK_HOST_TAG/bin/llvm-ar"
+NDK_RANLIB="$ANDROID_NDK_ROOT/toolchains/llvm/prebuilt/$NDK_HOST_TAG/bin/llvm-ranlib"
+NDK_STRIP="$ANDROID_NDK_ROOT/toolchains/llvm/prebuilt/$NDK_HOST_TAG/bin/llvm-strip"
 
 for tool in "$NDK_CLANG" "$NDK_AR" "$NDK_RANLIB" "$NDK_STRIP"; do
 	[ -x "$tool" ] || { echo "error: NDK tool not found: $tool" >&2; exit 1; }
