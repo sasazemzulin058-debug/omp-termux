@@ -39,7 +39,10 @@ curl -fsSL https://raw.githubusercontent.com/sasazemzulin058-debug/omp-termux/ma
 ```
 
 Installer verifies archive SHA-256, installs Android Bun runtime, then checks
-`omp --version`. Pin release with `OMP_VERSION=v0.1.6`.
+`omp --version`. Project automation state and known release blockers:
+[`docs/TERMUX_PROJECT_STATE.md`](docs/TERMUX_PROJECT_STATE.md).
+
+Pin release with `OMP_VERSION=v<version>-termux`.
 
 ## Upstream install
 
