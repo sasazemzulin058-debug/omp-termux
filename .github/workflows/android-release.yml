@@ -24,25 +24,27 @@ env:
 jobs:
   native-addon:
     name: Build Android ARM64 native addon
-    runs-on: [self-hosted, Windows, X64]
-    defaults:
-      run:
-        shell: 'C:/PROGRA~1/Git/bin/bash.exe --noprofile --norc -eo pipefail {0}'
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
         with:
           ref: ${{ inputs.tag || github.ref }}
 
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ninja-build cmake python3
+
       - name: Verify Android overlay and release tag
         run: python3 android/scripts/verify-overlay.py
+      
       - name: Validate release inputs
         run: python3 android/scripts/check-release-inputs.py
 
       - name: Install Rust target
-        shell: powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command "& '{0}'"
         run: |
           rustup show active-toolchain
-          if ($LASTEXITCODE -ne 0) { rustup toolchain install }
+          rustup toolchain install
           rustup target add aarch64-linux-android
 
       - name: Install Android NDK r27
@@ -51,7 +53,6 @@ jobs:
         with:
           ndk-version: r27
           add-to-path: false
-
 
       - name: Make CMake find Ninja
         run: |
@@ -76,7 +77,6 @@ jobs:
           chmod +x "$RUNNER_TEMP/bin/cmake"
           echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
 
-
       - name: Install Bun
         uses: oven-sh/setup-bun@v2
         with:
@@ -95,7 +95,6 @@ jobs:
           CARGO_PROFILE_CI_DEBUG: "false"
           RUSTFLAGS: "-C debuginfo=0"
           OPUS_NO_PKG_CONFIG: "1"
-
           CMAKE_GENERATOR: Ninja
           CMAKE_MAKE_PROGRAM: /usr/bin/ninja
           CMAKE_ARGS: -DCMAKE_MAKE_PROGRAM=/usr/bin/ninja
@@ -103,7 +102,6 @@ jobs:
         run: bash android/scripts/build-android-ci.sh
 
       - name: Verify native addon artifact naming and checksum
-        shell: bash
         run: |
           set -euo pipefail
           test -s packages/natives/native/pi_natives.android-arm64.node
@@ -118,6 +116,7 @@ jobs:
             packages/natives/native/pi_natives.android-arm64.node
             packages/natives/native/pi_natives.android-arm64.node.sha256
           if-no-files-found: error
+
   js-bundle:
     name: Build Termux JavaScript bundle
     runs-on: ubuntu-24.04
@@ -128,6 +127,7 @@ jobs:
 
       - name: Verify Android overlay and release tag
         run: python3 android/scripts/verify-overlay.py
+      
       - name: Validate release inputs
         run: python3 android/scripts/check-release-inputs.py
 
@@ -140,7 +140,6 @@ jobs:
         run: bun install --frozen-lockfile --minimum-release-age 0
 
       - name: Build JavaScript bundle
-        shell: bash
         run: |
           set -euo pipefail
           bun --cwd=packages/stats scripts/generate-client-bundle.ts --generate
@@ -159,7 +158,6 @@ jobs:
           tar -czf termux-js.tar.gz -C termux-bundle .
 
       - name: Verify JavaScript bundle archive contents
-        shell: bash
         run: |
           set -euo pipefail
           test -s termux-js.tar.gz
@@ -173,6 +171,7 @@ jobs:
           name: termux-js-bundle
           path: termux-js.tar.gz
           if-no-files-found: error
+
   package-release:
     name: Package and publish GitHub Release
     needs: [native-addon, js-bundle]
@@ -184,6 +183,7 @@ jobs:
 
       - name: Verify Android overlay and release tag
         run: python3 android/scripts/verify-overlay.py
+      
       - name: Validate release inputs
         run: python3 android/scripts/check-release-inputs.py
 
@@ -200,7 +200,6 @@ jobs:
           path: .
 
       - name: Assemble and test release bundle
-        shell: bash
         run: |
           set -euo pipefail
           test -s packages/natives/native/pi_natives.android-arm64.node
@@ -224,6 +223,7 @@ jobs:
           tar -tzf omp-termux.tar.gz | grep -Fx './cli.js'
           tar -tzf omp-termux.tar.gz | grep -F './node_modules/@oh-my-pi/pi-natives/native/pi_natives.android-arm64.node'
           sha256sum -c packages/natives/native/pi_natives.android-arm64.node.sha256
+
       - name: Attach to release
         uses: softprops/action-gh-release@v2
         with:
