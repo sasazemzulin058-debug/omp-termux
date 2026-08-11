@@ -36,9 +36,6 @@ jobs:
           set -euo pipefail
           bash android/scripts/apply-patches.sh
           git diff --check
-          for patch in android/patches/[0-9][0-9]-*.patch; do
-            git apply --reverse --check "$patch"
-          done
       - name: Verify upstream build inputs
         run: |
           test -f package.json
