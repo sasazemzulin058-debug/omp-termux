@@ -34,6 +34,8 @@ jobs:
             --exclude='android/' \
             --exclude='quickstart.sh' \
             --exclude='install.sh' \
+            --exclude='.bun-cache/' \
+            --exclude='tmp/' \
             "$tmp/" ./
       - name: Apply deterministic Android overlay
         shell: bash
@@ -62,9 +64,17 @@ jobs:
             exit 0
           fi
           git commit -m "chore: sync upstream OMP ${version}"
-          if git ls-remote --exit-code --tags origin "refs/tags/$tag" >/dev/null 2>&1; then
-            echo "error: release tag already exists: $tag" >&2
-            exit 1
+          if remote_tag_sha=$(git ls-remote --tags origin "refs/tags/$tag" | awk '{print $1}'); then
+            if [ -n "$remote_tag_sha" ]; then
+              head_sha=$(git rev-parse HEAD)
+              if [ "$remote_tag_sha" = "$head_sha" ]; then
+                echo "release already published: $tag"
+                exit 0
+              fi
+              echo "error: immutable release tag already points to $remote_tag_sha: $tag" >&2
+              echo "       upstream version is unchanged; next upstream version is required" >&2
+              exit 1
+            fi
           fi
           git tag "$tag"
           git push --atomic origin HEAD:main "refs/tags/$tag"
