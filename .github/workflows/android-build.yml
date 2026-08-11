@@ -80,7 +80,12 @@ jobs:
           mkdir -p "$RUNNER_TEMP/bin"
           cat > "$RUNNER_TEMP/bin/cmake" <<EOF
           #!/bin/sh
-          exec $cmake_bin "\$@" -DCMAKE_MAKE_PROGRAM=$ninja
+          args=""
+          for arg in "\$@"; do
+            [ "\$arg" = "-DCMAKE_SYSTEM_PROCESSOR=aarch64" ] && arg=-DCMAKE_SYSTEM_PROCESSOR=arm64
+            args="\$args \"\$arg\""
+          done
+          eval exec "$cmake_bin" \$args -DCMAKE_MAKE_PROGRAM="$ninja"
           EOF
           chmod +x "$RUNNER_TEMP/bin/cmake"
           echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
