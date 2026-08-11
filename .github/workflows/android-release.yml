@@ -87,10 +87,14 @@ jobs:
       - name: Add compile swap
         run: |
           set -euo pipefail
-          sudo fallocate -l 8G /swapfile
-          sudo chmod 600 /swapfile
-          sudo mkswap /swapfile
-          sudo swapon /swapfile
+          if ! sudo swapon --show=NAME | grep -qx /swapfile; then
+            sudo swapoff /swapfile 2>/dev/null || true
+            sudo rm -f /swapfile
+            sudo fallocate -l 8G /swapfile
+            sudo chmod 600 /swapfile
+            sudo mkswap /swapfile
+            sudo swapon /swapfile
+          fi
           free -h
 
       - name: Cross-compile native addon (NDK clang)
