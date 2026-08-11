@@ -98,7 +98,7 @@ jobs:
       - name: Cross-compile native addon (NDK clang)
         env:
           ANDROID_NDK_ROOT: ${{ steps.ndk.outputs.ndk-path }}
-          CARGO_BUILD_JOBS: 2
+          CARGO_BUILD_JOBS: 1
           OPUS_NO_PKG_CONFIG: "1"
           CXX_aarch64_linux_android: ${{ steps.ndk.outputs.ndk-path }}/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android24-clang++
           CMAKE_CXX_COMPILER: ${{ steps.ndk.outputs.ndk-path }}/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android24-clang++
