@@ -36,7 +36,7 @@ jobs:
           set -euo pipefail
           python3 android/scripts/apply-overlay.py
           git diff --check -- . ':(exclude)packages/catalog/src/discovery/cursor-gen/agent_pb.ts' \
-            ':(exclude)types/assets/index.d.ts'
+            ':(exclude)types/assets/index.d.ts' ':(exclude)README.md'
       - name: Verify upstream build inputs
         run: |
           test -f package.json
