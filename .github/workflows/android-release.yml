@@ -112,7 +112,7 @@ jobs:
           CMAKE_GENERATOR: Ninja
           CMAKE_MAKE_PROGRAM: /usr/bin/ninja
           CMAKE_ARGS: -DCMAKE_MAKE_PROGRAM=/usr/bin/ninja
-          CARGO_INCREMENTAL: "true"
+          CARGO_INCREMENTAL: "false"
         run: bash android/scripts/build-android-ci.sh
 
       - name: Build Termux bundle
