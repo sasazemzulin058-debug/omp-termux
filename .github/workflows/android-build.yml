@@ -76,10 +76,11 @@ jobs:
         run: |
           set -euo pipefail
           ninja=$(command -v ninja || command -v ninja-build)
+          cmake_bin=$(command -v cmake)
           mkdir -p "$RUNNER_TEMP/bin"
           cat > "$RUNNER_TEMP/bin/cmake" <<EOF
           #!/bin/sh
-          exec /usr/bin/cmake "\$@" -DCMAKE_MAKE_PROGRAM=$ninja
+          exec $cmake_bin "\$@" -DCMAKE_MAKE_PROGRAM=$ninja
           EOF
           chmod +x "$RUNNER_TEMP/bin/cmake"
           echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
