@@ -80,6 +80,9 @@ jobs:
           mkdir -p "$RUNNER_TEMP/bin"
           cat > "$RUNNER_TEMP/bin/cmake" <<EOF
           #!/bin/sh
+          if [ "\$1" = "--build" ]; then
+            exec "$cmake_bin" "\$@"
+          fi
           args=""
           for arg in "\$@"; do
             case "\$arg" in
