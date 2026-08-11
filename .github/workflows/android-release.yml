@@ -62,6 +62,7 @@ jobs:
         env:
           ANDROID_NDK_ROOT: ${{ steps.ndk.outputs.ndk-path }}
           CARGO_BUILD_JOBS: 2
+          OPUS_NO_PKG_CONFIG: "1"
         run: bash android/scripts/build-android-ci.sh
 
       - name: Build Termux bundle
