@@ -143,7 +143,7 @@ BUILT="$REPO_ROOT/target/aarch64-linux-android/ci/libpi_natives.so"
 cp "$BUILT" "$TMP_DIR/pi_natives.android-arm64.node"
 BUILT="$TMP_DIR/pi_natives.android-arm64.node"
 if [ ! -f "$BUILT" ]; then
-	echo "error: napi build did not produce $BUILT" >&2
+	echo "error: cargo build did not produce $BUILT" >&2
 	ls -la "$TMP_DIR" >&2
 	exit 1
 fi

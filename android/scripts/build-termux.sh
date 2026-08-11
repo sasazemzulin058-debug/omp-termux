@@ -29,8 +29,11 @@ if [ "$host_triple" != "aarch64-linux-android" ]; then
 	echo "      this script targets on-device Termux builds; use build-android.sh for cross-compile" >&2
 fi
 
-# --- apply patches -----------------------------------------------------------
-"$REPO_ROOT/android/scripts/apply-patches.sh"
+# --- apply deterministic overlay ---------------------------------------------
+if ! python3 "$REPO_ROOT/android/scripts/verify-overlay.py" >/dev/null 2>&1; then
+	python3 "$REPO_ROOT/android/scripts/apply-overlay.py"
+	python3 "$REPO_ROOT/android/scripts/verify-overlay.py"
+fi
 
 # --- build -------------------------------------------------------------------
 echo "==> Building pi-natives (release)"

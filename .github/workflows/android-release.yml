@@ -17,6 +17,10 @@ on:
 permissions:
   contents: write
 
+concurrency:
+  group: android-release-${{ inputs.tag || github.ref_name }}
+  cancel-in-progress: false
+
 jobs:
   release:
     name: Build and attach android-arm64 addon
@@ -46,17 +50,12 @@ jobs:
 
 
       - name: Install JS dependencies
-        run: bun install --minimum-release-age 0
+        run: bun install --frozen-lockfile --minimum-release-age 0
 
-      # bun's hoisting does not always surface @napi-rs/cli as a top-level
-      # .bin. Add the explicit dep in a scratch workspace to guarantee the bin
-      # exists when the build script needs it.
-      - name: Ensure napi CLI is available
-        run: |
-          if [ ! -x node_modules/.bin/napi ]; then
-            bun add --no-save @napi-rs/cli@3.7.0
-          fi
-          test -x node_modules/.bin/napi || { echo "napi still missing"; exit 1; }
+      - name: Verify Android overlay and release tag
+        env:
+          RELEASE_TAG: ${{ github.event.inputs.tag || github.ref_name }}
+        run: python3 android/scripts/verify-overlay.py
 
       - name: Install native build tools
         run: sudo apt-get update && sudo apt-get install -y ninja-build
@@ -103,7 +102,7 @@ jobs:
           CARGO_BUILD_JOBS: 1
           CARGO_PROFILE_CI_LTO: "false"
           CARGO_PROFILE_CI_OPT_LEVEL: "0"
-          CARGO_PROFILE_CI_CODEGEN_UNITS: "256"
+          CARGO_PROFILE_CI_CODEGEN_UNITS: "1"
           CARGO_PROFILE_CI_DEBUG: "false"
           RUSTFLAGS: "-C debuginfo=0"
           OPUS_NO_PKG_CONFIG: "1"
