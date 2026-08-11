@@ -32,6 +32,8 @@ jobs:
 
       - name: Verify Android overlay and release tag
         run: python3 android/scripts/verify-overlay.py
+      - name: Validate release inputs
+        run: python3 android/scripts/check-release-inputs.py
 
       - name: Install Rust target
         run: |
@@ -111,6 +113,14 @@ jobs:
           CARGO_INCREMENTAL: "false"
         run: bash android/scripts/build-android-ci.sh
 
+      - name: Verify native addon artifact naming and checksum
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -s packages/natives/native/pi_natives.android-arm64.node
+          test -s packages/natives/native/pi_natives.android-arm64.node.sha256
+          (cd packages/natives/native && sha256sum -c pi_natives.android-arm64.node.sha256)
+
       - name: Upload native addon
         uses: actions/upload-artifact@v4
         with:
@@ -119,7 +129,6 @@ jobs:
             packages/natives/native/pi_natives.android-arm64.node
             packages/natives/native/pi_natives.android-arm64.node.sha256
           if-no-files-found: error
-
   js-bundle:
     name: Build Termux JavaScript bundle
     runs-on: ubuntu-24.04
@@ -130,6 +139,8 @@ jobs:
 
       - name: Verify Android overlay and release tag
         run: python3 android/scripts/verify-overlay.py
+      - name: Validate release inputs
+        run: python3 android/scripts/check-release-inputs.py
 
       - name: Install Bun
         uses: oven-sh/setup-bun@v2
@@ -158,13 +169,21 @@ jobs:
             termux-bundle/node_modules/@oh-my-pi/pi-natives/native/
           tar -czf termux-js.tar.gz -C termux-bundle .
 
+      - name: Verify JavaScript bundle archive contents
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -s termux-js.tar.gz
+          tar -tzf termux-js.tar.gz | grep -Fx './cli.js'
+          tar -tzf termux-js.tar.gz | grep -F 'node_modules/@oh-my-pi/pi-natives/package.json'
+          tar -tzf termux-js.tar.gz | grep -F 'node_modules/@oh-my-pi/pi-natives/native/index.js'
+
       - name: Upload JavaScript bundle
         uses: actions/upload-artifact@v4
         with:
           name: termux-js-bundle
           path: termux-js.tar.gz
           if-no-files-found: error
-
   package-release:
     name: Package and publish GitHub Release
     needs: [native-addon, js-bundle]
@@ -176,6 +195,8 @@ jobs:
 
       - name: Verify Android overlay and release tag
         run: python3 android/scripts/verify-overlay.py
+      - name: Validate release inputs
+        run: python3 android/scripts/check-release-inputs.py
 
       - name: Download native addon
         uses: actions/download-artifact@v4
@@ -193,19 +214,27 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          test -s packages/natives/native/pi_natives.android-arm64.node
+          test -s packages/natives/native/pi_natives.android-arm64.node.sha256
+          (cd packages/natives/native && sha256sum -c pi_natives.android-arm64.node.sha256)
+          test -s termux-js.tar.gz
+          tar -tzf termux-js.tar.gz | grep -Fx './cli.js'
           rm -rf termux-bundle
           mkdir termux-bundle
           tar -xzf termux-js.tar.gz -C termux-bundle
           mkdir -p termux-bundle/node_modules/@oh-my-pi/pi-natives/native
           cp packages/natives/native/pi_natives.android-arm64.node \
             termux-bundle/node_modules/@oh-my-pi/pi-natives/native/
+          test -s termux-bundle/cli.js
+          test -s termux-bundle/node_modules/@oh-my-pi/pi-natives/native/pi_natives.android-arm64.node
           tar -czf omp-termux.tar.gz -C termux-bundle .
           sha256sum omp-termux.tar.gz > omp-termux.tar.gz.sha256
           test -s omp-termux.tar.gz
+          test -s omp-termux.tar.gz.sha256
+          sha256sum -c omp-termux.tar.gz.sha256
           tar -tzf omp-termux.tar.gz | grep -Fx './cli.js'
-          tar -tzf omp-termux.tar.gz | grep -F 'pi_natives.android-arm64.node'
+          tar -tzf omp-termux.tar.gz | grep -F './node_modules/@oh-my-pi/pi-natives/native/pi_natives.android-arm64.node'
           sha256sum -c packages/natives/native/pi_natives.android-arm64.node.sha256
-
       - name: Attach to release
         uses: softprops/action-gh-release@v2
         with:

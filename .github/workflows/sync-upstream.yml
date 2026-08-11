@@ -50,6 +50,32 @@ jobs:
           test -f bun.lock
           test -f crates/pi-natives/Cargo.toml
           test -f packages/natives/native/loader-state.js
+      - name: Validate release inputs
+        run: python3 android/scripts/check-release-inputs.py
+      - name: Setup Bun and verify lockfile consistency
+        shell: bash
+        run: |
+          set -euo pipefail
+          bun_ver=$(python3 -c "import json; p=json.load(open('package.json')); print(p.get('packageManager','').split('@')[1] if 'packageManager' in p and '@' in p['packageManager'] else '')")
+          if [ -n "$bun_ver" ]; then
+            npm install -g "bun@$bun_ver" || true
+          fi
+          if ! command -v bun &>/dev/null; then
+            echo "error: bun CLI missing, required for lockfile validation" >&2
+            exit 1
+          fi
+          if ! bun install --frozen-lockfile; then
+            echo "error: bun.lock is out of sync with package.json" >&2
+            git diff bun.lock || true
+            exit 1
+          fi
+          if [ -n "$(git status --porcelain bun.lock)" ]; then
+            echo "error: bun.lock modified during frozen lockfile verification" >&2
+            git diff bun.lock
+            exit 1
+          fi
+          git checkout -- .bun-cache node_modules 2>/dev/null || true
+          rm -rf .bun-cache node_modules
       - name: Push sync commit and version tag
         shell: bash
         run: |
