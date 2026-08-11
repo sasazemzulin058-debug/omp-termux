@@ -1,6 +1,6 @@
 # omp-termux project state
 
-Updated: 2026-08-11 (commits `836a02b7` + queued GitHub Actions run `31490421319`)
+Updated: 2026-08-11 (commits `d24b5d8f` + CI runs through `31492095466`)
 
 ## Goal
 
@@ -44,7 +44,8 @@ native-addon ──┐
 js-bundle ─────┘
 ```
 
-`native-addon` builds `pi_natives.android-arm64.node` with NDK r27 and uploads it as an artifact. Native build uses an NDK-supported GitHub host and derives the NDK host toolchain from `uname -m`.
+- `native-addon` builds `pi_natives.android-arm64.node` with NDK r27 and uploads it as an artifact. Native build uses an NDK-supported GitHub host and derives the NDK host toolchain from `uname -m`.
+- `native-addon` is configured for NDK r27 on `ubuntu-24.04`; latest observed run `31492095466` reached `build-android-ci.sh` and spent its short job window downloading Rust crates, then failed before artifact verification. No compiler error was emitted in captured log. This is a reproducibility/runner-timeout blocker, not evidence to remove Android NDK or replace Bionic with glibc.
 
 `js-bundle` builds JavaScript bundle and uploads `termux-js-bundle`.
 
@@ -102,6 +103,7 @@ As of this document update:
 - `bun.lock` is synchronized with current upstream package metadata;
 - tags without published assets are not installable;
 - full physical test on another Android device is still pending;
+- latest native workflow attempt failed during dependency-fetch/build startup before native artifact checksum verification;
 - `docs/TERMUX_COMPATIBILITY_MATRIX.md` is authoritative for subsystem status and no-feature-loss acceptance criteria.
 
 Do not claim `v17.2.12-termux` is installable until release assets exist and checks pass.

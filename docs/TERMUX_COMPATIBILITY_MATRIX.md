@@ -81,9 +81,8 @@
 | **Clipboard** | `АДАПТИРОВАНО` | Отключена библиотека `arboard`. Вызовы `read_image_from_clipboard` возвращают `Ok(None)`, записи в буфер отключаются нативно. | Для текста рекомендуется интеграция с `termux-clipboard-set` на уровне JS. | [`apply-overlay.py:38-54`](https://github.com/sasazemzulin058-debug/omp-termux/blob/main/android/scripts/apply-overlay.py) |
 | **Audio** | `НЕ ПОДДЕРЖИВАЕТСЯ` | Нативная звуковая подсистема Linux (ALSA/PulseAudio) отсутствует. | Для воспроизведения требуется `termux-media-player` (`НЕ ПРОВЕРЕНО`). | `ОГРАНИЧЕНИЕ ФОРКА` |
 | **WebRTC** | `НЕ ПОДДЕРЖИВАЕТСЯ` | Нативные модули WebRTC не собираются под Android NDK в данном форке. | Отсутствует нативный интерфейс передачи потоков. | `ОГРАНИЧЕНИЕ ФОРКА` |
-| **Isolation / Sandboxing** | `ОГРАНИЧЕННО` | Изоляция ограничена Linux UID/GID приложения Termux в Android. | Отсутствуют `namespaces`, `chroot` без root и полноценный `docker`/`podman`. | Android OS Security Model |
-| **Install & Update** | `АДАПТИРОВАНО` | Автоматическая загрузка готовкой сборки JS + NDK-нативного аддона через `quickstart.sh`. | Нет автоматического фонового обновления; обновление переустановкой. | [`quickstart.sh`](https://github.com/sasazemzulin058-debug/omp-termux/blob/main/quickstart.sh) |
-| **CI / Cross-Compile** | `АДАПТИРОВАНО` | Двухэтапный GitHub Actions pipeline с NDK r27, preflight, checksum и artifact checks. | Native build требует NDK-compatible host, low-memory настройки и отдельный Android runtime smoke. | [`.github/workflows/android-release.yml`](https://github.com/sasazemzulin058-debug/omp-termux/blob/main/.github/workflows/android-release.yml) |
+| **Install & Update** | `АДАПТИРОВАНО` | Автоматическая загрузка готовой сборки JS + NDK-нативного аддона через `quickstart.sh`. | Нет автоматического фонового обновления; обновление переустановкой. | [`quickstart.sh`](https://github.com/sasazemzulin058-debug/omp-termux/blob/main/quickstart.sh) |
+| **CI / Cross-Compile** | `ОГРАНИЧЕННО` | Pipeline имеет preflight, checksum и artifact checks; опубликованный `v0.1.6` подтверждает release contract. | Последняя попытка native build `31492095466` остановилась во время dependency-fetch/build startup до artifact verification; повторять без изменения runner/cache strategy нельзя. | [`.github/workflows/android-release.yml`](https://github.com/sasazemzulin058-debug/omp-termux/blob/main/.github/workflows/android-release.yml) |
 | **Security & Permissions** | `ПОДДЕРЖИВАЕТСЯ` | Соблюдение модели разрешений Android SELinux и Termux storage access. | Требуется явное разрешение `termux-setup-storage` для доступа к `/sdcard`. | Termux Wiki |
 | **Lifecycle & Background** | `ОГРАНИЧЕННО` | Выполнение процессов в рамках сессии Termux. | Завершение процессов операционной системой из-за Phantom Process Killer в Android 12+. | Android OS restrictions |
 
@@ -191,7 +190,7 @@ omp --eval 'import { ps } from "pi-builtins"; console.log(ps)'
 
 **Вердикт:** `ОГРАНИЧЕННО СОВМЕСТИМ` (Partially Compatible)
 
-Платформа OMP успешно адаптирована на уровне исходного кода Rust/JS и процессов CI для системы Android ARM64 (Termux). Автоматизация сборки нативного аддона с помощью NDK r27 и подготовка инсталлятора `quickstart.sh` функционируют. Однако полный цикл работы CLI OMP и проверка стабильности подсинтаксических вызовов Bun/seccomp на физических смартфонах имеют статус **`НЕ ПРОВЕРЕНО`**. До успешной публикации физических артефактов нового тега полной совместимости не заявляется.
+Платформа OMP адаптирована на уровне исходного кода Rust/JS и release automation для Android ARM64 (Termux). Релиз `v0.1.6` имеет четыре ожидаемых assets и проверенный release contract. Однако новый native build не завершён: run `31492095466` остановился до artifact verification во время dependency-fetch/build startup. Полный цикл CLI и проверка Bun/seccomp на физическом смартфоне имеют статус **`НЕ ПРОВЕРЕНО`**. До успешного нового native artifact и runtime smoke полная совместимость не заявляется.
 ---
 
 ## 12. Зафиксированные решения и research log
