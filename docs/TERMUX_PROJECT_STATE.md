@@ -44,8 +44,8 @@ native-addon ──┐
 js-bundle ─────┘
 ```
 
-- `native-addon` builds `pi_natives.android-arm64.node` with NDK r27 and uploads it as an artifact. Native build uses an NDK-supported GitHub host and derives the NDK host toolchain from `uname -m`.
-- `native-addon` is configured for NDK r27 on `ubuntu-24.04`; latest observed run `31492095466` reached `build-android-ci.sh` and spent its short job window downloading Rust crates, then failed before artifact verification. No compiler error was emitted in captured log. This is a reproducibility/runner-timeout blocker, not evidence to remove Android NDK or replace Bionic with glibc.
+- `native-addon` builds `pi_natives.android-arm64.node` with NDK r27. Native jobs now target repository runner labels `[self-hosted, Windows, X64]`; `build-android-ci.sh` selects the Windows NDK host toolchain under Git Bash and keeps target `aarch64-linux-android`.
+- The prior hosted run `31493742003` confirmed exit 143/OOM during Cargo compilation. Corrected checksum format, runner routing, and Windows NDK executable handling are published; active validation run `31494537653` is queued/assigned to `HOME-PC`.
 
 `js-bundle` builds JavaScript bundle and uploads `termux-js-bundle`.
 
