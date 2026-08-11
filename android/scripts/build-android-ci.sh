@@ -170,6 +170,6 @@ case "$file_type" in
 esac
 
 # Emit sha256
-sha256sum "$ADDON" | awk '{print $1}' > "$ADDON.sha256"
+sha256sum "$ADDON" > "$ADDON.sha256"
 echo "    sha256: $(cat "$ADDON.sha256")"
 echo "==> Done"
