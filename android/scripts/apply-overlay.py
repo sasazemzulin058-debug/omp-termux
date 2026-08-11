@@ -54,6 +54,9 @@ def clipboard(text):
 def process(text):
     return once(text, '#[cfg(target_os = "linux")]\nmod platform {', '#[cfg(any(target_os = "linux", target_os = "android"))]\nmod platform {', "process.rs")
 
+def builtins(text):
+    return once(text, '#[cfg(target_os = "linux")]\nmod proc_snapshot {', '#[cfg(any(target_os = "linux", target_os = "android"))]\nmod proc_snapshot {', "proc_snapshot.rs")
+
 def loader(text):
     old = 'const SUPPORTED_PLATFORMS = ["linux-x64", "linux-arm64", "darwin-x64", "darwin-arm64", "win32-x64"];'
     new = 'const SUPPORTED_PLATFORMS = ["linux-x64", "linux-arm64", "android-arm64", "darwin-x64", "darwin-arm64", "win32-x64"];'
@@ -64,5 +67,6 @@ edit("crates/pi-natives/src/lib.rs", lambda s: once(s, "#![feature(alloc_error_h
 edit("crates/pi-natives/src/crash_handler.rs", crash)
 edit("crates/pi-natives/src/clipboard.rs", clipboard)
 edit("crates/pi-shell/src/process.rs", process)
+edit("crates/pi-builtins/src/proc_snapshot.rs", builtins)
 edit("packages/natives/native/loader-state.js", loader)
 print("Android overlay applied: 6 transformations")
