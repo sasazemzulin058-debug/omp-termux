@@ -35,6 +35,12 @@ for patch in "${patches[@]}"; do
 		skipped=$((skipped + 1))
 		continue
 	fi
+	if git apply --3way --check "$patch" >/dev/null 2>&1; then
+		git apply --3way "$patch"
+		printf 'apply  %s (3-way)\n' "$name"
+		applied=$((applied + 1))
+		continue
+	fi
 	if ! git apply --check "$patch" >/dev/null 2>&1; then
 		echo "error: $name does not apply cleanly to the current tree" >&2
 		echo "       the upstream files may have drifted; regenerate via android/scripts/regen-patches.sh" >&2

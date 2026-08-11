@@ -1,5 +1,5 @@
 diff --git a/crates/pi-natives/src/clipboard.rs b/crates/pi-natives/src/clipboard.rs
-index 792e36d..8e82003 100644
+index fdf862c..f54bb86 100644
 --- a/crates/pi-natives/src/clipboard.rs
 +++ b/crates/pi-natives/src/clipboard.rs
 @@ -4,13 +4,17 @@
@@ -28,16 +28,16 @@ index 792e36d..8e82003 100644
  fn encode_png(image: ImageData<'_>) -> Result<Vec<u8>> {
  	let width = u32::try_from(image.width)
  		.map_err(|_| Error::from_reason("Clipboard image width overflow"))?;
-@@ -63,7 +68,7 @@ pub fn copy_to_clipboard(text: String) -> Result<()> {
+@@ -152,7 +157,7 @@ pub fn copy_to_clipboard(text: String) -> Result<()> {
  /// serving, without shelling out to `xclip`/`wl-copy`. Wayland is unaffected
  /// (`wl-clipboard-rs` forks its own serving process) but sharing the instance
  /// is harmless there.
 -#[cfg(target_os = "linux")]
 +#[cfg(all(target_os = "linux", not(target_os = "android")))]
  fn set_clipboard_text(text: String) -> Result<()> {
- 	use std::sync::{Mutex, OnceLock};
+ 	use std::sync::OnceLock;
  
-@@ -88,7 +93,7 @@ fn set_clipboard_text(text: String) -> Result<()> {
+@@ -179,7 +184,7 @@ fn set_clipboard_text(text: String) -> Result<()> {
  /// exits, so a transient `Clipboard` is sufficient. Keeping the write on the
  /// calling thread also avoids worker-thread `AppKit` pasteboard warnings on
  /// macOS.
@@ -46,21 +46,12 @@ index 792e36d..8e82003 100644
  fn set_clipboard_text(text: String) -> Result<()> {
  	let mut clipboard = Clipboard::new()
  		.map_err(|err| Error::from_reason(format!("Failed to access clipboard: {err}")))?;
-@@ -98,12 +103,25 @@ fn set_clipboard_text(text: String) -> Result<()> {
+@@ -189,12 +194,16 @@ fn set_clipboard_text(text: String) -> Result<()> {
  	Ok(())
  }
  
-+/// Android (Termux): no system clipboard backend is available to native code —
-+/// arboard has no bionic backend and there is no X11/Wayland/AppKit/Win32
-+/// surface. Copy is surfaced as an error so the JS layer can fall back to
-+/// `termux-clipboard-set` or simply report the failure, rather than silently
-+/// dropping the text.
 +#[cfg(target_os = "android")]
-+fn set_clipboard_text(_text: String) -> Result<()> {
-+	Err(Error::from_reason(
-+		"Clipboard copy is not supported on Android/Termux native build; use termux-clipboard-set",
-+	))
-+}
++fn set_clipboard_text(_text: String) -> Result<()> { Err(Error::from_reason("Clipboard copy is not supported on Android/Termux native build; use termux-clipboard-set")) }
 +
  /// Read an image from the system clipboard.
  ///
@@ -72,16 +63,11 @@ index 792e36d..8e82003 100644
  #[napi]
  pub fn read_image_from_clipboard() -> task::Promise<Option<ClipboardImage>> {
  	task::blocking("clipboard.read_image", (), move |_| -> Result<Option<ClipboardImage>> {
-@@ -122,3 +140,12 @@ pub fn read_image_from_clipboard() -> task::Promise<Option<ClipboardImage>> {
- 		}
- 	})
+@@ -366,3 +375,7 @@ mod tests {
+ 		assert!(dib_to_png(&oversized_header).is_err(), "header size beyond buffer must not decode");
+ 	}
  }
 +
-+/// Android (Termux): no native clipboard image backend. Resolves to `None`
-+/// (no image available) instead of erroring, matching the "empty clipboard"
-+/// path so image-paste flows degrade gracefully.
 +#[cfg(target_os = "android")]
 +#[napi]
-+pub async fn read_image_from_clipboard() -> Result<Option<ClipboardImage>> {
-+	Ok(None)
-+}
++pub async fn read_image_from_clipboard() -> Result<Option<ClipboardImage>> { Ok(None) }

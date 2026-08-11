@@ -1,8 +1,6 @@
-diff --git a/crates/pi-natives/src/crash_handler.rs b/crates/pi-natives/src/crash_handler.rs
-index 8685d7e..245ce3f 100644
---- a/crates/pi-natives/src/crash_handler.rs
-+++ b/crates/pi-natives/src/crash_handler.rs
-@@ -30,10 +30,7 @@ use std::{
+--- a/crates/pi-natives/src/crash_handler.rs	2026-08-04 08:53:35.000000000 +0500
++++ b/crates/pi-natives/src/crash_handler.rs	2026-08-11 08:08:44.382396946 +0500
+@@ -36,10 +36,7 @@
  	io::Write as _,
  	path::{Path, PathBuf},
  	process,
@@ -14,16 +12,16 @@ index 8685d7e..245ce3f 100644
  	thread,
  	time::{SystemTime, UNIX_EPOCH},
  };
-@@ -48,7 +45,6 @@ const DEFAULT_CONFIG_DIR: &str = ".omp";
+@@ -54,7 +51,6 @@
  const APP_NAME: &str = "omp";
  
  static INSTALL: Once = Once::new();
 -static ALLOC_HOOK_ACTIVE: AtomicBool = AtomicBool::new(false);
  
- /// Install the panic and allocation-error hooks. Idempotent.
- pub fn install() {
-@@ -60,25 +56,18 @@ pub fn install() {
- 			prev_panic(info);
+ thread_local! {
+ 	/// Active `task::blocking` panic recovery frames on this thread.
+@@ -93,19 +89,7 @@
+ 			},
  		}));
  
 -		std::alloc::set_alloc_error_hook(|layout| {
@@ -36,25 +34,22 @@ index 8685d7e..245ce3f 100644
 -				process::abort();
 -			}
 -			let report = format_alloc_report(layout);
--			persist(&report, CrashKind::Alloc);
+-			persist(&report, CrashKind::Alloc, true);
 -			process::abort();
 -		});
-+		// alloc hook disabled on bionic: nightly-only feature(alloc_error_hook)
-+		// was removed; we accept reduced OOM diagnostics in exchange for
-+		// stable-Rust builds on Termux.
++		// alloc hook disabled on bionic: nightly-only feature is unavailable.
  	});
  }
  
+@@ -146,6 +130,7 @@
  #[derive(Clone, Copy)]
  enum CrashKind {
  	Panic,
-+	// Retained for the unit tests that exercise alloc-report formatting; the
-+	// runtime alloc-error hook is disabled on stable Rust (no feature(alloc_error_hook)).
 +	#[allow(dead_code, reason = "alloc hook disabled on bionic; kept for tests")]
  	Alloc,
  }
  
-@@ -104,6 +93,7 @@ fn format_panic_report(info: &std::panic::PanicHookInfo<'_>) -> String {
+@@ -171,6 +156,7 @@
  	out
  }
  
@@ -62,7 +57,7 @@ index 8685d7e..245ce3f 100644
  fn format_alloc_report(layout: Layout) -> String {
  	// Capturing a backtrace allocates. If the global allocator is in a state
  	// where small allocations keep failing this will recurse into the hook —
-@@ -128,6 +118,7 @@ fn report_header(kind: CrashKind) -> String {
+@@ -195,6 +181,7 @@
  		pid = process::id(),
  	)
  }
