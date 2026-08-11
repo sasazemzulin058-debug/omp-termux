@@ -42,6 +42,7 @@ def clipboard(text):
         ("use image::{", "#[cfg(not(target_os = \"android\"))]\nuse image::{"),
         ("use crate::task;", "#[cfg(not(target_os = \"android\"))]\nuse crate::task;"),
         ("fn encode_png(", "#[cfg(not(target_os = \"android\"))]\nfn encode_png("),
+        ("fn rgba_to_png(", "#[cfg(not(target_os = \"android\"))]\nfn rgba_to_png("),
         ("#[cfg(target_os = \"linux\")]\nfn set_clipboard_text(", "#[cfg(all(target_os = \"linux\", not(target_os = \"android\")))]\nfn set_clipboard_text("),
         ("#[cfg(not(target_os = \"linux\"))]\nfn set_clipboard_text(", "#[cfg(all(not(target_os = \"linux\"), not(target_os = \"android\")))]\nfn set_clipboard_text("),
     ]:
