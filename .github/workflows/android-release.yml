@@ -44,8 +44,6 @@ jobs:
           ndk-version: r27
           add-to-path: false
 
-      - name: Apply deterministic Android overlay
-        run: python3 android/scripts/apply-overlay.py
 
       - name: Install JS dependencies
         run: bun install --minimum-release-age 0
