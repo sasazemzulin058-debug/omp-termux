@@ -1,6 +1,6 @@
 # omp-termux project state
 
-Updated: 2026-08-11
+Updated: 2026-08-11 (commits `836a02b7` + queued GitHub Actions run `31490421319`)
 
 ## Goal
 
@@ -27,8 +27,10 @@ Scheduled every six hours and manually runnable.
 2. Preserves fork-owned `.github/`, `android/`, `quickstart.sh`, and `install.sh`.
 3. Applies `android/scripts/apply-overlay.py`.
 4. Verifies required upstream inputs.
-5. Commits and pushes `main` plus immutable `v${version}-termux` tag atomically.
-6. Tag push starts `android-release.yml`.
+5. Runs `android/scripts/check-release-inputs.py`.
+6. Verifies the pinned Bun lockfile before committing.
+7. Commits and pushes `main` plus immutable `v${version}-termux` tag atomically.
+8. Tag push starts `android-release.yml`.
 
 No-op sync exits cleanly. Existing release tags are not force-updated. Runtime directories `.bun-cache/` and `tmp/` are excluded from upstream import.
 
@@ -42,7 +44,7 @@ native-addon ──┐
 js-bundle ─────┘
 ```
 
-`native-addon` builds `pi_natives.android-arm64.node` with NDK r27 and uploads it as an artifact.
+`native-addon` builds `pi_natives.android-arm64.node` with NDK r27 and uploads it as an artifact. Native jobs use `ubuntu-24.04-8-core`; standard `ubuntu-24.04` reached Rust compilation but was terminated with exit 143.
 
 `js-bundle` builds JavaScript bundle and uploads `termux-js-bundle`.
 
@@ -53,7 +55,9 @@ js-bundle ─────┘
 - `pi_natives.android-arm64.node`
 - `pi_natives.android-arm64.node.sha256`
 
-Jobs use `CARGO_BUILD_JOBS=1`, low optimization, disabled debug info, and swap because standard GitHub runners previously terminated Rust compilation with `SIGTERM` / exit `143`.
+Preflight checks reject version/tag mismatch, missing overlay inputs, and runtime caches. The lockfile was synchronized in commit `78391f2f` after run `31489858118` failed at frozen install.
+
+Jobs use `CARGO_BUILD_JOBS=1`, low optimization, disabled debug info, and swap.
 
 ## Android overlay
 
@@ -70,6 +74,8 @@ Current transformations cover:
 - Android ARM64 native loader platform list.
 
 Verifier: `android/scripts/verify-overlay.py`.
+
+Release preflight: `android/scripts/check-release-inputs.py`.
 
 Verifier checks package/tag version consistency and overlay markers. Upstream versions may add files under `crates/pi-builtins`; verifier accepts those gates only when files exist in checked-out upstream.
 
@@ -93,12 +99,14 @@ Device does not run `bun install`, Rust, clang, or native source build.
 
 As of this document update:
 
-- latest successful published release: `v0.1.6`;
-- `v17.2.12-termux` tag exists but its release build previously failed during native Rust compilation;
-- GitHub Actions run `31485948518` failed at native compile because runner operation was canceled;
-- latest sync attempts can fail when immutable `v17.2.12-termux` already exists and upstream version has not changed; this is intentional tag protection;
-- parallel release workflow is committed, but needs a new upstream version or a fresh test tag before end-to-end confirmation;
-- full physical test on another Android device is still pending.
+- latest successful published release: `v0.1.6`; its four expected assets exist;
+- upstream-sync/release foundation is published through commit `836a02b7`;
+- `bun.lock` is synchronized with current upstream package metadata in commit `78391f2f`;
+- run `31489858118` passed dependency install and overlay verification, then failed native Rust compilation with exit 143 on standard runner;
+- run `31490421319` is queued on `ubuntu-24.04-8-core`; larger-runner availability is the current release gate;
+- tags `v17.2.12-termux` and `v17.2.12-termux-fix` exist without published releases;
+- full physical test on another Android device is still pending;
+- `docs/TERMUX_COMPATIBILITY_MATRIX.md` is authoritative for subsystem status and no-feature-loss acceptance criteria.
 
 Do not claim `v17.2.12-termux` is installable until release assets exist and checks pass.
 
@@ -106,16 +114,12 @@ Do not claim `v17.2.12-termux` is installable until release assets exist and che
 
 ```sh
 cd omp-termux
-
 bash -n android/scripts/*.sh quickstart.sh
 python3 -m py_compile android/scripts/*.py
+python3 android/scripts/check-release-inputs.py
 git diff --check
-python3 android/scripts/verify-overlay.py
-
-# Inspect automation
 gh run list --repo sasazemzulin058-debug/omp-termux --limit 20
 gh release list --repo sasazemzulin058-debug/omp-termux --limit 10
-gh release view v17.2.12-termux --repo sasazemzulin058-debug/omp-termux
 ```
 
 After a successful release:
