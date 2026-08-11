@@ -82,7 +82,9 @@ jobs:
           #!/bin/sh
           args=""
           for arg in "\$@"; do
-            [ "\$arg" = "-DCMAKE_SYSTEM_PROCESSOR=aarch64" ] && arg=-DCMAKE_SYSTEM_PROCESSOR=arm64
+            case "\$arg" in
+              -DCMAKE_SYSTEM_PROCESSOR=*) continue ;;
+            esac
             args="\$args \"\$arg\""
           done
           eval exec "$cmake_bin" \$args -DCMAKE_MAKE_PROGRAM="$ninja"
