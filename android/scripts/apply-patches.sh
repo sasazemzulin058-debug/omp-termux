@@ -30,6 +30,11 @@ applied=0
 skipped=0
 for patch in "${patches[@]}"; do
 	name="$(basename "$patch")"
+	if [ "$name" = "05-pi-shell-android-cfg.patch" ] && grep -q '^#[cfg(any(target_os = "linux", target_os = "android"))]' crates/pi-shell/src/process.rs; then
+		echo "skip   $name (already applied)"
+		skipped=$((skipped + 1))
+		continue
+	fi
 	if git apply --reverse --check "$patch" >/dev/null 2>&1; then
 		echo "skip   $name (already applied)"
 		skipped=$((skipped + 1))
