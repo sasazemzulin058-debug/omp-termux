@@ -118,9 +118,9 @@ TMP_DIR="$(mktemp -d "$NATIVE_DIR/.build/cross-XXXXXX")"
 # builds, which creates incompatible Opus objects. Cargo config above keeps all
 # C/C++/Rust objects on selected NDK r27.
 cargo build --manifest-path crates/pi-natives/Cargo.toml \
-	--target aarch64-linux-android --profile dev --locked
+	--target aarch64-linux-android --profile ci --locked
 
-BUILT="$REPO_ROOT/target/aarch64-linux-android/debug/libpi_natives.so"
+BUILT="$REPO_ROOT/target/aarch64-linux-android/ci/libpi_natives.so"
 cp "$BUILT" "$TMP_DIR/pi_natives.android-arm64.node"
 BUILT="$TMP_DIR/pi_natives.android-arm64.node"
 if [ ! -f "$BUILT" ]; then
