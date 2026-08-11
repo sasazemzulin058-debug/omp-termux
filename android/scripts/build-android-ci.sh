@@ -23,16 +23,19 @@ JOBS="${CARGO_BUILD_JOBS:-2}"
 export CARGO_BUILD_JOBS="$JOBS"
 
 ARCH_NAME="$(uname -m)"
-case "$ARCH_NAME" in
-	x86_64) NDK_HOST_TAG="linux-x86_64" ;;
-	aarch64|arm64) NDK_HOST_TAG="linux-aarch64" ;;
-	*) echo "error: unsupported host arch: $ARCH_NAME" >&2; exit 1 ;;
+OS_NAME="$(uname -s)"
+case "$OS_NAME:$ARCH_NAME" in
+	Linux:x86_64) NDK_HOST_TAG="linux-x86_64"; NDK_EXE_SUFFIX="" ;;
+	Linux:aarch64|Linux:arm64) NDK_HOST_TAG="linux-aarch64"; NDK_EXE_SUFFIX="" ;;
+	MINGW*:x86_64|MSYS*:x86_64|CYGWIN*:x86_64) NDK_HOST_TAG="windows-x86_64"; NDK_EXE_SUFFIX=".cmd" ;;
+	*) echo "error: unsupported host: $OS_NAME/$ARCH_NAME" >&2; exit 1 ;;
 esac
 
-NDK_CLANG="$ANDROID_NDK_ROOT/toolchains/llvm/prebuilt/$NDK_HOST_TAG/bin/aarch64-linux-android24-clang"
-NDK_AR="$ANDROID_NDK_ROOT/toolchains/llvm/prebuilt/$NDK_HOST_TAG/bin/llvm-ar"
-NDK_RANLIB="$ANDROID_NDK_ROOT/toolchains/llvm/prebuilt/$NDK_HOST_TAG/bin/llvm-ranlib"
-NDK_STRIP="$ANDROID_NDK_ROOT/toolchains/llvm/prebuilt/$NDK_HOST_TAG/bin/llvm-strip"
+NDK_BIN="$ANDROID_NDK_ROOT/toolchains/llvm/prebuilt/$NDK_HOST_TAG/bin"
+NDK_CLANG="$NDK_BIN/aarch64-linux-android24-clang$NDK_EXE_SUFFIX"
+NDK_AR="$NDK_BIN/llvm-ar$NDK_EXE_SUFFIX"
+NDK_RANLIB="$NDK_BIN/llvm-ranlib$NDK_EXE_SUFFIX"
+NDK_STRIP="$NDK_BIN/llvm-strip$NDK_EXE_SUFFIX"
 
 for tool in "$NDK_CLANG" "$NDK_AR" "$NDK_RANLIB" "$NDK_STRIP"; do
 	[ -x "$tool" ] || { echo "error: NDK tool not found: $tool" >&2; exit 1; }

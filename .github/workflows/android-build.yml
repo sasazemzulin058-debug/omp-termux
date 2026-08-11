@@ -29,7 +29,7 @@ on:
 jobs:
   build:
     name: Cross-compile android-arm64 addon
-    runs-on: ubuntu-24.04
+    runs-on: [self-hosted, Windows, X64]
     steps:
       - uses: actions/checkout@v4
 
@@ -106,8 +106,7 @@ jobs:
           ANDROID_NDK_ROOT: ${{ steps.ndk.outputs.ndk-path }}
           CARGO_BUILD_JOBS: 1
           CARGO_PROFILE_CI_LTO: "false"
-          CARGO_PROFILE_CI_OPT_LEVEL: "0"
-          CARGO_PROFILE_CI_CODEGEN_UNITS: "1"
+          CARGO_PROFILE_CI_CODEGEN_UNITS: "16"
           CARGO_PROFILE_CI_DEBUG: "false"
           RUSTFLAGS: "-C debuginfo=0"
           OPUS_NO_PKG_CONFIG: "1"
