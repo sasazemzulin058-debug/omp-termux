@@ -27,7 +27,7 @@ OS_NAME="$(uname -s)"
 case "$OS_NAME:$ARCH_NAME" in
 	Linux:x86_64) NDK_HOST_TAG="linux-x86_64"; NDK_EXE_SUFFIX="" ;;
 	Linux:aarch64|Linux:arm64) NDK_HOST_TAG="linux-aarch64"; NDK_EXE_SUFFIX="" ;;
-	MINGW*:x86_64|MSYS*:x86_64|CYGWIN*:x86_64) NDK_HOST_TAG="windows-x86_64"; NDK_EXE_SUFFIX=".cmd" ;;
+	MINGW*:x86_64|MSYS*:x86_64|CYGWIN*:x86_64) NDK_HOST_TAG="windows-x86_64"; NDK_EXE_SUFFIX=".exe" ;;
 	*) echo "error: unsupported host: $OS_NAME/$ARCH_NAME" >&2; exit 1 ;;
 esac
 
