@@ -125,7 +125,12 @@ cat >> Cargo.toml <<'EOF'
 [profile.ci.package."*"]
 opt-level = 0
 debug = false
-codegen-units = 256
+codegen-units = 1
+
+[profile.ci.package.pi-natives]
+opt-level = 0
+debug = false
+codegen-units = 1
 EOF
 
 # Build with cargo directly. napi injects runner NDK r29 linker into target
