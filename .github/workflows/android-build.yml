@@ -43,18 +43,11 @@ jobs:
 
       - name: Install Rust target for the repo-pinned toolchain
         # rust-toolchain.toml pins nightly-2026-04-29; rustup auto-activates it
-        # for any cargo invocation in the repo. dtolnay's `targets:` input only
-        # applies to the toolchain IT installs, so add the android target to the
-        # pinned toolchain explicitly or the cross-build can't find std.
+        # for any cargo invocation in the repo.
+        shell: pwsh
         run: |
-          set -euo pipefail
-          if ! command -v rustup >/dev/null 2>&1; then
-            for cargo_bin in /c/Users/*/.cargo/bin /d/Users/*/.cargo/bin; do
-              if [ -x "$cargo_bin/rustup.exe" ]; then export PATH="$cargo_bin:$PATH"; break; fi
-            done
-          fi
-          command -v rustup
-          rustup show active-toolchain || rustup toolchain install
+          rustup show active-toolchain
+          if ($LASTEXITCODE -ne 0) { rustup toolchain install }
           rustup target add aarch64-linux-android
 
       - name: Install Android NDK r27

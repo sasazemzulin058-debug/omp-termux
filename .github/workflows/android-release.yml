@@ -39,15 +39,10 @@ jobs:
         run: python3 android/scripts/check-release-inputs.py
 
       - name: Install Rust target
+        shell: pwsh
         run: |
-          set -euo pipefail
-          if ! command -v rustup >/dev/null 2>&1; then
-            for cargo_bin in /c/Users/*/.cargo/bin /d/Users/*/.cargo/bin; do
-              if [ -x "$cargo_bin/rustup.exe" ]; then export PATH="$cargo_bin:$PATH"; break; fi
-            done
-          fi
-          command -v rustup
-          rustup show active-toolchain || rustup toolchain install
+          rustup show active-toolchain
+          if ($LASTEXITCODE -ne 0) { rustup toolchain install }
           rustup target add aarch64-linux-android
 
       - name: Install Android NDK r27
