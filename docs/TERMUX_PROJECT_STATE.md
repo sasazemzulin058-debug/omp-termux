@@ -100,11 +100,13 @@ Device does not run `bun install`, Rust, clang, or native source build.
 As of this document update:
 
 - latest successful published release: `v0.1.6`; its four expected assets exist;
-- upstream-sync/release foundation is published through commit `836a02b7`;
+- release foundation and research log are published through commits `932b1030` and `f73c15d5`;
 - `bun.lock` is synchronized with current upstream package metadata in commit `78391f2f`;
-- run `31489858118` passed dependency install and overlay verification, then failed native Rust compilation with exit 143 on standard runner;
-- run `31490421319` is queued on `ubuntu-24.04-8-core`; larger-runner availability is the current release gate;
-- tags `v17.2.12-termux` and `v17.2.12-termux-fix` exist without published releases;
+- run `31489632958` passed dependency install and overlay verification, then failed native Rust compilation with exit 143 on standard runner;
+- run `31490421319` remained queued because `ubuntu-24.04-8-core` is unavailable for this public repository;
+- run `31491799176` proved public `ubuntu-24.04-arm` is available but `nttld/setup-ndk@v1` rejects host `linux-arm64`;
+- native jobs now use x64 `ubuntu-24.04` with an 8G swap step; build script keeps dynamic NDK host-tag resolution;
+- next release run must confirm whether swap resolves exit 143; release assets remain unpublished for `v17.2.12-termux*`;
 - full physical test on another Android device is still pending;
 - `docs/TERMUX_COMPATIBILITY_MATRIX.md` is authoritative for subsystem status and no-feature-loss acceptance criteria.
 
