@@ -69,6 +69,7 @@ jobs:
           CXX_aarch64_linux_android: ${{ steps.ndk.outputs.ndk-path }}/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android24-clang++
           CMAKE_CXX_COMPILER: ${{ steps.ndk.outputs.ndk-path }}/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android24-clang++
           CMAKE_GENERATOR: Ninja
+          CMAKE_MAKE_PROGRAM: /usr/bin/ninja
         run: bash android/scripts/build-android-ci.sh
 
       - name: Build Termux bundle
