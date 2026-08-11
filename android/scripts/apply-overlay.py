@@ -56,7 +56,7 @@ def process(text):
 
 def builtins(text):
     old = '#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]'
-    if text.count(old) != 5:
+    if text.count(old) != 4:
         raise SystemExit(f"overlay marker mismatch: proc_snapshot cfg count: {text.count(old)}")
     text = text.replace(old, '#[cfg(any(target_os = "linux", target_os = "android", target_os = "macos", target_os = "windows"))]')
     return once(text, '#[cfg(target_os = "linux")]\nmod proc_snapshot {', '#[cfg(any(target_os = "linux", target_os = "android"))]\nmod proc_snapshot {', "proc_snapshot.rs")
