@@ -5,6 +5,7 @@
 //! `pi_voice::live`. This class adapts its callbacks to non-blocking
 //! threadsafe functions and its PCM input to `Float32Array`.
 
+#[cfg(not(target_os = "android"))]
 use std::sync::Arc;
 
 use napi::{
@@ -12,6 +13,7 @@ use napi::{
 	threadsafe_function::{ThreadsafeFunction, ThreadsafeFunctionCallMode, UnknownReturnValue},
 };
 use napi_derive::napi;
+#[cfg(not(target_os = "android"))]
 use pi_voice::live::{DEFAULT_OPEN_TIMEOUT_MS, LiveCallbacks, LivePeerCore};
 
 type StringCallback = ThreadsafeFunction<String, UnknownReturnValue>;
@@ -20,9 +22,11 @@ type LevelCallback = ThreadsafeFunction<f64, UnknownReturnValue>;
 /// WebRTC peer that accepts 16 kHz mono PCM and renders remote Opus audio.
 #[napi]
 pub struct LiveWebRtcPeer {
+	#[cfg(not(target_os = "android"))]
 	inner: Arc<LivePeerCore>,
 }
 
+#[cfg(not(target_os = "android"))]
 #[napi]
 impl LiveWebRtcPeer {
 	/// Create an idle peer and register its event, output-level, and failure
@@ -106,6 +110,7 @@ impl LiveWebRtcPeer {
 	}
 }
 
+#[cfg(not(target_os = "android"))]
 impl Drop for LiveWebRtcPeer {
 	fn drop(&mut self) {
 		if self.inner.is_closing() {
@@ -118,4 +123,45 @@ impl Drop for LiveWebRtcPeer {
 			});
 		}
 	}
+}
+
+#[cfg(target_os = "android")]
+#[napi]
+impl LiveWebRtcPeer {
+	#[napi(constructor)]
+	pub fn new(
+		_on_event: StringCallback,
+		_on_level: LevelCallback,
+		_on_failure: StringCallback,
+	) -> Self {
+		Self {}
+	}
+
+	#[napi]
+	pub async fn create_offer(&self) -> Result<String> {
+		Err(napi::Error::from_reason("LiveWebRtcPeer is not supported on Android/Termux"))
+	}
+
+	#[napi]
+	pub async fn accept_answer(&self, _sdp: String) -> Result<()> {
+		Err(napi::Error::from_reason("LiveWebRtcPeer is not supported on Android/Termux"))
+	}
+
+	#[napi]
+	pub async fn wait_for_open(&self, _timeout_ms: Option<u32>) -> Result<()> {
+		Err(napi::Error::from_reason("LiveWebRtcPeer is not supported on Android/Termux"))
+	}
+
+	#[napi]
+	pub fn push_audio(&self, _samples: Float32Array) -> Result<()> {
+		Err(napi::Error::from_reason("LiveWebRtcPeer is not supported on Android/Termux"))
+	}
+
+	#[napi]
+	pub fn set_muted(&self, _muted: bool) -> Result<()> {
+		Ok(())
+	}
+
+	#[napi]
+	pub async fn close(&self) {}
 }

@@ -49,7 +49,6 @@ flume.workspace = true
 pi-ast.workspace = true
 pi-iso.workspace = true
 pi-shell.workspace = true
-pi-voice.workspace = true
 pi-walker.workspace = true
 portable-pty.workspace = true
 png.workspace = true
@@ -68,6 +67,8 @@ unicode-width.workspace = true
 xxhash-rust.workspace = true
 
 [target.'cfg(not(target_os = "android"))'.dependencies]
+# pi-voice stubbed on Android: audiopus-sys C-build is incompatible with Android NDK cross-link
+pi-voice.workspace = true
 arboard.workspace = true
 
 [target.'cfg(target_os = "linux")'.dependencies]
