@@ -213,7 +213,7 @@ jobs:
           sha256sum -c omp-termux.tar.gz.sha256
           tar -tzf omp-termux.tar.gz | grep -Fx './cli.js'
           tar -tzf omp-termux.tar.gz | grep -F './node_modules/@oh-my-pi/pi-natives/native/pi_natives.android-arm64.node'
-          sha256sum -c packages/natives/native/pi_natives.android-arm64.node.sha256
+          (cd packages/natives/native && sha256sum -c pi_natives.android-arm64.node.sha256)
 
       - name: Attach to release
         uses: softprops/action-gh-release@v2
