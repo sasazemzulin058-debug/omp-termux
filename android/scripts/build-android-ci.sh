@@ -143,7 +143,9 @@ body = m.group(1)
 replacements = {
     "inherits": 'inherits = "dev"',
     "lto": "lto = false",
-    "codegen-units": "codegen-units = 256",
+    # CGU=256 (dev default) spikes rustc RSS on webrtc/syntect and OOMs the
+    # 7G GH runner even with 16G swap. Serial codegen keeps peak low.
+    "codegen-units": "codegen-units = 1",
     "debug": "debug = false",
     "opt-level": "opt-level = 0",
     "incremental": "incremental = false",
@@ -170,7 +172,7 @@ if '[profile.ci.package."*"]' not in text:
 [profile.ci.package."*"]
 opt-level = 0
 debug = false
-codegen-units = 16
+codegen-units = 1
 
 [profile.ci.package.pi-natives]
 opt-level = 0
@@ -181,6 +183,17 @@ p.write_text(text)
 print("patched [profile.ci] for low-memory Android build")
 PY
 
+# Cap C/C++/cmake/ninja + rustc frontend parallelism. Cargo -j1 alone does not
+# constrain ring/opus cmake or rayon inside rustc; those still OOM the runner.
+export MAKEFLAGS="${MAKEFLAGS:--j1}"
+export CMAKE_BUILD_PARALLEL_LEVEL="${CMAKE_BUILD_PARALLEL_LEVEL:-1}"
+export NINJAFLAGS="${NINJAFLAGS:--j1}"
+export CARGO_BUILD_JOBS=1
+export RAYON_NUM_THREADS="${RAYON_NUM_THREADS:-1}"
+export CARGO_BUILD_PIPELINING=false
+# Force single CGU even if a package override races the profile patch.
+export RUSTFLAGS="${RUSTFLAGS:-} -C codegen-units=1 -C debuginfo=0"
+echo "    MAKEFLAGS=$MAKEFLAGS RAYON_NUM_THREADS=$RAYON_NUM_THREADS RUSTFLAGS=$RUSTFLAGS"
 # Build with cargo directly. napi injects runner NDK r29 linker into target
 # builds, which creates incompatible Opus objects. Cargo config above keeps all
 # C/C++/Rust objects on selected NDK r27.

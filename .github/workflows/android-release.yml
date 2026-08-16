@@ -88,21 +88,35 @@ jobs:
       - name: Add compile swap
         run: |
           set -euo pipefail
-          # Runner ships a small pre-enabled /swapfile; always replace with 16G.
+          # Runner ships a small pre-enabled /swapfile; always replace.
+          # 32G preferred; fall back to 16G if disk is tight.
           sudo swapoff -a || true
           sudo rm -f /swapfile
-          sudo fallocate -l 16G /swapfile
+          if sudo fallocate -l 32G /swapfile; then
+            echo "swap=32G"
+          else
+            sudo rm -f /swapfile
+            sudo fallocate -l 16G /swapfile
+            echo "swap=16G (32G fallocate failed)"
+          fi
           sudo chmod 600 /swapfile
           sudo mkswap /swapfile
           sudo swapon /swapfile
           free -h
           swapon --show
+          df -h /
 
       - name: Cross-compile native addon
         env:
           ANDROID_NDK_ROOT: ${{ steps.ndk.outputs.ndk-path }}
           CARGO_BUILD_JOBS: 1
-          RUSTFLAGS: "-C debuginfo=0 -C linker-plugin-lto=no"
+          # Serial rustc/LLVM + no debuginfo. CGU also forced in build script.
+          RUSTFLAGS: "-C debuginfo=0 -C linker-plugin-lto=no -C codegen-units=1"
+          RAYON_NUM_THREADS: "1"
+          CARGO_BUILD_PIPELINING: "false"
+          MAKEFLAGS: "-j1"
+          CMAKE_BUILD_PARALLEL_LEVEL: "1"
+          NINJAFLAGS: "-j1"
           OPUS_NO_PKG_CONFIG: "1"
           CMAKE_GENERATOR: Ninja
           CMAKE_MAKE_PROGRAM: /usr/bin/ninja
