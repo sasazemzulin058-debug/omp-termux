@@ -28,7 +28,7 @@ on:
 jobs:
   build:
     name: Cross-compile android-arm64 addon
-    runs-on: tenki-standard-small-2c-4g
+    runs-on: tenki-standard-large-plus-16c-32g
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
