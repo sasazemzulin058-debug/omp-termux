@@ -21,7 +21,7 @@ if tag and tag != f"v{version}-termux":
 checks = {
     "crates/pi-natives/Cargo.toml": '[target.\'cfg(not(target_os = "android"))\'.dependencies]\narboard.workspace = true',
     "crates/pi-natives/src/lib.rs": "#![feature(alloc_error_hook)]",
-    "crates/pi-natives/src/crash_handler.rs": "alloc hook disabled on bionic",
+    "crates/pi-natives/src/crash_handler.rs": "alloc hook disabled on Android",
     "crates/pi-natives/src/clipboard.rs": '#[cfg(target_os = "android")]\nfn set_clipboard_text',
     "crates/pi-shell/src/process.rs": '#[cfg(any(target_os = "linux", target_os = "android"))]',
     "crates/pi-builtins/src/proc_snapshot.rs": '#[cfg(any(target_os = "linux", target_os = "android"))]',
