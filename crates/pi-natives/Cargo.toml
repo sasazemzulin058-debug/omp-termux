@@ -43,7 +43,6 @@ inferno.workspace = true
 napi.workspace = true
 napi-derive.workspace = true
 parking_lot.workspace = true
-pdf-inspector.workspace = true
 phf.workspace = true
 flume.workspace = true
 pi-ast.workspace = true
@@ -101,6 +100,7 @@ winreg.workspace = true
 arboard.workspace = true
 # pi-voice stubbed on Android: webrtc/opus OOMs free GH runners.
 pi-voice.workspace = true
+pdf-inspector.workspace = true
 
 [dev-dependencies]
 xkeysym = "=0.2.1"

@@ -226,6 +226,43 @@ trap 'cleanup_mem_watch; restore_cargo_config' EXIT
 # builds, which creates incompatible Opus objects. Cargo config above keeps all
 # C/C++/Rust objects on selected NDK r27.
 set +e
+echo "==> [Stage 1/5] Building pi-ast & tree-sitter grammars..."
+cargo build --manifest-path crates/pi-ast/Cargo.toml \
+	--target aarch64-linux-android --profile ci --locked -j 1
+CARGO_RC=$?
+if [ "$CARGO_RC" -ne 0 ]; then
+  echo "error: Stage 1 (pi-ast) failed with $CARGO_RC" >&2
+  exit "$CARGO_RC"
+fi
+
+echo "==> [Stage 2/5] Building pi-walker..."
+cargo build --manifest-path crates/pi-walker/Cargo.toml \
+	--target aarch64-linux-android --profile ci --locked -j 1
+CARGO_RC=$?
+if [ "$CARGO_RC" -ne 0 ]; then
+  echo "error: Stage 2 (pi-walker) failed with $CARGO_RC" >&2
+  exit "$CARGO_RC"
+fi
+
+echo "==> [Stage 3/5] Building pi-shell..."
+cargo build --manifest-path crates/pi-shell/Cargo.toml \
+	--target aarch64-linux-android --profile ci --locked -j 1
+CARGO_RC=$?
+if [ "$CARGO_RC" -ne 0 ]; then
+  echo "error: Stage 3 (pi-shell) failed with $CARGO_RC" >&2
+  exit "$CARGO_RC"
+fi
+
+echo "==> [Stage 4/5] Building pi-iso..."
+cargo build --manifest-path crates/pi-iso/Cargo.toml \
+	--target aarch64-linux-android --profile ci --locked -j 1
+CARGO_RC=$?
+if [ "$CARGO_RC" -ne 0 ]; then
+  echo "error: Stage 4 (pi-iso) failed with $CARGO_RC" >&2
+  exit "$CARGO_RC"
+fi
+
+echo "==> [Stage 5/5] Building and linking pi-natives addon..."
 cargo build --manifest-path crates/pi-natives/Cargo.toml \
 	--target aarch64-linux-android --profile ci --locked -j 1
 CARGO_RC=$?
