@@ -128,18 +128,42 @@ echo "    napi bin:  $NAPI_BIN"
 mkdir -p "$NATIVE_DIR/.build"
 TMP_DIR="$(mktemp -d "$NATIVE_DIR/.build/cross-XXXXXX")"
 
-# Memory-safe Android profile: no LTO, no incremental, opt-level 0, serial-ish
-# codegen. Final .node is stripped below; runtime quality is full arm64 binary.
-cat >> Cargo.toml <<'EOF'
-
-[profile.ci]
-inherits = "dev"
-lto = false
-codegen-units = 256
-debug = false
-incremental = false
-strip = "symbols"
-opt-level = 0
+# Memory-safe Android overrides on existing workspace [profile.ci].
+# Do NOT redefine [profile.ci] (duplicate key breaks cargo).
+python3 - <<'PY'
+from pathlib import Path
+p = Path("Cargo.toml")
+text = p.read_text()
+# Force low-memory keys on existing [profile.ci] block until next [profile.
+import re
+m = re.search(r"(?ms)^\[profile\.ci\]\n(.*?)(?=^\[|\Z)", text)
+if not m:
+    raise SystemExit("missing [profile.ci] in Cargo.toml")
+body = m.group(1)
+replacements = {
+    "lto": 'lto = false',
+    "codegen-units": "codegen-units = 256",
+    "debug": "debug = false",
+    "opt-level": "opt-level = 0",
+    "incremental": "incremental = false",
+    "strip": 'strip = "symbols"',
+}
+lines = []
+seen = set()
+for line in body.splitlines(True):
+    key = line.split("=", 1)[0].strip() if "=" in line else ""
+    if key in replacements:
+        lines.append(replacements[key] + "\n")
+        seen.add(key)
+    else:
+        lines.append(line)
+for key, val in replacements.items():
+    if key not in seen:
+        lines.append(val + "\n")
+new_body = "".join(lines)
+text = text[: m.start(1)] + new_body + text[m.end(1) :]
+if '[profile.ci.package."*"]' not in text:
+    text += """
 
 [profile.ci.package."*"]
 opt-level = 0
@@ -150,7 +174,10 @@ codegen-units = 16
 opt-level = 0
 debug = false
 codegen-units = 1
-EOF
+"""
+p.write_text(text)
+print("patched [profile.ci] for low-memory Android build")
+PY
 
 # Build with cargo directly. napi injects runner NDK r29 linker into target
 # builds, which creates incompatible Opus objects. Cargo config above keeps all
