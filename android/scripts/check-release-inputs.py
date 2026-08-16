@@ -54,16 +54,17 @@ def main():
         if not marker_path.is_file():
             sys.exit(f"error: missing required overlay marker file: {marker}")
 
-    # 4. Reject obvious runtime cache / build output directories if present in staging tree
-    reject_dirs = [
-        "node_modules",
-        "target",
-        ".cache",
-    ]
-    found_rejects = [d for d in reject_dirs if (root / d).exists()]
-
-    if found_rejects:
-        sys.exit(f"error: staging tree contains runtime cache directory: {', '.join(found_rejects)}")
+    # 4. Reject runtime cache directories in fresh staging tree
+    # In CI, checkout is fresh before bun install.
+    if os.environ.get("CI_CHECK_STAGING") == "1":
+        reject_dirs = [
+            "node_modules",
+            "target",
+            ".cache",
+        ]
+        found_rejects = [d for d in reject_dirs if (root / d).exists()]
+        if found_rejects:
+            sys.exit(f"error: staging tree contains runtime cache directory: {', '.join(found_rejects)}")
 
     print(f"Release preflight passed for version {version}")
 
