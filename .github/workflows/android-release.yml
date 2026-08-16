@@ -28,7 +28,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ inputs.tag || github.ref }}
+          ref: ${{ github.ref }}
 
       - name: Install system dependencies
         run: |
@@ -85,20 +85,30 @@ jobs:
       - name: Install JS dependencies
         run: bun install --minimum-release-age 0
 
+      - name: Add compile swap
+        run: |
+          set -euo pipefail
+          if ! sudo swapon --show=NAME | grep -qx /swapfile; then
+            sudo swapoff /swapfile 2>/dev/null || true
+            sudo rm -f /swapfile
+            sudo fallocate -l 12G /swapfile
+            sudo chmod 600 /swapfile
+            sudo mkswap /swapfile
+            sudo swapon /swapfile
+          fi
+          free -h
+
       - name: Cross-compile native addon
         env:
           ANDROID_NDK_ROOT: ${{ steps.ndk.outputs.ndk-path }}
           CARGO_BUILD_JOBS: 1
-          CARGO_PROFILE_CI_LTO: "false"
-          CARGO_PROFILE_CI_OPT_LEVEL: "0"
-          CARGO_PROFILE_CI_CODEGEN_UNITS: "16"
-          CARGO_PROFILE_CI_DEBUG: "false"
-          RUSTFLAGS: "-C debuginfo=0"
+          RUSTFLAGS: "-C debuginfo=0 -C linker-plugin-lto=no"
           OPUS_NO_PKG_CONFIG: "1"
           CMAKE_GENERATOR: Ninja
           CMAKE_MAKE_PROGRAM: /usr/bin/ninja
           CMAKE_ARGS: -DCMAKE_MAKE_PROGRAM=/usr/bin/ninja
           CARGO_INCREMENTAL: "false"
+          CARGO_TERM_COLOR: always
         run: bash android/scripts/build-android-ci.sh
 
       - name: Verify native addon artifact naming and checksum
@@ -123,7 +133,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ inputs.tag || github.ref }}
+          ref: ${{ github.ref }}
 
       - name: Verify Android overlay and release tag
         run: python3 android/scripts/verify-overlay.py
@@ -142,18 +152,10 @@ jobs:
       - name: Build JavaScript bundle
         run: |
           set -euo pipefail
-          # Full arm64 Termux package: docs/stats-aware CLI bundle + natives loader
-          # stubs. Native .node is attached later in package-release.
-          bun --cwd=packages/coding-agent run gen:bundle
-          test -s packages/coding-agent/dist/cli.js
-          mkdir -p termux-bundle/node_modules/@oh-my-pi/pi-natives/native
-          cp packages/coding-agent/dist/cli.js termux-bundle/cli.js
-          cp packages/natives/package.json termux-bundle/node_modules/@oh-my-pi/pi-natives/
-          cp packages/natives/native/index.js packages/natives/native/loader-state.js \
-            packages/natives/native/embedded-addon.js \
-            packages/natives/native/clipboard.js packages/natives/native/desktop.js \
-            termux-bundle/node_modules/@oh-my-pi/pi-natives/native/
-          tar -czf termux-js.tar.gz -C termux-bundle .
+          # Lean path: no host linux-x64 natives, no stats vite pipeline.
+          # Full arm64 package still embeds docs + natives loader stubs.
+          bun android/scripts/build-termux-js.ts
+          test -s termux-js.tar.gz
 
       - name: Verify JavaScript bundle archive contents
         run: |
@@ -177,7 +179,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ inputs.tag || github.ref }}
+          ref: ${{ github.ref }}
 
       - name: Verify Android overlay and release tag
         run: python3 android/scripts/verify-overlay.py

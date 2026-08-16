@@ -128,14 +128,23 @@ echo "    napi bin:  $NAPI_BIN"
 mkdir -p "$NATIVE_DIR/.build"
 TMP_DIR="$(mktemp -d "$NATIVE_DIR/.build/cross-XXXXXX")"
 
-# Avoid inherited release optimization for every dependency. This keeps Rust
-# memory below GitHub runner limits; final addon is stripped below.
+# Memory-safe Android profile: no LTO, no incremental, opt-level 0, serial-ish
+# codegen. Final .node is stripped below; runtime quality is full arm64 binary.
 cat >> Cargo.toml <<'EOF'
+
+[profile.ci]
+inherits = "dev"
+lto = false
+codegen-units = 256
+debug = false
+incremental = false
+strip = "symbols"
+opt-level = 0
 
 [profile.ci.package."*"]
 opt-level = 0
 debug = false
-codegen-units = 1
+codegen-units = 16
 
 [profile.ci.package.pi-natives]
 opt-level = 0
@@ -147,7 +156,7 @@ EOF
 # builds, which creates incompatible Opus objects. Cargo config above keeps all
 # C/C++/Rust objects on selected NDK r27.
 cargo build --manifest-path crates/pi-natives/Cargo.toml \
-	--target aarch64-linux-android --profile ci --locked
+	--target aarch64-linux-android --profile ci --locked -j "$JOBS"
 
 BUILT="$REPO_ROOT/target/aarch64-linux-android/ci/libpi_natives.so"
 cp "$BUILT" "$TMP_DIR/pi_natives.android-arm64.node"
