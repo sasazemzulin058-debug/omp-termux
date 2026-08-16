@@ -45,11 +45,7 @@ done
 # `cc` (cc-rs) reads CC_<target> (dashes → underscores); cargo reads
 # CARGO_TARGET_<TARGET>_LINKER / _AR. Both must agree on the toolchain.
 NDK_BIN="$(dirname "$NDK_CLANG")"
-# Rust/napi can resolve target linker by generic name. Put selected NDK first
-# and provide aliases so it cannot silently select runner NDK r29.
-[ "$NDK_BIN/aarch64-linux-android-clang" = "$NDK_CLANG" ] || ln -sf "$NDK_CLANG" "$NDK_BIN/aarch64-linux-android-clang"
-[ "$NDK_BIN/aarch64-linux-android24-clang" = "$NDK_CLANG" ] || ln -sf "$NDK_CLANG" "$NDK_BIN/aarch64-linux-android24-clang"
-[ "$NDK_BIN/clang" = "$NDK_CLANG" ] || ln -sf "$NDK_CLANG" "$NDK_BIN/clang"
+# Do NOT create recursive symlinks on clang!
 export PATH="$NDK_BIN:$PATH"
 export CC="$NDK_CLANG"
 export CXX="$NDK_BIN/aarch64-linux-android24-clang++"
