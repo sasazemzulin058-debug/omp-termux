@@ -58,6 +58,10 @@ export AR_aarch64_linux_android="$NDK_AR"
 export CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER="$NDK_CLANG"
 export CARGO_TARGET_AARCH64_LINUX_ANDROID_AR="$NDK_AR"
 export CARGO_TARGET_AARCH64_LINUX_ANDROID_RANLIB="$NDK_RANLIB"
+export CFLAGS="-Os -g0 -fvisibility=hidden"
+export CXXFLAGS="-Os -g0 -fvisibility=hidden"
+export CFLAGS_aarch64_linux_android="-Os -g0 -fvisibility=hidden"
+export CXXFLAGS_aarch64_linux_android="-Os -g0 -fvisibility=hidden"
 
 # napi may inject its own Android NDK linker. Cargo config wins over that
 # default and keeps all native objects on same NDK toolchain.

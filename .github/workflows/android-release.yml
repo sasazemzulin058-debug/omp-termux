@@ -26,6 +26,14 @@ jobs:
     name: Build Android ARM64 native addon
     runs-on: ubuntu-24.04
     steps:
+      - name: Free runner disk space
+        run: |
+          set -euo pipefail
+          sudo rm -rf /usr/share/dotnet || true
+          sudo rm -rf /opt/ghc || true
+          sudo rm -rf /usr/local/share/boost || true
+          df -h /
+
       - uses: actions/checkout@v4
         with:
           ref: ${{ github.ref }}
