@@ -28,7 +28,7 @@ permissions:
 
 jobs:
   manage:
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    runs-on: tenki-standard-small-2c-4g
     steps:
       - uses: actions/checkout@v4
 
