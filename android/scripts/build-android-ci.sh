@@ -200,9 +200,9 @@ PY
 export MAKEFLAGS="${MAKEFLAGS:--j1}"
 export CMAKE_BUILD_PARALLEL_LEVEL="${CMAKE_BUILD_PARALLEL_LEVEL:-1}"
 export NINJAFLAGS="${NINJAFLAGS:--j1}"
-export CARGO_BUILD_JOBS="${CARGO_BUILD_JOBS:-4}"
-export NUM_JOBS="${NUM_JOBS:-4}"
-export RAYON_NUM_THREADS="${RAYON_NUM_THREADS:-4}"
+export CARGO_BUILD_JOBS=2
+export NUM_JOBS=2
+export RAYON_NUM_THREADS=2
 export CARGO_BUILD_PIPELINING=true
 export RUSTC_WRAPPER=sccache
 export RUSTFLAGS="${RUSTFLAGS:--C opt-level=3 -C debuginfo=0 -C strip=symbols -C linker-plugin-lto=no -C link-arg=-fuse-ld=lld}"
