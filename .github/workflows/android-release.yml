@@ -90,12 +90,12 @@ jobs:
       - name: Cross-compile native addon
         env:
           ANDROID_NDK_ROOT: ${{ steps.ndk.outputs.ndk-path }}
-          CARGO_BUILD_JOBS: 4
-          RAYON_NUM_THREADS: 4
-          MAKEFLAGS: "-j4"
-          NUM_JOBS: 4
-          CMAKE_BUILD_PARALLEL_LEVEL: 4
-          NINJAFLAGS: "-j4"
+          CARGO_BUILD_JOBS: 8
+          RAYON_NUM_THREADS: 8
+          MAKEFLAGS: "-j8"
+          NUM_JOBS: 8
+          CMAKE_BUILD_PARALLEL_LEVEL: 8
+          NINJAFLAGS: "-j8"
           OPUS_NO_PKG_CONFIG: "1"
           CMAKE_GENERATOR: Ninja
           CARGO_INCREMENTAL: "false"

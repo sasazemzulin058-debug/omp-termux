@@ -19,7 +19,7 @@ cd "$REPO_ROOT"
 
 NATIVE_DIR="packages/natives/native"
 ADDON="$NATIVE_DIR/pi_natives.android-arm64.node"
-JOBS="${CARGO_BUILD_JOBS:-2}"
+JOBS="${CARGO_BUILD_JOBS:-8}"
 export CARGO_BUILD_JOBS="$JOBS"
 
 ARCH_NAME="$(uname -m)"
@@ -146,10 +146,10 @@ replacements = {
     # and serialize via cargo -j1 + RAYON_NUM_THREADS=1 so units run one-by-one.
     "inherits": 'inherits = "release"',
     "lto": "lto = false",
-    "codegen-units": "codegen-units = 16",
+    "codegen-units": "codegen-units = 256",
     "debug": "debug = false",
-    "opt-level": 'opt-level = "s"',
-    "incremental": "incremental = false",
+    "opt-level": 'opt-level = 3',
+    "incremental": "incremental = true",
     "strip": 'strip = "symbols"',
     "panic": 'panic = "abort"',
 }
@@ -171,19 +171,9 @@ if '[profile.ci.package."*"]' not in text:
     text += """
 
 [profile.ci.package."*"]
-opt-level = "s"
+opt-level = 3
 debug = false
-codegen-units = 16
-
-[profile.ci.package.pi-ast]
-opt-level = "s"
-debug = false
-codegen-units = 16
-
-[profile.ci.package.pi-natives]
-opt-level = "s"
-debug = false
-codegen-units = 16
+codegen-units = 256
 """
 p.write_text(text)
 print("patched [profile.ci] for low-memory Android build")
@@ -193,12 +183,12 @@ PY
 # constrain ring/opus cmake or rayon inside rustc; those still OOM the runner.
 # CGU=16 + RAYON_NUM_THREADS=1: smaller units, processed serially (lower peak
 # than CGU=1 which puts the whole crate in one LLVM unit).
-export MAKEFLAGS="${MAKEFLAGS:--j1}"
-export CMAKE_BUILD_PARALLEL_LEVEL="${CMAKE_BUILD_PARALLEL_LEVEL:-1}"
-export NINJAFLAGS="${NINJAFLAGS:--j1}"
-export CARGO_BUILD_JOBS=2
-export NUM_JOBS=2
-export RAYON_NUM_THREADS=2
+export MAKEFLAGS="${MAKEFLAGS:--j8}"
+export CMAKE_BUILD_PARALLEL_LEVEL="${CMAKE_BUILD_PARALLEL_LEVEL:-8}"
+export NINJAFLAGS="${NINJAFLAGS:--j8}"
+export CARGO_BUILD_JOBS="${CARGO_BUILD_JOBS:-8}"
+export NUM_JOBS="${NUM_JOBS:-8}"
+export RAYON_NUM_THREADS="${RAYON_NUM_THREADS:-8}"
 export CARGO_BUILD_PIPELINING=true
 export RUSTC_WRAPPER=sccache
 export RUSTFLAGS="${RUSTFLAGS:--C opt-level=3 -C debuginfo=0 -C strip=symbols -C linker-plugin-lto=no -C link-arg=-fuse-ld=lld}"
