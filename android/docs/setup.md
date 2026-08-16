@@ -68,6 +68,9 @@ bun ~/omp-termux/packages/coding-agent/src/cli.ts
 - **Clipboard copy** is unsupported natively — use `termux-clipboard-set` (from
   the `termux-api` package) if you need it.
 - **Clipboard image paste** returns empty.
+- **Native audio / LiveWebRtcPeer** are stubbed — constructors/methods return
+  errors. The `pi-voice`+webrtc/opus graph OOMs free GitHub runners; Termux
+  builds drop that dep so shell/PTY/grep/highlight still ship.
 - Everything else (shell, PTY, process management, grep, file discovery, syntax
   highlighting, tokenization) runs natively.
 

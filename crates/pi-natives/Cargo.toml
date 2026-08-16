@@ -49,7 +49,6 @@ flume.workspace = true
 pi-ast.workspace = true
 pi-iso.workspace = true
 pi-shell.workspace = true
-pi-voice.workspace = true
 pi-walker.workspace = true
 portable-pty.workspace = true
 png.workspace = true
@@ -100,6 +99,8 @@ winreg.workspace = true
 
 [target.'cfg(not(target_os = "android"))'.dependencies]
 arboard.workspace = true
+# pi-voice stubbed on Android: webrtc/opus OOMs free GH runners.
+pi-voice.workspace = true
 
 [dev-dependencies]
 xkeysym = "=0.2.1"

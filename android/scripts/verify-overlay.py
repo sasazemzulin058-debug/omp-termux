@@ -19,10 +19,12 @@ if tag and tag != f"v{version}-termux":
     raise SystemExit(f"version/tag mismatch: package={version}, tag={tag}")
 
 checks = {
-    "crates/pi-natives/Cargo.toml": '[target.\'cfg(not(target_os = "android"))\'.dependencies]\narboard.workspace = true',
+    "crates/pi-natives/Cargo.toml": "pi-voice stubbed on Android",
     "crates/pi-natives/src/lib.rs": "#![feature(alloc_error_hook)]",
     "crates/pi-natives/src/crash_handler.rs": "alloc hook disabled on Android",
     "crates/pi-natives/src/clipboard.rs": '#[cfg(target_os = "android")]\nfn set_clipboard_text',
+    "crates/pi-natives/src/audio.rs": "Native audio is not supported on Android/Termux",
+    "crates/pi-natives/src/live.rs": "LiveWebRtcPeer is not supported on Android/Termux",
     "crates/pi-shell/src/process.rs": '#[cfg(any(target_os = "linux", target_os = "android"))]',
     "crates/pi-builtins/src/proc_snapshot.rs": '#[cfg(any(target_os = "linux", target_os = "android"))]',
     "crates/pi-builtins/src/ps.rs": '#[cfg(any(target_os = "linux", target_os = "android"))]\nfn ps_total_memory_bytes',
