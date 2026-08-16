@@ -174,7 +174,18 @@ text = text[: m.start(1)] + new_body + text[m.end(1) :]
 if '[profile.ci.package."*"]' not in text:
     text += """
 
+[profile.ci]
+lto = "off"
+codegen-units = 16
+debug = false
+strip = "symbols"
+
 [profile.ci.package."*"]
+opt-level = "s"
+debug = false
+codegen-units = 16
+
+[profile.ci.package.pi-ast]
 opt-level = "s"
 debug = false
 codegen-units = 16
@@ -183,7 +194,6 @@ codegen-units = 16
 opt-level = "s"
 debug = false
 codegen-units = 16
-"""
 p.write_text(text)
 print("patched [profile.ci] for low-memory Android build")
 PY

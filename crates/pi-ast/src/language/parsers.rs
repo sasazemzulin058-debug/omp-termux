@@ -13,26 +13,8 @@ pub fn language_c() -> TSLanguage {
 pub fn language_cpp() -> TSLanguage {
 	tree_sitter_cpp::LANGUAGE.into()
 }
-pub fn language_c_sharp() -> TSLanguage {
-	tree_sitter_c_sharp::LANGUAGE.into()
-}
-pub fn language_css() -> TSLanguage {
-	tree_sitter_css::LANGUAGE.into()
-}
-pub fn language_diff() -> TSLanguage {
-	tree_sitter_diff::LANGUAGE.into()
-}
-pub fn language_dockerfile() -> TSLanguage {
-	tree_sitter_dockerfile::language()
-}
 pub fn language_go() -> TSLanguage {
 	tree_sitter_go::LANGUAGE.into()
-}
-pub fn language_html() -> TSLanguage {
-	tree_sitter_html::LANGUAGE.into()
-}
-pub fn language_java() -> TSLanguage {
-	tree_sitter_java::LANGUAGE.into()
 }
 pub fn language_javascript() -> TSLanguage {
 	tree_sitter_javascript::LANGUAGE.into()
@@ -40,35 +22,11 @@ pub fn language_javascript() -> TSLanguage {
 pub fn language_json() -> TSLanguage {
 	tree_sitter_json::LANGUAGE.into()
 }
-pub fn language_kotlin() -> TSLanguage {
-	tree_sitter_kotlin::LANGUAGE.into()
-}
-pub fn language_lua() -> TSLanguage {
-	tree_sitter_lua::LANGUAGE.into()
-}
-pub fn language_markdown() -> TSLanguage {
-	tree_sitter_md::LANGUAGE.into()
-}
-pub fn language_php() -> TSLanguage {
-	tree_sitter_php::LANGUAGE_PHP_ONLY.into()
-}
 pub fn language_python() -> TSLanguage {
 	tree_sitter_python::LANGUAGE.into()
 }
-pub fn language_ruby() -> TSLanguage {
-	tree_sitter_ruby::LANGUAGE.into()
-}
 pub fn language_rust() -> TSLanguage {
 	tree_sitter_rust::LANGUAGE.into()
-}
-pub fn language_sql() -> TSLanguage {
-	tree_sitter_sql::LANGUAGE.into()
-}
-pub fn language_swift() -> TSLanguage {
-	tree_sitter_swift::LANGUAGE.into()
-}
-pub fn language_toml() -> TSLanguage {
-	tree_sitter_toml_ng::LANGUAGE.into()
 }
 pub fn language_tsx() -> TSLanguage {
 	tree_sitter_typescript::LANGUAGE_TSX.into()
@@ -76,11 +34,142 @@ pub fn language_tsx() -> TSLanguage {
 pub fn language_typescript() -> TSLanguage {
 	tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into()
 }
+// --- Conditionally compiled grammars (Desktop-only, fallback on Android) ---
+#[cfg(not(target_os = "android"))]
+pub fn language_c_sharp() -> TSLanguage {
+	tree_sitter_c_sharp::LANGUAGE.into()
+}
+#[cfg(target_os = "android")]
+pub fn language_c_sharp() -> TSLanguage {
+	language_cpp()
+}
+
+#[cfg(not(target_os = "android"))]
+pub fn language_css() -> TSLanguage {
+	tree_sitter_css::LANGUAGE.into()
+}
+#[cfg(target_os = "android")]
+pub fn language_css() -> TSLanguage {
+	language_javascript()
+}
+
+#[cfg(not(target_os = "android"))]
+pub fn language_diff() -> TSLanguage {
+	tree_sitter_diff::LANGUAGE.into()
+}
+#[cfg(target_os = "android")]
+pub fn language_diff() -> TSLanguage {
+	language_bash()
+}
+
+#[cfg(not(target_os = "android"))]
+pub fn language_dockerfile() -> TSLanguage {
+	tree_sitter_dockerfile::language()
+}
+#[cfg(target_os = "android")]
+pub fn language_dockerfile() -> TSLanguage {
+	language_bash()
+}
+
+#[cfg(not(target_os = "android"))]
+pub fn language_html() -> TSLanguage {
+	tree_sitter_html::LANGUAGE.into()
+}
+#[cfg(target_os = "android")]
+pub fn language_html() -> TSLanguage {
+	language_javascript()
+}
+
+#[cfg(not(target_os = "android"))]
+pub fn language_java() -> TSLanguage {
+	tree_sitter_java::LANGUAGE.into()
+}
+#[cfg(target_os = "android")]
+pub fn language_java() -> TSLanguage {
+	language_cpp()
+}
+
+#[cfg(not(target_os = "android"))]
+pub fn language_kotlin() -> TSLanguage {
+	tree_sitter_kotlin::LANGUAGE.into()
+}
+#[cfg(target_os = "android")]
+pub fn language_kotlin() -> TSLanguage {
+	language_cpp()
+}
+
+#[cfg(not(target_os = "android"))]
+pub fn language_lua() -> TSLanguage {
+	tree_sitter_lua::LANGUAGE.into()
+}
+#[cfg(target_os = "android")]
+pub fn language_lua() -> TSLanguage {
+	language_python()
+}
+
+#[cfg(not(target_os = "android"))]
+pub fn language_markdown() -> TSLanguage {
+	tree_sitter_md::LANGUAGE.into()
+}
+#[cfg(target_os = "android")]
+pub fn language_markdown() -> TSLanguage {
+	language_bash()
+}
+
+#[cfg(not(target_os = "android"))]
+pub fn language_php() -> TSLanguage {
+	tree_sitter_php::LANGUAGE_PHP_ONLY.into()
+}
+#[cfg(target_os = "android")]
+pub fn language_php() -> TSLanguage {
+	language_javascript()
+}
+
+#[cfg(not(target_os = "android"))]
+pub fn language_ruby() -> TSLanguage {
+	tree_sitter_ruby::LANGUAGE.into()
+}
+#[cfg(target_os = "android")]
+pub fn language_ruby() -> TSLanguage {
+	language_python()
+}
+
+#[cfg(not(target_os = "android"))]
+pub fn language_sql() -> TSLanguage {
+	tree_sitter_sql::LANGUAGE.into()
+}
+#[cfg(target_os = "android")]
+pub fn language_sql() -> TSLanguage {
+	language_json()
+}
+
+#[cfg(not(target_os = "android"))]
+pub fn language_swift() -> TSLanguage {
+	tree_sitter_swift::LANGUAGE.into()
+}
+#[cfg(target_os = "android")]
+pub fn language_swift() -> TSLanguage {
+	language_rust()
+}
+
+#[cfg(not(target_os = "android"))]
+pub fn language_toml() -> TSLanguage {
+	tree_sitter_toml_ng::LANGUAGE.into()
+}
+#[cfg(target_os = "android")]
+pub fn language_toml() -> TSLanguage {
+	language_json()
+}
+
+#[cfg(not(target_os = "android"))]
 pub fn language_yaml() -> TSLanguage {
 	tree_sitter_yaml::LANGUAGE.into()
 }
+#[cfg(target_os = "android")]
+pub fn language_yaml() -> TSLanguage {
+	language_json()
+}
 
-// --- Conditionally compiled grammars (Desktop-only, fallback on Android) ---
 
 #[cfg(not(target_os = "android"))]
 pub fn language_astro() -> TSLanguage {
