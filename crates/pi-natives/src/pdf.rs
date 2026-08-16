@@ -2,7 +2,6 @@
 
 use napi::{Result, bindgen_prelude::Uint8Array};
 use napi_derive::napi;
-#[cfg(not(target_os = "android"))]
 use pdf_inspector::{MarkdownOptions, PdfOptions, process_pdf_mem_with_options};
 
 use crate::task;
@@ -36,7 +35,6 @@ pub fn pdf_to_markdown(input: Uint8Array) -> task::Promise<PdfMarkdownResult> {
 	task::blocking("pdf.to_markdown", (), move |_| convert_pdf(&input))
 }
 
-#[cfg(not(target_os = "android"))]
 fn convert_pdf(input: &[u8]) -> Result<PdfMarkdownResult> {
 	let options = PdfOptions::new()
 		.markdown(MarkdownOptions { include_page_numbers: true, ..Default::default() });
@@ -59,13 +57,6 @@ fn convert_pdf(input: &[u8]) -> Result<PdfMarkdownResult> {
 		pages_needing_ocr: converted.pages_needing_ocr,
 		has_encoding_issues: converted.has_encoding_issues,
 	})
-}
-
-#[cfg(target_os = "android")]
-fn convert_pdf(_input: &[u8]) -> Result<PdfMarkdownResult> {
-	Err(napi::Error::from_reason(
-		"PDF to Markdown conversion is not supported on Android/Termux arm64 build",
-	))
 }
 
 #[cfg(test)]

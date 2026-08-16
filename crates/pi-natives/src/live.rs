@@ -4,27 +4,25 @@
 //! the realtime peer, Opus media, and speaker playback live in
 //! `pi_voice::live`. This class adapts its callbacks to non-blocking
 //! threadsafe functions and its PCM input to `Float32Array`.
-//!
-//! On Android/Termux the WebRTC/opus graph is stubbed out of the native addon
-//! so CI can build arm64 without OOM-killing the runner.
+
+use std::sync::Arc;
 
 use napi::{
 	bindgen_prelude::{Float32Array, Result},
-	threadsafe_function::{ThreadsafeFunction, UnknownReturnValue},
+	threadsafe_function::{ThreadsafeFunction, ThreadsafeFunctionCallMode, UnknownReturnValue},
 };
 use napi_derive::napi;
+use pi_voice::live::{DEFAULT_OPEN_TIMEOUT_MS, LiveCallbacks, LivePeerCore};
 
 type StringCallback = ThreadsafeFunction<String, UnknownReturnValue>;
 type LevelCallback = ThreadsafeFunction<f64, UnknownReturnValue>;
 
 /// WebRTC peer that accepts 16 kHz mono PCM and renders remote Opus audio.
-#[cfg(not(target_os = "android"))]
 #[napi]
 pub struct LiveWebRtcPeer {
-	inner: std::sync::Arc<pi_voice::live::LivePeerCore>,
+	inner: Arc<LivePeerCore>,
 }
 
-#[cfg(not(target_os = "android"))]
 #[napi]
 impl LiveWebRtcPeer {
 	/// Create an idle peer and register its event, output-level, and failure
@@ -37,11 +35,8 @@ impl LiveWebRtcPeer {
 		#[napi(ts_arg_type = "(error: Error | null, message: string) => void")]
 		on_failure: StringCallback,
 	) -> Self {
-		use napi::threadsafe_function::ThreadsafeFunctionCallMode;
-		use pi_voice::live::{LiveCallbacks, LivePeerCore};
-
 		Self {
-			inner: std::sync::Arc::new(LivePeerCore::new(LiveCallbacks {
+			inner: Arc::new(LivePeerCore::new(LiveCallbacks {
 				event:   Box::new(move |payload| {
 					on_event.call(Ok(payload), ThreadsafeFunctionCallMode::NonBlocking);
 				}),
@@ -78,8 +73,6 @@ impl LiveWebRtcPeer {
 	/// Wait until the `oai-events` data channel is open.
 	#[napi]
 	pub async fn wait_for_open(&self, timeout_ms: Option<u32>) -> Result<()> {
-		use pi_voice::live::DEFAULT_OPEN_TIMEOUT_MS;
-
 		self
 			.inner
 			.wait_for_open(timeout_ms.unwrap_or(DEFAULT_OPEN_TIMEOUT_MS))
@@ -113,72 +106,16 @@ impl LiveWebRtcPeer {
 	}
 }
 
-#[cfg(not(target_os = "android"))]
 impl Drop for LiveWebRtcPeer {
 	fn drop(&mut self) {
 		if self.inner.is_closing() {
 			return;
 		}
-		let inner = std::sync::Arc::clone(&self.inner);
+		let inner = Arc::clone(&self.inner);
 		if let Ok(runtime) = tokio::runtime::Handle::try_current() {
 			runtime.spawn(async move {
 				inner.close().await;
 			});
 		}
 	}
-}
-
-// ─── Android/Termux stubs (no pi-voice / webrtc / opus graph) ───────────────
-
-const ANDROID_LIVE_MSG: &str =
-	"LiveWebRtcPeer is not supported on Android/Termux arm64 build (pi-voice/webrtc stubbed to fit CI memory)";
-
-/// WebRTC peer — stubbed on Android.
-#[cfg(target_os = "android")]
-#[napi]
-pub struct LiveWebRtcPeer;
-
-#[cfg(target_os = "android")]
-#[napi]
-impl LiveWebRtcPeer {
-	/// Always constructs, but every media op fails with a clear Termux message.
-	#[napi(constructor)]
-	pub fn new(
-		#[napi(ts_arg_type = "(error: Error | null, payload: string) => void")]
-		_on_event: StringCallback,
-		#[napi(ts_arg_type = "(error: Error | null, level: number) => void")]
-		_on_level: LevelCallback,
-		#[napi(ts_arg_type = "(error: Error | null, message: string) => void")]
-		_on_failure: StringCallback,
-	) -> Self {
-		Self
-	}
-
-	#[napi]
-	pub async fn create_offer(&self) -> Result<String> {
-		Err(napi::Error::from_reason(ANDROID_LIVE_MSG))
-	}
-
-	#[napi]
-	pub async fn accept_answer(&self, _sdp: String) -> Result<()> {
-		Err(napi::Error::from_reason(ANDROID_LIVE_MSG))
-	}
-
-	#[napi]
-	pub async fn wait_for_open(&self, _timeout_ms: Option<u32>) -> Result<()> {
-		Err(napi::Error::from_reason(ANDROID_LIVE_MSG))
-	}
-
-	#[napi]
-	pub fn push_audio(&self, _samples: Float32Array) -> Result<()> {
-		Err(napi::Error::from_reason(ANDROID_LIVE_MSG))
-	}
-
-	#[napi]
-	pub fn set_muted(&self, _muted: bool) -> Result<()> {
-		Err(napi::Error::from_reason(ANDROID_LIVE_MSG))
-	}
-
-	#[napi]
-	pub async fn close(&self) {}
 }
