@@ -210,23 +210,7 @@ echo "    MAKEFLAGS=$MAKEFLAGS RAYON_NUM_THREADS=$RAYON_NUM_THREADS RUSTFLAGS=$R
 echo "    memory before cargo:"
 free -h || true
 swapon --show || true
-# Background RSS watch so OOM leaves a breadcrumb of peak pressure.
-(
-  while true; do
-    date -u +%H:%M:%S
-    free -h | sed 's/^/  /'
-    ps -eo pid,rss,comm --sort=-rss | head -n 8 | sed 's/^/  /' || true
-    sleep 30
-  done
-) > /tmp/omp-mem-watch.log 2>&1 &
-MEM_WATCH_PID=$!
-cleanup_mem_watch() {
-  kill "$MEM_WATCH_PID" 2>/dev/null || true
-  wait "$MEM_WATCH_PID" 2>/dev/null || true
-  echo "==> memory watch tail:"
-  tail -n 80 /tmp/omp-mem-watch.log 2>/dev/null || true
-}
-trap 'cleanup_mem_watch; restore_cargo_config' EXIT
+trap restore_cargo_config EXIT
 # Build with cargo directly. napi injects runner NDK r29 linker into target
 # builds, which creates incompatible Opus objects. Cargo config above keeps all
 # C/C++/Rust objects on selected NDK r27.
