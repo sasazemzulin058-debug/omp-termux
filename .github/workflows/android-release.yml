@@ -24,7 +24,6 @@ env:
 jobs:
   native-addon:
     name: Build Android ARM64 native addon
-    if: false
     runs-on: ubuntu-24.04
     steps:
       - name: Free runner disk space
@@ -201,7 +200,7 @@ jobs:
 
   package-release:
     name: Package and publish GitHub Release
-    needs: [js-bundle]
+    needs: [native-addon, js-bundle]
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
@@ -214,27 +213,42 @@ jobs:
       - name: Validate release inputs
         run: python3 android/scripts/check-release-inputs.py
 
+      - name: Download native addon
+        uses: actions/download-artifact@v4
+        with:
+          name: android-arm64-native
+          path: packages/natives/native
+
       - name: Download JavaScript bundle
         uses: actions/download-artifact@v4
         with:
           name: termux-js-bundle
           path: .
 
-      - name: Assemble release bundle
+      - name: Assemble and test release bundle
         run: |
           set -euo pipefail
+          test -s packages/natives/native/pi_natives.android-arm64.node
+          test -s packages/natives/native/pi_natives.android-arm64.node.sha256
+          (cd packages/natives/native && sha256sum -c pi_natives.android-arm64.node.sha256)
           test -s termux-js.tar.gz
           tar -tzf termux-js.tar.gz | grep -Fx './cli.js'
           rm -rf termux-bundle
           mkdir termux-bundle
           tar -xzf termux-js.tar.gz -C termux-bundle
+          mkdir -p termux-bundle/node_modules/@oh-my-pi/pi-natives/native
+          cp packages/natives/native/pi_natives.android-arm64.node \
+            termux-bundle/node_modules/@oh-my-pi/pi-natives/native/
           test -s termux-bundle/cli.js
+          test -s termux-bundle/node_modules/@oh-my-pi/pi-natives/native/pi_natives.android-arm64.node
           tar -czf omp-termux.tar.gz -C termux-bundle .
           sha256sum omp-termux.tar.gz > omp-termux.tar.gz.sha256
           test -s omp-termux.tar.gz
           test -s omp-termux.tar.gz.sha256
           sha256sum -c omp-termux.tar.gz.sha256
           tar -tzf omp-termux.tar.gz | grep -Fx './cli.js'
+          tar -tzf omp-termux.tar.gz | grep -F './node_modules/@oh-my-pi/pi-natives/native/pi_natives.android-arm64.node'
+          sha256sum -c packages/natives/native/pi_natives.android-arm64.node.sha256
 
       - name: Attach to release
         uses: softprops/action-gh-release@v2
@@ -243,4 +257,6 @@ jobs:
           files: |
             omp-termux.tar.gz
             omp-termux.tar.gz.sha256
+            packages/natives/native/pi_natives.android-arm64.node
+            packages/natives/native/pi_natives.android-arm64.node.sha256
           fail_on_unmatched_files: true
