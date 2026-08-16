@@ -236,6 +236,6 @@ case "$file_type" in
 esac
 
 # Emit sha256
-sha256sum "$ADDON" > "$ADDON.sha256"
+(cd "$NATIVE_DIR" && sha256sum "$(basename "$ADDON")" > "$(basename "$ADDON").sha256")
 echo "    sha256: $(cat "$ADDON.sha256")"
 echo "==> Done"
