@@ -83,7 +83,7 @@ jobs:
           bun-version: ${{ env.BUN_VERSION }}
 
       - name: Install JS dependencies
-        run: bun install --frozen-lockfile --minimum-release-age 0
+        run: bun install --minimum-release-age 0
 
       - name: Cross-compile native addon
         env:
@@ -137,7 +137,7 @@ jobs:
           bun-version: ${{ env.BUN_VERSION }}
 
       - name: Install JS dependencies
-        run: bun install --frozen-lockfile --minimum-release-age 0
+        run: bun install --minimum-release-age 0
 
       - name: Build JavaScript bundle
         run: |
