@@ -24,7 +24,7 @@ env:
 jobs:
   native-addon:
     name: Build Android ARM64 native addon
-    runs-on: tenki-standard-medium-4c-8g
+    runs-on: [self-hosted, linux, x64, vps-build]
     steps:
       - name: Free runner disk space
         run: |
@@ -55,12 +55,10 @@ jobs:
           rustup toolchain install
           rustup target add aarch64-linux-android
 
-      - name: Install Android NDK r27
+      - name: Setup Android NDK
         id: ndk
-        uses: nttld/setup-ndk@v1
-        with:
-          ndk-version: r27
-          add-to-path: false
+        run: |
+          echo "ndk-path=$HOME/android-ndk-r27c" >> "$GITHUB_OUTPUT"
 
       - name: Make CMake find Ninja
         run: |
@@ -119,20 +117,14 @@ jobs:
       - name: Cross-compile native addon
         env:
           ANDROID_NDK_ROOT: ${{ steps.ndk.outputs.ndk-path }}
-          CARGO_BUILD_JOBS: 1
-          # Serial cargo + serial LLVM units (RAYON=1). Profile sets CGU=16.
-          # Do not force CGU=1 — one giant unit can OOM more than many small ones.
-          RUSTFLAGS: "-C opt-level=s -C debuginfo=0 -C strip=symbols -C linker-plugin-lto=no -C link-arg=-Wl,--no-keep-memory -C link-arg=-Wl,--reduce-memory-overheads"
-          RAYON_NUM_THREADS: "1"
-          CARGO_BUILD_PIPELINING: "false"
-          MAKEFLAGS: "-j1"
-          NUM_JOBS: "1"
-          CMAKE_BUILD_PARALLEL_LEVEL: "1"
-          NINJAFLAGS: "-j1"
+          CARGO_BUILD_JOBS: 4
+          RAYON_NUM_THREADS: 4
+          MAKEFLAGS: "-j4"
+          NUM_JOBS: 4
+          CMAKE_BUILD_PARALLEL_LEVEL: 4
+          NINJAFLAGS: "-j4"
           OPUS_NO_PKG_CONFIG: "1"
           CMAKE_GENERATOR: Ninja
-          CMAKE_MAKE_PROGRAM: /usr/bin/ninja
-          CMAKE_ARGS: -DCMAKE_MAKE_PROGRAM=/usr/bin/ninja
           CARGO_INCREMENTAL: "false"
           CARGO_TERM_COLOR: always
         run: bash android/scripts/build-android-ci.sh

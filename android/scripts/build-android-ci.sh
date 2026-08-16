@@ -200,12 +200,12 @@ PY
 export MAKEFLAGS="${MAKEFLAGS:--j1}"
 export CMAKE_BUILD_PARALLEL_LEVEL="${CMAKE_BUILD_PARALLEL_LEVEL:-1}"
 export NINJAFLAGS="${NINJAFLAGS:--j1}"
-export CARGO_BUILD_JOBS=1
-export NUM_JOBS=1
-export RAYON_NUM_THREADS="${RAYON_NUM_THREADS:-1}"
-export CARGO_BUILD_PIPELINING=false
-# Do NOT force -C codegen-units=1 here (inflates peak RSS). Profile sets 16.
-export RUSTFLAGS="${RUSTFLAGS:--C opt-level=s -C debuginfo=0 -C strip=symbols -C linker-plugin-lto=no -C link-arg=-Wl,--no-keep-memory -C link-arg=-Wl,--reduce-memory-overheads}"
+export CARGO_BUILD_JOBS="${CARGO_BUILD_JOBS:-4}"
+export NUM_JOBS="${NUM_JOBS:-4}"
+export RAYON_NUM_THREADS="${RAYON_NUM_THREADS:-4}"
+export CARGO_BUILD_PIPELINING=true
+export RUSTC_WRAPPER=sccache
+export RUSTFLAGS="${RUSTFLAGS:--C opt-level=3 -C debuginfo=0 -C strip=symbols -C linker-plugin-lto=no -C link-arg=-fuse-ld=lld}"
 echo "    MAKEFLAGS=$MAKEFLAGS RAYON_NUM_THREADS=$RAYON_NUM_THREADS RUSTFLAGS=$RUSTFLAGS"
 echo "    memory before cargo:"
 free -h || true
@@ -232,7 +232,7 @@ trap 'cleanup_mem_watch; restore_cargo_config' EXIT
 # C/C++/Rust objects on selected NDK r27.
 set +e
 cargo build --manifest-path crates/pi-natives/Cargo.toml \
-	--target aarch64-linux-android --profile ci --locked -j 1
+	--target aarch64-linux-android --profile ci --locked -j "$CARGO_BUILD_JOBS"
 CARGO_RC=$?
 set -e
 if [ "$CARGO_RC" -ne 0 ]; then
