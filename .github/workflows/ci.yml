@@ -220,8 +220,8 @@ jobs:
          fail-fast: false
          matrix:
             include:
-               - { variant: baseline, rust_checks: true }
-               - { variant: modern }
+               - {variant: baseline, rust_checks: true}
+               - {variant: modern}
       steps:
          - uses: actions/checkout@v4
          - uses: ./.github/actions/build-native
@@ -245,9 +245,9 @@ jobs:
          fail-fast: false
          matrix:
             include:
-               - { os: omp-kata, platform: linux, arch: arm64, target: aarch64-unknown-linux-gnu }
-               - { os: omp-kata, platform: win32, arch: x64, target: x86_64-pc-windows-msvc, variant: baseline }
-      runs-on: ${{ matrix.os }}
+               - {os: omp-kata, platform: linux, arch: arm64, target: aarch64-unknown-linux-gnu}
+               - {os: omp-kata, platform: win32, arch: x64, target: x86_64-pc-windows-msvc, variant: baseline}
+      runs-on: tenki-standard-small-2c-4g
       steps:
          - uses: actions/checkout@v4
          - uses: ./.github/actions/build-native
@@ -268,9 +268,9 @@ jobs:
          fail-fast: false
          matrix:
             include:
-               - { os: macos-15-intel, platform: darwin, arch: x64, variant: baseline }
-               - { os: macos-14, platform: darwin, arch: arm64 }
-      runs-on: ${{ matrix.os }}
+               - {os: macos-15-intel, platform: darwin, arch: x64, variant: baseline}
+               - {os: macos-14, platform: darwin, arch: arm64}
+      runs-on: tenki-standard-small-2c-4g
       steps:
          - uses: actions/checkout@v4
          - uses: ./.github/actions/build-native
@@ -553,58 +553,18 @@ jobs:
 
    release_binary:
       name: "Release binary: ${{ matrix.target_id }}"
-      if: ${{ needs.release_metadata.outputs.is-release == 'true' && !cancelled() &&
-         needs.native_linux_x64.result == 'success' && needs.native_cross_platform_kata.result ==
-         'success' && needs.native_cross_platform_macos.result == 'success' &&
-         needs.test_workspace.result == 'success' &&
-         needs.test_coding_agent_singleton.result == 'success' &&
-         needs.test_ts_native.result == 'success' &&
-         needs.test_coding_agent_ui.result == 'success' &&
-         needs.test_coding_agent_runtime.result == 'success' &&
-         needs.test_coding_agent_native.result == 'success' &&
-         needs.test_smoke.result == 'success' && needs.check.result == 'success' &&
-         needs.install_methods.result == 'success' }}
+      if: ${{ needs.release_metadata.outputs.is-release == 'true' && !cancelled() && needs.native_linux_x64.result == 'success' && needs.native_cross_platform_kata.result == 'success' && needs.native_cross_platform_macos.result == 'success' && needs.test_workspace.result == 'success' && needs.test_coding_agent_singleton.result == 'success' && needs.test_ts_native.result == 'success' && needs.test_coding_agent_ui.result == 'success' && needs.test_coding_agent_runtime.result == 'success' && needs.test_coding_agent_native.result == 'success' && needs.test_smoke.result == 'success' && needs.check.result == 'success' && needs.install_methods.result == 'success' }}
       needs: [release_metadata, check, native_linux_x64, native_cross_platform_kata, native_cross_platform_macos, test_workspace, test_coding_agent_singleton, test_ts_native, test_coding_agent_ui, test_coding_agent_runtime, test_coding_agent_native, test_smoke, install_methods, native_artifact_lookup]
       strategy:
          fail-fast: false
          matrix:
             include:
-               - {
-                    os: ubuntu-22.04,
-                    platform: linux,
-                    arch: x64,
-                    target_id: linux-x64,
-                    binary_path: packages/coding-agent/binaries/omp-linux-x64,
-                 }
-               - {
-                    os: ubuntu-24.04-arm,
-                    platform: linux,
-                    arch: arm64,
-                    target_id: linux-arm64,
-                    binary_path: packages/coding-agent/binaries/omp-linux-arm64,
-                 }
-               - {
-                    os: macos-15-intel,
-                    platform: darwin,
-                    arch: x64,
-                    target_id: darwin-x64,
-                    binary_path: packages/coding-agent/binaries/omp-darwin-x64,
-                 }
-               - {
-                    os: macos-14,
-                    platform: darwin,
-                    arch: arm64,
-                    target_id: darwin-arm64,
-                    binary_path: packages/coding-agent/binaries/omp-darwin-arm64,
-                 }
-               - {
-                    os: ubuntu-22.04,
-                    platform: win32,
-                    arch: x64,
-                    target_id: win32-x64,
-                    binary_path: packages/coding-agent/binaries/omp-windows-x64.exe,
-                 }
-      runs-on: ${{ matrix.os }}
+               - {os: ubuntu-22.04, platform: linux, arch: x64, target_id: linux-x64, binary_path: packages/coding-agent/binaries/omp-linux-x64}
+               - {os: ubuntu-24.04-arm, platform: linux, arch: arm64, target_id: linux-arm64, binary_path: packages/coding-agent/binaries/omp-linux-arm64}
+               - {os: macos-15-intel, platform: darwin, arch: x64, target_id: darwin-x64, binary_path: packages/coding-agent/binaries/omp-darwin-x64}
+               - {os: macos-14, platform: darwin, arch: arm64, target_id: darwin-arm64, binary_path: packages/coding-agent/binaries/omp-darwin-arm64}
+               - {os: ubuntu-22.04, platform: win32, arch: x64, target_id: win32-x64, binary_path: packages/coding-agent/binaries/omp-windows-x64.exe}
+      runs-on: tenki-standard-small-2c-4g
       permissions:
          contents: read
          id-token: write
@@ -681,10 +641,9 @@ jobs:
 
    release_github:
       name: Publish GitHub release
-      if: ${{ needs.release_metadata.outputs.is-release == 'true' && !cancelled() &&
-         needs.release_binary.result == 'success' }}
+      if: ${{ needs.release_metadata.outputs.is-release == 'true' && !cancelled() && needs.release_binary.result == 'success' }}
       needs: [release_metadata, release_binary]
-      runs-on: blacksmith-4vcpu-ubuntu-2204
+      runs-on: tenki-standard-small-2c-4g
       permissions:
          contents: write
       steps:
@@ -716,13 +675,11 @@ jobs:
               body_path: release-notes.md
               generate_release_notes: true
 
-
    release_github_verify:
       name: Verify published release (macOS)
-      if: ${{ needs.release_metadata.outputs.is-release == 'true' && !cancelled() &&
-         needs.release_github.result == 'success' }}
+      if: ${{ needs.release_metadata.outputs.is-release == 'true' && !cancelled() && needs.release_github.result == 'success' }}
       needs: [release_metadata, release_github]
-      runs-on: blacksmith-6vcpu-macos-15
+      runs-on: tenki-standard-small-2c-4g
       permissions:
          contents: read
       env:
@@ -753,12 +710,9 @@ jobs:
 
    release_npm:
       name: Publish to npm
-      if: ${{ needs.release_metadata.outputs.is-release == 'true' && !cancelled() &&
-         needs.release_binary.result == 'success' &&
-         needs.release_github_verify.result == 'success' &&
-         !inputs.skip_npm }}
+      if: ${{ needs.release_metadata.outputs.is-release == 'true' && !cancelled() && needs.release_binary.result == 'success' && needs.release_github_verify.result == 'success' && !inputs.skip_npm }}
       needs: [release_metadata, release_binary, release_github_verify, native_artifact_lookup]
-      runs-on: blacksmith-4vcpu-ubuntu-2204
+      runs-on: tenki-standard-small-2c-4g
       # `id-token: write` lets npm mint the GitHub OIDC token it exchanges for a
       # short-lived publish token (trusted publishing + provenance). When a
       # package has no matching trusted publisher configured, npm silently falls
@@ -810,10 +764,9 @@ jobs:
    # release never blocks on tap access.
    release_brew:
       name: Update Homebrew tap
-      if: ${{ needs.release_metadata.outputs.is-release == 'true' && !cancelled() &&
-         needs.release_github_verify.result == 'success' }}
+      if: ${{ needs.release_metadata.outputs.is-release == 'true' && !cancelled() && needs.release_github_verify.result == 'success' }}
       needs: [release_metadata, release_github_verify]
-      runs-on: blacksmith-4vcpu-ubuntu-2204
+      runs-on: tenki-standard-small-2c-4g
       env:
          HAS_TAP_KEY: ${{ secrets.HOMEBREW_TAP_DEPLOY_KEY != '' }}
       steps:
