@@ -24,7 +24,7 @@ env:
 jobs:
   native-addon:
     name: Build Android ARM64 native addon
-    runs-on: tenki-standard-large-plus-16c-32g
+    runs-on: tenki-standard-medium-4c-8g
     steps:
       - name: Free runner disk space
         run: |
