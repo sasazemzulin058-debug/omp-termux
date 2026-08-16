@@ -110,11 +110,13 @@ jobs:
         env:
           ANDROID_NDK_ROOT: ${{ steps.ndk.outputs.ndk-path }}
           CARGO_BUILD_JOBS: 1
-          # Serial rustc/LLVM + no debuginfo. CGU also forced in build script.
-          RUSTFLAGS: "-C debuginfo=0 -C linker-plugin-lto=no -C codegen-units=1"
+          # Serial cargo + serial LLVM units (RAYON=1). Profile sets CGU=16.
+          # Do not force CGU=1 — one giant unit can OOM more than many small ones.
+          RUSTFLAGS: "-C debuginfo=0 -C linker-plugin-lto=no"
           RAYON_NUM_THREADS: "1"
           CARGO_BUILD_PIPELINING: "false"
           MAKEFLAGS: "-j1"
+          NUM_JOBS: "1"
           CMAKE_BUILD_PARALLEL_LEVEL: "1"
           NINJAFLAGS: "-j1"
           OPUS_NO_PKG_CONFIG: "1"

@@ -141,11 +141,12 @@ if not m:
     raise SystemExit("missing [profile.ci] in Cargo.toml")
 body = m.group(1)
 replacements = {
-    "inherits": 'inherits = "dev"',
+    # Inherit release (not dev): dev defaults CGU=256 and package.* opt=2.
+    # cargo#17205: CGU too low also OOMs (one huge unit). Keep moderate CGU
+    # and serialize via cargo -j1 + RAYON_NUM_THREADS=1 so units run one-by-one.
+    "inherits": 'inherits = "release"',
     "lto": "lto = false",
-    # CGU=256 (dev default) spikes rustc RSS on webrtc/syntect and OOMs the
-    # 7G GH runner even with 16G swap. Serial codegen keeps peak low.
-    "codegen-units": "codegen-units = 1",
+    "codegen-units": "codegen-units = 16",
     "debug": "debug = false",
     "opt-level": "opt-level = 0",
     "incremental": "incremental = false",
@@ -172,12 +173,12 @@ if '[profile.ci.package."*"]' not in text:
 [profile.ci.package."*"]
 opt-level = 0
 debug = false
-codegen-units = 1
+codegen-units = 16
 
 [profile.ci.package.pi-natives]
 opt-level = 0
 debug = false
-codegen-units = 1
+codegen-units = 16
 """
 p.write_text(text)
 print("patched [profile.ci] for low-memory Android build")
@@ -185,20 +186,52 @@ PY
 
 # Cap C/C++/cmake/ninja + rustc frontend parallelism. Cargo -j1 alone does not
 # constrain ring/opus cmake or rayon inside rustc; those still OOM the runner.
+# CGU=16 + RAYON_NUM_THREADS=1: smaller units, processed serially (lower peak
+# than CGU=1 which puts the whole crate in one LLVM unit).
 export MAKEFLAGS="${MAKEFLAGS:--j1}"
 export CMAKE_BUILD_PARALLEL_LEVEL="${CMAKE_BUILD_PARALLEL_LEVEL:-1}"
 export NINJAFLAGS="${NINJAFLAGS:--j1}"
 export CARGO_BUILD_JOBS=1
+export NUM_JOBS=1
 export RAYON_NUM_THREADS="${RAYON_NUM_THREADS:-1}"
 export CARGO_BUILD_PIPELINING=false
-# Force single CGU even if a package override races the profile patch.
-export RUSTFLAGS="${RUSTFLAGS:-} -C codegen-units=1 -C debuginfo=0"
+# Do NOT force -C codegen-units=1 here (inflates peak RSS). Profile sets 16.
+export RUSTFLAGS="${RUSTFLAGS:--C debuginfo=0 -C linker-plugin-lto=no}"
 echo "    MAKEFLAGS=$MAKEFLAGS RAYON_NUM_THREADS=$RAYON_NUM_THREADS RUSTFLAGS=$RUSTFLAGS"
+echo "    memory before cargo:"
+free -h || true
+swapon --show || true
+# Background RSS watch so OOM leaves a breadcrumb of peak pressure.
+(
+  while true; do
+    date -u +%H:%M:%S
+    free -h | sed 's/^/  /'
+    ps -eo pid,rss,comm --sort=-rss | head -n 8 | sed 's/^/  /' || true
+    sleep 30
+  done
+) > /tmp/omp-mem-watch.log 2>&1 &
+MEM_WATCH_PID=$!
+cleanup_mem_watch() {
+  kill "$MEM_WATCH_PID" 2>/dev/null || true
+  wait "$MEM_WATCH_PID" 2>/dev/null || true
+  echo "==> memory watch tail:"
+  tail -n 80 /tmp/omp-mem-watch.log 2>/dev/null || true
+}
+trap 'cleanup_mem_watch; restore_cargo_config' EXIT
 # Build with cargo directly. napi injects runner NDK r29 linker into target
 # builds, which creates incompatible Opus objects. Cargo config above keeps all
 # C/C++/Rust objects on selected NDK r27.
+set +e
 cargo build --manifest-path crates/pi-natives/Cargo.toml \
 	--target aarch64-linux-android --profile ci --locked -j 1
+CARGO_RC=$?
+set -e
+if [ "$CARGO_RC" -ne 0 ]; then
+  echo "error: cargo exited $CARGO_RC" >&2
+  free -h >&2 || true
+  dmesg -T 2>/dev/null | tail -n 40 >&2 || true
+  exit "$CARGO_RC"
+fi
 
 BUILT="$REPO_ROOT/target/aarch64-linux-android/ci/libpi_natives.so"
 cp "$BUILT" "$TMP_DIR/pi_natives.android-arm64.node"
