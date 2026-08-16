@@ -83,37 +83,10 @@ jobs:
           chmod +x "$RUNNER_TEMP/bin/cmake"
           echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
 
-      - name: Install Bun
-        uses: oven-sh/setup-bun@v2
-        with:
-          bun-version: ${{ env.BUN_VERSION }}
-
       - name: Install JS dependencies
-        run: bun install --minimum-release-age 0
-
-      - name: Add compile swap
         run: |
-          set -euo pipefail
-          # Maximize swap usage and keep page cache lean
-          sudo sysctl vm.swappiness=100 || true
-          sudo sysctl vm.vfs_cache_pressure=50 || true
-          # Runner ships a small pre-enabled /swapfile; always replace.
-          # 32G preferred; fall back to 16G if disk is tight.
-          sudo swapoff -a || true
-          sudo rm -f /swapfile
-          if sudo fallocate -l 32G /swapfile; then
-            echo "swap=32G"
-          else
-            sudo rm -f /swapfile
-            sudo fallocate -l 16G /swapfile
-            echo "swap=16G (32G fallocate failed)"
-          fi
-          sudo chmod 600 /swapfile
-          sudo mkswap /swapfile
-          sudo swapon /swapfile
-          free -h
-          swapon --show
-          df -h /
+          export PATH="$HOME/.bun/bin:$PATH"
+          bun install --minimum-release-age 0
       - name: Cross-compile native addon
         env:
           ANDROID_NDK_ROOT: ${{ steps.ndk.outputs.ndk-path }}
