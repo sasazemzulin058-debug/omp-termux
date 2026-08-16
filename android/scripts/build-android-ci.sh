@@ -194,6 +194,7 @@ codegen-units = 16
 opt-level = "s"
 debug = false
 codegen-units = 16
+"""
 p.write_text(text)
 print("patched [profile.ci] for low-memory Android build")
 PY
