@@ -20,7 +20,7 @@ concurrency:
 
 jobs:
   check:
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    runs-on: tenki-standard-small-2c-4g
     steps:
       - id: vouch
         uses: mitchellh/vouch/action/check-pr@v1
