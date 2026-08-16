@@ -24,7 +24,7 @@ env:
 jobs:
   native-addon:
     name: Build Android ARM64 native addon
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    runs-on: tenki-standard-small-2c-4g
     steps:
       - name: Free runner disk space
         run: |
@@ -45,7 +45,7 @@ jobs:
 
       - name: Verify Android overlay and release tag
         run: python3 android/scripts/verify-overlay.py
-      
+
       - name: Validate release inputs
         run: python3 android/scripts/check-release-inputs.py
 
@@ -155,7 +155,7 @@ jobs:
 
   js-bundle:
     name: Build Termux JavaScript bundle
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    runs-on: tenki-standard-small-2c-4g
     steps:
       - uses: actions/checkout@v4
         with:
@@ -163,7 +163,7 @@ jobs:
 
       - name: Verify Android overlay and release tag
         run: python3 android/scripts/verify-overlay.py
-      
+
       - name: Validate release inputs
         run: python3 android/scripts/check-release-inputs.py
 
@@ -201,7 +201,7 @@ jobs:
   package-release:
     name: Package and publish GitHub Release
     needs: [native-addon, js-bundle]
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    runs-on: tenki-standard-small-2c-4g
     steps:
       - uses: actions/checkout@v4
         with:
@@ -209,7 +209,7 @@ jobs:
 
       - name: Verify Android overlay and release tag
         run: python3 android/scripts/verify-overlay.py
-      
+
       - name: Validate release inputs
         run: python3 android/scripts/check-release-inputs.py
 
