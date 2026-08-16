@@ -141,12 +141,14 @@ if not m:
     raise SystemExit("missing [profile.ci] in Cargo.toml")
 body = m.group(1)
 replacements = {
-    "lto": 'lto = false',
+    "inherits": 'inherits = "dev"',
+    "lto": "lto = false",
     "codegen-units": "codegen-units = 256",
     "debug": "debug = false",
     "opt-level": "opt-level = 0",
     "incremental": "incremental = false",
     "strip": 'strip = "symbols"',
+    "panic": 'panic = "abort"',
 }
 lines = []
 seen = set()
@@ -183,7 +185,7 @@ PY
 # builds, which creates incompatible Opus objects. Cargo config above keeps all
 # C/C++/Rust objects on selected NDK r27.
 cargo build --manifest-path crates/pi-natives/Cargo.toml \
-	--target aarch64-linux-android --profile ci --locked -j "$JOBS"
+	--target aarch64-linux-android --profile ci --locked -j 1
 
 BUILT="$REPO_ROOT/target/aarch64-linux-android/ci/libpi_natives.so"
 cp "$BUILT" "$TMP_DIR/pi_natives.android-arm64.node"
