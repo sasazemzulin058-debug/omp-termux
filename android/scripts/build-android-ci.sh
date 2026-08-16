@@ -148,7 +148,7 @@ replacements = {
     "lto": "lto = false",
     "codegen-units": "codegen-units = 16",
     "debug": "debug = false",
-    "opt-level": "opt-level = 0",
+    "opt-level": 'opt-level = "s"',
     "incremental": "incremental = false",
     "strip": 'strip = "symbols"',
     "panic": 'panic = "abort"',
@@ -171,12 +171,12 @@ if '[profile.ci.package."*"]' not in text:
     text += """
 
 [profile.ci.package."*"]
-opt-level = 0
+opt-level = "s"
 debug = false
 codegen-units = 16
 
 [profile.ci.package.pi-natives]
-opt-level = 0
+opt-level = "s"
 debug = false
 codegen-units = 16
 """
@@ -196,7 +196,7 @@ export NUM_JOBS=1
 export RAYON_NUM_THREADS="${RAYON_NUM_THREADS:-1}"
 export CARGO_BUILD_PIPELINING=false
 # Do NOT force -C codegen-units=1 here (inflates peak RSS). Profile sets 16.
-export RUSTFLAGS="${RUSTFLAGS:--C debuginfo=0 -C linker-plugin-lto=no}"
+export RUSTFLAGS="${RUSTFLAGS:--C opt-level=s -C debuginfo=0 -C strip=symbols -C linker-plugin-lto=no -C link-arg=-Wl,--no-keep-memory -C link-arg=-Wl,--reduce-memory-overheads}"
 echo "    MAKEFLAGS=$MAKEFLAGS RAYON_NUM_THREADS=$RAYON_NUM_THREADS RUSTFLAGS=$RUSTFLAGS"
 echo "    memory before cargo:"
 free -h || true

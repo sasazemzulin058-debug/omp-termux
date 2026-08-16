@@ -88,6 +88,9 @@ jobs:
       - name: Add compile swap
         run: |
           set -euo pipefail
+          # Maximize swap usage and keep page cache lean
+          sudo sysctl vm.swappiness=100 || true
+          sudo sysctl vm.vfs_cache_pressure=50 || true
           # Runner ships a small pre-enabled /swapfile; always replace.
           # 32G preferred; fall back to 16G if disk is tight.
           sudo swapoff -a || true
@@ -105,14 +108,13 @@ jobs:
           free -h
           swapon --show
           df -h /
-
       - name: Cross-compile native addon
         env:
           ANDROID_NDK_ROOT: ${{ steps.ndk.outputs.ndk-path }}
           CARGO_BUILD_JOBS: 1
           # Serial cargo + serial LLVM units (RAYON=1). Profile sets CGU=16.
           # Do not force CGU=1 — one giant unit can OOM more than many small ones.
-          RUSTFLAGS: "-C debuginfo=0 -C linker-plugin-lto=no"
+          RUSTFLAGS: "-C opt-level=s -C debuginfo=0 -C strip=symbols -C linker-plugin-lto=no -C link-arg=-Wl,--no-keep-memory -C link-arg=-Wl,--reduce-memory-overheads"
           RAYON_NUM_THREADS: "1"
           CARGO_BUILD_PIPELINING: "false"
           MAKEFLAGS: "-j1"
