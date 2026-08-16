@@ -68,15 +68,6 @@ fn convert_pdf(_input: &[u8]) -> Result<PdfMarkdownResult> {
 	))
 }
 
-	Ok(PdfMarkdownResult {
-		markdown,
-		title: converted.title,
-		page_count: converted.page_count,
-		pages_needing_ocr: converted.pages_needing_ocr,
-		has_encoding_issues: converted.has_encoding_issues,
-	})
-}
-
 #[cfg(test)]
 mod tests {
 	use super::*;
