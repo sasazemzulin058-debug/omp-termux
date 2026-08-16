@@ -174,12 +174,6 @@ text = text[: m.start(1)] + new_body + text[m.end(1) :]
 if '[profile.ci.package."*"]' not in text:
     text += """
 
-[profile.ci]
-lto = "off"
-codegen-units = 16
-debug = false
-strip = "symbols"
-
 [profile.ci.package."*"]
 opt-level = "s"
 debug = false
