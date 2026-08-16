@@ -10,7 +10,7 @@ import {
 	type TtsrTestArgs,
 } from "@oh-my-pi/pi-coding-agent/cli/ttsr-cli";
 import { resetSettingsForTest } from "@oh-my-pi/pi-coding-agent/config/settings";
-import { getProjectAgentDir, getProjectDir, setProjectDir } from "@oh-my-pi/pi-utils";
+import { getProjectAgentDir, getProjectDir, removeSyncWithRetries, setProjectDir } from "@oh-my-pi/pi-utils";
 
 let testTmpDir: string;
 
@@ -20,7 +20,7 @@ beforeAll(() => {
 
 afterAll(() => {
 	if (testTmpDir && fs.existsSync(testTmpDir)) {
-		fs.rmSync(testTmpDir, { force: true, recursive: true });
+		removeSyncWithRetries(testTmpDir);
 	}
 });
 
@@ -92,7 +92,7 @@ async function writeTempSnippet(content: string, ext: string): Promise<string> {
 function cleanupTmp(): void {
 	if (!testTmpDir || !fs.existsSync(testTmpDir)) return;
 	for (const entry of fs.readdirSync(testTmpDir)) {
-		fs.rmSync(path.join(testTmpDir, entry), { force: true, recursive: true });
+		removeSyncWithRetries(path.join(testTmpDir, entry));
 	}
 }
 
@@ -182,6 +182,50 @@ describe("omp ttsr", () => {
 			await run({ action: "test", test });
 			expect(stdout).toContain("Triggered");
 			expect(stdout).toContain("astCondition");
+		});
+
+		it("infers tool/edit context for a newly-allowlisted .cs file", async () => {
+			captureStreams();
+			const rulePath = await writeTempRule("class", ["tool:edit(*.cs)"]);
+			const snippetPath = await writeTempSnippet("class A {}", "cs");
+			await run({ action: "test", test: { rule: rulePath, file: snippetPath, source: undefined }, json: true });
+			const report = JSON.parse(stdout);
+			expect(report.source).toBe("tool");
+			expect(report.tool).toBe("edit");
+			expect(report.triggered).toHaveLength(1);
+			// A recognized source file needs no context-mismatch note.
+			expect(report.inferenceNote).toBeUndefined();
+		});
+
+		it("emits an inference note when a supplied file path falls through to text source", async () => {
+			captureStreams();
+			const rulePath = await writeTempRule("class", ["tool:edit(*.cs)"]);
+			const snippetPath = await writeTempSnippet("class A {}", "unknownext");
+			await run({ action: "test", test: { rule: rulePath, file: snippetPath, source: undefined }, json: true });
+			const report = JSON.parse(stdout);
+			expect(report.source).toBe("text");
+			expect(report.inferenceNote).toContain(".unknownext");
+			expect(report.inferenceNote).toContain("--source tool --tool edit");
+			// The tool-scoped rule is a false negative here — the note explains why.
+			expect(report.triggered).toHaveLength(0);
+		});
+
+		it("renders the inferred text-source note in human-readable output", async () => {
+			captureStreams();
+			const rulePath = await writeTempRule("class", ["tool:edit(*.cs)"]);
+			const snippetPath = await writeTempSnippet("class A {}", "unknownext");
+			await run({ action: "test", test: { rule: rulePath, file: snippetPath, source: undefined } });
+			expect(stdout).toContain("note: inferred --source text from '.unknownext'");
+			expect(stdout).toContain("--source tool --tool edit");
+		});
+
+		it("omits the inference note when --source is explicit", async () => {
+			captureStreams();
+			const rulePath = await writeTempRule("class", ["tool:edit(*.cs)"]);
+			const snippetPath = await writeTempSnippet("class A {}", "unknownext");
+			await run({ action: "test", test: { rule: rulePath, file: snippetPath, source: "text" }, json: true });
+			const report = JSON.parse(stdout);
+			expect(report.inferenceNote).toBeUndefined();
 		});
 	});
 

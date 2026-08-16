@@ -1,3 +1,5 @@
+import { parseFlag } from "@oh-my-pi/pi-utils";
+import { ToolError } from "../../tool-errors";
 import type { Observation, ObservationEntry } from "../tab-protocol";
 
 export interface CmuxKind {
@@ -120,15 +122,57 @@ export function serializeEval(fn: string | ((...args: unknown[]) => unknown), ar
 	return `(${fn.toString()})(${args.map(arg => JSON.stringify(arg)).join(",")})`;
 }
 
-export function mapWaitUntil(waitUntil: string | undefined): "interactive" | "complete" {
-	return waitUntil === "domcontentloaded" ? "interactive" : "complete";
+/**
+ * Like {@link serializeEval}, but wraps the expression in a page-side
+ * try/catch envelope so a throwing script surfaces its message + stack
+ * instead of the daemon's opaque `js_error: A JavaScript exception occurred`,
+ * and a Promise return (which the daemon cannot serialize) is flagged
+ * explicitly rather than failing as "unsupported type".
+ *
+ * String scripts run through indirect eval to keep global-scope semantics;
+ * function sources are already expressions and are invoked directly.
+ * `undefined` results come back as `null` (JSON cannot carry `undefined`).
+ * Decode with {@link unwrapEvalEnvelope}.
+ */
+export function serializeEvalWithEnvelope(fn: string | ((...args: unknown[]) => unknown), args: unknown[]): string {
+	const inner = serializeEval(fn, args);
+	const expr = typeof fn === "string" ? `(0, eval)(${JSON.stringify(inner)})` : inner;
+	return `(() => {
+		try {
+			const __v = (${expr});
+			if (__v && typeof __v.then === "function") return { __ompPromise: true };
+			return { __ompOk: __v === undefined ? null : __v };
+		} catch (e) {
+			return { __ompErr: (e && (e.stack || e.message)) || String(e) };
+		}
+	})()`;
 }
 
-const TRUTHY_ENV_VALUES = new Set(["1", "Y", "y", "TRUE", "true", "YES", "yes", "ON", "on"]);
+/**
+ * Decode a {@link serializeEvalWithEnvelope} result: rethrow page-side
+ * exceptions as rich {@link ToolError}s, reject unserializable Promise
+ * returns with an actionable message, and pass through values from daemons
+ * that did not run the wrapper.
+ */
+export function unwrapEvalEnvelope<TResult>(value: unknown, label: string): TResult {
+	if (value && typeof value === "object") {
+		if ("__ompErr" in value && typeof value.__ompErr === "string") {
+			throw new ToolError(`${label} threw a JavaScript exception:\n${value.__ompErr}`);
+		}
+		if ("__ompPromise" in value && value.__ompPromise === true) {
+			throw new ToolError(
+				`${label} returned a Promise, but this surface evaluates synchronously and cannot await it — return a plain value (poll with waitForFunction for async state instead)`,
+			);
+		}
+		if ("__ompOk" in value) {
+			return value.__ompOk as TResult;
+		}
+	}
+	return value as TResult;
+}
 
-function resolveCmuxEnabled(envValue: string | undefined, settingEnabled: boolean): boolean {
-	if (!envValue) return settingEnabled;
-	return TRUTHY_ENV_VALUES.has(envValue);
+export function mapWaitUntil(waitUntil: string | undefined): "interactive" | "complete" {
+	return waitUntil === "domcontentloaded" ? "interactive" : "complete";
 }
 
 export interface ResolveCmuxKindOptions {
@@ -140,7 +184,7 @@ export function resolveCmuxKind(
 	options?: ResolveCmuxKindOptions | null,
 	env: Record<string, string | undefined> = process.env,
 ): CmuxKind | null {
-	if (!resolveCmuxEnabled(env.PI_BROWSER_CMUX, options?.settingEnabled ?? true)) {
+	if (!parseFlag(env.PI_BROWSER_CMUX, options?.settingEnabled ?? true)) {
 		return null;
 	}
 	const socketPath = env.CMUX_SOCKET_PATH;

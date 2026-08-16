@@ -1,6 +1,7 @@
 import { describe, expect, it } from "bun:test";
-import { parseArgs } from "../src/cli/args";
+import { parseArgs, validateToolNames } from "../src/cli/args";
 import { OPTIONAL_VALUE_FLAGS, STRING_VALUE_FLAGS } from "../src/cli/flag-tables";
+import { CliUsageError } from "../src/cli/usage-error";
 
 /**
  * Catches the set → args.ts direction of drift between
@@ -27,11 +28,18 @@ import { OPTIONAL_VALUE_FLAGS, STRING_VALUE_FLAGS } from "../src/cli/flag-tables
 describe("STRING_VALUE_FLAGS table is honored by args.ts parseArgs", () => {
 	for (const flag of STRING_VALUE_FLAGS) {
 		it(`${flag} consumes the next token unconditionally`, () => {
-			const result = parseArgs([flag, "--profile", "work"]);
-			expect(
-				result.profile,
-				`parseArgs should treat --profile as the value of ${flag}, not as a profile activation`,
-			).toBeUndefined();
+			try {
+				const result = parseArgs([flag, "--profile", "work"]);
+				expect(
+					result.profile,
+					`parseArgs should treat --profile as the value of ${flag}, not as a profile activation`,
+				).toBeUndefined();
+			} catch (error) {
+				// Value-validating flags (e.g. --max-time) reject "--profile" as their
+				// value; consuming-and-rejecting still proves the flag swallowed the
+				// token instead of activating the profile.
+				expect(error).toBeInstanceOf(CliUsageError);
+			}
 		});
 	}
 });
@@ -46,6 +54,62 @@ describe("OPTIONAL_VALUE_FLAGS table is honored by args.ts parseArgs", () => {
 			).toBe("work");
 		});
 	}
+});
+
+describe("--external-thinking", () => {
+	it("enables external thinking without consuming the initial message", () => {
+		const result = parseArgs(["--external-thinking", "check this"]);
+
+		expect(result.externalThinking).toBe(true);
+		expect(result.messages).toEqual(["check this"]);
+	});
+
+	it("stays unset when omitted", () => {
+		expect(parseArgs([]).externalThinking).toBeUndefined();
+	});
+});
+describe("--session-dir", () => {
+	it("uses PI_CODING_AGENT_SESSION_DIR unless the CLI flag overrides it", () => {
+		const previous = Bun.env.PI_CODING_AGENT_SESSION_DIR;
+		Bun.env.PI_CODING_AGENT_SESSION_DIR = "/env/sessions";
+		try {
+			expect(parseArgs([]).sessionDir).toBe("/env/sessions");
+			expect(parseArgs(["--session-dir", "/cli/sessions"]).sessionDir).toBe("/cli/sessions");
+		} finally {
+			if (previous === undefined) {
+				delete Bun.env.PI_CODING_AGENT_SESSION_DIR;
+			} else {
+				Bun.env.PI_CODING_AGENT_SESSION_DIR = previous;
+			}
+		}
+	});
+});
+
+describe("--tools validation", () => {
+	it("maps search and find to grep and glob", () => {
+		const result = parseArgs(["--tools", "search,find,grep"]);
+
+		expect(result.tools).toEqual(["grep", "glob"]);
+	});
+
+	it("defers unknown-name validation until all session tools are discovered", () => {
+		expect(parseArgs(["--tools", "bash,intercom"]).tools).toEqual(["bash", "intercom"]);
+		expect(parseArgs(["--tools", "read,custom_tool"], new Map()).tools).toEqual(["read", "custom_tool"]);
+	});
+});
+
+describe("--tools discovered-registry validation", () => {
+	it("accepts extension and custom tools after they enter the session registry", () => {
+		expect(() =>
+			validateToolNames(["read", "intercom", "custom_tool"], ["read", "intercom", "custom_tool"]),
+		).not.toThrow();
+	});
+
+	it("rejects names absent from the final registry", () => {
+		expect(() => validateToolNames(["read", "missing"], ["read", "intercom", "custom_tool"])).toThrow(
+			/Unknown tool in --tools: missing/,
+		);
+	});
 });
 
 describe("OPTIONAL_FLAGS per-flag quirks", () => {
@@ -104,5 +168,19 @@ describe("parseArgs @file parsing with quotes", () => {
 	it("parses single-quoted @'file' arguments", () => {
 		const result = parseArgs(["@'foo bar.png'"]);
 		expect(result.fileArgs).toEqual(["foo bar.png"]);
+	});
+});
+
+describe("foreign session import flags", () => {
+	it("parses each source flag without consuming the initial message", () => {
+		const claude = parseArgs(["--from-claude", "continue this session"]);
+		const codex = parseArgs(["--from-codex", "continue this session"]);
+
+		expect(claude.fromClaude).toBe(true);
+		expect(claude.messages).toEqual(["continue this session"]);
+		expect(claude.unrecognizedFlags).toEqual([]);
+		expect(codex.fromCodex).toBe(true);
+		expect(codex.messages).toEqual(["continue this session"]);
+		expect(codex.unrecognizedFlags).toEqual([]);
 	});
 });

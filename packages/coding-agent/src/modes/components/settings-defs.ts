@@ -18,6 +18,7 @@ import {
 	getPathsForTab,
 	getType,
 	getUi,
+	isCredential,
 	SETTING_TABS,
 	type SettingPath,
 	type SettingTab,
@@ -66,9 +67,27 @@ export interface SubmenuSettingDef extends BaseSettingDef {
 
 export interface TextInputSettingDef extends BaseSettingDef {
 	type: "text";
+	secret: boolean;
 }
 
-export type SettingDef = BooleanSettingDef | EnumSettingDef | SubmenuSettingDef | TextInputSettingDef;
+export interface ProviderLimitsSettingDef extends BaseSettingDef {
+	type: "providerLimits";
+}
+
+/** Array-of-enum setting edited as a toggle list; `ordered` lists render positions and support reordering. */
+export interface MultiSelectSettingDef extends BaseSettingDef {
+	type: "multiselect";
+	options: OptionList;
+	ordered: boolean;
+}
+
+export type SettingDef =
+	| BooleanSettingDef
+	| EnumSettingDef
+	| SubmenuSettingDef
+	| TextInputSettingDef
+	| ProviderLimitsSettingDef
+	| MultiSelectSettingDef;
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Condition Functions
@@ -107,6 +126,13 @@ const CONDITIONS: Record<string, () => boolean> = {
 	autoThinkingActive: () => {
 		try {
 			return Settings.instance.get("defaultThinkingLevel") === "auto";
+		} catch {
+			return false;
+		}
+	},
+	usageAwareFallbackEnabled: () => {
+		try {
+			return Settings.instance.get("retry.usageAwareFallback") === true;
 		} catch {
 			return false;
 		}
@@ -167,7 +193,23 @@ function pathToSettingDef(path: SettingPath): SettingDef | null {
 		if (options) {
 			return { ...base, type: "submenu", options };
 		}
-		return { ...base, type: "text" };
+		// One classification drives both surfaces: a setting marked `credential`
+		// masks here too, so the panel cannot display one that only the CLI knows
+		// to redact.
+		return { ...base, type: "text", secret: isCredential(path) };
+	}
+
+	if (schemaType === "array") {
+		// Arrays without declared options stay config-file only (free-form lists
+		// like extension paths have no finite choice set to toggle).
+		if (!options || options === "runtime") return null;
+		return { ...base, type: "multiselect", options, ordered: ui.ordered === true };
+	}
+
+	if (schemaType === "record") {
+		return path === "providers.maxInFlightRequests"
+			? { ...base, type: "providerLimits" }
+			: { ...base, type: "text", secret: false };
 	}
 
 	return null;

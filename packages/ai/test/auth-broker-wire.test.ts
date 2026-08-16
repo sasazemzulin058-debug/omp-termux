@@ -1,16 +1,22 @@
+import { Database } from "bun:sqlite";
 import { afterEach, beforeEach, describe, expect, test, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { AuthStorage, REMOTE_REFRESH_SENTINEL, SqliteAuthCredentialStore } from "@oh-my-pi/pi-ai";
 import {
+	AUTH_BROKER_CAPABILITIES_HEADER,
+	AUTH_BROKER_CAPABILITY_CODEX_METER_BLOCK_SCOPES,
 	AuthBrokerClient,
+	AuthBrokerError,
 	type AuthBrokerServerHandle,
 	AuthBrokerStreamUnsupportedError,
+	type SnapshotResponse,
 	type SnapshotStreamEvent,
 	startAuthBroker,
 } from "@oh-my-pi/pi-ai/auth-broker";
 import * as oauthUtils from "@oh-my-pi/pi-ai/registry/oauth";
+import { removeWithRetries } from "../../utils/src/temp";
 
 const ANTHROPIC_ENV = ["ANTHROPIC_API_KEY", "ANTHROPIC_OAUTH_TOKEN"] as const;
 const savedEnv: Partial<Record<(typeof ANTHROPIC_ENV)[number], string | undefined>> = {};
@@ -24,6 +30,37 @@ function mintOAuthCredential(suffix: string, expires: number) {
 		accountId: `account-${suffix}`,
 		email: `${suffix}@example.com`,
 	};
+}
+
+function fetchWithoutAuthBrokerCapabilities(): typeof fetch {
+	return Object.assign(
+		async (input: string | URL | Request, init?: RequestInit) => {
+			const headers = new Headers(init?.headers);
+			headers.delete(AUTH_BROKER_CAPABILITIES_HEADER);
+			return fetch(input, { ...init, headers });
+		},
+		{ preconnect: fetch.preconnect },
+	);
+}
+
+function credentialBlocks(snapshot: SnapshotResponse, credentialId: number) {
+	return snapshot.credentials.find(entry => entry.id === credentialId)?.blocks ?? [];
+}
+
+function readRawCodexCredentialBlocks(
+	dbPath: string,
+	credentialId: number,
+): Array<{ block_scope: string; blocked_until_ms: number; updated_at: number }> {
+	const db = new Database(dbPath, { readonly: true });
+	try {
+		return db
+			.prepare(
+				"SELECT block_scope, blocked_until_ms, updated_at FROM auth_credential_blocks WHERE credential_id = ? AND provider_key = 'openai-codex:oauth' ORDER BY block_scope",
+			)
+			.all(credentialId) as Array<{ block_scope: string; blocked_until_ms: number; updated_at: number }>;
+	} finally {
+		db.close();
+	}
 }
 
 describe("auth-broker wire surface", () => {
@@ -57,7 +94,7 @@ describe("auth-broker wire surface", () => {
 		await handle?.close();
 		storage?.close();
 		store?.close();
-		await fs.rm(tempDir, { recursive: true, force: true });
+		await removeWithRetries(tempDir);
 		for (const key of ANTHROPIC_ENV) {
 			if (savedEnv[key] === undefined) delete process.env[key];
 			else process.env[key] = savedEnv[key];
@@ -90,6 +127,68 @@ describe("auth-broker wire surface", () => {
 		}
 	});
 
+	test("preserves an HTTP rejection when the caller aborts while reading its body", async () => {
+		const client = new AuthBrokerClient({
+			url: "http://broker.invalid",
+			token,
+			maxRetries: 0,
+			fetchImpl: (async (_input, init) => {
+				const signal = init?.signal;
+				const body = new ReadableStream<Uint8Array>({
+					start(controller) {
+						controller.enqueue(new TextEncoder().encode("forbidden"));
+						signal?.addEventListener("abort", () => controller.error(signal.reason), { once: true });
+					},
+				});
+				return new Response(body, { status: 401 });
+			}) as typeof fetch,
+		});
+
+		try {
+			await client.fetchSnapshot({ signal: AbortSignal.timeout(10) });
+			throw new Error("expected auth rejection");
+		} catch (error) {
+			expect(error).toBeInstanceOf(AuthBrokerError);
+			expect(error).toMatchObject({ status: 401 });
+		}
+	});
+
+	test("GET /v1/usage outlives the base timeout for a serialized account batch", async () => {
+		vi.useFakeTimers();
+		const response = Promise.withResolvers<Response>();
+		let usageSignal: AbortSignal | undefined;
+		const fetchImpl: typeof fetch = Object.assign(
+			async (_input: string | URL | Request, init?: RequestInit) => {
+				const signal = init?.signal;
+				if (signal) usageSignal = signal;
+				return response.promise;
+			},
+			{ preconnect: fetch.preconnect },
+		);
+		const client = new AuthBrokerClient({
+			url: "http://broker.invalid",
+			token,
+			timeoutMs: 10_000,
+			maxRetries: 0,
+			fetchImpl,
+		});
+		try {
+			const usage = client.fetchUsage({ maxAccountsPerProvider: 3 });
+			await Promise.resolve();
+			const baseTimeout = AbortSignal.timeout(10_000);
+			vi.advanceTimersByTime(10_001);
+			await Promise.resolve();
+			expect(baseTimeout.aborted).toBe(true);
+			expect(usageSignal?.aborted).toBe(false);
+
+			const generatedAt = Date.now();
+			response.resolve(Response.json({ generatedAt, reports: [] }));
+			expect(await usage).toEqual({ generatedAt, reports: [] });
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+
 	test("GET /v1/snapshot returns generation headers and 304 for unchanged long-poll", async () => {
 		const res = await fetch(`${handle!.url}/v1/snapshot`, {
 			headers: { Authorization: `Bearer ${token}` },
@@ -98,14 +197,216 @@ describe("auth-broker wire surface", () => {
 		const body = (await res.json()) as { generation: number; serverNowMs: number; refresher: { enabled: boolean } };
 		expect(res.headers.get("etag")).toBe(`"${body.generation}"`);
 		expect(res.headers.get("cache-control")).toBe("no-store");
+		expect(res.headers.get("vary")).toBe(AUTH_BROKER_CAPABILITIES_HEADER);
 		expect(body.generation).toBeGreaterThan(0);
 		expect(body.serverNowMs).toBeGreaterThan(0);
 		expect(body.refresher.enabled).toBe(false);
 
-		const client = new AuthBrokerClient({ url: handle!.url, token });
+		const observedCapabilities: Array<string | null> = [];
+		const fetchImpl: typeof fetch = Object.assign(
+			async (input: string | URL | Request, init?: RequestInit) => {
+				observedCapabilities.push(new Headers(init?.headers).get(AUTH_BROKER_CAPABILITIES_HEADER));
+				return fetch(input, init);
+			},
+			{ preconnect: fetch.preconnect },
+		);
+		const client = new AuthBrokerClient({ url: handle!.url, token, fetchImpl });
 		const unchanged = await client.fetchSnapshot({ ifGenerationGt: body.generation, waitMs: 10 });
 		expect(unchanged.status).toBe(304);
 		expect(unchanged.generation).toBe(body.generation);
+		expect(observedCapabilities).toEqual([AUTH_BROKER_CAPABILITY_CODEX_METER_BLOCK_SCOPES]);
+
+		const rawUnchanged = await fetch(`${handle!.url}/v1/snapshot?wait=10`, {
+			headers: {
+				Authorization: `Bearer ${token}`,
+				"If-None-Match": `"${body.generation}"`,
+			},
+		});
+		expect(rawUnchanged.status).toBe(304);
+		expect(rawUnchanged.headers.get("vary")).toBe(AUTH_BROKER_CAPABILITIES_HEADER);
+	});
+
+	test("ignores external SQLite commits outside auth tables", async () => {
+		const generation = storage!.getGeneration();
+		const db = new Database(path.join(tempDir, "agent.db"));
+		try {
+			db.run("CREATE TABLE unrelated_state (id INTEGER PRIMARY KEY, value TEXT NOT NULL)");
+			db.run("INSERT INTO unrelated_state (value) VALUES ('changed')");
+		} finally {
+			db.close();
+		}
+
+		expect(await storage!.pollExternalChanges()).toBe(false);
+		expect(storage!.getGeneration()).toBe(generation);
+	});
+
+	test("does not double-bump after a local auth write with an unrelated external commit pending", async () => {
+		const db = new Database(path.join(tempDir, "agent.db"));
+		try {
+			db.run("CREATE TABLE unrelated_state (id INTEGER PRIMARY KEY, value TEXT NOT NULL)");
+			db.run("INSERT INTO unrelated_state (value) VALUES ('changed')");
+		} finally {
+			db.close();
+		}
+		storage!.upsertCredential("unit-local", { type: "api_key", key: "local-key" });
+		const generation = storage!.getGeneration();
+
+		expect(await storage!.pollExternalChanges()).toBe(false);
+		expect(storage!.getGeneration()).toBe(generation);
+	});
+
+	test("preserves a pending external auth commit while acknowledging local changes", async () => {
+		const generation = storage!.getGeneration();
+		const db = new Database(path.join(tempDir, "agent.db"));
+		try {
+			db.run("UPDATE auth_credentials SET updated_at = updated_at + 1 WHERE provider = 'anthropic'");
+		} finally {
+			db.close();
+		}
+
+		store!.acknowledgeLocalChanges();
+		expect(await storage!.pollExternalChanges()).toBe(true);
+		expect(storage!.getGeneration()).toBeGreaterThan(generation);
+	});
+
+	test("projects Codex meter blocks for legacy clients and observes writes from another connection", async () => {
+		await handle!.close();
+		handle = undefined;
+		const credential = storage!.upsertCredential("openai-codex", {
+			...mintOAuthCredential("codex-scopes", Date.now() + 60_000),
+		})[0];
+		if (!credential) throw new Error("expected Codex credential");
+		const chatBlockedUntilMs = Date.now() + 60_000;
+		const sparkBlockedUntilMs = Date.now() + 120_000;
+		storage!.upsertCredentialBlock({
+			credentialId: credential.id,
+			providerKey: "openai-codex:oauth",
+			blockScope: "chat",
+			blockedUntilMs: chatBlockedUntilMs,
+		});
+		storage!.upsertCredentialBlock({
+			credentialId: credential.id,
+			providerKey: "openai-codex:oauth",
+			blockScope: "spark",
+			blockedUntilMs: sparkBlockedUntilMs,
+		});
+		expect(
+			readRawCodexCredentialBlocks(path.join(tempDir, "agent.db"), credential.id).map(row => row.block_scope),
+		).toEqual(["chat", "shared", "spark"]);
+
+		const sparkUpdatedAtSec = Math.floor(Date.now() / 1000) - 20;
+		const chatUpdatedAtSec = sparkUpdatedAtSec + 10;
+		const db = new Database(path.join(tempDir, "agent.db"));
+		try {
+			const updateTimestamp = db.prepare(
+				"UPDATE auth_credential_blocks SET updated_at = ? WHERE credential_id = ? AND provider_key = ? AND block_scope = ?",
+			);
+			updateTimestamp.run(chatUpdatedAtSec, credential.id, "openai-codex:oauth", "chat");
+			updateTimestamp.run(sparkUpdatedAtSec, credential.id, "openai-codex:oauth", "spark");
+		} finally {
+			db.close();
+		}
+		await storage!.pollExternalChanges();
+		expect(readRawCodexCredentialBlocks(path.join(tempDir, "agent.db"), credential.id)).toEqual([
+			{
+				block_scope: "chat",
+				blocked_until_ms: chatBlockedUntilMs,
+				updated_at: chatUpdatedAtSec,
+			},
+			{
+				block_scope: "shared",
+				blocked_until_ms: sparkBlockedUntilMs,
+				updated_at: chatUpdatedAtSec,
+			},
+			{
+				block_scope: "spark",
+				blocked_until_ms: sparkBlockedUntilMs,
+				updated_at: sparkUpdatedAtSec,
+			},
+		]);
+
+		handle = startAuthBroker({
+			storage: storage!,
+			bind: "127.0.0.1:0",
+			bearerTokens: [token],
+			disableRefresher: true,
+			externalChangePollMs: 10,
+			// This integration exercises the real server poll; fake timers do not
+			// drive Bun's HTTP stream lifecycle.
+		});
+
+		const currentClient = new AuthBrokerClient({ url: handle!.url, token });
+		const currentResult = await currentClient.fetchSnapshot();
+		if (currentResult.status !== 200) throw new Error("expected current-client snapshot");
+		const currentBlocks = credentialBlocks(currentResult.snapshot, credential.id);
+		expect(currentBlocks).toEqual([
+			{
+				providerKey: "openai-codex:oauth",
+				blockScope: "chat",
+				blockedUntilMs: chatBlockedUntilMs,
+				updatedAtMs: chatUpdatedAtSec * 1000,
+			},
+			{
+				providerKey: "openai-codex:oauth",
+				blockScope: "spark",
+				blockedUntilMs: sparkBlockedUntilMs,
+				updatedAtMs: sparkUpdatedAtSec * 1000,
+			},
+		]);
+		const maxUpdatedAtMs = Math.max(...currentBlocks.map(block => block.updatedAtMs ?? 0));
+		expect(maxUpdatedAtMs).toBe(chatUpdatedAtSec * 1000);
+
+		const legacyClient = new AuthBrokerClient({
+			url: handle!.url,
+			token,
+			fetchImpl: fetchWithoutAuthBrokerCapabilities(),
+		});
+		const legacyResult = await legacyClient.fetchSnapshot();
+		if (legacyResult.status !== 200) throw new Error("expected legacy-client snapshot");
+		expect(credentialBlocks(legacyResult.snapshot, credential.id)).toEqual([
+			{
+				providerKey: "openai-codex:oauth",
+				blockScope: "shared",
+				blockedUntilMs: sparkBlockedUntilMs,
+				updatedAtMs: maxUpdatedAtMs,
+			},
+		]);
+
+		expect(
+			storage!
+				.listCredentialBlocks([credential.id])
+				.map(block => block.blockScope)
+				.sort(),
+		).toEqual(["chat", "spark"]);
+
+		const pendingLegacySnapshot = legacyClient.fetchSnapshot({
+			ifGenerationGt: legacyResult.generation,
+			waitMs: 1000,
+		});
+		const updatedChatBlockedUntilMs = sparkBlockedUntilMs + 60_000;
+		const legacyWriter = new Database(path.join(tempDir, "agent.db"));
+		try {
+			legacyWriter
+				.prepare(
+					`INSERT INTO auth_credential_blocks (
+						credential_id, provider_key, block_scope, blocked_until_ms, updated_at
+					) VALUES (?, 'openai-codex:oauth', 'shared', ?, ?)
+					ON CONFLICT(credential_id, provider_key, block_scope) DO UPDATE SET
+						blocked_until_ms = MAX(auth_credential_blocks.blocked_until_ms, excluded.blocked_until_ms),
+						updated_at = excluded.updated_at`,
+				)
+				.run(credential.id, updatedChatBlockedUntilMs, Math.floor(Date.now() / 1000));
+		} finally {
+			legacyWriter.close();
+		}
+		const changedLegacyResult = await pendingLegacySnapshot;
+		if (changedLegacyResult.status !== 200) throw new Error("expected legacy-client long-poll snapshot");
+		expect(
+			credentialBlocks(changedLegacyResult.snapshot, credential.id).map(block => [
+				block.blockScope,
+				block.blockedUntilMs,
+			]),
+		).toEqual([["shared", updatedChatBlockedUntilMs]]);
 	});
 
 	test("GET /v1/snapshot long-poll wakes when generation changes", async () => {
@@ -173,6 +474,123 @@ describe("auth-broker wire surface", () => {
 		await expect(client.refreshCredential(id)).rejects.toThrow();
 	});
 
+	test("GET /v1/usage/history serves recorded snapshots with sinceMs/provider filters and requires auth", async () => {
+		const hourMs = 60 * 60 * 1000;
+		const now = Date.now();
+		// Hours apart so the store's per-bucket dedupe keeps distinct rows.
+		store!.recordUsageSnapshots!([
+			{
+				recordedAt: now - 3 * hourMs,
+				provider: "anthropic",
+				accountKey: "acct-a",
+				email: "a@example.com",
+				limitId: "5h",
+				label: "Claude 5 Hour",
+				windowLabel: "5h",
+				usedFraction: 0.2,
+				status: "ok",
+			},
+			{
+				recordedAt: now - hourMs,
+				provider: "anthropic",
+				accountKey: "acct-a",
+				email: "a@example.com",
+				limitId: "5h",
+				label: "Claude 5 Hour",
+				windowLabel: "5h",
+				usedFraction: 0.9,
+				status: "warning",
+			},
+			{
+				recordedAt: now - hourMs,
+				provider: "openai-codex",
+				accountKey: "acct-b",
+				limitId: "weekly",
+				label: "Weekly",
+				usedFraction: 0.5,
+			},
+		]);
+
+		const unauthorized = await fetch(`${handle!.url}/v1/usage/history`);
+		expect(unauthorized.status).toBe(401);
+
+		const client = new AuthBrokerClient({ url: handle!.url, token });
+		const all = await client.fetchUsageHistory();
+		expect(all.entries).toHaveLength(3);
+		expect(all.entries[0].recordedAt).toBeLessThanOrEqual(all.entries[1].recordedAt);
+
+		const recent = await client.fetchUsageHistory({ sinceMs: now - 2 * hourMs });
+		expect(recent.entries.map(e => e.usedFraction).sort()).toEqual([0.5, 0.9]);
+
+		const anthropicOnly = await client.fetchUsageHistory({ provider: "anthropic" });
+		expect(anthropicOnly.entries).toHaveLength(2);
+		expect(anthropicOnly.entries.every(e => e.provider === "anthropic")).toBe(true);
+		expect(anthropicOnly.entries[1]).toMatchObject({
+			accountKey: "acct-a",
+			email: "a@example.com",
+			windowLabel: "5h",
+			usedFraction: 0.9,
+			status: "warning",
+		});
+	});
+
+	test("POST /v1/usage/observed persists per-client usage served by GET /v1/usage/clients", async () => {
+		const unauthorized = await fetch(`${handle!.url}/v1/usage/observed`, { method: "POST" });
+		expect(unauthorized.status).toBe(401);
+
+		const client = new AuthBrokerClient({ url: handle!.url, token });
+		const now = Date.now();
+		const entry = {
+			at: now,
+			provider: "anthropic",
+			model: "claude-x",
+			requests: 2,
+			inputTokens: 1000,
+			outputTokens: 400,
+			cacheReadTokens: 50,
+			cacheWriteTokens: 25,
+			costUsd: 3.25,
+		};
+		const ack = await client.reportClientUsage({ installId: "install-1", hostname: "mbp.local", entries: [entry] });
+		expect(ack.ok).toBe(true);
+		await client.reportClientUsage({
+			installId: "install-2",
+			entries: [{ ...entry, provider: "openai-codex", model: "gpt-y", requests: 1, costUsd: 0 }],
+		});
+
+		const summary = await client.fetchClientUsageSummary();
+		expect(summary.clients).toHaveLength(2);
+		const first = summary.clients.find(c => c.installId === "install-1");
+		expect(first).toMatchObject({ hostname: "mbp.local" });
+		expect(first?.lastSeen).toBeGreaterThan(0);
+		expect(first?.providers).toEqual([
+			{
+				provider: "anthropic",
+				requests: 2,
+				inputTokens: 1000,
+				outputTokens: 400,
+				cacheReadTokens: 50,
+				cacheWriteTokens: 25,
+				costUsd: 3.25,
+			},
+		]);
+		const second = summary.clients.find(c => c.installId === "install-2");
+		expect(second?.hostname).toBeUndefined();
+		expect(second?.providers[0]).toMatchObject({ provider: "openai-codex", requests: 1 });
+
+		// sinceMs beyond the recorded timestamps returns clients with no aggregates.
+		const future = await client.fetchClientUsageSummary({ sinceMs: now + 60_000 });
+		expect(future.clients.every(c => c.providers.length === 0)).toBe(true);
+
+		// Malformed body is rejected by schema validation.
+		const bad = await fetch(`${handle!.url}/v1/usage/observed`, {
+			method: "POST",
+			headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+			body: JSON.stringify({ installId: "x", entries: [{ at: "not-a-number" }] }),
+		});
+		expect(bad.status).toBe(400);
+	});
+
 	test("Unknown route returns 404", async () => {
 		const res = await fetch(`${handle!.url}/v1/nope`, {
 			headers: { Authorization: `Bearer ${token}` },
@@ -211,6 +629,101 @@ describe("auth-broker wire surface", () => {
 		} finally {
 			controller.abort();
 			await iter.return(undefined).catch(() => {});
+		}
+	});
+
+	test("SSE stream projects Codex meter blocks only for clients without the capability", async () => {
+		const credential = storage!.upsertCredential("openai-codex", {
+			...mintOAuthCredential("codex-stream-scopes", Date.now() + 60_000),
+		})[0];
+		if (!credential) throw new Error("expected Codex credential");
+		const chatBlockedUntilMs = Date.now() + 60_000;
+		const sparkBlockedUntilMs = Date.now() + 120_000;
+		storage!.upsertCredentialBlock({
+			credentialId: credential.id,
+			providerKey: "openai-codex:oauth",
+			blockScope: "chat",
+			blockedUntilMs: chatBlockedUntilMs,
+		});
+		storage!.upsertCredentialBlock({
+			credentialId: credential.id,
+			providerKey: "openai-codex:oauth",
+			blockScope: "spark",
+			blockedUntilMs: sparkBlockedUntilMs,
+		});
+
+		const currentController = new AbortController();
+		const legacyController = new AbortController();
+		const currentIter = new AuthBrokerClient({ url: handle!.url, token }).openSnapshotStream({
+			signal: currentController.signal,
+		});
+		const legacyIter = new AuthBrokerClient({
+			url: handle!.url,
+			token,
+			fetchImpl: fetchWithoutAuthBrokerCapabilities(),
+		}).openSnapshotStream({ signal: legacyController.signal });
+		try {
+			const [currentInitial, legacyInitial] = await Promise.all([currentIter.next(), legacyIter.next()]);
+			if (currentInitial.done || currentInitial.value.kind !== "snapshot") {
+				throw new Error("expected current-client snapshot frame");
+			}
+			if (legacyInitial.done || legacyInitial.value.kind !== "snapshot") {
+				throw new Error("expected legacy-client snapshot frame");
+			}
+			expect(
+				credentialBlocks(currentInitial.value, credential.id).map(block => [
+					block.blockScope,
+					block.blockedUntilMs,
+				]),
+			).toEqual([
+				["chat", chatBlockedUntilMs],
+				["spark", sparkBlockedUntilMs],
+			]);
+			const initialCurrentBlocks = credentialBlocks(currentInitial.value, credential.id);
+			expect(credentialBlocks(legacyInitial.value, credential.id)).toEqual([
+				{
+					providerKey: "openai-codex:oauth",
+					blockScope: "shared",
+					blockedUntilMs: sparkBlockedUntilMs,
+					updatedAtMs: Math.max(...initialCurrentBlocks.map(block => block.updatedAtMs ?? 0)),
+				},
+			]);
+
+			const updatedChatBlockedUntilMs = sparkBlockedUntilMs + 60_000;
+			storage!.upsertCredentialBlock({
+				credentialId: credential.id,
+				providerKey: "openai-codex:oauth",
+				blockScope: "chat",
+				blockedUntilMs: updatedChatBlockedUntilMs,
+			});
+
+			const [currentDelta, legacyDelta] = await Promise.all([
+				nextMatching(currentIter, event => event.kind === "entry" && event.entry.id === credential.id),
+				nextMatching(legacyIter, event => event.kind === "entry" && event.entry.id === credential.id),
+			]);
+			if (currentDelta.kind !== "entry" || legacyDelta.kind !== "entry") {
+				throw new Error("expected entry frames");
+			}
+			const currentDeltaBlocks = currentDelta.entry.blocks ?? [];
+			expect(currentDeltaBlocks.map(block => [block.blockScope, block.blockedUntilMs])).toEqual([
+				["chat", updatedChatBlockedUntilMs],
+				["spark", sparkBlockedUntilMs],
+			]);
+			expect(legacyDelta.entry.blocks).toEqual([
+				{
+					providerKey: "openai-codex:oauth",
+					blockScope: "shared",
+					blockedUntilMs: updatedChatBlockedUntilMs,
+					updatedAtMs: Math.max(...currentDeltaBlocks.map(block => block.updatedAtMs ?? 0)),
+				},
+			]);
+		} finally {
+			currentController.abort();
+			legacyController.abort();
+			await Promise.all([
+				currentIter.return(undefined).catch(() => {}),
+				legacyIter.return(undefined).catch(() => {}),
+			]);
 		}
 	});
 
@@ -296,6 +809,7 @@ describe("auth-broker wire surface", () => {
 			});
 			expect(res.status).toBe(200);
 			expect(res.headers.get("content-type") ?? "").toContain("text/event-stream");
+			expect(res.headers.get("vary")).toBe(AUTH_BROKER_CAPABILITIES_HEADER);
 			expect(res.body).not.toBeNull();
 			const reader = (res.body as ReadableStream<Uint8Array>).getReader();
 			const decoder = new TextDecoder();

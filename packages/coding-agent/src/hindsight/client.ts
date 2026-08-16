@@ -8,20 +8,42 @@
  * tests to spy on.
  */
 
+import { USER_AGENT } from "@oh-my-pi/pi-utils";
+import { isTimeoutError, withTimeoutSignal } from "../utils/fetch-timeout";
 import type { HindsightConfig } from "./config";
 
-const USER_AGENT = "oh-my-pi-coding-agent";
 const DEFAULT_USER_AGENT = USER_AGENT;
+/** Fallback deadlines (ms) applied when the caller supplies no override. */
+const DEFAULT_REQUEST_TIMEOUT_MS = 30_000;
+const DEFAULT_REFLECT_TIMEOUT_MS = 120_000;
+const DEFAULT_RECALL_TIMEOUT_MS = 30_000;
+const DEFAULT_RETAIN_TIMEOUT_MS = 60_000;
 
 export type Budget = "low" | "mid" | "high" | string;
 export type TagsMatch = "any" | "all" | "any_strict" | "all_strict";
 export type UpdateMode = "replace" | "append";
 export type ConsolidationState = "failed" | "pending" | "done";
 
+/** Per-operation request deadlines (ms). Each falls back to a built-in default. */
+export interface HindsightTimeouts {
+	/** Default deadline for ops without a specific override. */
+	request?: number;
+	reflect?: number;
+	recall?: number;
+	retain?: number;
+}
+
 export interface HindsightApiOptions {
 	baseUrl: string;
 	apiKey?: string;
 	userAgent?: string;
+	/** Per-op deadlines; unset entries fall back to built-in defaults. */
+	timeouts?: HindsightTimeouts;
+}
+
+/** Caller cancellation shared by Hindsight request option bags. */
+export interface HindsightRequestOptions {
+	signal?: AbortSignal;
 }
 
 export interface RecallResult {
@@ -77,7 +99,7 @@ export interface MemoryItemInput {
 	updateMode?: UpdateMode;
 }
 
-export interface RetainOptions {
+export interface RetainOptions extends HindsightRequestOptions {
 	timestamp?: Date | string;
 	context?: string;
 	metadata?: Record<string, string>;
@@ -87,7 +109,7 @@ export interface RetainOptions {
 	updateMode?: UpdateMode;
 }
 
-export interface RetainBatchOptions {
+export interface RetainBatchOptions extends HindsightRequestOptions {
 	/** Document id applied to every item that doesn't carry its own. */
 	documentId?: string;
 	/** Tags attached to the resulting document(s), not individual items. */
@@ -95,7 +117,7 @@ export interface RetainBatchOptions {
 	async?: boolean;
 }
 
-export interface RecallOptions {
+export interface RecallOptions extends HindsightRequestOptions {
 	types?: string[];
 	maxTokens?: number;
 	budget?: Budget;
@@ -103,19 +125,19 @@ export interface RecallOptions {
 	tagsMatch?: TagsMatch;
 }
 
-export interface ReflectOptions {
+export interface ReflectOptions extends HindsightRequestOptions {
 	context?: string;
 	budget?: Budget;
 	tags?: string[];
 	tagsMatch?: TagsMatch;
 }
 
-export interface CreateBankOptions {
+export interface CreateBankOptions extends HindsightRequestOptions {
 	reflectMission?: string;
 	retainMission?: string;
 }
 
-export interface ListMemoriesOptions {
+export interface ListMemoriesOptions extends HindsightRequestOptions {
 	limit?: number;
 	offset?: number;
 	type?: string;
@@ -123,12 +145,12 @@ export interface ListMemoriesOptions {
 	consolidationState?: ConsolidationState;
 }
 
-export interface ListDocumentsOptions {
+export interface ListDocumentsOptions extends HindsightRequestOptions {
 	limit?: number;
 	offset?: number;
 }
 
-export interface UpdateDocumentOptions {
+export interface UpdateDocumentOptions extends HindsightRequestOptions {
 	tags?: string[];
 }
 
@@ -166,7 +188,7 @@ export interface MentalModelHistoryEntry {
 	[key: string]: unknown;
 }
 
-export interface CreateMentalModelOptions {
+export interface CreateMentalModelOptions extends HindsightRequestOptions {
 	id?: string;
 	tags?: string[];
 	maxTokens?: number;
@@ -183,11 +205,11 @@ export interface RefreshMentalModelResponse {
 	[key: string]: unknown;
 }
 
-export interface ListMentalModelsOptions {
+export interface ListMentalModelsOptions extends HindsightRequestOptions {
 	detail?: MentalModelDetail;
 }
 
-export interface GetMentalModelOptions {
+export interface GetMentalModelOptions extends HindsightRequestOptions {
 	detail?: MentalModelDetail;
 }
 
@@ -208,11 +230,18 @@ interface RequestOptions {
 	query?: Record<string, unknown>;
 	/** Return null instead of throwing on a 404 response. */
 	allow404?: boolean;
+	signal?: AbortSignal;
+	/** Op deadline (ms); defaults to the client's request timeout. */
+	timeoutMs?: number;
 }
 
 export class HindsightApi {
 	#baseUrl: string;
 	#headers: Record<string, string>;
+	#reflectTimeoutMs: number;
+	#recallTimeoutMs: number;
+	#retainTimeoutMs: number;
+	#requestTimeoutMs: number;
 
 	constructor(options: HindsightApiOptions) {
 		this.#baseUrl = options.baseUrl.replace(/\/+$/, "");
@@ -223,6 +252,11 @@ export class HindsightApi {
 		if (options.apiKey) {
 			this.#headers.Authorization = `Bearer ${options.apiKey}`;
 		}
+		const timeouts = options.timeouts;
+		this.#requestTimeoutMs = timeouts?.request ?? DEFAULT_REQUEST_TIMEOUT_MS;
+		this.#reflectTimeoutMs = timeouts?.reflect ?? DEFAULT_REFLECT_TIMEOUT_MS;
+		this.#recallTimeoutMs = timeouts?.recall ?? DEFAULT_RECALL_TIMEOUT_MS;
+		this.#retainTimeoutMs = timeouts?.retain ?? DEFAULT_RETAIN_TIMEOUT_MS;
 	}
 
 	async retain(bankId: string, content: string, options?: RetainOptions): Promise<RetainResponse> {
@@ -240,7 +274,11 @@ export class HindsightApi {
 			"POST",
 			`/v1/default/banks/${encodeURIComponent(bankId)}/memories`,
 			"retain",
-			{ body: { items: [item], async: options?.async } },
+			{
+				body: { items: [item], async: options?.async },
+				signal: options?.signal,
+				timeoutMs: this.#retainTimeoutMs,
+			},
 		);
 	}
 
@@ -270,6 +308,8 @@ export class HindsightApi {
 					document_tags: options?.documentTags,
 					async: options?.async,
 				},
+				signal: options?.signal,
+				timeoutMs: this.#retainTimeoutMs,
 			},
 		);
 	}
@@ -288,6 +328,8 @@ export class HindsightApi {
 					tags: options?.tags,
 					tags_match: options?.tagsMatch,
 				},
+				signal: options?.signal,
+				timeoutMs: this.#recallTimeoutMs,
 			},
 		);
 	}
@@ -305,6 +347,8 @@ export class HindsightApi {
 					tags: options?.tags,
 					tags_match: options?.tagsMatch,
 				},
+				signal: options?.signal,
+				timeoutMs: this.#reflectTimeoutMs,
 			},
 		);
 	}
@@ -319,6 +363,7 @@ export class HindsightApi {
 					reflect_mission: options.reflectMission,
 					retain_mission: options.retainMission,
 				},
+				signal: options.signal,
 			},
 		);
 	}
@@ -340,6 +385,7 @@ export class HindsightApi {
 					limit: options?.limit,
 					offset: options?.offset,
 				},
+				signal: options?.signal,
 			},
 		);
 	}
@@ -350,7 +396,7 @@ export class HindsightApi {
 			"GET",
 			`/v1/default/banks/${encodeURIComponent(bankId)}/documents`,
 			"listDocuments",
-			{ query: { limit: options?.limit, offset: options?.offset } },
+			{ query: { limit: options?.limit, offset: options?.offset }, signal: options?.signal },
 		);
 	}
 
@@ -370,7 +416,7 @@ export class HindsightApi {
 			"PATCH",
 			`/v1/default/banks/${encodeURIComponent(bankId)}/documents/${encodeURIComponent(documentId)}`,
 			"updateDocument",
-			{ body: { tags: options.tags } },
+			{ body: { tags: options.tags }, signal: options.signal },
 		);
 	}
 
@@ -399,7 +445,7 @@ export class HindsightApi {
 			"GET",
 			`/v1/default/banks/${encodeURIComponent(bankId)}/mental-models`,
 			"listMentalModels",
-			{ query: { detail: options?.detail ?? "content" } },
+			{ query: { detail: options?.detail ?? "content" }, signal: options?.signal },
 		);
 	}
 
@@ -413,7 +459,7 @@ export class HindsightApi {
 			"GET",
 			`/v1/default/banks/${encodeURIComponent(bankId)}/mental-models/${encodeURIComponent(mentalModelId)}`,
 			"getMentalModel",
-			{ query: { detail: options?.detail ?? "content" }, allow404: true },
+			{ query: { detail: options?.detail ?? "content" }, allow404: true, signal: options?.signal },
 		);
 	}
 
@@ -441,6 +487,7 @@ export class HindsightApi {
 					max_tokens: options?.maxTokens,
 					trigger: options?.trigger,
 				},
+				signal: options?.signal,
 			},
 		);
 	}
@@ -489,7 +536,12 @@ export class HindsightApi {
 			if (qs) url += `?${qs}`;
 		}
 
-		const init: RequestInit = { method, headers: this.#headers };
+		const timeoutMs = opts?.timeoutMs ?? this.#requestTimeoutMs;
+		const init: RequestInit = {
+			method,
+			headers: this.#headers,
+			signal: withTimeoutSignal(timeoutMs, opts?.signal),
+		};
 		if (opts?.body !== undefined) {
 			init.body = JSON.stringify(pruneUndefined(opts.body));
 		}
@@ -498,11 +550,10 @@ export class HindsightApi {
 		try {
 			response = await fetch(url, init);
 		} catch (err) {
-			throw new HindsightError(
-				`${operation} request failed: ${err instanceof Error ? err.message : String(err)}`,
-				undefined,
-				err,
-			);
+			const message = isTimeoutError(err)
+				? `${operation} request timed out after ${Math.round(timeoutMs / 1000)}s`
+				: `${operation} request failed: ${err instanceof Error ? err.message : String(err)}`;
+			throw new HindsightError(message, undefined, err);
 		}
 
 		if (opts?.allow404 && response.status === 404) {
@@ -619,5 +670,11 @@ export function createHindsightClient(config: HindsightConfig & { hindsightApiUr
 		baseUrl: config.hindsightApiUrl,
 		apiKey: config.hindsightApiToken ?? undefined,
 		userAgent: USER_AGENT,
+		timeouts: {
+			request: config.requestTimeoutMs,
+			reflect: config.reflectTimeoutMs,
+			recall: config.recallTimeoutMs,
+			retain: config.retainTimeoutMs,
+		},
 	});
 }

@@ -2,8 +2,8 @@ import { describe, expect, it } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import path from "node:path";
-import type { AgentSideConnection, SessionNotification } from "@agentclientprotocol/sdk";
-import { type } from "arktype";
+import { type } from "@oh-my-pi/omptype";
+import type { AgentSideConnection, SessionNotification } from "@oh-my-pi/pi-utils/acp";
 
 const arkSessionNotification = type({
 	sessionId: "string",
@@ -219,6 +219,144 @@ describe("ACP event mapper", () => {
 		expect(update.content).toContainEqual({ type: "content", content: { type: "text", text: "$ npm run check" } });
 	});
 
+	it("keeps internal Hub traffic off the ACP session stream", () => {
+		const events: AgentSessionEvent[] = [
+			{
+				type: "tool_execution_start",
+				toolCallId: "tc-hub-send",
+				toolName: "hub",
+				args: { op: "send", to: "Scout", message: "Private coordination" },
+			},
+			{
+				type: "tool_execution_update",
+				toolCallId: "tc-hub-send",
+				toolName: "hub",
+				args: { op: "send", to: "Scout", message: "Private coordination" },
+				partialResult: { content: [{ type: "text", text: "delivering" }] },
+			},
+			{
+				type: "tool_execution_end",
+				toolCallId: "tc-hub-send",
+				toolName: "hub",
+				isError: false,
+				result: { content: [{ type: "text", text: "delivered" }] },
+			},
+		] satisfies AgentSessionEvent[];
+
+		const updates = events.flatMap(event =>
+			mapAgentSessionEventToAcpSessionUpdates(event, "session-1", {
+				getToolArgs: () => ({ op: "send", to: "Scout", message: "Private coordination" }),
+			}),
+		);
+
+		expect(updates).toEqual([]);
+	});
+
+	it("keeps xd-routed Hub traffic off the ACP session stream", () => {
+		const args = {
+			path: "xd://hub",
+			content: JSON.stringify({ op: "inbox", from: "Scout" }),
+		};
+		const events = [
+			{
+				type: "tool_execution_start",
+				toolCallId: "tc-xd-hub-inbox",
+				toolName: "write",
+				args,
+			},
+			{
+				type: "tool_execution_end",
+				toolCallId: "tc-xd-hub-inbox",
+				toolName: "write",
+				isError: false,
+				result: { content: [{ type: "text", text: "Private reply" }] },
+			},
+		] satisfies AgentSessionEvent[];
+
+		const updates = events.flatMap(event =>
+			mapAgentSessionEventToAcpSessionUpdates(event, "session-1", {
+				getToolArgs: () => args,
+			}),
+		);
+
+		expect(updates).toEqual([]);
+	});
+
+	it("keeps Hub process control visible over ACP", () => {
+		const updates = mapAgentSessionEventToAcpSessionUpdates(
+			{
+				type: "tool_execution_start",
+				toolCallId: "tc-hub-process-send",
+				toolName: "hub",
+				args: { op: "send", name: "server", text: "ping" },
+			},
+			"session-1",
+		);
+
+		expect(updates).toHaveLength(1);
+		expect(updates[0]?.update).toEqual(
+			expect.objectContaining({
+				sessionUpdate: "tool_call",
+				rawInput: { op: "send", name: "server", text: "ping" },
+			}),
+		);
+	});
+
+	it("keeps background job-wait results visible over ACP", () => {
+		const events = [
+			{
+				type: "tool_execution_start",
+				toolCallId: "tc-hub-job-wait",
+				toolName: "hub",
+				args: { op: "wait", ids: ["bash_a1b2c3"] },
+			},
+			{
+				type: "tool_execution_end",
+				toolCallId: "tc-hub-job-wait",
+				toolName: "hub",
+				isError: false,
+				result: { content: [{ type: "text", text: "job output" }] },
+			},
+		] satisfies AgentSessionEvent[];
+
+		const updates = events.flatMap(event =>
+			mapAgentSessionEventToAcpSessionUpdates(event, "session-1", {
+				getToolArgs: () => ({ op: "wait", ids: ["bash_a1b2c3"] }),
+			}),
+		);
+
+		expect(updates.map(update => update.update.sessionUpdate)).toEqual(["tool_call", "tool_call_update"]);
+	});
+
+	it("keeps a bare Hub wait visible so job deliveries reach ACP", () => {
+		const updates = mapAgentSessionEventToAcpSessionUpdates(
+			{
+				type: "tool_execution_start",
+				toolCallId: "tc-hub-bare-wait",
+				toolName: "hub",
+				args: { op: "wait" },
+			},
+			"session-1",
+		);
+
+		expect(updates).toHaveLength(1);
+		expect(updates[0]?.update.sessionUpdate).toBe("tool_call");
+	});
+
+	it("hides a peer-scoped Hub wait from ACP", () => {
+		const updates = mapAgentSessionEventToAcpSessionUpdates(
+			{
+				type: "tool_execution_start",
+				toolCallId: "tc-hub-peer-wait",
+				toolName: "hub",
+				args: { op: "wait", from: "Scout" },
+			},
+			"session-1",
+		);
+
+		expect(updates).toEqual([]);
+	});
+
 	it("uses command text for a new command tool even when intent is generic", () => {
 		const updates = mapAgentSessionEventToAcpSessionUpdates(
 			{
@@ -390,6 +528,53 @@ describe("ACP event mapper", () => {
 			{ type: "diff", path: "single.ts", oldText: "before\n", newText: "after\n" },
 		]);
 		expect(update.locations).toEqual([{ path: "single.ts" }]);
+	});
+
+	it("resolves live image blob refs for ACP content without expanding rawOutput", () => {
+		const blobRef = "blob:sha256:77467fcfe2bbdc034e0eabb4778c9d7de521c0d7c3e0d0a62566468e4d7da3a5";
+		const resolvedImageData = "resolved-webp-base64";
+		const events: AgentSessionEvent[] = [
+			{
+				type: "tool_execution_update",
+				toolCallId: "tc-image-update",
+				toolName: "generate_image",
+				args: {},
+				partialResult: {
+					content: [{ type: "image", data: blobRef, mimeType: "image/webp" }],
+					details: { images: [{ data: blobRef, mimeType: "image/webp" }] },
+				},
+			} as AgentSessionEvent,
+			{
+				type: "tool_execution_end",
+				toolCallId: "tc-image-end",
+				toolName: "generate_image",
+				isError: false,
+				result: {
+					content: [{ type: "text", text: "Generated image saved." }],
+					details: { images: [{ data: blobRef, mimeType: "image/webp" }] },
+				},
+			} as AgentSessionEvent,
+		];
+
+		for (const event of events) {
+			const updates = mapAgentSessionEventToAcpSessionUpdates(event, "session-1", {
+				resolveImageData: data => (data === blobRef ? resolvedImageData : data),
+			});
+			const update = updates[0]!.update as {
+				content?: Array<{
+					type: string;
+					content?: { type: string; data?: string; mimeType?: string; text?: string };
+				}>;
+				rawOutput?: unknown;
+			};
+			const images = update.content?.filter(item => item.type === "content" && item.content?.type === "image") ?? [];
+
+			expect(images).toEqual([
+				{ type: "content", content: { type: "image", data: resolvedImageData, mimeType: "image/webp" } },
+			]);
+			expect(JSON.stringify(update.content)).not.toContain("blob:sha256:");
+			expect(JSON.stringify(update.rawOutput)).toContain(blobRef);
+		}
 	});
 
 	it("emits locations on tool_execution_update from args", () => {
@@ -942,6 +1127,45 @@ describe("ACP event mapper", () => {
 		const update = updates[0]!.update as { sessionUpdate: string; locations?: { path: string }[] };
 		expect(update.sessionUpdate).toBe("tool_call");
 		expect(update.locations).toEqual([{ path: "src/current.ts" }, { path: "src/old.ts" }, { path: "src/new.ts" }]);
+	});
+
+	it("maps xd:// device writes to an execute call with no fabricated file location", () => {
+		const update = buildToolCallStartUpdate({
+			toolCallId: "toolu_xd_write",
+			toolName: "write",
+			args: { path: "xd://github", content: '{"op":"repo_view"}' },
+			cwd: path.resolve("/repo"),
+		});
+
+		expectAcpStructure(arkSessionNotification, { sessionId: "session-1", update });
+		expect(update).toMatchObject({
+			sessionUpdate: "tool_call",
+			title: "xd://github",
+			kind: "execute",
+		});
+		expect("locations" in update).toBe(false);
+	});
+
+	it("keeps xd:// discovery reads as read kind and plain file writes as edit", () => {
+		const discovery = buildToolCallStartUpdate({
+			toolCallId: "toolu_xd_read",
+			toolName: "read",
+			args: { path: "xd://lsp" },
+		});
+		expect(discovery).toMatchObject({ title: "xd://lsp", kind: "read" });
+		expect("locations" in discovery).toBe(false);
+
+		const fileWrite = buildToolCallStartUpdate({
+			toolCallId: "toolu_file_write",
+			toolName: "write",
+			args: { path: "src/foo.ts", content: "x" },
+			cwd: path.resolve("/repo"),
+		});
+		expect(fileWrite).toMatchObject({
+			title: "write: src/foo.ts",
+			kind: "edit",
+			locations: [{ path: path.resolve("/repo", "src/foo.ts") }],
+		});
 	});
 
 	it("rejects mutated ACP notification discriminators", () => {

@@ -2,11 +2,12 @@
  * Tests for AgentSession concurrent prompt guard.
  */
 
-import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { scheduler } from "node:timers/promises";
+import { type } from "@oh-my-pi/omptype";
 import { Agent, AgentBusyError, type AgentMessage, type AgentTool } from "@oh-my-pi/pi-agent-core";
 import type { AssistantMessage, Message, ToolCall } from "@oh-my-pi/pi-ai";
 import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
@@ -15,15 +16,17 @@ import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { AsyncJobManager } from "@oh-my-pi/pi-coding-agent/async";
 import type { Rule } from "@oh-my-pi/pi-coding-agent/capability/rule";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
-import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { type SettingPath, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { TtsrManager } from "@oh-my-pi/pi-coding-agent/export/ttsr";
-import type { ExtensionRunner } from "@oh-my-pi/pi-coding-agent/extensibility/extensions";
+import { ExtensionRuntime, loadExtensionFromFactory } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/loader";
+import { ExtensionRunner } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/runner";
+import { GoalRuntime } from "@oh-my-pi/pi-coding-agent/goals/runtime";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { convertToLlm } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
-import { Snowflake } from "@oh-my-pi/pi-utils";
-import { type } from "arktype";
+import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
+import { removeSyncWithRetries, Snowflake } from "@oh-my-pi/pi-utils";
 import { createAssistantMessage } from "./helpers/agent-session-setup";
 
 // Mock stream that mimics AssistantMessageEventStream
@@ -40,11 +43,27 @@ const originalSchedulerWait = scheduler.wait.bind(scheduler);
 function collapseSchedulerSettleDelays(): void {
 	vi.spyOn(scheduler, "wait").mockImplementation((_delayMs, options) => originalSchedulerWait(0, options));
 }
+let sharedDir: string;
+let sharedAuthStorage: AuthStorage;
+let sharedModelRegistry: ModelRegistry;
+
+beforeAll(async () => {
+	sharedDir = path.join(os.tmpdir(), `pi-concurrent-shared-${Snowflake.next()}`);
+	fs.mkdirSync(sharedDir, { recursive: true });
+	sharedAuthStorage = await AuthStorage.create(path.join(sharedDir, "auth.db"));
+	sharedAuthStorage.setRuntimeApiKey("anthropic", "test-key");
+	sharedAuthStorage.setRuntimeApiKey("openai-codex", "test-key");
+	sharedModelRegistry = new ModelRegistry(sharedAuthStorage, path.join(sharedDir, "models.yml"));
+});
+
+afterAll(() => {
+	sharedAuthStorage.close();
+	removeSyncWithRetries(sharedDir);
+});
 
 describe("AgentSession concurrent prompt guard", () => {
 	let session: AgentSession;
 	let tempDir: string;
-	const authStorages: AuthStorage[] = [];
 
 	beforeEach(() => {
 		// Collapse scheduler settle delays so the post-abort auto-continue and
@@ -58,17 +77,14 @@ describe("AgentSession concurrent prompt guard", () => {
 		if (session) {
 			await session.dispose();
 		}
-		for (const authStorage of authStorages.splice(0)) {
-			authStorage.close();
-		}
 		if (tempDir && fs.existsSync(tempDir)) {
-			fs.rmSync(tempDir, { recursive: true });
+			removeSyncWithRetries(tempDir);
 		}
 		vi.restoreAllMocks();
 		AsyncJobManager.resetForTests();
 	});
 
-	async function createSession() {
+	async function createSession(settingsOverrides?: Partial<Record<SettingPath, unknown>>) {
 		const model = getBundledModel("anthropic", "claude-sonnet-4-5")!;
 		let abortSignal: AbortSignal | undefined;
 
@@ -100,12 +116,8 @@ describe("AgentSession concurrent prompt guard", () => {
 		});
 
 		const sessionManager = SessionManager.inMemory();
-		const settings = Settings.isolated();
-		const authStorage = await AuthStorage.create(path.join(tempDir, "testauth.db"));
-		authStorages.push(authStorage);
-		const modelRegistry = new ModelRegistry(authStorage, path.join(tempDir, "models.yml"));
-		authStorage.setRuntimeApiKey("anthropic", "test-key");
-
+		const settings = Settings.isolated(settingsOverrides);
+		const modelRegistry = sharedModelRegistry;
 		session = new AgentSession({
 			agent,
 			sessionManager,
@@ -176,6 +188,86 @@ describe("AgentSession concurrent prompt guard", () => {
 		await firstPrompt.catch(() => {});
 	});
 
+	it("queues sendUserMessage as steer while streaming without AgentBusyError", async () => {
+		await createSession();
+
+		const firstPrompt = session.prompt("First message");
+		await waitFor(() => session.isStreaming);
+
+		// The first agent loop may dequeue a steer before the assertion runs, so
+		// observe agent.steer itself rather than the residual queue length.
+		const steered: AgentMessage[] = [];
+		const originalSteer = session.agent.steer.bind(session.agent);
+		session.agent.steer = (message: AgentMessage) => {
+			steered.push(message);
+			originalSteer(message);
+		};
+
+		// Extension path: no deliverAs while busy must queue, not throw.
+		await expect(session.sendUserMessage("hello from extension")).resolves.toBeUndefined();
+		expect(steered).toHaveLength(1);
+		const queued = steered[0];
+		expect(queued?.role).toBe("user");
+		if (queued?.role === "user") {
+			expect(queued.content).toEqual([{ type: "text", text: "hello from extension" }]);
+			expect(queued.steering).toBe(true);
+		}
+
+		session.agent.clearAllQueues();
+		await session.abort();
+		await firstPrompt.catch(() => {});
+	});
+
+	it("sendUserMessage without deliverAs preserves prompt-flow keyword notices while streaming", async () => {
+		await createSession({ "magicKeywords.enabled": true, "magicKeywords.ultrathink": true });
+
+		const firstPrompt = session.prompt("First message");
+		await waitFor(() => session.isStreaming);
+
+		try {
+			await session.sendUserMessage("ultrathink fix via extension");
+			const queuedShape = session.agent
+				.peekSteeringQueue()
+				.map(message => (message.role === "custom" ? message.customType : message.role));
+			expect(queuedShape).toEqual(["ultrathink-notice", "user"]);
+			expect(session.getQueuedMessages()).toEqual({
+				steering: ["ultrathink fix via extension"],
+				followUp: [],
+			});
+		} finally {
+			session.agent.clearAllQueues();
+			await session.abort();
+			await firstPrompt.catch(() => {});
+		}
+	});
+
+	it("sendUserMessage without deliverAs starts a normal prompt when idle", async () => {
+		await createSession();
+
+		let rejected: unknown;
+		let settled = false;
+		const turn = session
+			.sendUserMessage("Idle extension message")
+			.catch(error => {
+				rejected = error;
+			})
+			.finally(() => {
+				settled = true;
+			});
+
+		try {
+			await waitFor(() => session.isStreaming || settled);
+			if (rejected) throw rejected;
+
+			expect(session.isStreaming).toBe(true);
+			expect(settled).toBe(false);
+			expect(session.getQueuedMessages()).toEqual({ steering: [], followUp: [] });
+		} finally {
+			await session.abort();
+			await turn;
+		}
+	});
+
 	it("delivers hidden nextTurn stop reactions through the next LLM call without exposing them in the visible queue", async () => {
 		const model = getBundledModel("anthropic", "claude-sonnet-4-5")!;
 		let firstStream: AssistantMessageEventStream | undefined;
@@ -206,11 +298,7 @@ describe("AgentSession concurrent prompt guard", () => {
 
 		const sessionManager = SessionManager.inMemory();
 		const settings = Settings.isolated();
-		const authStorage = await AuthStorage.create(path.join(tempDir, "testauth.db"));
-		authStorages.push(authStorage);
-		const modelRegistry = new ModelRegistry(authStorage, path.join(tempDir, "models.yml"));
-		authStorage.setRuntimeApiKey("anthropic", "test-key");
-
+		const modelRegistry = sharedModelRegistry;
 		session = new AgentSession({
 			agent,
 			sessionManager,
@@ -264,6 +352,7 @@ describe("AgentSession concurrent prompt guard", () => {
 			convertToLlm,
 		});
 		const stopEvents: Array<{
+			messages: AgentMessage[];
 			stop_hook_active: boolean;
 			session_id: string;
 			turn_id: number;
@@ -288,11 +377,7 @@ describe("AgentSession concurrent prompt guard", () => {
 		} as unknown as ExtensionRunner;
 		const sessionManager = SessionManager.inMemory();
 		const settings = Settings.isolated();
-		const authStorage = await AuthStorage.create(path.join(tempDir, "testauth.db"));
-		authStorages.push(authStorage);
-		const modelRegistry = new ModelRegistry(authStorage, path.join(tempDir, "models.yml"));
-		authStorage.setRuntimeApiKey("anthropic", "test-key");
-
+		const modelRegistry = sharedModelRegistry;
 		session = new AgentSession({ agent, sessionManager, settings, modelRegistry, extensionRunner });
 
 		await session.prompt("First message");
@@ -319,6 +404,14 @@ describe("AgentSession concurrent prompt guard", () => {
 		expect(stopEvents.map(event => event.turn_id)).toEqual([0, 0]);
 		expect(stopEvents[0]?.session_id).toBe(session.sessionId);
 		expect(stopEvents[0]?.last_assistant_message?.role).toBe("assistant");
+		expect(
+			stopEvents[1]?.messages.some(
+				message =>
+					message.role === "user" &&
+					Array.isArray(message.content) &&
+					message.content.some(block => block.type === "text" && block.text === "First message"),
+			),
+		).toBe(true);
 	});
 
 	it("uses non-empty session_stop reason when additional context is empty", async () => {
@@ -351,11 +444,7 @@ describe("AgentSession concurrent prompt guard", () => {
 		} as unknown as ExtensionRunner;
 		const sessionManager = SessionManager.inMemory();
 		const settings = Settings.isolated();
-		const authStorage = await AuthStorage.create(path.join(tempDir, "testauth.db"));
-		authStorages.push(authStorage);
-		const modelRegistry = new ModelRegistry(authStorage, path.join(tempDir, "models.yml"));
-		authStorage.setRuntimeApiKey("anthropic", "test-key");
-
+		const modelRegistry = sharedModelRegistry;
 		session = new AgentSession({ agent, sessionManager, settings, modelRegistry, extensionRunner });
 
 		await session.prompt("First message");
@@ -373,7 +462,7 @@ describe("AgentSession concurrent prompt guard", () => {
 		).toBe(true);
 	});
 
-	it("does not continue session_stop feedback after aborting a slow hook", async () => {
+	it("does not emit session_stop when abort starts before the settle pass", async () => {
 		const model = getBundledModel("anthropic", "claude-sonnet-4-5")!;
 		const mock = createMockModel({
 			handler: () => ({ content: ["Done"] }),
@@ -384,8 +473,9 @@ describe("AgentSession concurrent prompt guard", () => {
 			streamFn: mock.stream,
 			convertToLlm,
 		});
-		const stopHook = Promise.withResolvers<{ continue: true; additionalContext: string }>();
-		const emitSessionStop = vi.fn(() => (emitSessionStop.mock.calls.length === 1 ? stopHook.promise : undefined));
+		const settleGate = Promise.withResolvers<void>();
+		const settleReached = Promise.withResolvers<void>();
+		const emitSessionStop = vi.fn().mockResolvedValue(undefined);
 		const extensionRunner = {
 			emit: vi.fn().mockResolvedValue(undefined),
 			emitBeforeAgentStart: vi.fn().mockResolvedValue(undefined),
@@ -394,22 +484,89 @@ describe("AgentSession concurrent prompt guard", () => {
 		} as unknown as ExtensionRunner;
 		const sessionManager = SessionManager.inMemory();
 		const settings = Settings.isolated();
-		const authStorage = await AuthStorage.create(path.join(tempDir, "testauth.db"));
-		authStorages.push(authStorage);
-		const modelRegistry = new ModelRegistry(authStorage, path.join(tempDir, "models.yml"));
-		authStorage.setRuntimeApiKey("anthropic", "test-key");
+		const modelRegistry = sharedModelRegistry;
+		session = new AgentSession({ agent, sessionManager, settings, modelRegistry, extensionRunner });
+		vi.spyOn(session.goalRuntime, "onAgentEnd").mockImplementation(() => {
+			settleReached.resolve();
+			return settleGate.promise;
+		});
+
+		const promptPromise = session.prompt("First message");
+		await settleReached.promise;
+		const abortPromise = session.abort();
+		settleGate.resolve();
+
+		await abortPromise;
+		await promptPromise;
+		await session.waitForIdle();
+
+		expect(emitSessionStop).not.toHaveBeenCalled();
+	});
+
+	it("cancels an active session_stop pass without applying stale continuation feedback", async () => {
+		const model = getBundledModel("anthropic", "claude-sonnet-4-5")!;
+		const mock = createMockModel({
+			handler: () => ({ content: ["Done"] }),
+		});
+		const agent = new Agent({
+			getApiKey: () => "test-key",
+			initialState: { model, systemPrompt: ["Test"], tools: [] },
+			streamFn: mock.stream,
+			convertToLlm,
+		});
+		const stopStarted = Promise.withResolvers<void>();
+		const stopHook = Promise.withResolvers<{ continue: true; additionalContext: string }>();
+		let firstStopSignal: AbortSignal | undefined;
+		let stopCount = 0;
+		const extensionRuntime = new ExtensionRuntime();
+		const extension = await loadExtensionFromFactory(
+			pi => {
+				pi.on("session_stop", event => {
+					stopCount++;
+					if (stopCount !== 1) return;
+					firstStopSignal = event.signal;
+					stopStarted.resolve();
+					return stopHook.promise;
+				});
+			},
+			tempDir,
+			new EventBus(),
+			extensionRuntime,
+			"slow-session-stop",
+		);
+		const sessionManager = SessionManager.inMemory();
+		const settings = Settings.isolated();
+		const modelRegistry = sharedModelRegistry;
+		const extensionRunner = new ExtensionRunner(
+			[extension],
+			extensionRuntime,
+			tempDir,
+			sessionManager,
+			modelRegistry,
+		);
+		const extensionErrors: string[] = [];
+		extensionRunner.onError(error => extensionErrors.push(error.error));
 
 		session = new AgentSession({ agent, sessionManager, settings, modelRegistry, extensionRunner });
 
 		const promptPromise = session.prompt("First message");
-		await waitFor(() => emitSessionStop.mock.calls.length === 1);
-		const abortPromise = session.abort();
+		await stopStarted.promise;
+		let abortSettled = false;
+		const abortPromise = session.abort().then(() => {
+			abortSettled = true;
+		});
+		await scheduler.yield();
+		const abortSettledBeforeHandler = abortSettled;
+		const signalWasCancelled = firstStopSignal?.aborted;
 		stopHook.resolve({ continue: true, additionalContext: "Should not run after abort." });
 
 		await abortPromise;
 		await promptPromise;
 		await session.waitForIdle();
 
+		expect(abortSettledBeforeHandler).toBe(true);
+		expect(signalWasCancelled).toBe(true);
+		expect(extensionErrors).toEqual([]);
 		expect(mock.calls).toHaveLength(1);
 		expect(session.queuedMessageCount).toBe(0);
 
@@ -447,11 +604,7 @@ describe("AgentSession concurrent prompt guard", () => {
 		} as unknown as ExtensionRunner;
 		const sessionManager = SessionManager.inMemory();
 		const settings = Settings.isolated();
-		const authStorage = await AuthStorage.create(path.join(tempDir, "testauth.db"));
-		authStorages.push(authStorage);
-		const modelRegistry = new ModelRegistry(authStorage, path.join(tempDir, "models.yml"));
-		authStorage.setRuntimeApiKey("anthropic", "test-key");
-
+		const modelRegistry = sharedModelRegistry;
 		session = new AgentSession({ agent, sessionManager, settings, modelRegistry, extensionRunner });
 
 		await session.prompt("First message");
@@ -480,11 +633,7 @@ describe("AgentSession concurrent prompt guard", () => {
 		} as unknown as ExtensionRunner;
 		const sessionManager = SessionManager.inMemory();
 		const settings = Settings.isolated();
-		const authStorage = await AuthStorage.create(path.join(tempDir, "testauth.db"));
-		authStorages.push(authStorage);
-		const modelRegistry = new ModelRegistry(authStorage, path.join(tempDir, "models.yml"));
-		authStorage.setRuntimeApiKey("anthropic", "test-key");
-
+		const modelRegistry = sharedModelRegistry;
 		session = new AgentSession({ agent, sessionManager, settings, modelRegistry, extensionRunner });
 
 		await session.prompt("First message");
@@ -513,11 +662,7 @@ describe("AgentSession concurrent prompt guard", () => {
 		} as unknown as ExtensionRunner;
 		const sessionManager = SessionManager.inMemory();
 		const settings = Settings.isolated();
-		const authStorage = await AuthStorage.create(path.join(tempDir, "testauth.db"));
-		authStorages.push(authStorage);
-		const modelRegistry = new ModelRegistry(authStorage, path.join(tempDir, "models.yml"));
-		authStorage.setRuntimeApiKey("anthropic", "test-key");
-
+		const modelRegistry = sharedModelRegistry;
 		session = new AgentSession({ agent, sessionManager, settings, modelRegistry, extensionRunner });
 
 		await session.prompt("First message");
@@ -553,11 +698,7 @@ describe("AgentSession concurrent prompt guard", () => {
 		} as unknown as ExtensionRunner;
 		const sessionManager = SessionManager.inMemory();
 		const settings = Settings.isolated();
-		const authStorage = await AuthStorage.create(path.join(tempDir, "testauth.db"));
-		authStorages.push(authStorage);
-		const modelRegistry = new ModelRegistry(authStorage, path.join(tempDir, "models.yml"));
-		authStorage.setRuntimeApiKey("anthropic", "test-key");
-
+		const modelRegistry = sharedModelRegistry;
 		session = new AgentSession({ agent, sessionManager, settings, modelRegistry, extensionRunner });
 		session.setClientBridge({
 			capabilities: {},
@@ -598,11 +739,7 @@ describe("AgentSession concurrent prompt guard", () => {
 		} as unknown as ExtensionRunner;
 		const sessionManager = SessionManager.inMemory();
 		const settings = Settings.isolated();
-		const authStorage = await AuthStorage.create(path.join(tempDir, "testauth.db"));
-		authStorages.push(authStorage);
-		const modelRegistry = new ModelRegistry(authStorage, path.join(tempDir, "models.yml"));
-		authStorage.setRuntimeApiKey("anthropic", "test-key");
-
+		const modelRegistry = sharedModelRegistry;
 		session = new AgentSession({
 			agent,
 			sessionManager,
@@ -636,11 +773,7 @@ describe("AgentSession concurrent prompt guard", () => {
 
 		const sessionManager = SessionManager.inMemory();
 		const settings = Settings.isolated();
-		const authStorage = await AuthStorage.create(path.join(tempDir, "testauth.db"));
-		authStorages.push(authStorage);
-		const modelRegistry = new ModelRegistry(authStorage, path.join(tempDir, "models.yml"));
-		authStorage.setRuntimeApiKey("anthropic", "test-key");
-
+		const modelRegistry = sharedModelRegistry;
 		session = new AgentSession({
 			agent,
 			sessionManager,
@@ -672,11 +805,7 @@ describe("AgentSession concurrent prompt guard", () => {
 
 		const sessionManager = SessionManager.inMemory();
 		const settings = Settings.isolated();
-		const authStorage = await AuthStorage.create(path.join(tempDir, "testauth-idle-followup.db"));
-		authStorages.push(authStorage);
-		const modelRegistry = new ModelRegistry(authStorage, path.join(tempDir, "models-idle-followup.yml"));
-		authStorage.setRuntimeApiKey("anthropic", "test-key");
-
+		const modelRegistry = sharedModelRegistry;
 		session = new AgentSession({
 			agent,
 			sessionManager,
@@ -711,17 +840,17 @@ describe("AgentSession concurrent prompt guard", () => {
 
 		const sessionManager = SessionManager.inMemory();
 		const settings = Settings.isolated();
-		const authStorage = await AuthStorage.create(path.join(tempDir, "testauth.db"));
-		authStorages.push(authStorage);
-		const modelRegistry = new ModelRegistry(authStorage, path.join(tempDir, "models.yml"));
-		authStorage.setRuntimeApiKey("anthropic", "test-key");
-
+		const modelRegistry = sharedModelRegistry;
 		session = new AgentSession({ agent, sessionManager, settings, modelRegistry });
 
 		const observedIsStreamingAtAgentEnd: boolean[] = [];
 		const reentrantPromptResults: Array<"resolved" | { error: string }> = [];
+		const observedIsStreamingAtRunIdle: boolean[] = [];
 		let reentrantPrompted = false;
 
+		session.subscribeRunState(state => {
+			if (state === "idle") observedIsStreamingAtRunIdle.push(session.isStreaming);
+		});
 		session.subscribe(event => {
 			if (event.type !== "agent_end") return;
 			observedIsStreamingAtAgentEnd.push(session.isStreaming);
@@ -738,7 +867,42 @@ describe("AgentSession concurrent prompt guard", () => {
 		await session.waitForIdle();
 
 		expect(observedIsStreamingAtAgentEnd).not.toContain(true);
+		expect(observedIsStreamingAtRunIdle).toContain(true);
 		expect(reentrantPromptResults).toEqual(["resolved"]);
+	});
+
+	it("does not let extension notifications block public agent_end", async () => {
+		const model = getBundledModel("anthropic", "claude-sonnet-4-5")!;
+		const mock = createMockModel({ handler: () => ({ content: ["Done"] }) });
+		const agent = new Agent({
+			getApiKey: () => "test-key",
+			initialState: { model, systemPrompt: ["Test"], tools: [] },
+			streamFn: mock.stream,
+		});
+		const { promise: extensionGate, resolve: releaseExtension } = Promise.withResolvers<void>();
+		const extensionRunner = {
+			emit: vi.fn((event: { type: string }) =>
+				event.type === "agent_end" ? extensionGate : Promise.resolve(undefined),
+			),
+			emitBeforeAgentStart: vi.fn().mockResolvedValue(undefined),
+			hasHandlers: vi.fn().mockReturnValue(false),
+		} as unknown as ExtensionRunner;
+		const sessionManager = SessionManager.inMemory();
+		const settings = Settings.isolated();
+		const modelRegistry = sharedModelRegistry;
+		session = new AgentSession({ agent, sessionManager, settings, modelRegistry, extensionRunner });
+
+		const { promise: publicAgentEnd, resolve: onPublicAgentEnd } = Promise.withResolvers<void>();
+		session.subscribe(event => {
+			if (event.type === "agent_end") onPublicAgentEnd();
+		});
+
+		await session.prompt("First message");
+		await publicAgentEnd;
+		expect(extensionRunner.emit).toHaveBeenCalledWith({ type: "agent_end", messages: expect.any(Array) });
+
+		releaseExtension();
+		await session.waitForIdle();
 	});
 
 	it("queues idle ACP client-triggered custom messages instead of starting an ownerless turn", async () => {
@@ -757,11 +921,7 @@ describe("AgentSession concurrent prompt guard", () => {
 
 		const sessionManager = SessionManager.inMemory();
 		const settings = Settings.isolated();
-		const authStorage = await AuthStorage.create(path.join(tempDir, "testauth-acp-idle.db"));
-		authStorages.push(authStorage);
-		const modelRegistry = new ModelRegistry(authStorage, path.join(tempDir, "models-acp-idle.yml"));
-		authStorage.setRuntimeApiKey("anthropic", "test-key");
-
+		const modelRegistry = sharedModelRegistry;
 		session = new AgentSession({
 			agent,
 			sessionManager,
@@ -823,30 +983,13 @@ describe("AgentSession concurrent prompt guard", () => {
 
 		const sessionManager = SessionManager.inMemory();
 		const settings = Settings.isolated();
-		const authStorage = await AuthStorage.create(path.join(tempDir, "testauth-acp-async.db"));
-		authStorages.push(authStorage);
-		const modelRegistry = new ModelRegistry(authStorage, path.join(tempDir, "models-acp-async.yml"));
-		authStorage.setRuntimeApiKey("anthropic", "test-key");
-
+		const modelRegistry = sharedModelRegistry;
 		const ownerId = "acp-session-a";
 		const deliveryGate = Promise.withResolvers<void>();
 		let deliveryStarted = false;
 		const asyncJobManager = new AsyncJobManager({
 			maxRunningJobs: 2,
 			retentionMs: 1_000,
-			onJobComplete: async () => {
-				deliveryStarted = true;
-				await deliveryGate.promise;
-				await session.sendCustomMessage(
-					{
-						customType: "async-result",
-						content: "Background result",
-						display: true,
-						attribution: "agent",
-					},
-					{ deliverAs: "followUp", triggerTurn: true },
-				);
-			},
 		});
 		AsyncJobManager.setInstance(asyncJobManager);
 
@@ -861,6 +1004,21 @@ describe("AgentSession concurrent prompt guard", () => {
 		session.setClientBridge({
 			capabilities: {},
 			deferAgentInitiatedTurns: true,
+		});
+		// Override the session's self-registered sink: the test gates delivery
+		// and reproduces the ACP follow-up injection explicitly.
+		asyncJobManager.registerDeliverySink(ownerId, async () => {
+			deliveryStarted = true;
+			await deliveryGate.promise;
+			await session.sendCustomMessage(
+				{
+					customType: "async-result",
+					content: "Background result",
+					display: true,
+					attribution: "agent",
+				},
+				{ deliverAs: "followUp", triggerTurn: true },
+			);
 		});
 
 		await session.prompt("First message");
@@ -900,10 +1058,7 @@ describe("AgentSession concurrent prompt guard", () => {
 
 	it("scopes ACP async job snapshots and drains to the owning session id", async () => {
 		const model = getBundledModel("anthropic", "claude-sonnet-4-5")!;
-		const authStorage = await AuthStorage.create(path.join(tempDir, "testauth-acp-scope.db"));
-		authStorages.push(authStorage);
-		const modelRegistry = new ModelRegistry(authStorage, path.join(tempDir, "models-acp-scope.yml"));
-		authStorage.setRuntimeApiKey("anthropic", "test-key");
+		const modelRegistry = sharedModelRegistry;
 		const settings = Settings.isolated();
 		const deliveryGate = Promise.withResolvers<void>();
 		const delivered: string[] = [];
@@ -911,13 +1066,6 @@ describe("AgentSession concurrent prompt guard", () => {
 		const asyncJobManager = new AsyncJobManager({
 			maxRunningJobs: 3,
 			retentionMs: 1_000,
-			onJobComplete: async jobId => {
-				started.add(jobId);
-				if (jobId === "job-a") {
-					await deliveryGate.promise;
-				}
-				delivered.push(jobId);
-			},
 		});
 		AsyncJobManager.setInstance(asyncJobManager);
 
@@ -947,6 +1095,19 @@ describe("AgentSession concurrent prompt guard", () => {
 			agentId: "acp-session-a",
 			ownedAsyncJobManager: asyncJobManager,
 		});
+		// Override both sessions' self-registered sinks so the test controls
+		// delivery timing and records routing order.
+		asyncJobManager.registerDeliverySink("acp-session-a", async jobId => {
+			started.add(jobId);
+			if (jobId === "job-a") {
+				await deliveryGate.promise;
+			}
+			delivered.push(jobId);
+		});
+		asyncJobManager.registerDeliverySink("acp-session-b", async jobId => {
+			started.add(jobId);
+			delivered.push(jobId);
+		});
 
 		try {
 			asyncJobManager.register("bash", "A", async () => "A", { id: "job-a", ownerId: "acp-session-a" });
@@ -967,7 +1128,6 @@ describe("AgentSession concurrent prompt guard", () => {
 describe("AgentSession TTSR resume gate", () => {
 	let session: AgentSession;
 	let tempDir: string;
-	const authStorages: AuthStorage[] = [];
 
 	beforeEach(() => {
 		tempDir = path.join(os.tmpdir(), `pi-ttsr-gate-test-${Snowflake.next()}`);
@@ -978,11 +1138,8 @@ describe("AgentSession TTSR resume gate", () => {
 		if (session) {
 			await session.dispose();
 		}
-		for (const authStorage of authStorages.splice(0)) {
-			authStorage.close();
-		}
 		if (tempDir && fs.existsSync(tempDir)) {
-			fs.rmSync(tempDir, { recursive: true });
+			removeSyncWithRetries(tempDir);
 		}
 		vi.restoreAllMocks();
 	});
@@ -1102,11 +1259,7 @@ describe("AgentSession TTSR resume gate", () => {
 
 		const sessionManager = SessionManager.inMemory();
 		const settings = Settings.isolated();
-		const authStorage = await AuthStorage.create(path.join(tempDir, "testauth-int.db"));
-		authStorages.push(authStorage);
-		const modelRegistry = new ModelRegistry(authStorage, path.join(tempDir, "models.yml"));
-		authStorage.setRuntimeApiKey("anthropic", "test-key");
-
+		const modelRegistry = sharedModelRegistry;
 		session = new AgentSession({
 			agent,
 			sessionManager,
@@ -1122,6 +1275,162 @@ describe("AgentSession TTSR resume gate", () => {
 		expect(continuationCompleted).toBe(true);
 		expect(streamCallCount).toBeGreaterThanOrEqual(2);
 		expect(session.isStreaming).toBe(false);
+	});
+
+	it("marks extension agent_end willContinue for TTSR abort and not ordinary abort", async () => {
+		collapseSchedulerSettleDelays();
+		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
+		if (!model) {
+			throw new Error("Expected bundled Anthropic test model to exist");
+		}
+
+		const ttsrManager = new TtsrManager({
+			enabled: true,
+			contextMode: "discard",
+			interruptMode: "always",
+			repeatMode: "once",
+			repeatGap: 10,
+		});
+		ttsrManager.addRule(testRule);
+
+		const extensionEmits: Array<{ type: string; willContinue?: boolean }> = [];
+		const continuationStarted = Promise.withResolvers<void>();
+
+		let streamCallCount = 0;
+		const agent = new Agent({
+			getApiKey: () => "test-key",
+			initialState: { model, systemPrompt: ["Test"], tools: [] },
+			streamFn: (_model, _context, options) => {
+				streamCallCount++;
+				const stream = new AssistantMessageEventStream();
+				const signal = options?.signal;
+				if (streamCallCount === 1) {
+					pushAbortableTtsrStream(stream, signal);
+				} else {
+					pushContinuationStream(stream, () => continuationStarted.resolve());
+				}
+				return stream;
+			},
+		});
+
+		const sessionManager = SessionManager.inMemory();
+		const settings = Settings.isolated({
+			"compaction.enabled": false,
+			"retry.enabled": false,
+			"todo.enabled": false,
+			"todo.reminders": false,
+		});
+		const modelRegistry = sharedModelRegistry;
+		const extensionRuntime = new ExtensionRuntime();
+		const extension = await loadExtensionFromFactory(
+			pi => {
+				pi.on("agent_end", event => {
+					extensionEmits.push({ type: event.type, willContinue: event.willContinue });
+				});
+			},
+			tempDir,
+			new EventBus(),
+			extensionRuntime,
+			"capture-agent-end",
+		);
+		const extensionRunner = new ExtensionRunner(
+			[extension],
+			extensionRuntime,
+			tempDir,
+			sessionManager,
+			modelRegistry,
+		);
+
+		session = new AgentSession({
+			agent,
+			sessionManager,
+			settings,
+			modelRegistry,
+			ttsrManager,
+			extensionRunner,
+		});
+
+		const firstGoalEndStarted = Promise.withResolvers<void>();
+		const releaseFirstGoalEnd = Promise.withResolvers<void>();
+		let goalEndCalls = 0;
+		vi.spyOn(GoalRuntime.prototype, "onAgentEnd").mockImplementation(async () => {
+			goalEndCalls++;
+			if (goalEndCalls !== 1) return;
+			firstGoalEndStarted.resolve();
+			await releaseFirstGoalEnd.promise;
+		});
+
+		const ttsrPrompt = session.prompt("Write some Rust code");
+		await firstGoalEndStarted.promise;
+		await continuationStarted.promise;
+		const pendingClearedWhileMaintenanceBlocked = !session.isTtsrAbortPending;
+		releaseFirstGoalEnd.resolve();
+		await ttsrPrompt;
+		await session.waitForIdle();
+		expect(pendingClearedWhileMaintenanceBlocked).toBe(true);
+
+		const ttsrEnds = extensionEmits.filter(event => event.type === "agent_end");
+		expect(streamCallCount).toBeGreaterThanOrEqual(2);
+		// Intermediate TTSR-abort settle continues; terminal settle after retry does not.
+		expect(ttsrEnds.length).toBeGreaterThanOrEqual(2);
+		expect(ttsrEnds[0]?.willContinue).toBe(true);
+		expect(ttsrEnds.slice(1, -1).every(event => !event.willContinue)).toBe(true);
+		expect(ttsrEnds.at(-1)?.willContinue).toBeFalsy();
+
+		extensionEmits.length = 0;
+		const ordinaryAgent = new Agent({
+			getApiKey: () => "test-key",
+			initialState: { model, systemPrompt: ["Test"], tools: [] },
+			streamFn: (_model, _context, options) => {
+				const stream = new AssistantMessageEventStream();
+				const signal = options?.signal;
+				queueMicrotask(() => {
+					const partial = makeMsg("partial");
+					stream.push({ type: "start", partial });
+					stream.push({
+						type: "text_delta",
+						contentIndex: 0,
+						delta: "partial",
+						partial: makeMsg("partial"),
+					});
+					queueMicrotask(() => {
+						session?.agent.abort("user cancelled");
+					});
+					if (signal) {
+						signal.addEventListener(
+							"abort",
+							() => {
+								stream.push({
+									type: "error",
+									reason: "aborted",
+									error: makeMsg("partial", "aborted"),
+								});
+							},
+							{ once: true },
+						);
+					}
+				});
+				return stream;
+			},
+		});
+		await session.dispose();
+		session = new AgentSession({
+			agent: ordinaryAgent,
+			sessionManager: SessionManager.inMemory(),
+			settings,
+			modelRegistry,
+			extensionRunner,
+		});
+
+		const promptPromise = session.prompt("user will cancel");
+		await session.waitForIdle();
+		await promptPromise.catch(() => undefined);
+
+		const ordinaryEnds = extensionEmits.filter(event => event.type === "agent_end");
+		expect(ordinaryEnds.length).toBeGreaterThanOrEqual(1);
+		for (const event of ordinaryEnds) {
+			expect(event.willContinue).toBeFalsy();
+		}
 	});
 
 	it("labels aborted tool placeholders with the TTSR rule reason", async () => {
@@ -1209,10 +1518,7 @@ describe("AgentSession TTSR resume gate", () => {
 
 		const sessionManager = SessionManager.inMemory();
 		const settings = Settings.isolated();
-		const authStorage = await AuthStorage.create(path.join(tempDir, "testauth-abort-reason.db"));
-		authStorages.push(authStorage);
-		const modelRegistry = new ModelRegistry(authStorage, path.join(tempDir, "models.yml"));
-		authStorage.setRuntimeApiKey("anthropic", "test-key");
+		const modelRegistry = sharedModelRegistry;
 		session = new AgentSession({ agent, sessionManager, settings, modelRegistry, ttsrManager });
 
 		await session.prompt("Write some Rust code");
@@ -1233,6 +1539,123 @@ describe("AgentSession TTSR resume gate", () => {
 				: "";
 		expect(text).toContain("Tool execution was aborted: TTSR matched rule: no-unwrap");
 		expect(text).not.toContain("Request was aborted");
+	});
+
+	it("labels only the matching aborted tool placeholder with the TTSR rule reason", async () => {
+		collapseSchedulerSettleDelays();
+		const model = getBundledModel("anthropic", "claude-sonnet-4-5")!;
+		let streamCallCount = 0;
+
+		const ttsrManager = new TtsrManager({
+			enabled: true,
+			contextMode: "discard",
+			interruptMode: "always",
+			repeatMode: "once",
+			repeatGap: 10,
+		});
+		ttsrManager.addRule(testRule);
+
+		const readToolCallContent: ToolCall = {
+			type: "toolCall",
+			id: "call_innocent_read",
+			name: "read",
+			arguments: { path: "history://Eval1WithSkill" },
+		};
+		const matchedToolCallContent: ToolCall = {
+			type: "toolCall",
+			id: "call_ttsr_abort_reason",
+			name: "mock_edit",
+			arguments: { snippet: "let val = result.unwrap(" },
+		};
+
+		const makeToolCallMsg = (stopReason: "toolUse" | "aborted" = "toolUse"): AssistantMessage => ({
+			role: "assistant",
+			content: [readToolCallContent, matchedToolCallContent],
+			api: "anthropic-messages",
+			provider: "anthropic",
+			model: "mock",
+			usage: {
+				input: 0,
+				output: 0,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 0,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			stopReason,
+			timestamp: Date.now(),
+		});
+
+		const agent = new Agent({
+			getApiKey: () => "test-key",
+			initialState: { model, systemPrompt: ["Test"], tools: [] },
+			streamFn: (_model, _context, options) => {
+				streamCallCount++;
+				const stream = new AssistantMessageEventStream();
+				const signal = options?.signal;
+				if (streamCallCount === 1) {
+					queueMicrotask(() => {
+						const partial = makeToolCallMsg();
+						if (signal) {
+							signal.addEventListener(
+								"abort",
+								() => {
+									stream.push({
+										type: "error",
+										reason: "aborted",
+										error: makeToolCallMsg("aborted"),
+									});
+								},
+								{ once: true },
+							);
+						}
+						stream.push({ type: "start", partial });
+						stream.push({ type: "toolcall_start", contentIndex: 1, partial });
+						stream.push({
+							type: "toolcall_delta",
+							contentIndex: 1,
+							delta: 'let val = result.unwrap("oops")',
+							partial,
+						});
+						// The abort placeholder is only minted for tool calls that reached
+						// `toolcall_end`: the agent loop drops incomplete tool calls from an
+						// aborted turn (partial args are unsafe to replay). Complete the
+						// innocent read before the rule-driven abort fires so its placeholder
+						// survives and can carry the neutral sibling label.
+						stream.push({ type: "toolcall_end", contentIndex: 0, toolCall: readToolCallContent, partial });
+					});
+				} else {
+					pushContinuationStream(stream, () => {});
+				}
+				return stream;
+			},
+		});
+
+		const sessionManager = SessionManager.inMemory();
+		const settings = Settings.isolated();
+		const modelRegistry = sharedModelRegistry;
+		session = new AgentSession({ agent, sessionManager, settings, modelRegistry, ttsrManager });
+
+		await session.prompt("Write some Rust code");
+
+		const toolResults = sessionManager
+			.getEntries()
+			.filter(entry => entry.type === "message" && entry.message.role === "toolResult")
+			.map(entry => (entry.type === "message" && entry.message.role === "toolResult" ? entry.message : undefined))
+			.filter(message => message !== undefined);
+		const toolResultText = (toolCallId: string): string =>
+			toolResults
+				.find(message => message.toolCallId === toolCallId)
+				?.content.find((part): part is { type: "text"; text: string } => part.type === "text")?.text ?? "";
+
+		const readText = toolResultText(readToolCallContent.id);
+		expect(readText).toContain("Tool execution was aborted: TTSR interrupt on another tool call");
+		expect(readText).not.toContain("TTSR matched rule: no-unwrap");
+		// The matching call never reached `toolcall_end`, so the loop drops it from
+		// the aborted turn (partial args are unsafe to replay) and no placeholder is
+		// minted. The rule label for a completed matching call is covered by the
+		// single-call test above.
+		expect(toolResultText(matchedToolCallContent.id)).toBe("");
 	});
 
 	it("relativizes the rule file path in the TTSR interrupt injection (no absolute leak)", async () => {
@@ -1277,11 +1700,7 @@ describe("AgentSession TTSR resume gate", () => {
 		});
 
 		const settings = Settings.isolated();
-		const authStorage = await AuthStorage.create(path.join(tempDir, "testauth-rel.db"));
-		authStorages.push(authStorage);
-		const modelRegistry = new ModelRegistry(authStorage, path.join(tempDir, "models.yml"));
-		authStorage.setRuntimeApiKey("anthropic", "test-key");
-
+		const modelRegistry = sharedModelRegistry;
 		session = new AgentSession({ agent, sessionManager, settings, modelRegistry, ttsrManager });
 
 		await session.prompt("Write some Rust code");
@@ -1353,11 +1772,7 @@ describe("AgentSession TTSR resume gate", () => {
 
 		const sessionManager = SessionManager.inMemory();
 		const settings = Settings.isolated();
-		const authStorage = await AuthStorage.create(path.join(tempDir, "testauth-def.db"));
-		authStorages.push(authStorage);
-		const modelRegistry = new ModelRegistry(authStorage, path.join(tempDir, "models.yml"));
-		authStorage.setRuntimeApiKey("anthropic", "test-key");
-
+		const modelRegistry = sharedModelRegistry;
 		session = new AgentSession({
 			agent,
 			sessionManager,
@@ -1424,11 +1839,7 @@ describe("AgentSession TTSR resume gate", () => {
 
 		const sessionManager = SessionManager.inMemory();
 		const settings = Settings.isolated();
-		const authStorage = await AuthStorage.create(path.join(tempDir, "testauth-abt.db"));
-		authStorages.push(authStorage);
-		const modelRegistry = new ModelRegistry(authStorage, path.join(tempDir, "models.yml"));
-		authStorage.setRuntimeApiKey("anthropic", "test-key");
-
+		const modelRegistry = sharedModelRegistry;
 		session = new AgentSession({
 			agent,
 			sessionManager,
@@ -1536,11 +1947,7 @@ describe("AgentSession TTSR resume gate", () => {
 
 		const sessionManager = SessionManager.inMemory();
 		const settings = Settings.isolated();
-		const authStorage = await AuthStorage.create(path.join(tempDir, "testauth-tool.db"));
-		authStorages.push(authStorage);
-		const modelRegistry = new ModelRegistry(authStorage, path.join(tempDir, "models.yml"));
-		authStorage.setRuntimeApiKey("anthropic", "test-key");
-
+		const modelRegistry = sharedModelRegistry;
 		session = new AgentSession({
 			agent,
 			sessionManager,
@@ -1645,11 +2052,7 @@ describe("AgentSession TTSR resume gate", () => {
 
 		const sessionManager = SessionManager.inMemory();
 		const settings = Settings.isolated();
-		const authStorage = await AuthStorage.create(path.join(tempDir, "testauth-never-tool.db"));
-		authStorages.push(authStorage);
-		const modelRegistry = new ModelRegistry(authStorage, path.join(tempDir, "models.yml"));
-		authStorage.setRuntimeApiKey("anthropic", "test-key");
-
+		const modelRegistry = sharedModelRegistry;
 		session = new AgentSession({
 			agent,
 			sessionManager,
@@ -1781,11 +2184,7 @@ describe("AgentSession TTSR resume gate", () => {
 
 		const sessionManager = SessionManager.inMemory();
 		const settings = Settings.isolated();
-		const authStorage = await AuthStorage.create(path.join(tempDir, "testauth-dup.db"));
-		authStorages.push(authStorage);
-		const modelRegistry = new ModelRegistry(authStorage, path.join(tempDir, "models.yml"));
-		authStorage.setRuntimeApiKey("anthropic", "test-key");
-
+		const modelRegistry = sharedModelRegistry;
 		session = new AgentSession({
 			agent,
 			sessionManager,
@@ -1811,15 +2210,29 @@ describe("AgentSession TTSR resume gate", () => {
 
 	it("prompt() waits for context-promotion continuation to finish", async () => {
 		collapseSchedulerSettleDelays();
-		const authStorage = await AuthStorage.create(path.join(tempDir, "testauth-promo.db"));
-		authStorages.push(authStorage);
-		authStorage.setRuntimeApiKey("openai-codex", "test-key");
-		const modelRegistry = new ModelRegistry(authStorage, path.join(tempDir, "models.yml"));
+		const authStorage = sharedAuthStorage;
+		// The bundled catalog has no codex model whose promotion target carries a
+		// strictly larger window (gpt-5.5's bundled target gpt-5.4 is same-window),
+		// so pin gpt-5.5 (272k) -> gpt-5.6-sol (372k) via modelOverrides.
+		const modelsConfigPath = path.join(tempDir, "models-promo.json");
+		await Bun.write(
+			modelsConfigPath,
+			JSON.stringify({
+				providers: {
+					"openai-codex": {
+						modelOverrides: {
+							"gpt-5.5": { contextPromotionTarget: "openai-codex/gpt-5.6-sol" },
+						},
+					},
+				},
+			}),
+		);
+		const modelRegistry = new ModelRegistry(authStorage, modelsConfigPath);
 
-		const sparkModel = modelRegistry.find("openai-codex", "gpt-5.3-codex-spark");
-		const codexModel = modelRegistry.find("openai-codex", "gpt-5.5");
-		if (!sparkModel || !codexModel) {
-			throw new Error("Expected codex spark and codex models to exist");
+		const smallModel = modelRegistry.find("openai-codex", "gpt-5.5");
+		const largeModel = modelRegistry.find("openai-codex", "gpt-5.6-sol");
+		if (!smallModel || !largeModel) {
+			throw new Error("Expected small and large codex models to exist");
 		}
 
 		let streamCallCount = 0;
@@ -1828,9 +2241,9 @@ describe("AgentSession TTSR resume gate", () => {
 		const makeOverflowMessage = (): AssistantMessage => ({
 			role: "assistant",
 			content: [{ type: "text", text: "" }],
-			api: sparkModel.api,
-			provider: sparkModel.provider,
-			model: sparkModel.id,
+			api: smallModel.api,
+			provider: smallModel.provider,
+			model: smallModel.id,
 			usage: {
 				input: 0,
 				output: 0,
@@ -1847,9 +2260,9 @@ describe("AgentSession TTSR resume gate", () => {
 		const makeSuccessMessage = (): AssistantMessage => ({
 			role: "assistant",
 			content: [{ type: "text", text: "Recovered after promotion" }],
-			api: codexModel.api,
-			provider: codexModel.provider,
-			model: codexModel.id,
+			api: largeModel.api,
+			provider: largeModel.provider,
+			model: largeModel.id,
 			usage: {
 				input: 0,
 				output: 0,
@@ -1864,7 +2277,7 @@ describe("AgentSession TTSR resume gate", () => {
 
 		const agent = new Agent({
 			getApiKey: () => "test-key",
-			initialState: { model: sparkModel, systemPrompt: ["Test"], tools: [] },
+			initialState: { model: smallModel, systemPrompt: ["Test"], tools: [] },
 			streamFn: () => {
 				streamCallCount++;
 				const stream = new AssistantMessageEventStream();
@@ -1905,7 +2318,7 @@ describe("AgentSession TTSR resume gate", () => {
 
 		expect(continuationCompleted).toBe(true);
 		expect(streamCallCount).toBeGreaterThanOrEqual(2);
-		expect(session.model?.id).toBe(codexModel.id);
+		expect(session.model?.id).toBe(largeModel.id);
 		expect(session.isStreaming).toBe(false);
 		expect(extensionRunner.emitSessionStop).toHaveBeenCalledTimes(1);
 	});

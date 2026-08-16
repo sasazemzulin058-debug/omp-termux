@@ -39,6 +39,35 @@ describe("SYSTEM.md prompt assembly", () => {
 
 	afterEach(cleanupTempHome(() => ({ tempDir, tempHomeDir, originalHome })));
 
+	it("keeps per-request date/cwd out of the system prompt footer", async () => {
+		// The date/cwd line was moved out of the system prompt and onto the first
+		// user turn (#7404): any byte that changes per request at the tail of the
+		// system block invalidates the tool-schema prefix cache on open-weight
+		// providers. The footer must not interpolate the cwd or the date.
+		const projectDir = path.join(os.homedir(), "project");
+		const { systemPrompt } = await buildSystemPrompt({
+			cwd: projectDir,
+			contextFiles: [],
+			skills: [],
+			rules: [],
+			toolNames: [],
+			activeRepoContext: null,
+			workspaceTree: {
+				rootPath: projectDir,
+				rendered: "",
+				truncated: false,
+				totalLines: 0,
+				agentsMdFiles: [],
+			},
+		});
+
+		const promptText = systemPrompt.join("\n\n");
+		const normalizedProjectDir = projectDir.replace(/\\/g, "/");
+		expect(promptText).not.toContain(normalizedProjectDir);
+		expect(promptText).not.toContain("Today");
+		expect(promptText).not.toContain("current working directory");
+	});
+
 	it("renders SYSTEM.md exactly once when it is used as the custom base prompt", async () => {
 		const projectDir = path.join(tempDir, "project");
 		const systemDir = path.join(projectDir, ".omp");
@@ -137,9 +166,36 @@ describe("SYSTEM.md prompt assembly", () => {
 		expect(promptText).toContain("CLI custom prompt");
 		expect(promptText).toContain("<workspace-tree>");
 		expect(promptText).toContain("<dir-context>");
-		expect(promptText).toContain(`current working directory is '${projectDir}'`);
+		// The project/environment footer survives even though the date/cwd line was
+		// relocated out of it; <workstation> is rendered only by that footer.
+		expect(promptText).toContain("<workstation>");
 		expect(appendMatches).toHaveLength(1);
 		expect(promptText).not.toContain("Discovered project SYSTEM prompt");
+	});
+
+	it("renders active child repo context in the main system prompt", async () => {
+		const parentDir = path.join(tempDir, "parent-cwd");
+		fs.mkdirSync(path.join(parentDir, "active-project", ".git"), { recursive: true });
+
+		const { systemPrompt } = await buildSystemPrompt({
+			cwd: parentDir,
+			contextFiles: [],
+			skills: [],
+			rules: [],
+			toolNames: [],
+			workspaceTree: {
+				rootPath: parentDir,
+				rendered: "",
+				truncated: false,
+				totalLines: 0,
+				agentsMdFiles: [],
+			},
+		});
+
+		const promptText = systemPrompt.join("\n\n");
+		expect(promptText).toContain("<active-repo-context>");
+		expect(promptText).toContain("`active-project`");
+		expect(promptText).toContain("`active-project/`");
 	});
 
 	it("prefers project SYSTEM.md over user SYSTEM.md", async () => {

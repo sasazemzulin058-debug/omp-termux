@@ -1,8 +1,11 @@
 import { describe, expect, it } from "bun:test";
+import type { FetchImpl } from "@oh-my-pi/pi-ai/types";
 import {
 	analyzeAuthError,
 	discoverOAuthEndpoints,
 	extractMcpAuthServerUrl,
+	extractOAuthChallengeScopes,
+	fetchResourceMetadataScopes,
 } from "@oh-my-pi/pi-coding-agent/mcp/oauth-discovery";
 import { type FetchInput, mockFetch } from "./helpers/fetch-mock";
 
@@ -137,6 +140,7 @@ describe("path-prefixed auth servers", () => {
 					JSON.stringify({
 						authorization_endpoint: "https://gateway.example.com/my-service/oauth",
 						token_endpoint: "https://gateway.example.com/my-service/token",
+						registration_endpoint: "https://gateway.example.com/my-service/register",
 					}),
 					{ status: 200, headers: { "Content-Type": "application/json" } },
 				);
@@ -152,6 +156,7 @@ describe("path-prefixed auth servers", () => {
 		expect(oauth).toEqual({
 			authorizationUrl: "https://gateway.example.com/my-service/oauth",
 			tokenUrl: "https://gateway.example.com/my-service/token",
+			registrationUrl: "https://gateway.example.com/my-service/register",
 		});
 		expect(calls).toContain("https://gateway.example.com/.well-known/oauth-authorization-server/my-service");
 	});
@@ -200,6 +205,168 @@ describe("resource_metadata chain", () => {
 		expect(auth.resourceMetadataUrl).toBe(
 			"https://gateway.example.com/my-service/.well-known/oauth-protected-resource",
 		);
+	});
+
+	it("extracts scope= from insufficient_scope challenge alongside resource_metadata", () => {
+		const error = new Error(
+			'HTTP 403: {"error":"insufficient_scope","required":["jit"]} [WWW-Authenticate: Bearer error="insufficient_scope", scope="jit", resource_metadata="https://gateway.example.com/jit/.well-known/oauth-protected-resource"]',
+		);
+
+		expect(extractOAuthChallengeScopes(error)).toBe("jit");
+		const auth = analyzeAuthError(error);
+		expect(auth.requiresAuth).toBe(true);
+		expect(auth.scopes).toBe("jit");
+		expect(auth.resourceMetadataUrl).toBe("https://gateway.example.com/jit/.well-known/oauth-protected-resource");
+	});
+
+	it("merges challenge scopes into oauth endpoints when the JSON body omits them", () => {
+		const error = new Error(
+			'HTTP 403: {"error":"insufficient_scope","oauth":{"authorization_url":"https://auth.example.com/oauth/auth","token_url":"https://auth.example.com/oauth/token"}} [WWW-Authenticate: Bearer error="insufficient_scope", scope="jit"]',
+		);
+
+		const auth = analyzeAuthError(error);
+		expect(auth.requiresAuth).toBe(true);
+		expect(auth.authType).toBe("oauth");
+		expect(auth.scopes).toBe("jit");
+		// Callers on the JSON-body path use `authResult.oauth` directly and skip
+		// discovery — the merged scope must land on the returned endpoints.
+		expect(auth.oauth?.scopes).toBe("jit");
+		expect(auth.oauth?.authorizationUrl).toBe("https://auth.example.com/oauth/auth");
+		expect(auth.oauth?.tokenUrl).toBe("https://auth.example.com/oauth/token");
+	});
+
+	it("fetches scopes from resource_metadata when JSON body endpoints omit them", async () => {
+		const fetchImpl = mockFetch((input: FetchInput) => {
+			const url = String(input);
+
+			if (url === "https://gateway.example.com/jit/.well-known/oauth-protected-resource") {
+				return new Response(
+					JSON.stringify({
+						authorization_servers: ["https://auth.example.com"],
+						resource: "https://gateway.example.com",
+						scopes_supported: ["jit", "read"],
+					}),
+					{ status: 200, headers: { "Content-Type": "application/json" } },
+				);
+			}
+
+			return new Response("not found", { status: 404 });
+		});
+
+		const scopes = await fetchResourceMetadataScopes(
+			"https://gateway.example.com/jit/.well-known/oauth-protected-resource",
+			{ fetch: fetchImpl },
+		);
+		expect(scopes).toBe("jit read");
+	});
+
+	it("returns undefined when resource_metadata fetch fails or lacks scopes", async () => {
+		const notFound = mockFetch(() => new Response("not found", { status: 404 }));
+		const emptyMeta = mockFetch(
+			() =>
+				new Response(JSON.stringify({ authorization_servers: ["https://auth.example.com"] }), {
+					status: 200,
+					headers: { "Content-Type": "application/json" },
+				}),
+		);
+
+		expect(
+			await fetchResourceMetadataScopes("https://gateway.example.com/x/.well-known/oauth-protected-resource", {
+				fetch: notFound,
+			}),
+		).toBeUndefined();
+		expect(
+			await fetchResourceMetadataScopes("https://gateway.example.com/x/.well-known/oauth-protected-resource", {
+				fetch: emptyMeta,
+			}),
+		).toBeUndefined();
+	});
+
+	it("carries scopes_supported from resource metadata into discovered auth-server endpoints", async () => {
+		const fetchImpl = mockFetch((input: FetchInput) => {
+			const url = String(input);
+
+			if (url === "https://gateway.example.com/my-service/.well-known/oauth-protected-resource") {
+				return new Response(
+					JSON.stringify({
+						authorization_servers: ["https://sso.example.com"],
+						resource: "https://gateway.example.com",
+						scopes_supported: ["k8s.logging-mcp-server", "k8s.annotations"],
+					}),
+					{ status: 200, headers: { "Content-Type": "application/json" } },
+				);
+			}
+
+			if (url === "https://sso.example.com/.well-known/oauth-authorization-server") {
+				return new Response(
+					JSON.stringify({
+						issuer: "https://sso.example.com",
+						authorization_endpoint: "https://sso.example.com/oauth/auth",
+						token_endpoint: "https://sso.example.com/oauth/token",
+					}),
+					{ status: 200, headers: { "Content-Type": "application/json" } },
+				);
+			}
+
+			return new Response("not found", { status: 404 });
+		});
+
+		const oauth = await discoverOAuthEndpoints(
+			"https://gateway.example.com/my-service/mcp",
+			undefined,
+			"https://gateway.example.com/my-service/.well-known/oauth-protected-resource",
+			{ fetch: fetchImpl },
+		);
+
+		expect(oauth).toEqual({
+			authorizationUrl: "https://sso.example.com/oauth/auth",
+			tokenUrl: "https://sso.example.com/oauth/token",
+			scopes: "k8s.logging-mcp-server k8s.annotations",
+			resource: "https://gateway.example.com",
+		});
+	});
+
+	it("threads challenge-derived scopes into endpoints discovered via resource metadata", async () => {
+		const fetchImpl = mockFetch((input: FetchInput) => {
+			const url = String(input);
+
+			if (url === "https://gateway.example.com/jit/.well-known/oauth-protected-resource") {
+				return new Response(
+					JSON.stringify({
+						authorization_servers: ["https://sso.example.com"],
+						resource: "https://gateway.example.com",
+					}),
+					{ status: 200, headers: { "Content-Type": "application/json" } },
+				);
+			}
+
+			if (url === "https://sso.example.com/.well-known/oauth-authorization-server") {
+				return new Response(
+					JSON.stringify({
+						issuer: "https://sso.example.com",
+						authorization_endpoint: "https://sso.example.com/oauth/auth",
+						token_endpoint: "https://sso.example.com/oauth/token",
+					}),
+					{ status: 200, headers: { "Content-Type": "application/json" } },
+				);
+			}
+
+			return new Response("not found", { status: 404 });
+		});
+
+		const oauth = await discoverOAuthEndpoints(
+			"https://gateway.example.com/jit/mcp",
+			undefined,
+			"https://gateway.example.com/jit/.well-known/oauth-protected-resource",
+			{ fetch: fetchImpl, protectedScopes: "jit" },
+		);
+
+		expect(oauth).toMatchObject({
+			authorizationUrl: "https://sso.example.com/oauth/auth",
+			tokenUrl: "https://sso.example.com/oauth/token",
+			scopes: "jit",
+			resource: "https://gateway.example.com",
+		});
 	});
 
 	it("follows resource_metadata URL to discover authorization servers", async () => {
@@ -313,5 +480,194 @@ describe("relative Mcp-Auth-Server URL", () => {
 		expect(extractMcpAuthServerUrl(error, "https://gateway.example.com/my-service/mcp")).toBe(
 			"https://gateway.example.com/my-service/oauth",
 		);
+	});
+});
+
+describe("RFC 8414 §3.3 issuer validation", () => {
+	it("accepts cross-host issuer metadata on resource-server fallback (Atlassian regression)", async () => {
+		const calls: string[] = [];
+		const fetchImpl = mockFetch((input: FetchInput) => {
+			const url = String(input);
+			calls.push(url);
+
+			if (url === "https://mcp.atlassian.com/.well-known/oauth-authorization-server") {
+				return new Response(
+					JSON.stringify({
+						issuer: "https://cf.mcp.atlassian.com",
+						authorization_endpoint: "https://mcp.atlassian.com/v1/authorize",
+						token_endpoint: "https://cf.mcp.atlassian.com/v1/token",
+						registration_endpoint: "https://cf.mcp.atlassian.com/v1/register",
+					}),
+					{ status: 200, headers: { "Content-Type": "application/json" } },
+				);
+			}
+
+			return new Response("not found", { status: 404 });
+		});
+
+		const oauth = await discoverOAuthEndpoints("https://mcp.atlassian.com/v1/mcp", undefined, undefined, {
+			fetch: fetchImpl,
+		});
+
+		expect(oauth).toEqual({
+			authorizationUrl: "https://mcp.atlassian.com/v1/authorize",
+			tokenUrl: "https://cf.mcp.atlassian.com/v1/token",
+			registrationUrl: "https://cf.mcp.atlassian.com/v1/register",
+		});
+		expect(calls[0]).toBe("https://mcp.atlassian.com/.well-known/oauth-authorization-server");
+	});
+
+	it("rejects origin-root metadata whose issuer mismatches the path-scoped auth server (Plane regression)", async () => {
+		// Plane hosts both a root issuer (`https://mcp.plane.so/`) at the
+		// origin-root well-known *and* a path-scoped issuer
+		// (`https://mcp.plane.so/http`) at the path-prefixed well-known. The
+		// `/http/mcp` endpoint advertises only the path-scoped issuer via
+		// protected-resource metadata, but the discovery loop probes origin-root
+		// first; before the fix it accepted the wrong-issuer metadata and routed
+		// the OAuth flow to `https://mcp.plane.so/authorize`, which rejects every
+		// grant with `server_error`.
+		const calls: string[] = [];
+		const fetchImpl = mockFetch((input: FetchInput) => {
+			const url = String(input);
+			calls.push(url);
+
+			if (url === "https://mcp.plane.so/.well-known/oauth-protected-resource/http/mcp") {
+				return new Response(
+					JSON.stringify({
+						resource: "https://mcp.plane.so/http/mcp",
+						authorization_servers: ["https://mcp.plane.so/http"],
+					}),
+					{ status: 200, headers: { "Content-Type": "application/json" } },
+				);
+			}
+
+			if (url === "https://mcp.plane.so/.well-known/oauth-authorization-server") {
+				// Root-issuer metadata served at origin root — wrong issuer for the
+				// `/http` auth server we asked about.
+				return new Response(
+					JSON.stringify({
+						issuer: "https://mcp.plane.so/",
+						authorization_endpoint: "https://mcp.plane.so/authorize",
+						token_endpoint: "https://mcp.plane.so/token",
+					}),
+					{ status: 200, headers: { "Content-Type": "application/json" } },
+				);
+			}
+
+			if (url === "https://mcp.plane.so/http/.well-known/oauth-authorization-server") {
+				return new Response(
+					JSON.stringify({
+						issuer: "https://mcp.plane.so/http",
+						authorization_endpoint: "https://mcp.plane.so/http/authorize",
+						token_endpoint: "https://mcp.plane.so/http/token",
+						registration_endpoint: "https://mcp.plane.so/http/register",
+					}),
+					{ status: 200, headers: { "Content-Type": "application/json" } },
+				);
+			}
+
+			return new Response("not found", { status: 404 });
+		});
+
+		const oauth = await discoverOAuthEndpoints(
+			"https://mcp.plane.so/http/mcp",
+			undefined,
+			"https://mcp.plane.so/.well-known/oauth-protected-resource/http/mcp",
+			{ fetch: fetchImpl },
+		);
+
+		expect(oauth).toEqual({
+			authorizationUrl: "https://mcp.plane.so/http/authorize",
+			tokenUrl: "https://mcp.plane.so/http/token",
+			registrationUrl: "https://mcp.plane.so/http/register",
+			resource: "https://mcp.plane.so/http/mcp",
+		});
+		// Wrong-issuer origin-root metadata WAS fetched and skipped.
+		expect(calls).toContain("https://mcp.plane.so/.well-known/oauth-authorization-server");
+		// Path-prefixed well-known is the one that supplied the result.
+		expect(calls).toContain("https://mcp.plane.so/http/.well-known/oauth-authorization-server");
+	});
+
+	it("treats trailing-slash issuer differences as a match", async () => {
+		const fetchImpl = mockFetch((input: FetchInput) => {
+			const url = String(input);
+			if (url === "https://auth.example.com/.well-known/oauth-authorization-server") {
+				return new Response(
+					JSON.stringify({
+						// Issuer with trailing slash; queried base without.
+						issuer: "https://auth.example.com/",
+						authorization_endpoint: "https://auth.example.com/oauth/authorize",
+						token_endpoint: "https://auth.example.com/oauth/token",
+					}),
+					{ status: 200, headers: { "Content-Type": "application/json" } },
+				);
+			}
+			return new Response("not found", { status: 404 });
+		});
+
+		const oauth = await discoverOAuthEndpoints("https://mcp.example.com", "https://auth.example.com", undefined, {
+			fetch: fetchImpl,
+		});
+
+		expect(oauth).toEqual({
+			authorizationUrl: "https://auth.example.com/oauth/authorize",
+			tokenUrl: "https://auth.example.com/oauth/token",
+		});
+	});
+
+	it("accepts metadata without an issuer field (legacy / nonstandard servers)", async () => {
+		// Some servers omit `issuer` from their well-known document. Keep today's
+		// permissive behavior so this fix never regresses an already-working flow.
+		const fetchImpl = mockFetch((input: FetchInput) => {
+			const url = String(input);
+			if (url === "https://auth.example.com/.well-known/oauth-authorization-server") {
+				return new Response(
+					JSON.stringify({
+						authorization_endpoint: "https://auth.example.com/oauth",
+						token_endpoint: "https://auth.example.com/token",
+					}),
+					{ status: 200, headers: { "Content-Type": "application/json" } },
+				);
+			}
+			return new Response("not found", { status: 404 });
+		});
+
+		const oauth = await discoverOAuthEndpoints("https://mcp.example.com", "https://auth.example.com", undefined, {
+			fetch: fetchImpl,
+		});
+
+		expect(oauth).toEqual({
+			authorizationUrl: "https://auth.example.com/oauth",
+			tokenUrl: "https://auth.example.com/token",
+		});
+	});
+});
+
+describe("bounded discovery fetches", () => {
+	// A fetch that never resolves on its own; it settles only when its
+	// AbortSignal fires. Pre-fix, discovery passed no signal, so this hung forever.
+	const hangingFetch: FetchImpl = (_input, init) => {
+		const { promise, reject } = Promise.withResolvers<Response>();
+		const signal = init?.signal;
+		const abort = () => reject(new DOMException("aborted", "AbortError"));
+		if (signal?.aborted) abort();
+		else signal?.addEventListener("abort", abort, { once: true });
+		return promise;
+	};
+
+	it("aborts hanging well-known discovery fetches instead of stalling", async () => {
+		const oauth = await discoverOAuthEndpoints("https://mcp.example.test/mcp", undefined, undefined, {
+			fetch: hangingFetch,
+			signal: AbortSignal.timeout(50),
+		});
+		expect(oauth).toBeNull();
+	});
+
+	it("aborts a hanging resource_metadata fetch and returns undefined", async () => {
+		const scopes = await fetchResourceMetadataScopes(
+			"https://mcp.example.test/.well-known/oauth-protected-resource",
+			{ fetch: hangingFetch, signal: AbortSignal.timeout(50) },
+		);
+		expect(scopes).toBeUndefined();
 	});
 });

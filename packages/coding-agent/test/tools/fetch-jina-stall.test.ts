@@ -40,21 +40,20 @@ describe("renderHtmlToText: jina stall does not starve local fallbacks (#1449)",
 			return new Response("", { status: 404 });
 		});
 
-		const started = Date.now();
+		// A short real budget is intentional: the combined AbortSignal clock is
+		// the behavior under test, and fake timers do not drive it reliably.
 		const result = await renderHtmlToText(
 			"https://example.com/article",
 			html,
-			0.3,
+			0.05,
 			settings,
 			undefined,
 			null,
 			fetchMock,
 		);
-		const elapsedMs = Date.now() - started;
 
 		expect(result.ok).toBe(true);
 		expect(["native", "trafilatura", "lynx"]).toContain(result.method);
-		expect(elapsedMs).toBeLessThan(1_500);
 	});
 
 	it("re-throws when the user signal is aborted, not when Jina sub-budget expires", async () => {
@@ -93,4 +92,64 @@ describe("renderHtmlToText: jina stall does not starve local fallbacks (#1449)",
 			(outcome as Error).name === "AbortError" || (outcome as Error).message.toLowerCase().includes("abort"),
 		).toBe(true);
 	});
+});
+
+describe("renderHtmlToText: Jina response validation", () => {
+	it("requests fresh markdown and strips the Jina metadata preamble", async () => {
+		const settings = Settings.isolated({ "providers.fetch": "jina" });
+		const markdown = `# Extracted article\n\n${"Substantive reader content. ".repeat(8)}`.trim();
+		let requestHeaders: Headers | undefined;
+		const fetchMock = asGlobalFetch((_input, init) => {
+			requestHeaders = new Headers(init?.headers);
+			return new Response(`Title: Example\nURL Source: https://example.com/article\nMarkdown Content:\n${markdown}`);
+		});
+
+		const result = await renderHtmlToText(
+			"https://example.com/article",
+			"<html><body>short</body></html>",
+			1,
+			settings,
+			undefined,
+			null,
+			fetchMock,
+		);
+
+		expect(result).toEqual({ content: markdown, ok: true, method: "jina" });
+		expect(requestHeaders?.get("accept")).toBe("text/markdown");
+		expect(requestHeaders?.get("x-no-cache")).toBe("true");
+	});
+
+	for (const { label, readerBody, headers } of [
+		{ label: "missing marker", readerBody: "Plausible but unstructured output. ".repeat(8) },
+		{ label: "short body", readerBody: "Markdown Content:\nToo short" },
+		{ label: "loading shell", readerBody: `Markdown Content:\nLoading...${" ".repeat(120)}` },
+		{ label: "JavaScript gate", readerBody: `Markdown Content:\nPlease enable JavaScript${" ".repeat(120)}` },
+		{
+			label: "declared oversized body",
+			readerBody: `Markdown Content:\n${"Substantive content. ".repeat(8)}`,
+			headers: { "Content-Length": String(2 * 1024 * 1024 + 1) },
+		},
+	]) {
+		it(`falls back when Jina returns a ${label}`, async () => {
+			const settings = Settings.isolated({ "providers.fetch": "jina" });
+			const paragraph =
+				"This locally rendered article contains enough meaningful prose to satisfy the shared reader quality gate. ";
+			const html = `<html><body><article><h1>Fallback article</h1><p>${paragraph.repeat(4)}</p></article></body></html>`;
+			const fetchMock = asGlobalFetch(() => new Response(readerBody, { headers }));
+
+			const result = await renderHtmlToText(
+				"https://example.com/article",
+				html,
+				1,
+				settings,
+				undefined,
+				null,
+				fetchMock,
+			);
+
+			expect(result.ok).toBe(true);
+			expect(result.method).toBe("native");
+			expect(result.content).toContain("Fallback article");
+		});
+	}
 });

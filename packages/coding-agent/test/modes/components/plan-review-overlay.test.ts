@@ -75,7 +75,7 @@ describe("PlanReviewOverlay", () => {
 		expect(onPick).toHaveBeenCalledWith("Approve and execute");
 	});
 
-	it("moves the option cursor with up/down and confirms the new target", () => {
+	it("moves the option cursor with down and confirms the new target", () => {
 		const onPick = vi.fn();
 		const overlay = new PlanReviewOverlay(
 			"plan",
@@ -85,11 +85,42 @@ describe("PlanReviewOverlay", () => {
 		overlay.handleInput(DOWN);
 		overlay.handleInput(ENTER);
 		expect(onPick).toHaveBeenCalledWith("Approve and compact context");
+	});
 
-		onPick.mockClear();
+	it("confirms the up-moved target from a lower start", () => {
+		const onPick = vi.fn();
+		const overlay = new PlanReviewOverlay(
+			"plan",
+			{ promptTitle: "next", options: APPROVAL_OPTIONS, initialIndex: 1 },
+			{ onPick, onCancel: vi.fn() },
+		);
 		overlay.handleInput(UP);
 		overlay.handleInput(ENTER);
 		expect(onPick).toHaveBeenCalledWith("Approve and execute");
+	});
+
+	it("locks input and shows a submitting indicator after a pick, ignoring repeat keys", () => {
+		const onPick = vi.fn();
+		const onCancel = vi.fn();
+		const overlay = new PlanReviewOverlay(
+			"plan",
+			{ promptTitle: "next", options: APPROVAL_OPTIONS },
+			{ onPick, onCancel },
+		);
+		overlay.handleInput(ENTER);
+		expect(onPick).toHaveBeenCalledTimes(1);
+		expect(onPick).toHaveBeenCalledWith("Approve and execute");
+
+		const committed = stripVTControlCharacters(overlay.render(80).join("\n"));
+		expect(committed).toContain("Approve and execute — submitting…");
+
+		// The async approval window keeps the overlay mounted; further keys must
+		// not fire a second callback or move the cursor (#5926).
+		overlay.handleInput(DOWN);
+		overlay.handleInput(ENTER);
+		overlay.handleInput("\x1b");
+		expect(onPick).toHaveBeenCalledTimes(1);
+		expect(onCancel).not.toHaveBeenCalled();
 	});
 
 	it("skips disabled options and never confirms them", () => {
@@ -180,6 +211,93 @@ describe("PlanReviewOverlay", () => {
 		expect(backToTop).not.toContain("para 199");
 	});
 
+	it("preserves scroll progress across a transient non-scrollable render", () => {
+		const originalRows = Object.getOwnPropertyDescriptor(process.stdout, "rows");
+		const setRows = (rows: number): void => {
+			Object.defineProperty(process.stdout, "rows", { configurable: true, value: rows });
+		};
+		const codeRows = Array.from({ length: 400 }, (_, i) => `L${String(i).padStart(3, "0")}`).join("\n");
+		const overlay = new PlanReviewOverlay(
+			`# Plan\n\n\`\`\`\n${codeRows}\n\`\`\`\n`,
+			{ promptTitle: "next", options: APPROVAL_OPTIONS },
+			{ onPick: vi.fn(), onCancel: vi.fn() },
+		);
+
+		try {
+			setRows(40);
+			render(overlay);
+			overlay.handleInput("G");
+			const bottom = render(overlay);
+			expect(bottom).toContain("L399");
+			expect(bottom).not.toContain("L000");
+
+			setRows(1000);
+			render(overlay);
+			setRows(40);
+			const restored = render(overlay);
+			expect(restored).toContain("L399");
+			expect(restored).not.toContain("L000");
+		} finally {
+			if (originalRows) Object.defineProperty(process.stdout, "rows", originalRows);
+			else Reflect.deleteProperty(process.stdout, "rows");
+		}
+	});
+
+	it("honors Home while a transient render is non-scrollable", () => {
+		const originalRows = Object.getOwnPropertyDescriptor(process.stdout, "rows");
+		const setRows = (rows: number): void => {
+			Object.defineProperty(process.stdout, "rows", { configurable: true, value: rows });
+		};
+		const codeRows = Array.from({ length: 400 }, (_, i) => `L${String(i).padStart(3, "0")}`).join("\n");
+		const overlay = new PlanReviewOverlay(
+			`# Plan\n\n\`\`\`\n${codeRows}\n\`\`\`\n`,
+			{ promptTitle: "next", options: APPROVAL_OPTIONS },
+			{ onPick: vi.fn(), onCancel: vi.fn() },
+		);
+
+		try {
+			setRows(40);
+			render(overlay);
+			overlay.handleInput("G");
+			setRows(1000);
+			render(overlay);
+			overlay.handleInput("\x1b[H");
+			setRows(40);
+			const restored = render(overlay);
+			expect(restored).toContain("L000");
+			expect(restored).not.toContain("L399");
+		} finally {
+			if (originalRows) Object.defineProperty(process.stdout, "rows", originalRows);
+			else Reflect.deleteProperty(process.stdout, "rows");
+		}
+	});
+
+	it("honors End while a transient render is non-scrollable", () => {
+		const originalRows = Object.getOwnPropertyDescriptor(process.stdout, "rows");
+		const setRows = (rows: number): void => {
+			Object.defineProperty(process.stdout, "rows", { configurable: true, value: rows });
+		};
+		const codeRows = Array.from({ length: 400 }, (_, i) => `L${String(i).padStart(3, "0")}`).join("\n");
+		const overlay = new PlanReviewOverlay(
+			`# Plan\n\n\`\`\`\n${codeRows}\n\`\`\`\n`,
+			{ promptTitle: "next", options: APPROVAL_OPTIONS },
+			{ onPick: vi.fn(), onCancel: vi.fn() },
+		);
+
+		try {
+			setRows(1000);
+			render(overlay);
+			overlay.handleInput("\x1b[F");
+			setRows(40);
+			const restored = render(overlay);
+			expect(restored).toContain("L399");
+			expect(restored).not.toContain("L000");
+		} finally {
+			if (originalRows) Object.defineProperty(process.stdout, "rows", originalRows);
+			else Reflect.deleteProperty(process.stdout, "rows");
+		}
+	});
+
 	it("swaps the displayed plan and resets scroll on setPlanContent", () => {
 		const longPlan = Array.from({ length: 200 }, (_, i) => `para ${i}`).join("\n\n");
 		const overlay = new PlanReviewOverlay(
@@ -193,6 +311,22 @@ describe("PlanReviewOverlay", () => {
 		expect(out).toContain("Fresh plan");
 		expect(out).toContain("brand new body");
 		expect(out).not.toContain("para 199");
+	});
+
+	it("copies the current plan content on c and advertises the hotkey when available", () => {
+		const onCopyPlan = vi.fn();
+		const overlay = new PlanReviewOverlay(
+			"# Original plan\n\nold body",
+			{ promptTitle: "next", options: APPROVAL_OPTIONS },
+			{ onPick: vi.fn(), onCancel: vi.fn(), onCopyPlan },
+		);
+
+		overlay.setPlanContent("# Edited plan\n\nnew body");
+		expect(render(overlay)).toContain("c copy");
+		overlay.handleInput("c");
+
+		expect(onCopyPlan).toHaveBeenCalledTimes(1);
+		expect(onCopyPlan).toHaveBeenCalledWith("# Edited plan\n\nnew body\n");
 	});
 
 	// Plan with ≥2 headings + nesting, wide enough for the sidebar at width 80.
@@ -322,6 +456,25 @@ describe("PlanReviewOverlay", () => {
 		expect(restored).toContain("goal body");
 	});
 
+	it("copies the edited plan after deleting a section in the overlay", () => {
+		const onCopyPlan = vi.fn();
+		const overlay = new PlanReviewOverlay(
+			SECTION_PLAN,
+			{ promptTitle: "next", options: APPROVAL_OPTIONS },
+			{ onPick: vi.fn(), onCancel: vi.fn(), onCopyPlan },
+		);
+		render(overlay);
+		overlay.handleInput(TAB); // -> toc (Overview)
+		overlay.handleInput(DOWN); // -> Goal
+		overlay.handleInput("d");
+		overlay.handleInput("c");
+
+		expect(onCopyPlan).toHaveBeenCalledTimes(1);
+		expect(onCopyPlan).toHaveBeenCalledWith(
+			"# Overview\n\nintro body\n\n## Steps\n\nstep body\n\n# Risks\n\nrisk body\n",
+		);
+	});
+
 	it("annotates a section and emits feedback for the Refine loop", () => {
 		const onFeedbackChange = vi.fn();
 		const overlay = new PlanReviewOverlay(
@@ -343,6 +496,236 @@ describe("PlanReviewOverlay", () => {
 		expect(feedback).toContain("needs detail");
 		expect(feedback).toContain("## Overview\n- needs detail\n");
 		expect(feedback).not.toContain("```md");
+	});
+
+	it("anchors body annotations to the visible line and restores their serializable state", () => {
+		const onAnnotationStateChange = vi.fn();
+		const onFeedbackChange = vi.fn();
+		const scrollSteps = 12;
+		const note = "clarify this execution detail";
+		const longPlan = `# Execution\n\n${Array.from(
+			{ length: 80 },
+			(_, i) => `body-row-${String(i).padStart(3, "0")}`,
+		).join("\n\n")}\n`;
+		const overlay = new PlanReviewOverlay(
+			longPlan,
+			{ promptTitle: "next", options: APPROVAL_OPTIONS },
+			{ onPick: vi.fn(), onCancel: vi.fn(), onAnnotationStateChange, onFeedbackChange },
+		);
+		const visibleRows = (): string[] =>
+			render(overlay)
+				.split("\n")
+				.map(line => line.match(/body-row-\d{3}/)?.[0])
+				.filter((row): row is string => row !== undefined);
+
+		render(overlay);
+		overlay.handleInput(TAB); // actions -> body
+		for (let i = 0; i < scrollSteps; i++) overlay.handleInput(DOWN);
+		const topVisibleRow = visibleRows()[0];
+		expect(topVisibleRow).toMatch(/^body-row-\d{3}$/);
+
+		overlay.handleInput("a");
+		expect(render(overlay)).toContain("Annotate");
+		for (const ch of note) overlay.handleInput(ch);
+		overlay.handleInput(ENTER);
+
+		expect(onAnnotationStateChange).toHaveBeenCalledTimes(1);
+		const annotationState = onAnnotationStateChange.mock.calls[0]?.[0];
+		expect(annotationState.annotations).toHaveLength(1);
+		expect(annotationState.annotations[0]).toMatchObject({
+			section: { index: 0, title: "Execution" },
+			target: { kind: "line", context: topVisibleRow },
+			note,
+		});
+		const annotatedLines = render(overlay).split("\n");
+		const annotatedRow = annotatedLines.findIndex(line => line.includes(topVisibleRow));
+		const calloutRow = annotatedLines.findIndex(line => line.includes(note));
+		expect(calloutRow).toBe(annotatedRow + 1);
+		const feedback = onFeedbackChange.mock.calls.at(-1)?.[0] as string;
+		expect(feedback).toContain(`> Line: ${topVisibleRow}`);
+		expect(feedback).toContain(note);
+
+		const restoredFeedback = vi.fn();
+		const restored = new PlanReviewOverlay(
+			longPlan,
+			{ promptTitle: "next", options: APPROVAL_OPTIONS, annotationState },
+			{ onPick: vi.fn(), onCancel: vi.fn(), onFeedbackChange: restoredFeedback },
+		);
+		expect(restoredFeedback.mock.calls[0]?.[0]).toBe(feedback);
+		render(restored);
+		restored.handleInput(TAB); // actions -> body
+		for (let i = 0; i < scrollSteps; i++) restored.handleInput(DOWN);
+		const restoredLines = render(restored).split("\n");
+		const restoredRow = restoredLines.findIndex(line => line.includes(topVisibleRow));
+		const restoredCalloutRow = restoredLines.findIndex(line => line.includes(note));
+		expect(restoredCalloutRow).toBe(restoredRow + 1);
+	});
+
+	it("clears non-empty restored state with stale anchors without notifying for empty state", () => {
+		const emptyStateChange = vi.fn();
+		const emptyFeedbackChange = vi.fn();
+		new PlanReviewOverlay(
+			"# B\n\nbeta body\n",
+			{ promptTitle: "next", options: APPROVAL_OPTIONS, annotationState: { annotations: [] } },
+			{
+				onPick: vi.fn(),
+				onCancel: vi.fn(),
+				onAnnotationStateChange: emptyStateChange,
+				onFeedbackChange: emptyFeedbackChange,
+			},
+		);
+		expect(emptyStateChange).not.toHaveBeenCalled();
+		expect(emptyFeedbackChange).not.toHaveBeenCalled();
+
+		const onAnnotationStateChange = vi.fn();
+		const onFeedbackChange = vi.fn();
+		const note = "stale section A note";
+		const restored = new PlanReviewOverlay(
+			"# B\n\nbeta body\n",
+			{
+				promptTitle: "next",
+				options: APPROVAL_OPTIONS,
+				annotationState: {
+					annotations: [{ section: { index: 0, title: "A" }, target: { kind: "section" }, note }],
+				},
+			},
+			{ onPick: vi.fn(), onCancel: vi.fn(), onAnnotationStateChange, onFeedbackChange },
+		);
+
+		expect(render(restored)).not.toContain(note);
+		expect(onAnnotationStateChange).toHaveBeenCalledTimes(1);
+		expect(onAnnotationStateChange).toHaveBeenCalledWith({ annotations: [] });
+		expect(onFeedbackChange).toHaveBeenCalledTimes(1);
+		expect(onFeedbackChange).toHaveBeenCalledWith("");
+	});
+
+	it("drops restored section annotations when the section title no longer exists", () => {
+		const onAnnotationStateChange = vi.fn();
+		const onFeedbackChange = vi.fn();
+		const note = "keep this attached to section A";
+		const overlay = new PlanReviewOverlay(
+			"# A\n\nalpha body\n\n# B\n\nbeta body\n",
+			{ promptTitle: "next", options: APPROVAL_OPTIONS },
+			{ onPick: vi.fn(), onCancel: vi.fn(), onAnnotationStateChange, onFeedbackChange },
+		);
+		render(overlay);
+		overlay.handleInput(TAB); // actions -> toc (A)
+		overlay.handleInput("a");
+		for (const ch of note) overlay.handleInput(ch);
+		overlay.handleInput(ENTER);
+		expect(onAnnotationStateChange.mock.calls.at(-1)?.[0].annotations).toHaveLength(1);
+
+		onAnnotationStateChange.mockClear();
+		onFeedbackChange.mockClear();
+		overlay.setPlanContent("# B\n\nbeta body\n");
+
+		expect(render(overlay)).not.toContain(note);
+		expect(onFeedbackChange).toHaveBeenCalledWith("");
+		expect(onAnnotationStateChange).toHaveBeenCalledWith({ annotations: [] });
+	});
+
+	it("does not migrate annotations between duplicate headings after a plan edit", () => {
+		const onAnnotationStateChange = vi.fn();
+		const onFeedbackChange = vi.fn();
+		const note = "keep this on phase B";
+		const overlay = new PlanReviewOverlay(
+			"# Plan\n\n## Phase A\n\n### Steps\n\nalpha\n\n## Phase B\n\n### Steps\n\nbeta\n",
+			{ promptTitle: "next", options: APPROVAL_OPTIONS },
+			{ onPick: vi.fn(), onCancel: vi.fn(), onAnnotationStateChange, onFeedbackChange },
+		);
+		render(overlay);
+		overlay.handleInput(TAB); // actions -> toc (Phase A)
+		for (let i = 0; i < 3; i++) overlay.handleInput(DOWN); // Phase B > Steps
+		overlay.handleInput("a");
+		for (const ch of note) overlay.handleInput(ch);
+		overlay.handleInput(ENTER);
+		expect(onAnnotationStateChange.mock.calls.at(-1)?.[0].annotations[0]).toMatchObject({
+			section: { title: "Steps", path: ["Plan", "Phase B", "Steps"] },
+			note,
+		});
+
+		onAnnotationStateChange.mockClear();
+		onFeedbackChange.mockClear();
+		overlay.setPlanContent("# Plan\n\n## Phase A\n\n### Steps\n\nalpha\n");
+
+		expect(render(overlay)).not.toContain(note);
+		expect(onAnnotationStateChange).toHaveBeenCalledWith({ annotations: [] });
+		expect(onFeedbackChange).toHaveBeenCalledWith("");
+	});
+
+	it("restores an annotation whose literal line context is an ellipsis", () => {
+		const note = "expand this placeholder";
+		const onAnnotationStateChange = vi.fn();
+		const overlay = new PlanReviewOverlay(
+			"# Plan\n\n…\n",
+			{
+				promptTitle: "next",
+				options: APPROVAL_OPTIONS,
+				annotationState: {
+					annotations: [
+						{
+							section: { index: 0, title: "Plan" },
+							target: { kind: "line", row: 2, context: "…" },
+							note,
+						},
+					],
+				},
+			},
+			{ onPick: vi.fn(), onCancel: vi.fn(), onAnnotationStateChange },
+		);
+
+		expect(render(overlay)).toContain(note);
+		expect(onAnnotationStateChange.mock.calls[0]?.[0].annotations[0]).toMatchObject({
+			target: { kind: "line", context: "…", contextTruncated: false },
+			note,
+		});
+	});
+
+	it("drops restored line annotations when their context disappears from the section", () => {
+		const onAnnotationStateChange = vi.fn();
+		const onFeedbackChange = vi.fn();
+		const note = "keep this attached to its original line";
+		const originalPlan = `# A\n\n${Array.from(
+			{ length: 80 },
+			(_, i) => `original-row-${String(i).padStart(3, "0")}`,
+		).join("\n\n")}\n`;
+		const overlay = new PlanReviewOverlay(
+			originalPlan,
+			{ promptTitle: "next", options: APPROVAL_OPTIONS },
+			{ onPick: vi.fn(), onCancel: vi.fn(), onAnnotationStateChange, onFeedbackChange },
+		);
+		const visibleRows = (): string[] =>
+			render(overlay)
+				.split("\n")
+				.map(line => line.match(/original-row-\d{3}/)?.[0])
+				.filter((row): row is string => row !== undefined);
+
+		render(overlay);
+		overlay.handleInput(TAB); // actions -> body
+		for (let i = 0; i < 12; i++) overlay.handleInput(DOWN);
+		const annotatedContext = visibleRows()[0];
+		expect(annotatedContext).toMatch(/^original-row-\d{3}$/);
+		overlay.handleInput("a");
+		for (const ch of note) overlay.handleInput(ch);
+		overlay.handleInput(ENTER);
+		expect(onAnnotationStateChange.mock.calls.at(-1)?.[0].annotations[0]).toMatchObject({
+			section: { title: "A" },
+			target: { kind: "line", context: annotatedContext },
+			note,
+		});
+
+		onAnnotationStateChange.mockClear();
+		onFeedbackChange.mockClear();
+		overlay.setPlanContent(
+			`# A\n\n${Array.from({ length: 12 }, (_, i) => `replacement-row-${String(i).padStart(3, "0")}`).join(
+				"\n\n",
+			)}\n`,
+		);
+
+		const out = render(overlay);
+		expect(out).not.toContain(note);
+		expect(onFeedbackChange).toHaveBeenCalledWith("");
+		expect(onAnnotationStateChange).toHaveBeenCalledWith({ annotations: [] });
 	});
 
 	it("opens the external editor for an active annotation draft", () => {
@@ -532,14 +915,14 @@ describe("PlanReviewOverlay", () => {
 		expect(hoverRow(overlay, "Approve and keep context")).toBe(true);
 		expect(optionLineRaw(overlay, "Approve and keep context")).toContain(selectedBg);
 
+		// Pointer onto the top border (a non-option row) drops the highlight.
+		overlay.handleInput("\x1b[<35;6;1M");
+		expect(optionLineRaw(overlay, "Approve and keep context")).not.toContain(selectedBg);
+
 		// Hover is visual only: the keyboard cursor stays on index 0, so Enter still
 		// confirms the first option rather than the hovered one.
 		overlay.handleInput(ENTER);
 		expect(onPick).toHaveBeenCalledWith("Approve and execute");
-
-		// Pointer onto the top border (a non-option row) drops the highlight.
-		overlay.handleInput("\x1b[<35;6;1M");
-		expect(optionLineRaw(overlay, "Approve and keep context")).not.toContain(selectedBg);
 	});
 
 	it("never hovers a disabled option", () => {

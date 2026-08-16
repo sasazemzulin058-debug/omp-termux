@@ -10,8 +10,10 @@
 import type { Effort } from "@oh-my-pi/pi-catalog/effort";
 import { mapEffortToAnthropicAdaptiveEffort, requireSupportedEffort } from "@oh-my-pi/pi-catalog/model-thinking";
 import { calculateCost } from "@oh-my-pi/pi-catalog/models";
-import { $env, $flag, extractHttpStatusFromError, fetchWithRetry } from "@oh-my-pi/pi-utils";
-import { ProviderHttpError } from "../errors";
+import { $flag, fetchWithRetry, parseStreamingJson, parseStreamingJsonThrottled } from "@oh-my-pi/pi-utils";
+import { renderDemotedThinking } from "../dialect/demotion";
+import * as AIError from "../error";
+import { resolveAwsBearerToken } from "../registry/aws";
 import type {
 	Api,
 	AssistantMessage,
@@ -28,21 +30,35 @@ import type {
 	ToolCall,
 	ToolResultMessage,
 } from "../types";
-import { normalizeToolCallId, resolveCacheRetention } from "../utils";
+import { normalizeSystemPrompts, normalizeToolCallId, resolveCacheRetention } from "../utils";
+import { resolveAwsAmbientRegion } from "../utils/aws-profile";
+import {
+	clearStreamingPartialJson,
+	kStreamingBlockIndex,
+	kStreamingLastParseLen,
+	kStreamingPartialJson,
+} from "../utils/block-symbols";
 import { AssistantMessageEventStream } from "../utils/event-stream";
-import { appendRawHttpRequestDumpFor400, type RawHttpRequestDump } from "../utils/http-inspector";
+import type { RawHttpRequestDump } from "../utils/http-inspector";
 import { armPreResponseTimeout, getStreamFirstEventTimeoutMs } from "../utils/idle-iterator";
-import { parseStreamingJson, parseStreamingJsonThrottled } from "../utils/json-parse";
 import { toolWireSchema } from "../utils/schema/wire";
 import { invalidateAwsCredentialCache, resolveAwsCredentials } from "./aws-credentials";
 import { decodeEventStream } from "./aws-eventstream";
 import { signRequest } from "./aws-sigv4";
 import { transformMessages } from "./transform-messages";
 
-/** Non-2xx response (or in-stream exception event) from the Bedrock runtime API. */
-export class BedrockApiError extends ProviderHttpError {
-	override readonly name = "BedrockApiError";
-}
+/**
+ * Headers SigV4 generates for itself. A caller cannot be allowed to supply these:
+ * `signRequest` would sign the caller's value but return its own, so the signature
+ * would not match what goes on the wire.
+ */
+const SIGNER_OWNED_HEADERS = new Set(["host", "x-amz-date", "x-amz-content-sha256", "x-amz-security-token"]);
+
+/** Headers the Bedrock request sets itself; a caller copy in any casing duplicates them. */
+// `content-length` included: the fetch layer recomputes it from the serialized
+// body, so a caller value would be signed but not sent, and AWS rejects the
+// mismatch.
+const BEDROCK_RESERVED_HEADERS = new Set(["content-type", "accept", "authorization", "content-length"]);
 
 export type BedrockThinkingDisplay = "summarized" | "omitted";
 
@@ -73,11 +89,9 @@ export interface BedrockOptions extends StreamOptions {
 	 */
 	thinkingDisplay?: BedrockThinkingDisplay;
 }
-const AUTHENTICATED_API_KEY_SENTINEL = "<authenticated>";
 
 function resolveBearerToken(options: BedrockOptions): string | undefined {
-	const apiKey = options.apiKey === AUTHENTICATED_API_KEY_SENTINEL ? undefined : options.apiKey;
-	return options.bearerToken || apiKey || $env.AWS_BEARER_TOKEN_BEDROCK;
+	return resolveAwsBearerToken(options.apiKey, options.bearerToken);
 }
 
 function inferRegionFromBedrockArn(modelId: string): string | undefined {
@@ -87,10 +101,80 @@ function inferRegionFromBedrockArn(modelId: string): string | undefined {
 	return region || undefined;
 }
 
+/**
+ * Default AWS region for each Bedrock cross-region inference-profile geo prefix.
+ * A geo-prefixed profile (e.g. `eu.anthropic.claude-…`) is only servable from
+ * regions in its own geo, so routing one to `us-east-1` yields HTTP 400 "The
+ * provided model identifier is invalid." `global.` profiles are anchored in the
+ * us regions and intentionally absent here (they resolve fine via `us-east-1`).
+ */
+const INFERENCE_PROFILE_GEO_DEFAULT_REGION: Record<string, string> = {
+	us: "us-east-1",
+	"us-gov": "us-gov-west-1",
+	eu: "eu-west-1",
+	apac: "ap-southeast-1",
+	au: "ap-southeast-2",
+	jp: "ap-northeast-1",
+};
+
+/** Geo prefix of a cross-region inference-profile id, e.g. `eu.anthropic.…` → `eu`. */
+function inferenceProfileGeo(modelId: string): string | undefined {
+	const dot = modelId.indexOf(".");
+	if (dot <= 0) return undefined;
+	const prefix = modelId.slice(0, dot);
+	return prefix in INFERENCE_PROFILE_GEO_DEFAULT_REGION ? prefix : undefined;
+}
+
+/**
+ * Whether a concrete AWS region can serve a given inference-profile geo. The
+ * `ap-` regions overlap across `apac`/`au`/`jp` profiles, so the Australia and
+ * Japan geos pin their specific source regions rather than matching all `ap-*`.
+ */
+function regionServesGeo(region: string, geo: string): boolean {
+	switch (geo) {
+		case "us-gov":
+			return region.startsWith("us-gov-");
+		case "us":
+			return region.startsWith("us-") && !region.startsWith("us-gov-");
+		case "eu":
+			return region.startsWith("eu-");
+		case "apac":
+			return region.startsWith("ap-");
+		case "au":
+			return region === "ap-southeast-2" || region === "ap-southeast-4";
+		case "jp":
+			return region === "ap-northeast-1" || region === "ap-northeast-3";
+		default:
+			return false;
+	}
+}
+
+/**
+ * Resolve the Bedrock runtime region for a request. An explicit per-request
+ * region and an ARN-embedded region win outright. Otherwise, for a geo-prefixed
+ * cross-region inference profile (`us.`/`eu.`/`apac.`/`au.`/`jp.`/`us-gov.`), an
+ * ambient region (`AWS_REGION` / `AWS_DEFAULT_REGION`) is honored only when it
+ * can serve the profile's geo; a mismatched or absent ambient region is
+ * corrected to the geo default so an `eu.`/`apac.` profile never POSTs to a `us`
+ * endpoint (and vice versa). `global.` profiles have no geo entry, so the
+ * ambient region (or `us-east-1`) is used unchanged.
+ */
+function resolveBedrockRegion(modelId: string, options: BedrockOptions): string {
+	const explicit = options.region || inferRegionFromBedrockArn(modelId);
+	if (explicit) return explicit;
+	const ambient = resolveAwsAmbientRegion(options.profile);
+	const geo = inferenceProfileGeo(modelId);
+	if (geo) {
+		if (ambient && regionServesGeo(ambient, geo)) return ambient;
+		return INFERENCE_PROFILE_GEO_DEFAULT_REGION[geo];
+	}
+	return ambient || "us-east-1";
+}
+
 type Block = (TextContent | ThinkingContent | ToolCall) & {
-	index?: number;
-	partialJson?: string;
-	lastParseLen?: number;
+	[kStreamingBlockIndex]?: number;
+	[kStreamingPartialJson]?: string;
+	[kStreamingLastParseLen]?: number;
 };
 
 // ---------- Bedrock wire-format types ----------
@@ -99,6 +183,11 @@ type Block = (TextContent | ThinkingContent | ToolCall) & {
 
 interface CachePoint {
 	cachePoint: { type: "default"; ttl?: "5m" | "1h" };
+}
+
+interface BedrockPromptCachePolicy {
+	remainingCheckpoints: number;
+	ttl?: "1h";
 }
 interface TextBlockWire {
 	text: string;
@@ -212,7 +301,7 @@ export const streamBedrock: StreamFunction<"bedrock-converse-stream"> = (
 	const stream = new AssistantMessageEventStream();
 
 	(async () => {
-		const startTime = Date.now();
+		const startTime = performance.now();
 		let firstTokenTime: number | undefined;
 
 		const output: AssistantMessage = {
@@ -235,16 +324,12 @@ export const streamBedrock: StreamFunction<"bedrock-converse-stream"> = (
 
 		const blocks = output.content as Block[];
 		let rawRequestDump: RawHttpRequestDump | undefined;
-		const region =
-			options.region ||
-			inferRegionFromBedrockArn(model.id) ||
-			$env.AWS_REGION ||
-			$env.AWS_DEFAULT_REGION ||
-			"us-east-1";
+		const region = resolveBedrockRegion(model.id, options);
 
 		try {
 			const cacheRetention = resolveCacheRetention(options.cacheRetention);
-			const convertedMessages = convertMessages(context, model, cacheRetention);
+			const promptCachePolicy = resolvePromptCachePolicy(model, cacheRetention);
+			const convertedMessages = convertMessages(context, model, promptCachePolicy);
 			const toolPlan = planToolConfig(context.tools, options.toolChoice, convertedMessages);
 			const toolConfig = toolPlan.toolConfig;
 			const sentinelInjected = toolPlan.sentinelInjected;
@@ -259,7 +344,7 @@ export const streamBedrock: StreamFunction<"bedrock-converse-stream"> = (
 
 			const commandInput: ConverseStreamRequest = {
 				messages: convertedMessages,
-				system: buildSystemPrompt(context.systemPrompt, model, cacheRetention),
+				system: buildSystemPrompt(context.systemPrompt, promptCachePolicy),
 				inferenceConfig: {
 					maxTokens: options.maxTokens,
 					temperature: options.temperature,
@@ -268,7 +353,7 @@ export const streamBedrock: StreamFunction<"bedrock-converse-stream"> = (
 				toolConfig,
 				additionalModelRequestFields,
 			};
-			options?.onPayload?.(commandInput);
+			options?.onPayload?.(commandInput, model);
 
 			const host = `bedrock-runtime.${region}.amazonaws.com`;
 			const url = `https://${host}/model/${encodeURIComponent(model.id)}/converse-stream`;
@@ -284,7 +369,32 @@ export const streamBedrock: StreamFunction<"bedrock-converse-stream"> = (
 
 			const bodyText = JSON.stringify(commandInput);
 			const body = new TextEncoder().encode(bodyText);
+			// Caller headers are merged BEFORE signing, so SigV4 covers them and they
+			// reach the wire. Bedrock built its header map from scratch and ignored
+			// `options.headers` entirely, so tracing/attribution headers set by a
+			// caller (or by a `before_provider_headers` extension) were silently
+			// dropped here while working on every other provider. Content-type and
+			// accept stay last: the eventstream framing is not the caller's to change.
+			//
+			// The signer's OWN headers are dropped first, and that is load-bearing:
+			// `signRequest` lets a caller value overwrite `host`/`x-amz-*` in the map
+			// it signs, but always RETURNS the generated ones, which `requestHeaders`
+			// below then puts on the wire. A caller supplying any of them would sign
+			// one set of values and send another, and Bedrock would reject every
+			// request with a signature mismatch.
+			// Lower-cased, and names the request sets itself are dropped. Keeping a
+			// caller `Content-Type` beside the fixed `content-type` leaves TWO object
+			// keys: SigV4 signs one value while fetch canonicalizes both into a single
+			// comma-joined wire header, so AWS validates different bytes than were
+			// signed and rejects the request.
+			const callerHeaders: Record<string, string> = {};
+			for (const [name, value] of Object.entries(options?.headers ?? {})) {
+				const field = name.toLowerCase();
+				if (SIGNER_OWNED_HEADERS.has(field) || BEDROCK_RESERVED_HEADERS.has(field)) continue;
+				callerHeaders[field] = value;
+			}
 			const baseHeaders: Record<string, string> = {
+				...callerHeaders,
 				"content-type": "application/json",
 				accept: "application/vnd.amazon.eventstream",
 			};
@@ -350,11 +460,15 @@ export const streamBedrock: StreamFunction<"bedrock-converse-stream"> = (
 					invalidateAwsCredentialCache({ profile: options.profile, region });
 				}
 				const errBody = await response.text().catch(() => "");
-				throw new BedrockApiError(`Bedrock HTTP ${response.status}: ${errBody.slice(0, 1000)}`, response.status, {
-					headers: response.headers,
-				});
+				throw new AIError.BedrockApiError(
+					`Bedrock HTTP ${response.status}: ${errBody.slice(0, 1000)}`,
+					response.status,
+					{
+						headers: response.headers,
+					},
+				);
 			}
-			if (!response.body) throw new Error("Bedrock response has no body");
+			if (!response.body) throw new AIError.BedrockApiError("Bedrock response has no body", response.status);
 
 			// Track first event for the abort/diagnostic path (currently informational).
 			for await (const message of decodeEventStream(response.body)) {
@@ -366,14 +480,12 @@ export const streamBedrock: StreamFunction<"bedrock-converse-stream"> = (
 					const payload = safeParsePayload(message.payload) as { message?: string } | undefined;
 					const errorMessage = payload?.message || new TextDecoder().decode(message.payload);
 					const text = `${exceptionType}: ${errorMessage}`;
-					throw exceptionType === "validationException"
-						? new BedrockApiError(text, 400, { code: exceptionType })
-						: new Error(text);
+					throw new AIError.BedrockApiError(text, 400, { code: exceptionType });
 				}
 				if (messageType === "error") {
 					const code = message.headers[":error-code"] || "UnknownError";
 					const errorMessage = message.headers[":error-message"] || new TextDecoder().decode(message.payload);
-					throw new Error(`${code}: ${errorMessage}`);
+					throw new AIError.BedrockApiError(`${code}: ${errorMessage}`, 400, { code });
 				}
 				if (messageType !== "event") continue;
 
@@ -385,18 +497,21 @@ export const streamBedrock: StreamFunction<"bedrock-converse-stream"> = (
 						// no-op: first event marker is implicit by stream entry.
 						const ev = payload as MessageStartEvent;
 						if (ev.role !== "assistant") {
-							throw new Error("Unexpected assistant message start but got user message start instead");
+							throw new AIError.BedrockApiError(
+								"Unexpected assistant message start but got user message start instead",
+								0,
+							);
 						}
 						stream.push({ type: "start", partial: output });
 						break;
 					}
 					case "contentBlockStart": {
-						if (!firstTokenTime) firstTokenTime = Date.now();
+						if (!firstTokenTime) firstTokenTime = performance.now();
 						handleContentBlockStart(payload as ContentBlockStartEvent, blocks, output, stream, sentinelInjected);
 						break;
 					}
 					case "contentBlockDelta": {
-						if (!firstTokenTime) firstTokenTime = Date.now();
+						if (!firstTokenTime) firstTokenTime = performance.now();
 						handleContentBlockDelta(payload as ContentBlockDeltaEvent, blocks, output, stream);
 						break;
 					}
@@ -425,24 +540,26 @@ export const streamBedrock: StreamFunction<"bedrock-converse-stream"> = (
 				}
 			}
 
-			if (options.signal?.aborted) throw new Error("Request was aborted");
+			if (options.signal?.aborted) throw new AIError.AbortError();
 
 			if (output.stopReason === "error" || output.stopReason === "aborted") {
-				throw new Error(output.errorMessage ?? "An unknown error occurred");
+				throw new AIError.BedrockApiError(output.errorMessage ?? "An unknown error occurred", 0);
 			}
 
-			output.duration = Date.now() - startTime;
+			output.duration = performance.now() - startTime;
 			if (firstTokenTime) output.ttft = firstTokenTime - startTime;
 			stream.push({ type: "done", reason: output.stopReason, message: output });
 			stream.end();
 		} catch (error) {
 			for (const block of output.content) {
-				delete (block as Block).index;
-				delete (block as Block).partialJson;
+				if (block.type === "toolCall") clearStreamingPartialJson(block);
 			}
-			output.stopReason = options.signal?.aborted ? "aborted" : "error";
-			output.errorStatus = extractHttpStatusFromError(error);
-			const baseMessage = error instanceof Error ? error.message : JSON.stringify(error);
+			let baseMessage: string;
+			try {
+				baseMessage = error instanceof Error ? error.message : (JSON.stringify(error) ?? String(error));
+			} catch {
+				baseMessage = String(error);
+			}
 			// Enrich error with thinking block diagnostics for signature-related failures
 			let diagnostics = "";
 			if (baseMessage.includes("signature") || baseMessage.includes("thinking")) {
@@ -463,8 +580,12 @@ export const streamBedrock: StreamFunction<"bedrock-converse-stream"> = (
 					diagnostics = `\n[thinking-diag] ${JSON.stringify(thinkingBlocks)}`;
 				}
 			}
-			output.errorMessage = await appendRawHttpRequestDumpFor400(baseMessage + diagnostics, error, rawRequestDump);
-			output.duration = Date.now() - startTime;
+			const result = await AIError.finalize(error, { api: model.api, signal: options.signal, rawRequestDump });
+			output.stopReason = result.stopReason;
+			output.errorStatus = result.status;
+			output.errorId = result.id;
+			output.errorMessage = result.message + diagnostics;
+			output.duration = performance.now() - startTime;
 			if (firstTokenTime) output.ttft = firstTokenTime - startTime;
 			stream.push({ type: "error", reason: output.stopReason, error: output });
 			stream.end();
@@ -504,8 +625,8 @@ function handleContentBlockStart(
 			id: normalizeToolCallId(start.toolUse.toolUseId || ""),
 			name: start.toolUse.name || "",
 			arguments: {},
-			partialJson: "",
-			index,
+			[kStreamingPartialJson]: "",
+			[kStreamingBlockIndex]: index,
 		};
 		output.content.push(block);
 		stream.push({ type: "toolcall_start", contentIndex: blocks.length - 1, partial: output });
@@ -520,13 +641,13 @@ function handleContentBlockDelta(
 ): void {
 	const contentBlockIndex = event.contentBlockIndex;
 	const delta = event.delta;
-	let index = blocks.findIndex(b => b.index === contentBlockIndex);
+	let index = blocks.findIndex(b => b[kStreamingBlockIndex] === contentBlockIndex);
 	let block = blocks[index];
 
 	if (delta?.text !== undefined) {
 		// If no text block exists yet, create one — `handleContentBlockStart` is not sent for text blocks
 		if (!block) {
-			const newBlock: Block = { type: "text", text: "", index: contentBlockIndex };
+			const newBlock: Block = { type: "text", text: "", [kStreamingBlockIndex]: contentBlockIndex };
 			output.content.push(newBlock);
 			index = blocks.length - 1;
 			block = blocks[index];
@@ -537,11 +658,11 @@ function handleContentBlockDelta(
 			stream.push({ type: "text_delta", contentIndex: index, delta: delta.text, partial: output });
 		}
 	} else if (delta?.toolUse && block?.type === "toolCall") {
-		block.partialJson = (block.partialJson || "") + (delta.toolUse.input || "");
-		const throttled = parseStreamingJsonThrottled(block.partialJson, block.lastParseLen ?? 0);
+		block[kStreamingPartialJson] = (block[kStreamingPartialJson] || "") + (delta.toolUse.input || "");
+		const throttled = parseStreamingJsonThrottled(block[kStreamingPartialJson], block[kStreamingLastParseLen] ?? 0);
 		if (throttled) {
 			block.arguments = throttled.value;
-			block.lastParseLen = throttled.parsedLen;
+			block[kStreamingLastParseLen] = throttled.parsedLen;
 		}
 		stream.push({ type: "toolcall_delta", contentIndex: index, delta: delta.toolUse.input || "", partial: output });
 	} else if (delta?.reasoningContent) {
@@ -549,7 +670,12 @@ function handleContentBlockDelta(
 		let thinkingIndex = index;
 
 		if (!thinkingBlock) {
-			const newBlock: Block = { type: "thinking", thinking: "", thinkingSignature: "", index: contentBlockIndex };
+			const newBlock: Block = {
+				type: "thinking",
+				thinking: "",
+				thinkingSignature: "",
+				[kStreamingBlockIndex]: contentBlockIndex,
+			};
 			output.content.push(newBlock);
 			thinkingIndex = blocks.length - 1;
 			thinkingBlock = blocks[thinkingIndex];
@@ -591,10 +717,9 @@ function handleContentBlockStop(
 	output: AssistantMessage,
 	stream: AssistantMessageEventStream,
 ): void {
-	const index = blocks.findIndex(b => b.index === event.contentBlockIndex);
+	const index = blocks.findIndex(b => b[kStreamingBlockIndex] === event.contentBlockIndex);
 	const block = blocks[index];
 	if (!block) return;
-	delete (block as Block).index;
 
 	switch (block.type) {
 		case "text":
@@ -604,38 +729,53 @@ function handleContentBlockStop(
 			stream.push({ type: "thinking_end", contentIndex: index, content: block.thinking, partial: output });
 			break;
 		case "toolCall":
-			block.arguments = parseStreamingJson(block.partialJson);
-			delete (block as Block).partialJson;
-			delete (block as Block).lastParseLen;
+			block.arguments = parseStreamingJson(block[kStreamingPartialJson]);
+			clearStreamingPartialJson(block);
 			stream.push({ type: "toolcall_end", contentIndex: index, toolCall: block, partial: output });
 			break;
 	}
 }
 
 /**
- * Check if the model supports prompt caching.
- * Supported: Claude 3.5 Haiku, Claude 3.7 Sonnet, Claude 4.x+ models, Haiku 4.5+
+ * Resolve Bedrock's explicit-cache request policy from the catalog's
+ * materialized provider contract. Bedrock enforces each model's minimum
+ * prefix-token requirement, so this boundary intentionally does not locally
+ * count tokens. The emitter prioritizes the final user boundary, then the
+ * system boundary, without exceeding the configured checkpoint maximum.
  *
- * For base models and system-defined inference profiles the model ID / ARN
- * contains the model name, so we can decide locally.
- *
- * For application inference profiles (whose ARNs don't contain the model name),
- * set AWS_BEDROCK_FORCE_CACHE=1 to enable cache points.  Amazon Nova models
- * have automatic caching and don't need explicit cache points.
+ * `AWS_BEDROCK_FORCE_CACHE` remains an escape hatch for opaque application
+ * inference profiles, defaulting those otherwise-unknown models to the
+ * existing two-checkpoint layout without inventing 1h retention.
  */
-function supportsPromptCaching(model: Model<"bedrock-converse-stream">): boolean {
-	if (model.cost.cacheRead || model.cost.cacheWrite) return true;
-	const id = model.id.toLowerCase();
-	// Claude 4.x models (opus-4, sonnet-4, haiku-4)
-	if (id.includes("claude") && (id.includes("-4-") || id.includes("-4."))) return true;
-	// Claude 3.5 Haiku, Claude 3.7 Sonnet (legacy naming)
-	if (id.includes("claude-3-7-sonnet") || id.includes("claude-3-5-haiku")) return true;
-	// Claude Haiku 4.5+ (new naming)
-	if (id.includes("claude-haiku")) return true;
-	// Application inference profiles don't contain the model name in the ARN.
-	// Allow users to force cache points via environment variable.
-	if (typeof process !== "undefined" && $flag("AWS_BEDROCK_FORCE_CACHE")) return true;
-	return false;
+function resolvePromptCachePolicy(
+	model: Model<"bedrock-converse-stream">,
+	cacheRetention: CacheRetention,
+): BedrockPromptCachePolicy {
+	if (cacheRetention === "none" || model.compat.promptCacheMode === "automatic") {
+		return { remainingCheckpoints: 0 };
+	}
+
+	const forced = $flag("AWS_BEDROCK_FORCE_CACHE");
+	const explicit = model.compat.promptCacheMode === "explicit";
+	if (!explicit && !forced) {
+		return { remainingCheckpoints: 0 };
+	}
+
+	const configuredMaximum = explicit ? model.compat.promptCacheMaximumCheckpoints : 2;
+	if (configuredMaximum <= 0) {
+		return { remainingCheckpoints: 0 };
+	}
+
+	return {
+		remainingCheckpoints: Math.min(configuredMaximum, 2),
+		...(cacheRetention === "long" && model.compat.supportsLongPromptCacheRetention ? { ttl: "1h" } : {}),
+	};
+}
+
+function takeCachePoint(policy: BedrockPromptCachePolicy): CachePoint | undefined {
+	if (policy.remainingCheckpoints <= 0) return undefined;
+	policy.remainingCheckpoints--;
+	return { cachePoint: { type: "default", ...(policy.ttl ? { ttl: policy.ttl } : {}) } };
 }
 
 /**
@@ -650,21 +790,16 @@ function supportsThinkingSignature(model: Model<"bedrock-converse-stream">): boo
 }
 
 function buildSystemPrompt(
-	systemPrompt: readonly string[] | undefined,
-	model: Model<"bedrock-converse-stream">,
-	cacheRetention: CacheRetention,
+	systemPrompt: readonly string[] | string | undefined,
+	promptCachePolicy: BedrockPromptCachePolicy,
 ): SystemContent[] | undefined {
-	const prompts = systemPrompt?.map(prompt => prompt.toWellFormed()).filter(prompt => prompt.length > 0) ?? [];
+	const prompts = normalizeSystemPrompts(systemPrompt);
 	if (prompts.length === 0) return undefined;
 
 	const blocks: SystemContent[] = prompts.map(prompt => ({ text: prompt }));
 
-	// Add cache point for supported Claude models
-	if (cacheRetention !== "none" && supportsPromptCaching(model)) {
-		blocks.push({
-			cachePoint: { type: "default", ...(cacheRetention === "long" ? { ttl: "1h" } : {}) },
-		});
-	}
+	const cachePoint = takeCachePoint(promptCachePolicy);
+	if (cachePoint) blocks.push(cachePoint);
 
 	return blocks;
 }
@@ -672,7 +807,7 @@ function buildSystemPrompt(
 function convertMessages(
 	context: Context,
 	model: Model<"bedrock-converse-stream">,
-	cacheRetention: CacheRetention,
+	promptCachePolicy: BedrockPromptCachePolicy,
 ): WireMessage[] {
 	const result: WireMessage[] = [];
 	const transformedMessages = transformMessages(context.messages, model, normalizeToolCallId);
@@ -701,7 +836,7 @@ function convertMessages(
 								contentBlocks.push({ image: createImageBlock(c.mimeType, c.data) });
 								break;
 							default:
-								throw new Error("Unknown user content type");
+								throw new AIError.ValidationError("Unknown user content type");
 						}
 					}
 					// Skip message if all blocks filtered out
@@ -733,10 +868,9 @@ function convertMessages(
 						case "thinking":
 							// Skip empty thinking blocks
 							if (c.thinking.trim().length === 0) continue;
-							// Thinking blocks require a valid signature when sent as reasoningContent.
-							// If the signature is missing (e.g., from an aborted stream), or the model
-							// doesn't support signatures, convert to plain text instead.
-							if (supportsThinkingSignature(model) && c.thinkingSignature) {
+							// A captured signature is authoritative even when the model id is an opaque ARN.
+							// Without one, known non-Claude families use unsigned reasoning; known Claude ids demote to text.
+							if (c.thinkingSignature) {
 								contentBlocks.push({
 									reasoningContent: {
 										reasoningText: { text: c.thinking.toWellFormed(), signature: c.thinkingSignature },
@@ -749,11 +883,11 @@ function convertMessages(
 								});
 							} else {
 								// Model requires signature but we don't have one — demote to text
-								contentBlocks.push({ text: `[Thinking]: ${c.thinking.toWellFormed()}` });
+								contentBlocks.push({ text: renderDemotedThinking(model.id, c.thinking) });
 							}
 							break;
 						default:
-							throw new Error("Unknown assistant content type");
+							throw new AIError.ValidationError("Unknown assistant content type");
 					}
 				}
 				// Skip if all content blocks were filtered out
@@ -799,17 +933,17 @@ function convertMessages(
 				break;
 			}
 			default:
-				throw new Error("Unknown message role");
+				throw new AIError.ValidationError("Unknown message role");
 		}
 	}
 
-	// Add cache point to the last user message for supported Claude models
-	if (cacheRetention !== "none" && supportsPromptCaching(model) && result.length > 0) {
+	// Prioritize the final user checkpoint; buildSystemPrompt consumes any
+	// remaining configured capacity afterward.
+	if (result.length > 0) {
 		const lastMessage = result[result.length - 1];
 		if (lastMessage.role === "user" && lastMessage.content) {
-			(lastMessage.content as UserContent[]).push({
-				cachePoint: { type: "default", ...(cacheRetention === "long" ? { ttl: "1h" } : {}) },
-			});
+			const cachePoint = takeCachePoint(promptCachePolicy);
+			if (cachePoint) (lastMessage.content as UserContent[]).push(cachePoint);
 		}
 	}
 
@@ -922,6 +1056,7 @@ function buildAdditionalModelRequestFields(
 		medium: 8192,
 		high: 16384,
 		xhigh: 32768,
+		max: 32768,
 	};
 	const budget = options.thinkingBudgets?.[level] ?? defaultBudgets[level];
 
@@ -961,7 +1096,7 @@ function createImageBlock(mimeType: string, data: string): ImageBlockWire["image
 			format = "webp";
 			break;
 		default:
-			throw new Error(`Unknown image type: ${mimeType}`);
+			throw new AIError.ValidationError(`Unknown image type: ${mimeType}`);
 	}
 	return { source: { bytes: data }, format };
 }

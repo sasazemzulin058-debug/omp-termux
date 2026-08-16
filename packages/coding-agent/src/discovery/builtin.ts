@@ -31,6 +31,7 @@ import {
 	expandEnvVarsDeep,
 	getExtensionNameFromPath,
 	loadFilesFromDir,
+	parseRequestIdFormat,
 	SOURCE_PATHS,
 	scanSkillsFromDir,
 } from "./helpers";
@@ -154,10 +155,19 @@ async function loadMCPServers(ctx: LoadContext): Promise<LoadResult<MCPServer>> 
 				timeout = undefined;
 			}
 
+			// Validate requestIdFormat: only the two documented encodings
+			const requestIdFormat = parseRequestIdFormat(serverConfig.requestIdFormat);
+			if (requestIdFormat === undefined && serverConfig.requestIdFormat != null) {
+				logger.warn(
+					`MCP server "${serverName}": invalid requestIdFormat ${JSON.stringify(serverConfig.requestIdFormat)}, ignoring`,
+				);
+			}
+
 			result.push({
 				name: serverName,
 				enabled,
 				timeout,
+				requestIdFormat,
 				command: serverConfig.command as string | undefined,
 				args: serverConfig.args as string[] | undefined,
 				env: serverConfig.env as Record<string, string> | undefined,
@@ -401,7 +411,8 @@ async function loadStickyRulesFile(filePath: string, level: "user" | "project"):
 	const content = await readFile(filePath);
 	if (!content) return null;
 	const source = createSourceMeta(PROVIDER_ID, filePath, level);
-	const rule = buildRuleFromMarkdown("RULES.md", content, filePath, source, { ruleName: "RULES" });
+	const ruleName = level === "project" ? "RULES@project" : "RULES";
+	const rule = buildRuleFromMarkdown("RULES.md", content, filePath, source, { ruleName });
 	// Force alwaysApply regardless of frontmatter — the whole point of RULES.md
 	// is to be reattached every turn.
 	return { ...rule, alwaysApply: true };

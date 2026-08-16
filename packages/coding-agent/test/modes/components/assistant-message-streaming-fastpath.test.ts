@@ -97,6 +97,31 @@ describe("AssistantMessageComponent streaming fast path", () => {
 		}
 	});
 
+	it("repairs Gemini's lone closing fence when the streamed turn becomes final", () => {
+		const text = `=== PACED IP ROTATION SOAK RESULTS ===
+Average Latency: 1,240 ms
+\`\`\`
+
+---
+
+### Production Deployment Status
+
+| Workload | Pod Status |
+| :--- | :--- |
+| google-scraper | **1/1 Running** |`;
+		const message = msg([{ type: "text", text }]);
+		const component = new AssistantMessageComponent();
+
+		component.updateContent(message, { transient: true });
+		expect(Bun.stripANSI(component.render(W).join("\n"))).toContain("| :--- | :--- |");
+
+		component.updateContent(message);
+		const finalized = Bun.stripANSI(component.render(W).join("\n"));
+		expect(finalized).not.toContain("| :--- | :--- |");
+		expect(finalized).toContain("google-scraper");
+		expect(finalized).toContain("1/1 Running");
+	});
+
 	// Regression: theme/symbol changes reach the component via invalidate()
 	// (InteractiveMode clears the markdown render cache and invalidates the
 	// tree). Reused fast-path children captured getMarkdownTheme() at
@@ -190,5 +215,23 @@ describe("AssistantMessageComponent streaming fast path", () => {
 		]);
 		reused.updateContent(filled);
 		expect(reused.render(W).join("\n")).toBe(teardownRender(filled));
+	});
+	it("does not re-format an already-display thinking block (rawThinking set)", () => {
+		// buildDisplayMessage emits a thinking block whose `thinking` is already the
+		// formatted display text and stamps the original under `rawThinking`.
+		// resolveThinkingDisplay must treat `thinking` as display-ready and NOT
+		// re-run the fence-stripping formatter — otherwise the fenced content
+		// ("keep me") is stripped a second time.
+		const m = msg([
+			{
+				type: "thinking",
+				thinking: "Visible\n```\nkeep me\n```",
+				rawThinking: "raw",
+			},
+		] as unknown as AssistantMessage["content"]);
+		const component = new AssistantMessageComponent();
+		component.updateContent(m);
+		const rendered = Bun.stripANSI(component.render(W).join("\n"));
+		expect(rendered).toContain("keep me");
 	});
 });

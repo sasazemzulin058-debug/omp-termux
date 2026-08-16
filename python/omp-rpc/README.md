@@ -9,6 +9,7 @@ provides:
 - typed startup options for common `omp --mode rpc` flags such as thinking level,
   tool selection, prompt appends, provider session IDs, and headless session toggles
 - typed protocol models for state, bash results, compaction, and session stats
+- automatic protocol v2 negotiation, lossless chunk reassembly, and stable message pagination
 - a process-backed client that manages request correlation over stdio
 - typed per-event listeners plus a typed catch-all notification hook
 - helpers for collecting prompt runs and handling extension UI requests in manual or headless mode

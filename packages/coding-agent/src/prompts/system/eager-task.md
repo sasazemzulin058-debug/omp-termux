@@ -1,7 +1,7 @@
 <system-reminder>
-Task delegation is enabled — subagents are the default for this request.
+Task delegation enabled for this request; subagents default.
 
-Explore and settle the approach FIRST. Once the design is settled, you MUST fan the work out to `{{toolRefs.task}}` subagents instead of implementing it yourself.{{#if taskBatch}} Batch independent slices into ONE parallel `{{toolRefs.task}}` call; never serialize work that can run concurrently.{{/if}}
+FIRST settle approach: scope, top-level decomposition, cross-slice contracts. YOUR job; NEVER delegate overall plan — per-slice design travels with executor. Once settled, MUST fan work out to `{{toolRefs.task}}` subagents rather than implement it yourself.{{#if taskBatch}} Batch independent slices into ONE parallel `{{toolRefs.task}}` call; NEVER serialize work that can run concurrently.{{/if}}
 
-Work alone only for: a single-file edit under ~30 lines, a direct answer requiring no code changes, or a command the user explicitly asked you to run.
+Work alone: single-file edit under ~30 lines | direct answer requiring no code changes | command user explicitly asked you to run | only ONE runnable slice — lone subagent lossy handoff, not parallelism.
 </system-reminder>

@@ -51,6 +51,17 @@ function emptyAttempt(): AssistantMessageEventStream {
 	] as unknown as AssistantMessageEvent[]);
 }
 
+/** start + stop with no visible content and a single EOS output token. */
+function eosOnlyAttempt(): AssistantMessageEventStream {
+	const message = assistant();
+	message.usage.output = 1;
+	message.usage.totalTokens = 1;
+	return streamFromEvents([
+		{ type: "start", partial: message },
+		{ type: "done", reason: "stop", message },
+	] as unknown as AssistantMessageEvent[]);
+}
+
 function contentAttempt(): AssistantMessageEventStream {
 	const message = assistant(["hello"]);
 	return streamFromEvents([
@@ -89,6 +100,23 @@ describe("withEmptyCompletionRetry", () => {
 		expect(result.content).toEqual([{ type: "text", text: "hello" }]);
 	});
 
+	it("retries an EOS-only empty stop that reports one output token", async () => {
+		let attempts = 0;
+		const waits: number[] = [];
+		const stream = withEmptyCompletionRetry({}, CTX, { providerRetryWait: async ms => void waits.push(ms) }, () => {
+			attempts++;
+			return attempts === 1 ? eosOnlyAttempt() : contentAttempt();
+		});
+
+		const events = await drain(stream);
+		const result = await stream.result();
+
+		expect(attempts).toBe(2);
+		expect(waits).toEqual([500]);
+		expect(events.filter(e => e.type === "start")).toHaveLength(1);
+		expect(result.content).toEqual([{ type: "text", text: "hello" }]);
+	});
+
 	it("delivers the empty result after exhausting the retry cap", async () => {
 		let attempts = 0;
 		const waits: number[] = [];
@@ -105,6 +133,28 @@ describe("withEmptyCompletionRetry", () => {
 		expect(events.filter(e => e.type === "start")).toHaveLength(1);
 		expect(events.at(-1)?.type).toBe("done");
 		expect(result.content).toEqual([]);
+	});
+
+	it("does not retry an empty pause_turn completion", async () => {
+		let attempts = 0;
+		const waits: number[] = [];
+		const stream = withEmptyCompletionRetry({}, CTX, { providerRetryWait: async ms => void waits.push(ms) }, () => {
+			attempts++;
+			const message = assistant();
+			message.stopDetails = { type: "pause_turn" };
+			return streamFromEvents([
+				{ type: "start", partial: message },
+				{ type: "done", reason: "stop", message },
+			] as unknown as AssistantMessageEvent[]);
+		});
+
+		const events = await drain(stream);
+		const result = await stream.result();
+
+		expect(attempts).toBe(1);
+		expect(waits).toEqual([]);
+		expect(events.filter(event => event.type === "start")).toHaveLength(1);
+		expect(result.stopDetails).toEqual({ type: "pause_turn" });
 	});
 
 	it("does not retry when the first attempt streams content", async () => {

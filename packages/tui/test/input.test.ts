@@ -1,8 +1,12 @@
-import { describe, expect, it } from "bun:test";
+import { afterEach, describe, expect, it } from "bun:test";
 import { CURSOR_MARKER } from "@oh-my-pi/pi-tui";
 import { Input } from "@oh-my-pi/pi-tui/components/input";
 import { setKittyProtocolActive } from "@oh-my-pi/pi-tui/keys";
-import { visibleWidth } from "@oh-my-pi/pi-tui/utils";
+import {
+	resetHangulCompatibilityJamoWidthForTests,
+	setHangulCompatibilityJamoWidth,
+	visibleWidth,
+} from "@oh-my-pi/pi-tui/utils";
 import { DEFAULT_TAB_WIDTH } from "@oh-my-pi/pi-utils";
 
 function renderedWidth(input: Input, width: number): number {
@@ -22,6 +26,10 @@ describe("Input component", () => {
 		input.handleInput("\x05"); // Ctrl+E (end)
 		return input;
 	}
+
+	afterEach(() => {
+		resetHangulCompatibilityJamoWidthForTests();
+	});
 
 	it("moves by CJK and punctuation blocks (backward)", () => {
 		const text = "天气不错，去散步吧！";
@@ -193,6 +201,41 @@ describe("Input component", () => {
 		expect(renderedWidth(input, width)).toBeLessThanOrEqual(width);
 	});
 
+	it("masks one bullet per grapheme without changing the submitted value", () => {
+		const input = new Input();
+		input.focused = true;
+		input.mask = true;
+		input.setValue("a😀e\u0301z");
+		input.handleInput("\x01"); // Ctrl+A (start)
+		input.handleInput("\x1b[C"); // after a
+		input.handleInput("\x1b[C"); // after emoji
+
+		const [line] = input.render(20);
+		const markerIndex = line.indexOf(CURSOR_MARKER);
+		expect(visibleWidth(line.slice(0, markerIndex))).toBe(4); // prompt + two graphemes
+		expect(Bun.stripANSI(line.replaceAll(CURSOR_MARKER, "")).trimEnd()).toBe("> ••••");
+		expect(line).not.toContain(input.getValue());
+
+		let submitted = "";
+		input.onSubmit = value => {
+			submitted = value;
+		};
+		input.handleInput("\n");
+		expect(submitted).toBe("a😀e\u0301z");
+	});
+
+	it("keeps masked Unicode input within narrow viewports", () => {
+		const input = setupAtEnd("😀e\u0301".repeat(20));
+		input.mask = true;
+		expect(renderedWidth(input, 12)).toBeLessThanOrEqual(12);
+	});
+
+	it("renders non-secret input unchanged when masking is disabled", () => {
+		const input = setupAtEnd("visible-value");
+		const [line] = input.render(30);
+		expect(Bun.stripANSI(line.replaceAll(CURSOR_MARKER, ""))).toContain("visible-value");
+	});
+
 	it("normalizes NFD Korean pastes (macOS Finder drag-drop) to NFC", () => {
 		// macOS Finder drag-drops file paths in NFD (decomposed Unicode).
 		// Korean syllable `화` is U+D654 (1 char, 2 cells) in NFC, but
@@ -245,6 +288,30 @@ describe("Input component", () => {
 		expect(line).not.toContain("\x1b[7m");
 		expect(line.replaceAll(CURSOR_MARKER, "")).toContain("abc");
 		expect(input.getUseTerminalCursor()).toBe(true);
+	});
+
+	it("runtime jamo profile controls the cursor marker column", () => {
+		// The hardware cursor column is `prompt + visibleWidth(value before
+		// cursor)`. Once the terminal probe sets the jamo width, that column must
+		// track it: 8 narrow jamo land at +8, 8 wide jamo at +16.
+		const promptWidth = 2; // "> "
+		const jamo = "ㅁ".repeat(8);
+
+		const narrow = new Input();
+		narrow.focused = true;
+		setHangulCompatibilityJamoWidth(1);
+		narrow.setValue(jamo);
+		narrow.handleInput("\x05"); // Ctrl+E (end)
+		const narrowLine = narrow.render(80)[0];
+		expect(visibleWidth(narrowLine.slice(0, narrowLine.indexOf(CURSOR_MARKER)))).toBe(promptWidth + 8);
+
+		const wide = new Input();
+		wide.focused = true;
+		setHangulCompatibilityJamoWidth(2);
+		wide.setValue(jamo);
+		wide.handleInput("\x05"); // Ctrl+E (end)
+		const wideLine = wide.render(80)[0];
+		expect(visibleWidth(wideLine.slice(0, wideLine.indexOf(CURSOR_MARKER)))).toBe(promptWidth + 16);
 	});
 
 	it("pasteText absorbs a payload from a non-bracketed transport (kitty OSC 5522)", () => {

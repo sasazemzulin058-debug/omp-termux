@@ -1,8 +1,14 @@
-import { describe, expect, it } from "bun:test";
+import { describe, expect, it, vi } from "bun:test";
 import type { MCPReconnect } from "@oh-my-pi/pi-coding-agent/mcp/tool-bridge";
-import { DeferredMCPTool, isRetriableConnectionError, MCPTool } from "@oh-my-pi/pi-coding-agent/mcp/tool-bridge";
+import {
+	DeferredMCPTool,
+	deduplicateMCPToolsByName,
+	isRetriableConnectionError,
+	MCPTool,
+} from "@oh-my-pi/pi-coding-agent/mcp/tool-bridge";
 import type { MCPServerConnection, MCPToolCallResult, MCPTransport } from "@oh-my-pi/pi-coding-agent/mcp/types";
 import { ToolAbortError } from "@oh-my-pi/pi-coding-agent/tools/tool-errors";
+import { logger } from "@oh-my-pi/pi-utils";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -33,6 +39,31 @@ function makeConnection(transport: MCPTransport, name = "test-server"): MCPServe
 		capabilities: { tools: {} },
 	};
 }
+
+// ---------------------------------------------------------------------------
+// deduplicateMCPToolsByName
+// ---------------------------------------------------------------------------
+
+describe("deduplicateMCPToolsByName", () => {
+	it("keeps the same collision winner after a reconnect reorders the tool list", () => {
+		const warn = vi.spyOn(logger, "warn").mockImplementation(() => {});
+		try {
+			const dotted = { name: "mcp__foo_bar_lookup", mcpServerName: "foo.bar", mcpToolName: "lookup" };
+			const underscored = { name: "mcp__foo_bar_lookup", mcpServerName: "foo_bar", mcpToolName: "lookup" };
+
+			const before = deduplicateMCPToolsByName([dotted, underscored]);
+			expect(before).toEqual([dotted]);
+
+			// Simulate MCPManager#replaceServerTools on the current winner: its
+			// tools are removed and re-appended, reordering it behind the loser.
+			// The minted name must not silently switch owners.
+			const after = deduplicateMCPToolsByName([underscored, dotted]);
+			expect(after).toEqual([dotted]);
+		} finally {
+			warn.mockRestore();
+		}
+	});
+});
 
 // ---------------------------------------------------------------------------
 // isRetriableConnectionError
@@ -270,6 +301,53 @@ describe("MCPTool.execute retry on connection error", () => {
 
 		expect(result.details?.provider).toBe("orig");
 		expect(result.details?.providerName).toBe("Original");
+	});
+	it("reconnects once when a tool result carries an OAuth challenge", async () => {
+		let oldCalls = 0;
+		let newCalls = 0;
+		let challenge: unknown;
+		const oldTransport = mockTransport(async () => {
+			oldCalls++;
+			return {
+				...toolCallResult("authorize me", true),
+				_meta: { "mcp/www_authenticate": ['Bearer resource_metadata="https://mcp.example/meta"'] },
+			};
+		});
+		const newTransport = mockTransport(async () => {
+			newCalls++;
+			return toolCallResult("authorized");
+		});
+		const newConn = makeConnection(newTransport, "test-server-authorized");
+		const reconnect: MCPReconnect = async options => {
+			challenge = options?.authChallenge;
+			return newConn;
+		};
+
+		const tool = new MCPTool(makeConnection(oldTransport), TOOL_DEF, reconnect);
+		const result = await tool.execute("call-1", {}, noop, noCtx);
+
+		expect(oldCalls).toBe(1);
+		expect(newCalls).toBe(1);
+		expect(challenge).toEqual({
+			wwwAuthenticate: ['Bearer resource_metadata="https://mcp.example/meta"'],
+		});
+		expect(result.details?.isError).toBeFalsy();
+		expect(result.content[0]).toEqual({ type: "text", text: "authorized" });
+	});
+
+	it("preserves the OAuth challenge metadata when no reconnect handler exists", async () => {
+		const result = await new MCPTool(
+			makeConnection(
+				mockTransport(async () => ({
+					...toolCallResult("authorize me", true),
+					_meta: { "mcp/www_authenticate": ["Bearer"] },
+				})),
+			),
+			TOOL_DEF,
+		).execute("call-1", {}, noop, noCtx);
+
+		expect(result.details?.isError).toBe(true);
+		expect(result.details?.mcpMeta).toEqual({ "mcp/www_authenticate": ["Bearer"] });
 	});
 });
 

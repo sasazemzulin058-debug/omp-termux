@@ -5,6 +5,7 @@ import * as path from "node:path";
 import { computeBankScope, deriveBankId, ensureBankExists } from "@oh-my-pi/pi-coding-agent/hindsight/bank";
 import { HindsightApi } from "@oh-my-pi/pi-coding-agent/hindsight/client";
 import type { HindsightConfig } from "@oh-my-pi/pi-coding-agent/hindsight/config";
+import { removeWithRetries } from "@oh-my-pi/pi-utils";
 
 // Isolate `git` invocations in this file from the host's global config —
 // `~/.gitconfig` commit signing or template hooks would otherwise turn the
@@ -59,6 +60,10 @@ const baseConfig = (overrides: Partial<HindsightConfig> = {}): HindsightConfig =
 	recallMaxQueryChars: 800,
 	recallPromptPreamble: "preamble",
 	debug: false,
+	requestTimeoutMs: 30_000,
+	reflectTimeoutMs: 120_000,
+	recallTimeoutMs: 30_000,
+	retainTimeoutMs: 60_000,
 	mentalModelsEnabled: false,
 	mentalModelAutoSeed: false,
 	mentalModelRefreshIntervalMs: 5 * 60 * 1000,
@@ -105,6 +110,12 @@ describe("computeBankScope", () => {
 			});
 		});
 
+		it("lowercases the project segment so one checkout maps to one bank", () => {
+			expect(computeBankScope(baseConfig({ scoping: "per-project" }), "/work/General")).toEqual({
+				bankId: "omp-general",
+			});
+		});
+
 		it("composes prefix + bankId + project", () => {
 			const scope = computeBankScope(
 				baseConfig({ scoping: "per-project", bankId: "team", bankIdPrefix: "prod" }),
@@ -140,6 +151,12 @@ describe("computeBankScope", () => {
 			const scope = computeBankScope(baseConfig({ scoping: "per-project-tagged" }), "");
 			expect(scope.retainTags).toEqual(["project:unknown"]);
 			expect(scope.recallTags).toEqual(["project:unknown"]);
+		});
+
+		it("lowercases the project tag so casing cannot split one project in two", () => {
+			const scope = computeBankScope(baseConfig({ scoping: "per-project-tagged" }), "/work/General");
+			expect(scope.retainTags).toEqual(["project:general"]);
+			expect(scope.recallTags).toEqual(["project:general"]);
 		});
 	});
 
@@ -178,7 +195,7 @@ describe("computeBankScope", () => {
 		});
 
 		afterAll(async () => {
-			if (baseDir) await fs.rm(baseDir, { recursive: true, force: true });
+			if (baseDir) await removeWithRetries(baseDir);
 		});
 
 		it("emits the same project tag from the primary checkout and a linked worktree", () => {
@@ -207,8 +224,49 @@ describe("computeBankScope", () => {
 
 		it("falls back to the cwd basename outside any repository", () => {
 			// The temp parent dir is not itself a repo — it just contains one.
+			// `mkdtemp` mixes case into the suffix, so fold it like the label does.
 			expect(computeBankScope(baseConfig({ scoping: "per-project-tagged" }), baseDir).retainTags).toEqual([
-				`project:${path.basename(baseDir)}`,
+				`project:${path.basename(baseDir).toLowerCase()}`,
+			]);
+		});
+	});
+
+	// Casing is the second fragmentation source, and it survives the #2232
+	// worktree fix: the label becomes a tag, Hindsight matches tags literally,
+	// so `project:General` and `project:general` are two disjoint scopes over
+	// one repository. Fold the case after the primary root is resolved.
+	describe("project label case folding", () => {
+		let baseDir: string;
+		let primaryRoot: string;
+		let worktreeRoot: string;
+
+		beforeAll(async () => {
+			baseDir = await fs.mkdtemp(path.join(os.tmpdir(), "hindsight-bank-case-"));
+			primaryRoot = path.join(baseDir, "CasedRepo");
+			worktreeRoot = path.join(baseDir, "CasedRepo-Feature");
+			await fs.mkdir(primaryRoot, { recursive: true });
+			runGit(primaryRoot, ["-c", "init.defaultBranch=main", "init"]);
+			runGit(primaryRoot, ["config", "user.email", "tester@example.com"]);
+			runGit(primaryRoot, ["config", "user.name", "Tester"]);
+			await fs.writeFile(path.join(primaryRoot, "README.md"), "hi\n");
+			runGit(primaryRoot, ["add", "-A"]);
+			runGit(primaryRoot, ["commit", "-m", "base"]);
+			runGit(primaryRoot, ["worktree", "add", worktreeRoot, "-b", "Feature"]);
+		});
+
+		afterAll(async () => {
+			if (baseDir) await removeWithRetries(baseDir);
+		});
+
+		it("folds a mixed-case checkout root to a lowercase tag", () => {
+			const scope = computeBankScope(baseConfig({ scoping: "per-project-tagged" }), primaryRoot);
+			expect(scope.retainTags).toEqual(["project:casedrepo"]);
+			expect(scope.recallTags).toEqual(["project:casedrepo"]);
+		});
+
+		it("folds the label a linked worktree inherits from a mixed-case primary root", () => {
+			expect(computeBankScope(baseConfig({ scoping: "per-project-tagged" }), worktreeRoot).retainTags).toEqual([
+				"project:casedrepo",
 			]);
 		});
 	});

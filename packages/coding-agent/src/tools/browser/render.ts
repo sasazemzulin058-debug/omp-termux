@@ -11,6 +11,7 @@ import type { RenderResultOptions } from "../../extensibility/custom-tools/types
 import type { Theme } from "../../modes/theme/theme";
 import { Hasher, isFramedBlockComponent, markFramedBlockComponent, renderCodeCell, renderStatusLine } from "../../tui";
 import type { BrowserToolDetails } from "../browser";
+import { formatJavaScriptForDisplay } from "../eval-format/javascript";
 import { formatStyledTruncationWarning, stripOutputNotice } from "../output-meta";
 import { replaceTabs, shortenPath } from "../render-utils";
 
@@ -23,7 +24,7 @@ interface BrowserRenderArgs {
 	code?: string;
 	all?: boolean;
 	kill?: boolean;
-	app?: { path?: string; cdp_url?: string; target?: string; cmux?: boolean; surface?: string };
+	app?: { path?: string; cdp_url?: string; relay?: boolean; target?: string; cmux?: boolean; surface?: string };
 	viewport?: { width: number; height: number; scale?: number };
 	timeout?: number;
 }
@@ -34,8 +35,11 @@ interface BrowserRenderContext {
 }
 
 function describeBrowser(args: BrowserRenderArgs, details: BrowserToolDetails | undefined): string | undefined {
-	if (args.app?.cdp_url) return `connected ${args.app.cdp_url}`;
-	if (args.app?.path) return `spawned ${shortenPath(args.app.path)}`;
+	const cdpUrl = typeof args.app?.cdp_url === "string" ? args.app.cdp_url : "";
+	if (cdpUrl) return `connected ${cdpUrl}`;
+	const appPath = typeof args.app?.path === "string" ? args.app.path : "";
+	if (appPath) return `spawned ${shortenPath(appPath)}`;
+	if (args.app?.relay) return "relay";
 	if (args.app?.cmux !== false && (args.app?.cmux === true || args.app?.surface)) {
 		return args.app.surface ? `cmux ${args.app.surface}` : "cmux";
 	}
@@ -46,6 +50,8 @@ function describeBrowser(args: BrowserRenderArgs, details: BrowserToolDetails | 
 			return "spawned";
 		case "connected":
 			return "connected";
+		case "relay":
+			return "relay";
 		case "cmux":
 			return "cmux";
 		default:
@@ -88,11 +94,11 @@ function renderRunCell(
 	isError: boolean,
 	theme: Theme,
 ): Component {
-	const code = dropTrailingBlankLines(args.code ?? "");
+	const code = formatJavaScriptForDisplay(dropTrailingBlankLines(args.code ?? ""));
 	const status = cellStatus(options.isPartial, isError);
 
 	const titleParts: string[] = [tabLabel(args, details)];
-	const url = details?.url ?? args.url;
+	const url = typeof details?.url === "string" ? details.url : typeof args.url === "string" ? args.url : "";
 	if (url) titleParts.push(shortenPath(url));
 	const browserDesc = describeBrowser(args, details);
 	if (browserDesc) titleParts.push(browserDesc);
@@ -156,7 +162,7 @@ function renderOpenOrCloseLine(
 	let title: string;
 	if (action === "close") {
 		const all = args.all === true || (args.name === undefined && details?.name === undefined);
-		title = all ? "Close all tabs" : `Close ${tabLabel(args, details)}`;
+		title = all ? "Release all tabs" : `Release ${tabLabel(args, details)}`;
 		if (args.kill) title += " (kill)";
 	} else {
 		title = `Open ${tabLabel(args, details)}`;
@@ -165,7 +171,7 @@ function renderOpenOrCloseLine(
 	const meta: string[] = [];
 	const browserDesc = describeBrowser(args, details);
 	if (browserDesc) meta.push(browserDesc);
-	const url = details?.url ?? args.url;
+	const url = typeof details?.url === "string" ? details.url : typeof args.url === "string" ? args.url : "";
 	if (url) meta.push(shortenPath(url));
 
 	const header =
@@ -187,6 +193,8 @@ function extractTextOutput(content: Array<{ type: string; text?: string }> | und
 }
 
 export const browserToolRenderer = {
+	animatedPendingPreview: (args: unknown) => (args as BrowserRenderArgs).action === "run",
+	animatedPartialResult: (args: unknown) => (args as BrowserRenderArgs).action === "run",
 	renderCall(args: BrowserRenderArgs, options: RenderResultOptions, theme: Theme): Component {
 		const action = args.action;
 		if (action === "run") {

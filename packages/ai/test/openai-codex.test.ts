@@ -128,6 +128,53 @@ describe("openai-codex tool schemas", () => {
 			},
 		});
 	});
+
+	it("preserves explicit strict:false on the wire (#4336)", () => {
+		const tools: Tool[] = [
+			{
+				name: "search",
+				description: "Search",
+				strict: false,
+				parameters: {
+					type: "object",
+					additionalProperties: false,
+					properties: {
+						name: { type: "string" },
+						target: { type: "string" },
+					},
+					required: ["name"],
+				},
+			},
+		];
+
+		const converted = convertOpenAICodexResponsesTools(tools, createCodexModel("gpt-5.5"));
+
+		// Author-set `strict: false` MUST survive to the wire so backends that
+		// distinguish it from an omitted flag stop over-filling optional args.
+		expect(converted[0]).toMatchObject({ type: "function", name: "search", strict: false });
+	});
+
+	it("omits strict when the tool leaves it unset (#4336)", () => {
+		const tools: Tool[] = [
+			{
+				name: "search",
+				description: "Search",
+				parameters: {
+					type: "object",
+					additionalProperties: false,
+					properties: { name: { type: "string" } },
+					required: ["name"],
+				},
+			},
+		];
+
+		const converted = convertOpenAICodexResponsesTools(tools, createCodexModel("gpt-5.5"));
+		const payload = converted[0] as { strict?: boolean };
+
+		// Codex responses only enforces strict when the tool opts in; leaving
+		// `strict` unset MUST NOT synthesize the field either way.
+		expect(payload.strict).toBeUndefined();
+	});
 });
 
 describe("openai-codex request transformer", () => {
@@ -264,6 +311,37 @@ describe("openai-codex reasoning effort validation", () => {
 		await expect(
 			transformRequestBody({ ...body }, createCodexModel(body.model), { reasoningEffort: "xhigh" }),
 		).rejects.toThrow(/Supported efforts: medium, high/);
+	});
+
+	it("rejects gpt-5.6 minimal now that the wire floor is low", async () => {
+		const body: RequestBody = { model: "gpt-5.6-sol", input: [] };
+		await expect(
+			transformRequestBody(body, createCodexModel(body.model), { reasoningEffort: "minimal" }),
+		).rejects.toThrow(/Supported efforts: low, medium, high, xhigh, max/);
+	});
+});
+
+describe("openai-codex reasoning effort wire mapping", () => {
+	it("maps gpt-5.6 user efforts 1:1 onto wire tiers", async () => {
+		const model = createCodexModel("gpt-5.6-sol");
+		const efforts = ["low", "medium", "high", "xhigh", "max"] as const;
+
+		for (const effort of efforts) {
+			const transformed = await transformRequestBody({ model: model.id }, model, {
+				reasoningEffort: effort,
+			});
+			expect(transformed.reasoning?.effort).toBe(effort);
+		}
+	});
+
+	it("keeps pre-5.6 efforts 1:1 and passes none through unmapped", async () => {
+		const gpt55 = createCodexModel("gpt-5.5");
+		const unshifted = await transformRequestBody({ model: gpt55.id }, gpt55, { reasoningEffort: "xhigh" });
+		expect(unshifted.reasoning?.effort).toBe("xhigh");
+
+		const gpt56 = createCodexModel("gpt-5.6-sol");
+		const none = await transformRequestBody({ model: gpt56.id }, gpt56, { reasoningEffort: "none" });
+		expect(none.reasoning?.effort).toBe("none");
 	});
 });
 

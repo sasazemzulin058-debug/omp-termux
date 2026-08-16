@@ -41,12 +41,16 @@ export const KNOWN_HOSTS = {
 	zai: { providers: ["zai"], urlMarkers: ["api.z.ai"] },
 	zhipu: { providers: ["zhipu-coding-plan"], urlMarkers: ["open.bigmodel.cn"] },
 	kilo: { providers: ["kilo"], urlMarkers: ["api.kilo.ai"] },
-	alibabaDashscope: { providers: ["alibaba-coding-plan"], urlMarkers: ["dashscope"] },
+	alibabaDashscope: {
+		providers: ["alibaba-coding-plan", "alibaba-token-plan"],
+		urlMarkers: ["dashscope", "token-plan."],
+	},
 	umans: { providers: ["umans"], urlMarkers: ["api.code.umans.ai"] },
 	xiaomi: { providers: ["xiaomi"], providerPrefixes: ["xiaomi-token-plan-"], urlMarkers: ["xiaomimimo.com"] },
-	xai: { providers: ["xai"], urlMarkers: ["api.x.ai"] },
+	xai: { providers: ["xai", "xai-oauth"], urlMarkers: ["api.x.ai"] },
 	mistral: { providers: ["mistral"], urlMarkers: ["mistral.ai"] },
 	together: { providers: ["together"], urlMarkers: ["api.together.xyz"] },
+	baseten: { providers: ["baseten"], urlMarkers: ["baseten.co"] },
 	/** URL-only on purpose: the `fireworks`/`firepass` providers route per-model and not every model is Fireworks-shaped. */
 	fireworks: { urlMarkers: ["fireworks.ai"] },
 	groq: { providers: ["groq"], urlMarkers: ["api.groq.com"] },
@@ -58,7 +62,11 @@ export const KNOWN_HOSTS = {
 	/** NVIDIA NIM (`integrate.api.nvidia.com`). Qwen NIM endpoints take `chat_template_kwargs.enable_thinking`, never top-level `enable_thinking`. */
 	nvidia: { providers: ["nvidia"], urlMarkers: ["integrate.api.nvidia.com"] },
 	moonshotNative: { providers: ["moonshot", "kimi-code"], urlMarkers: ["api.moonshot.ai", "api.kimi.com"] },
+	/** Google AI Studio's OpenAI-compatible shim (`/v1beta/openai`) — a subset of chat-completions; rejects `store` with a 400. Native Gemini uses `google-generative-ai` api instead. */
+	googleAistudio: { providers: [], urlMarkers: ["generativelanguage.googleapis.com"] },
 	opencode: { providers: ["opencode-go", "opencode-zen"], urlMarkers: ["opencode.ai"] },
+	/** ZenMux's Anthropic-compatible proxy (`zenmux.ai/api/anthropic`) forwards to signature-enforcing Anthropic. */
+	zenmux: { providers: ["zenmux"], urlMarkers: ["zenmux.ai"] },
 	chutes: { urlMarkers: ["chutes.ai"] },
 } as const satisfies Record<string, HostClassSpec>;
 
@@ -104,6 +112,24 @@ function includesAsciiCaseInsensitive(value: string, lowerNeedle: string): boole
 }
 
 // --- Endpoint-shape predicates (URL path/verb shapes, not vendor hosts) ---
+
+/**
+ * Hostname for a Vertex AI GenerateContent / rawPredict / OpenAI-compat
+ * request for the given location.
+ *
+ * - `global` → global endpoint (`aiplatform.googleapis.com`)
+ * - `eu` / `us` multi-regions → REP endpoints (`aiplatform.{eu|us}.rep.googleapis.com`)
+ * - every other location → regional (`{location}-aiplatform.googleapis.com`)
+ *
+ * Multi-region codes do NOT follow the regional `{location}-aiplatform` pattern;
+ * interpolating them that way yields hosts like `eu-aiplatform.googleapis.com`
+ * that 404.
+ */
+export function resolveVertexEndpointHost(location: string): string {
+	if (location === "global") return "aiplatform.googleapis.com";
+	if (location === "eu" || location === "us") return `aiplatform.${location}.rep.googleapis.com`;
+	return `${location}-aiplatform.googleapis.com`;
+}
 
 /** Vertex AI express-mode OpenAI-compatible endpoint (`…/endpoints/openapi`). */
 export function isVertexExpressOpenAIUrl(baseUrl: string): boolean {

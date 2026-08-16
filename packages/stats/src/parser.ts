@@ -1,13 +1,24 @@
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
-import { type AssistantMessage, getPriorityPremiumRequests, type ServiceTier } from "@oh-my-pi/pi-ai";
-import { getSessionsDir, isEnoent } from "@oh-my-pi/pi-utils";
+import {
+	type AssistantMessage,
+	coerceServiceTierByFamily,
+	getPriorityPremiumRequests,
+	resolveModelServiceTier,
+	type ServiceTierByFamily,
+	type ToolCall,
+	type ToolResultMessage,
+	type Usage,
+} from "@oh-my-pi/pi-ai";
+import { getSessionsDir, isEnoent, readLines } from "@oh-my-pi/pi-utils";
 import type {
 	AgentType,
 	MessageStats,
 	SessionEntry,
 	SessionMessageEntry,
 	SessionServiceTierChangeEntry,
+	ToolCallStats,
+	ToolResultLink,
 	UserMessageLink,
 	UserMessageStats,
 } from "./types";
@@ -21,12 +32,16 @@ const ADVISOR_TRANSCRIPT_BASENAME = "__advisor.jsonl";
  * directory. Layout: `<sessionsDir>/<project>/<file>.jsonl` is the `main`
  * agent; subagent and advisor transcripts live nested one level deeper inside
  * the session's artifacts dir (`<project>/<session>/<id>.jsonl`,
- * `<project>/<session>/__advisor.jsonl`). Any `__advisor.jsonl` — at any depth,
- * including a subagent's own advisor — counts as `advisor`; every other nested
- * transcript is a task `subagent`.
+ * `<project>/<session>/__advisor.jsonl`). Any advisor transcript
+ * (`__advisor.jsonl` or `__advisor.<slug>.jsonl`) — at any depth, including a
+ * subagent's own advisor — counts as `advisor`; every other nested transcript
+ * is a task `subagent`.
  */
 export function classifyAgentType(sessionPath: string): AgentType {
-	if (path.basename(sessionPath) === ADVISOR_TRANSCRIPT_BASENAME) return "advisor";
+	const base = path.basename(sessionPath);
+	if (base === ADVISOR_TRANSCRIPT_BASENAME || (base.startsWith("__advisor.") && base.endsWith(".jsonl"))) {
+		return "advisor";
+	}
 	const rel = path.relative(getSessionsDir(), sessionPath);
 	// `<project>/<file>.jsonl` -> 2 segments. Deeper nesting is a subagent.
 	return rel.split(path.sep).length <= 2 ? "main" : "subagent";
@@ -76,6 +91,14 @@ function isServiceTierChange(entry: SessionEntry): entry is SessionServiceTierCh
 }
 
 /**
+ * Check if an entry is a tool-result message.
+ */
+function isToolResultMessage(entry: SessionEntry): entry is SessionMessageEntry {
+	if (entry.type !== "message") return false;
+	return (entry as SessionMessageEntry).message?.role === "toolResult";
+}
+
+/**
  * Extract plain text from a user message content payload.
  */
 function extractUserText(content: unknown): string {
@@ -121,16 +144,27 @@ function extractUserStats(sessionFile: string, folder: string, entry: SessionMes
 
 /**
  * Extract stats from an assistant message entry.
+ *
+ * Session JSONL on disk is not guaranteed to match the current
+ * `AssistantMessage` shape: crash-truncated turns, sessions written by older
+ * versions, and foreign producers all flow through this parser. Every field
+ * returned here feeds a NOT NULL column in stats.db, so malformed entries are
+ * coerced (missing `stopReason`, token counts, `timestamp`) or skipped
+ * (missing `model`/`provider`/`api`/`usage`) instead of crashing the whole
+ * sync with a constraint violation.
  */
 function extractStats(
 	sessionFile: string,
 	folder: string,
 	entry: SessionMessageEntry,
-	currentServiceTier: ServiceTier | undefined,
+	currentServiceTier: ServiceTierByFamily | undefined,
 	agentType: AgentType,
 ): MessageStats | null {
 	const msg = entry.message as AssistantMessage;
 	if (msg?.role !== "assistant") return null;
+	if (typeof msg.model !== "string" || typeof msg.provider !== "string" || typeof msg.api !== "string") return null;
+	const rawUsage = msg.usage as Partial<Usage> | undefined;
+	if (!rawUsage || typeof rawUsage !== "object") return null;
 
 	// Backfill: when the session recorded `priority` as the active service tier
 	// at this point but the AI usage payload was captured before priority
@@ -138,9 +172,29 @@ function extractStats(
 	// "Premium Reqs" stat aggregates priority traffic on re-sync. Trust any
 	// non-zero value already in `usage.premiumRequests` (Copilot multipliers or
 	// the new AI code path) and only synthesise when the field is missing/zero.
-	const recorded = msg.usage.premiumRequests ?? 0;
-	const derived = recorded > 0 ? recorded : getPriorityPremiumRequests(currentServiceTier, msg.provider);
-	const usage = derived === recorded ? msg.usage : { ...msg.usage, premiumRequests: derived };
+	const recorded = rawUsage.premiumRequests ?? 0;
+	const model = { provider: msg.provider, api: msg.api, id: msg.model };
+	const tier = resolveModelServiceTier(currentServiceTier, model);
+	const derived = recorded > 0 ? recorded : getPriorityPremiumRequests(tier, model);
+	const wellFormed =
+		typeof rawUsage.input === "number" &&
+		typeof rawUsage.output === "number" &&
+		typeof rawUsage.cacheRead === "number" &&
+		typeof rawUsage.cacheWrite === "number" &&
+		typeof rawUsage.totalTokens === "number";
+	const usage: Usage =
+		wellFormed && derived === recorded
+			? (rawUsage as Usage)
+			: {
+					...rawUsage,
+					input: rawUsage.input ?? 0,
+					output: rawUsage.output ?? 0,
+					cacheRead: rawUsage.cacheRead ?? 0,
+					cacheWrite: rawUsage.cacheWrite ?? 0,
+					totalTokens: rawUsage.totalTokens ?? 0,
+					cost: rawUsage.cost ?? { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+					premiumRequests: derived,
+				};
 
 	return {
 		sessionFile,
@@ -149,65 +203,145 @@ function extractStats(
 		model: msg.model,
 		provider: msg.provider,
 		api: msg.api,
-		timestamp: msg.timestamp,
+		timestamp: coerceEntryTimestamp(msg.timestamp, entry),
 		duration: msg.duration ?? null,
 		ttft: msg.ttft ?? null,
-		stopReason: msg.stopReason,
+		// A message persisted without a terminal stop reason never completed
+		// normally: classify by whether it carried an error.
+		stopReason: msg.stopReason ?? (msg.errorMessage ? "error" : "aborted"),
 		errorMessage: msg.errorMessage ?? null,
 		usage,
 		agentType,
 	};
 }
 
+/** Message timestamp, falling back to the entry's ISO timestamp, then 0. */
+function coerceEntryTimestamp(timestamp: number | undefined, entry: SessionMessageEntry): number {
+	if (typeof timestamp === "number" && Number.isFinite(timestamp)) return timestamp;
+	const ts = Date.parse(entry.timestamp);
+	return Number.isFinite(ts) ? ts : 0;
+}
+
+/**
+ * Extract one {@link ToolCallStats} per `toolCall` content block of an
+ * assistant message. Returns an empty array for turns without tool calls.
+ */
+function extractToolCalls(
+	sessionFile: string,
+	folder: string,
+	entry: SessionMessageEntry,
+	agentType: AgentType,
+): ToolCallStats[] {
+	const msg = entry.message as AssistantMessage;
+	if (msg?.role !== "assistant" || !Array.isArray(msg.content)) return [];
+	// `tool_calls` columns are NOT NULL: skip turns that can't be attributed
+	// (malformed persisted entries — see extractStats) and blocks missing ids.
+	if (typeof msg.model !== "string" || typeof msg.provider !== "string") return [];
+
+	const blocks = msg.content.filter(
+		(block): block is ToolCall =>
+			block !== null &&
+			typeof block === "object" &&
+			block.type === "toolCall" &&
+			typeof block.id === "string" &&
+			typeof block.name === "string",
+	);
+	if (blocks.length === 0) return [];
+
+	return blocks.map(block => {
+		let argsChars = 0;
+		try {
+			argsChars = JSON.stringify(block.arguments ?? {}).length;
+		} catch {
+			// Non-serializable arguments (shouldn't happen in persisted JSONL); size unknown.
+		}
+		return {
+			sessionFile,
+			entryId: entry.id,
+			toolCallId: block.id,
+			folder,
+			toolName: block.name,
+			model: msg.model,
+			provider: msg.provider,
+			timestamp: coerceEntryTimestamp(msg.timestamp, entry),
+			agentType,
+			callsInTurn: blocks.length,
+			argsChars,
+		};
+	});
+}
+
+/**
+ * Build the result linkage for a `toolResult` entry: text characters fed back
+ * into context plus the error flag, keyed to the originating call.
+ */
+function extractToolResultLink(sessionFile: string, entry: SessionMessageEntry): ToolResultLink | null {
+	const msg = entry.message as ToolResultMessage;
+	if (msg.role !== "toolResult" || typeof msg.toolCallId !== "string" || msg.toolCallId.length === 0) return null;
+	let resultChars = 0;
+	if (Array.isArray(msg.content)) {
+		for (const block of msg.content) {
+			if (block && typeof block === "object" && block.type === "text" && typeof block.text === "string") {
+				resultChars += block.text.length;
+			}
+		}
+	}
+	return {
+		sessionFile,
+		toolCallId: msg.toolCallId,
+		resultChars,
+		isError: msg.isError === true,
+	};
+}
+
 const LF = 0x0a;
+const CR = 0x0d;
+const jsonLineDecoder = new TextDecoder();
+
+function parseJsonLine(bytes: Uint8Array, start: number, end: number): SessionEntry | null {
+	while (end > start && bytes[end - 1] === CR) end--;
+	if (end <= start) return null;
+	try {
+		return JSON.parse(jsonLineDecoder.decode(bytes.subarray(start, end))) as SessionEntry;
+	} catch {
+		return null;
+	}
+}
+
+function visitSessionEntriesLenient(bytes: Uint8Array, visit: (entry: SessionEntry) => void): number {
+	let cursor = 0;
+	let read = 0;
+
+	while (cursor < bytes.length) {
+		const newline = bytes.indexOf(LF, cursor);
+		const hasNewline = newline !== -1;
+		const lineEnd = hasNewline ? newline : bytes.length;
+		const entry = parseJsonLine(bytes, cursor, lineEnd);
+		if (entry) {
+			visit(entry);
+			read = hasNewline ? newline + 1 : lineEnd;
+		} else if (hasNewline) {
+			read = newline + 1;
+		} else {
+			break;
+		}
+		cursor = hasNewline ? newline + 1 : lineEnd;
+	}
+
+	return read;
+}
 
 function parseSessionEntriesLenient(bytes: Uint8Array): { entries: SessionEntry[]; read: number } {
 	const entries: SessionEntry[] = [];
-	let cursor = 0;
-
-	while (cursor < bytes.length) {
-		const { values, error, read, done } = Bun.JSONL.parseChunk(bytes, cursor, bytes.length);
-		if (values.length > 0) {
-			entries.push(...(values as SessionEntry[]));
-		}
-
-		if (error) {
-			const nextNewline = bytes.indexOf(LF, Math.max(read, cursor));
-			if (nextNewline === -1) break;
-			cursor = nextNewline + 1;
-			continue;
-		}
-
-		if (read <= cursor) break;
-		cursor = read;
-		if (done) break;
-	}
-
-	return { entries, read: cursor };
+	const read = visitSessionEntriesLenient(bytes, entry => entries.push(entry));
+	return { entries, read };
 }
 
-function scanLastServiceTier(bytes: Uint8Array): ServiceTier | undefined {
-	let cursor = 0;
-	let currentServiceTier: ServiceTier | undefined;
-
-	while (cursor < bytes.length) {
-		const { values, error, read, done } = Bun.JSONL.parseChunk(bytes, cursor, bytes.length);
-		for (const value of values as SessionEntry[]) {
-			if (isServiceTierChange(value)) currentServiceTier = value.serviceTier ?? undefined;
-		}
-
-		if (error) {
-			const nextNewline = bytes.indexOf(LF, Math.max(read, cursor));
-			if (nextNewline === -1) break;
-			cursor = nextNewline + 1;
-			continue;
-		}
-
-		if (read <= cursor) break;
-		cursor = read;
-		if (done) break;
-	}
-
+function scanLastServiceTier(bytes: Uint8Array): ServiceTierByFamily | undefined {
+	let currentServiceTier: ServiceTierByFamily | undefined;
+	visitSessionEntriesLenient(bytes, entry => {
+		if (isServiceTierChange(entry)) currentServiceTier = coerceServiceTierByFamily(entry.serviceTier);
+	});
 	return currentServiceTier;
 }
 /**
@@ -230,6 +364,8 @@ export interface ParseSessionResult {
 	stats: MessageStats[];
 	userStats: UserMessageStats[];
 	userLinks: UserMessageLink[];
+	toolCalls: ToolCallStats[];
+	toolResults: ToolResultLink[];
 	newOffset: number;
 }
 export async function parseSessionFile(sessionPath: string, fromOffset = 0): Promise<ParseSessionResult> {
@@ -237,7 +373,8 @@ export async function parseSessionFile(sessionPath: string, fromOffset = 0): Pro
 	try {
 		bytes = await Bun.file(sessionPath).bytes();
 	} catch (err) {
-		if (isEnoent(err)) return { stats: [], userStats: [], userLinks: [], newOffset: fromOffset };
+		if (isEnoent(err))
+			return { stats: [], userStats: [], userLinks: [], toolCalls: [], toolResults: [], newOffset: fromOffset };
 		throw err;
 	}
 
@@ -246,17 +383,19 @@ export async function parseSessionFile(sessionPath: string, fromOffset = 0): Pro
 	const stats: MessageStats[] = [];
 	const userStats: UserMessageStats[] = [];
 	const userLinks: UserMessageLink[] = [];
+	const toolCalls: ToolCallStats[] = [];
+	const toolResults: ToolResultLink[] = [];
 	const userByEntryId = new Map<string, UserMessageStats>();
 	const start = Math.max(0, Math.min(fromOffset, bytes.length));
 	const unprocessed = bytes.subarray(start);
 	const { entries, read } = parseSessionEntriesLenient(unprocessed);
-	let currentServiceTier: ServiceTier | undefined;
+	let currentServiceTier: ServiceTierByFamily | undefined;
 	if (start > 0) {
 		currentServiceTier = scanLastServiceTier(bytes.subarray(0, start));
 	}
 	for (const entry of entries) {
 		if (isServiceTierChange(entry)) {
-			currentServiceTier = entry.serviceTier ?? undefined;
+			currentServiceTier = coerceServiceTierByFamily(entry.serviceTier);
 			continue;
 		}
 		if (isUserMessage(entry)) {
@@ -267,9 +406,15 @@ export async function parseSessionFile(sessionPath: string, fromOffset = 0): Pro
 			}
 			continue;
 		}
+		if (isToolResultMessage(entry)) {
+			const link = extractToolResultLink(sessionPath, entry);
+			if (link) toolResults.push(link);
+			continue;
+		}
 		if (isAssistantMessage(entry)) {
 			const msgStats = extractStats(sessionPath, folder, entry, currentServiceTier, agentType);
 			if (msgStats) stats.push(msgStats);
+			toolCalls.push(...extractToolCalls(sessionPath, folder, entry, agentType));
 			// Link assistant's responding model back to the user message it answered.
 			const parentId = (entry as SessionMessageEntry).parentId;
 			if (parentId) {
@@ -292,7 +437,7 @@ export async function parseSessionFile(sessionPath: string, fromOffset = 0): Pro
 		}
 	}
 
-	return { stats, userStats, userLinks, newOffset: start + read };
+	return { stats, userStats, userLinks, toolCalls, toolResults, newOffset: start + read };
 }
 
 /**
@@ -339,19 +484,16 @@ export async function listAllSessionFiles(): Promise<string[]> {
  * Find a specific entry in a session file.
  */
 export async function getSessionEntry(sessionPath: string, entryId: string): Promise<SessionEntry | null> {
-	let bytes: Uint8Array;
 	try {
-		bytes = await Bun.file(sessionPath).bytes();
+		for await (const line of readLines(Bun.file(sessionPath).stream())) {
+			const entry = parseJsonLine(line, 0, line.length);
+			if (entry && "id" in entry && entry.id === entryId) {
+				return entry;
+			}
+		}
 	} catch (err) {
 		if (isEnoent(err)) return null;
 		throw err;
-	}
-
-	const { entries } = parseSessionEntriesLenient(bytes);
-	for (const entry of entries) {
-		if ("id" in entry && entry.id === entryId) {
-			return entry;
-		}
 	}
 	return null;
 }

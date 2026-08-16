@@ -5,6 +5,7 @@ condition:
   - "\\.read\\(\\)\\.unwrap\\(\\)"
   - "\\.write\\(\\)\\.unwrap\\(\\)"
 scope: "tool:edit(*.rs), tool:write(*.rs)"
+interruptMode: never
 ---
 
 Use `parking_lot::{Mutex, RwLock}` instead of `std::sync::{Mutex, RwLock}` when code immediately unwraps lock results.
@@ -32,12 +33,12 @@ let guard = data.lock();
 
 ## Equivalents
 
-| std::sync | parking_lot |
-| --- | --- |
-| `Mutex<T>` | `Mutex<T>` |
-| `RwLock<T>` | `RwLock<T>` |
-| `Condvar` | `Condvar` |
-| `Once` | `Once` |
+|std::sync|parking_lot|
+|---|---|
+|`Mutex<T>`|`Mutex<T>`|
+|`RwLock<T>`|`RwLock<T>`|
+|`Condvar`|`Condvar`|
+|`Once`|`Once`|
 
 ## Keep async locks async
 

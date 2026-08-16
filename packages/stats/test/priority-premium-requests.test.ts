@@ -1,35 +1,14 @@
 import { Database } from "bun:sqlite";
-import { afterEach, beforeEach, describe, expect, it } from "bun:test";
+import { describe, expect, it } from "bun:test";
 import * as fs from "node:fs/promises";
-import * as os from "node:os";
 import * as path from "node:path";
 import { syncAllSessions } from "@oh-my-pi/omp-stats/aggregator";
 import { closeDb, getOverallStats, getRecentRequests } from "@oh-my-pi/omp-stats/db";
 import { parseSessionFile } from "@oh-my-pi/omp-stats/parser";
-import { getAgentDir, getSessionsDir, getStatsDbPath, setAgentDir, TempDir } from "@oh-my-pi/pi-utils";
+import { getSessionsDir, getStatsDbPath } from "@oh-my-pi/pi-utils";
+import { installStatsTestIsolation } from "./helpers/temp-agent";
 
-const originalConfigDir = process.env.PI_CONFIG_DIR;
-const originalAgentDir = getAgentDir();
-let tempDir: TempDir | null = null;
-
-beforeEach(() => {
-	tempDir = TempDir.createSync("@pi-stats-priority-");
-	const configDir = path.relative(os.homedir(), tempDir.join("config"));
-	process.env.PI_CONFIG_DIR = configDir;
-	setAgentDir(path.join(os.homedir(), configDir, "agent"));
-});
-
-afterEach(() => {
-	closeDb();
-	if (originalConfigDir === undefined) {
-		delete process.env.PI_CONFIG_DIR;
-	} else {
-		process.env.PI_CONFIG_DIR = originalConfigDir;
-	}
-	setAgentDir(originalAgentDir);
-	tempDir?.removeSync();
-	tempDir = null;
-});
+installStatsTestIsolation("@pi-stats-priority-");
 
 interface SessionLines {
 	lines: Array<Record<string, unknown>>;
@@ -48,6 +27,7 @@ function assistantEntry(opts: {
 	id: string;
 	parentId?: string | null;
 	provider: string;
+	api?: string;
 	premiumRequests?: number;
 }): Record<string, unknown> {
 	return {
@@ -58,7 +38,7 @@ function assistantEntry(opts: {
 		message: {
 			role: "assistant",
 			content: [{ type: "text", text: "ok" }],
-			api: "openai-responses",
+			api: opts.api ?? "openai-responses",
 			provider: opts.provider,
 			model: "gpt-5.4",
 			stopReason: "stop",
@@ -84,7 +64,10 @@ describe("priority service-tier premium-request backfill", () => {
 				{ type: "service_tier_change", id: "stc1", timestamp: new Date().toISOString(), serviceTier: "priority" },
 				assistantEntry({ id: "a1", provider: "openai" }),
 				assistantEntry({ id: "a2", provider: "openai-codex" }),
-				assistantEntry({ id: "a3", provider: "anthropic" }),
+				// Direct Anthropic always records api "anthropic-messages" — the
+				// service-tier family is classified by api, not provider (Bedrock/
+				// Vertex Claude belong to the anthropic knob too).
+				assistantEntry({ id: "a3", provider: "anthropic", api: "anthropic-messages" }),
 				{ type: "service_tier_change", id: "stc2", timestamp: new Date().toISOString(), serviceTier: null },
 				assistantEntry({ id: "a4", provider: "openai" }),
 			],

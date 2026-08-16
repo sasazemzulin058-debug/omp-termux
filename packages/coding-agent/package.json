@@ -1,7 +1,7 @@
 {
   "type": "module",
   "name": "@oh-my-pi/pi-coding-agent",
-  "version": "16.1.16",
+  "version": "17.3.5",
   "description": "Coding agent CLI with read, bash, edit, write tools and session management",
   "homepage": "https://omp.sh",
   "author": "Can Boluk",
@@ -35,59 +35,50 @@
     "check": "biome check . && bun run check:types",
     "check:types": "tsgo -p tsconfig.json --noEmit",
     "lint": "biome lint .",
-    "test": "bun test --parallel=4 test src",
+    "test": "bun ../../scripts/ci-test-ts.ts coding-agent-heavy --full",
     "fix": "biome check --write --unsafe . && bun run format-prompts",
     "fmt": "biome format --write . && bun run format-prompts",
     "format-prompts": "bun scripts/format-prompts.ts",
-    "generate-docs-index": "bun scripts/generate-docs-index.ts --generate",
-    "prepack": "bun scripts/generate-docs-index.ts --generate && bun --cwd=../collab-web run build:tool-views && bun scripts/bundle-dist.ts || ( bun scripts/generate-docs-index.ts --reset; exit 1 )",
-    "postpack": "bun scripts/generate-docs-index.ts --reset",
+    "gen:tool-views": "bun --cwd=../collab-web run gen:tool-views",
+    "gen:bundle": "bun scripts/bundle-dist.ts",
+    "gen:native": "bun --cwd=../natives run gen:native",
+    "gen:native:reset": "bun --cwd=../natives run gen:native:reset",
+    "prepack": "bun run gen:tool-views && bun run gen:bundle",
     "bench:guard": "bun scripts/bench-guard.ts"
   },
   "dependencies": {
-    "@agentclientprotocol/sdk": "0.25.0",
-    "@babel/parser": "^7.29.7",
-    "@mozilla/readability": "^0.6.0",
-    "@oh-my-pi/hashline": "16.1.16",
-    "@oh-my-pi/omp-stats": "16.1.16",
-    "@oh-my-pi/pi-agent-core": "16.1.16",
-    "@oh-my-pi/pi-ai": "16.1.16",
-    "@oh-my-pi/pi-catalog": "16.1.16",
-    "@oh-my-pi/pi-mnemopi": "16.1.16",
-    "@oh-my-pi/pi-natives": "16.1.16",
-    "@oh-my-pi/pi-tui": "16.1.16",
-    "@oh-my-pi/pi-utils": "16.1.16",
-    "@oh-my-pi/pi-wire": "16.1.16",
-    "@oh-my-pi/snapcompact": "16.1.16",
-    "@opentelemetry/api": "^1.9.1",
-    "@opentelemetry/context-async-hooks": "^2.7.1",
-    "@opentelemetry/exporter-trace-otlp-proto": "^0.218.0",
-    "@opentelemetry/resources": "^2.7.1",
-    "@opentelemetry/sdk-trace-base": "^2.7.1",
-    "@opentelemetry/sdk-trace-node": "^2.7.1",
-    "@puppeteer/browsers": "^3.0.4",
-    "@types/turndown": "5.0.6",
-    "@xterm/headless": "^6.0.0",
-    "arktype": "^2.2.0",
-    "chalk": "^5.6.2",
-    "diff": "^9.0.0",
-    "fast-xml-parser": "^5.9.0",
-    "handlebars": "^4.7.9",
-    "linkedom": "^0.18.12",
-    "lru-cache": "11.5.1",
-    "mammoth": "^1.12.0",
-    "mupdf": "^1.27.0",
-    "puppeteer-core": "^25.1.0",
-    "turndown": "7.2.4",
-    "turndown-plugin-gfm": "1.0.2",
-    "zod": "^4"
+    "@babel/parser": "catalog:",
+    "@oh-my-pi/hashline": "catalog:",
+    "@oh-my-pi/omp-stats": "catalog:",
+    "@oh-my-pi/omptype": "catalog:",
+    "@oh-my-pi/pi-agent-core": "catalog:",
+    "@oh-my-pi/pi-ai": "catalog:",
+    "@oh-my-pi/pi-catalog": "catalog:",
+    "@oh-my-pi/pi-mnemopi": "catalog:",
+    "@oh-my-pi/pi-natives": "catalog:",
+    "@oh-my-pi/pi-tui": "catalog:",
+    "@oh-my-pi/pi-utils": "catalog:",
+    "@oh-my-pi/pi-wire": "catalog:",
+    "@oh-my-pi/snapcompact": "catalog:",
+    "@opentelemetry/api": "catalog:",
+    "@opentelemetry/api-logs": "catalog:",
+    "@opentelemetry/context-async-hooks": "catalog:",
+    "@opentelemetry/exporter-logs-otlp-proto": "catalog:",
+    "@opentelemetry/exporter-metrics-otlp-proto": "catalog:",
+    "@opentelemetry/exporter-trace-otlp-proto": "catalog:",
+    "@opentelemetry/resources": "catalog:",
+    "@opentelemetry/sdk-logs": "catalog:",
+    "@opentelemetry/sdk-metrics": "catalog:",
+    "@opentelemetry/sdk-trace-base": "catalog:",
+    "@opentelemetry/sdk-trace-node": "catalog:",
+    "puppeteer-core": "catalog:"
   },
   "optionalDependencies": {
-    "@huggingface/transformers": "^4.2.0",
+    "@huggingface/transformers": "catalog:",
     "sherpa-onnx-node": "1.13.2"
   },
   "devDependencies": {
-    "@types/bun": "^1.3.14"
+    "@types/bun": "catalog:"
   },
   "engines": {
     "bun": ">=1.3.14"
@@ -95,7 +86,13 @@
   "files": [
     "src",
     "dist/cli.js",
+    "dist/docs-index.generated.txt",
+    "dist/CHANGELOG-*.md",
     "dist/*.node",
+    "dist/template-*.css",
+    "dist/template-*.html",
+    "dist/template-*.js",
+    "dist/tool-views.generated-*.js",
     "scripts",
     "examples",
     "README.md",
@@ -374,6 +371,14 @@
       "types": "./src/lsp/clients/*.ts",
       "import": "./src/lsp/clients/*.ts"
     },
+    "./markit": {
+      "types": "./src/markit/index.ts",
+      "import": "./src/markit/index.ts"
+    },
+    "./markit/*": {
+      "types": "./src/markit/*.ts",
+      "import": "./src/markit/*.ts"
+    },
     "./mcp": {
       "types": "./src/mcp/index.ts",
       "import": "./src/mcp/index.ts"
@@ -523,13 +528,17 @@
       "types": "./src/task/*.ts",
       "import": "./src/task/*.ts"
     },
-    "./tool-discovery/*": {
-      "types": "./src/tool-discovery/*.ts",
-      "import": "./src/tool-discovery/*.ts"
-    },
     "./tools": {
       "types": "./src/tools/index.ts",
       "import": "./src/tools/index.ts"
+    },
+    "./tools/hub": {
+      "types": "./src/tools/hub/index.ts",
+      "import": "./src/tools/hub/index.ts"
+    },
+    "./tools/hub/*": {
+      "types": "./src/tools/hub/*.ts",
+      "import": "./src/tools/hub/*.ts"
     },
     "./tools/*": {
       "types": "./src/tools/*.ts",

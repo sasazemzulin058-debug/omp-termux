@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it, spyOn, vi } from "bun:test";
+import { afterAll, afterEach, beforeAll, describe, expect, it, spyOn, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -10,6 +10,7 @@ import type { PrDiffPayload, ViewLookupResult } from "@oh-my-pi/pi-coding-agent/
 import * as gh from "@oh-my-pi/pi-coding-agent/tools/gh";
 import * as git from "@oh-my-pi/pi-coding-agent/utils/git";
 import * as jj from "@oh-my-pi/pi-coding-agent/utils/jj";
+import { removeWithRetries } from "@oh-my-pi/pi-utils";
 
 const SAMPLE_JJ_DIFF = `diff --git a/src/workspace.ts b/src/workspace.ts
 --- a/src/workspace.ts
@@ -81,18 +82,21 @@ interface EditorCall {
 }
 
 describe("ReviewCommand", () => {
-	let tmpDir: string | undefined;
+	let tmpDir: string;
 
-	afterEach(async () => {
-		vi.restoreAllMocks();
-		if (tmpDir) {
-			await fs.rm(tmpDir, { recursive: true, force: true });
-			tmpDir = undefined;
-		}
+	beforeAll(async () => {
+		tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-review-command-"));
 	});
 
-	async function createTempDir(): Promise<string> {
-		tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-review-command-"));
+	afterEach(() => {
+		vi.restoreAllMocks();
+	});
+
+	afterAll(async () => {
+		await removeWithRetries(tmpDir);
+	});
+
+	function createTempDir(): string {
 		return tmpDir;
 	}
 
@@ -183,8 +187,6 @@ describe("ReviewCommand", () => {
 			const result = await command.execute([], ctx);
 
 			expect(result).toBeUndefined();
-			await fs.rm(dir, { recursive: true, force: true });
-			tmpDir = undefined;
 		}
 	});
 

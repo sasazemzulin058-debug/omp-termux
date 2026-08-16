@@ -1,6 +1,8 @@
 import { Buffer } from "node:buffer";
-import { CODEX_BASE_URL } from "@oh-my-pi/pi-catalog/wire/codex";
+import { toNumber } from "@oh-my-pi/pi-catalog/utils";
+import { USER_AGENT } from "@oh-my-pi/pi-utils";
 import type {
+	CredentialRankingContext,
 	CredentialRankingStrategy,
 	UsageAmount,
 	UsageFetchContext,
@@ -12,7 +14,9 @@ import type {
 	UsageWindow,
 } from "../usage";
 import { isRecord } from "../utils";
-import { toNumber } from "./shared";
+import { normalizeCodexBaseUrl } from "./openai-codex-base-url";
+import { listCodexResetCredits } from "./openai-codex-reset";
+import { HOUR_MS } from "./shared";
 
 const CODEX_USAGE_PATH = "wham/usage";
 const JWT_AUTH_CLAIM = "https://api.openai.com/auth";
@@ -200,20 +204,6 @@ function parseResetCredits(payload: unknown): UsageResetCredits | undefined {
 	return { availableCount: Math.max(0, Math.trunc(availableCount)) };
 }
 
-export function normalizeCodexBaseUrl(baseUrl?: string): string {
-	const fallback = CODEX_BASE_URL;
-	const trimmed = baseUrl?.trim() ? baseUrl.trim() : fallback;
-	const base = trimmed.replace(/\/+$/, "");
-	const lower = base.toLowerCase();
-	if (
-		(lower.startsWith("https://chatgpt.com") || lower.startsWith("https://chat.openai.com")) &&
-		!lower.includes("/backend-api")
-	) {
-		return `${base}/backend-api`;
-	}
-	return base;
-}
-
 function buildCodexUsageUrl(baseUrl: string): string {
 	const normalized = baseUrl.endsWith("/") ? baseUrl : `${baseUrl}/`;
 	return `${normalized}${CODEX_USAGE_PATH}`;
@@ -275,11 +265,10 @@ function buildUsageAmount(window: ParsedUsageWindow): UsageAmount {
 	};
 }
 
-function buildUsageStatus(usedFraction?: number, limitReached?: boolean): UsageLimit["status"] {
-	if (limitReached) return "exhausted";
-	if (usedFraction === undefined) return "unknown";
-	if (usedFraction >= 1) return "exhausted";
-	if (usedFraction >= 0.9) return "warning";
+function buildUsageStatus(args: { usedFraction?: number; explicitlyAllowed: boolean }): UsageLimit["status"] {
+	if (args.usedFraction === undefined) return "unknown";
+	if (args.usedFraction >= 1) return args.explicitlyAllowed ? "warning" : "exhausted";
+	if (args.usedFraction >= 0.9) return "warning";
 	return "ok";
 }
 
@@ -288,6 +277,7 @@ function buildUsageLimit(args: {
 	window: ParsedUsageWindow;
 	accountId?: string;
 	planType?: string;
+	allowed?: boolean;
 	limitReached?: boolean;
 	nowMs: number;
 }): UsageLimit {
@@ -298,14 +288,19 @@ function buildUsageLimit(args: {
 		label: usageWindow.label,
 		scope: {
 			provider: "openai-codex",
-			accountId: args.accountId,
-			tier: args.planType,
 			windowId: usageWindow.id,
 			shared: true,
 		},
 		window: usageWindow,
 		amount,
-		status: buildUsageStatus(amount.usedFraction, args.limitReached),
+		// The shared account-level rejection flag cannot identify which window
+		// is binding, but an explicit positive verdict applies to both windows.
+		// Preserve 100% as a warning when Codex still allows requests; live
+		// usage_limit_reached responses remain authoritative for blocking.
+		status: buildUsageStatus({
+			usedFraction: amount.usedFraction,
+			explicitlyAllowed: args.allowed === true && args.limitReached === false,
+		}),
 	};
 }
 function additionalLimitSlug(args: { limitName?: string; meteredFeature?: string }): string {
@@ -335,9 +330,10 @@ function buildAdditionalUsageLimit(args: {
 	displayName: string;
 	window: ParsedUsageWindow;
 	accountId?: string;
-	limitReached?: boolean;
 	limitName?: string;
 	meteredFeature?: string;
+	allowed?: boolean;
+	limitReached?: boolean;
 	nowMs: number;
 }): UsageLimit {
 	const usageWindow = buildUsageWindow(args.window, args.key, args.nowMs);
@@ -355,7 +351,44 @@ function buildAdditionalUsageLimit(args: {
 		},
 		window: usageWindow,
 		amount,
-		status: buildUsageStatus(amount.usedFraction, args.limitReached),
+		// A positive meter verdict is authoritative even when the advisory
+		// percentage rounds to 100; negative shared verdicts remain window-local.
+		status: buildUsageStatus({
+			usedFraction: amount.usedFraction,
+			explicitlyAllowed: args.allowed === true && args.limitReached === false,
+		}),
+	};
+}
+
+/**
+ * Parse Codex `x-codex-{primary,secondary}-*` rate-limit response headers into
+ * a usage report. The backend attaches these snapshots to every response, so
+ * ingesting them lets credential selection block an exhausted account before
+ * the next request burns a wire 429.
+ */
+export function parseCodexRateLimitHeaders(headers: Record<string, string>, now = Date.now()): UsageReport | null {
+	const parseWindow = (key: "primary" | "secondary"): ParsedUsageWindow | undefined => {
+		const usedPercent = toNumber(headers[`x-codex-${key}-used-percent`]);
+		if (usedPercent === undefined) return undefined;
+		const windowMinutes = toNumber(headers[`x-codex-${key}-window-minutes`]);
+		const resetAt = toNumber(headers[`x-codex-${key}-reset-at`]);
+		return {
+			usedPercent,
+			limitWindowSeconds: windowMinutes === undefined ? undefined : windowMinutes * 60,
+			resetAt,
+		};
+	};
+	const primary = parseWindow("primary");
+	const secondary = parseWindow("secondary");
+	if (!primary && !secondary) return null;
+	const limits: UsageLimit[] = [];
+	if (primary) limits.push(buildUsageLimit({ key: "primary", window: primary, nowMs: now }));
+	if (secondary) limits.push(buildUsageLimit({ key: "secondary", window: secondary, nowMs: now }));
+	return {
+		provider: "openai-codex",
+		fetchedAt: now,
+		limits,
+		metadata: { source: "ratelimit-headers" },
 	};
 }
 
@@ -364,6 +397,7 @@ export const openaiCodexUsageProvider: UsageProvider = {
 	supports(params: UsageFetchParams): boolean {
 		return params.provider === "openai-codex" && params.credential.type === "oauth";
 	},
+	parseRateLimitHeaders: parseCodexRateLimitHeaders,
 	async fetchUsage(params: UsageFetchParams, ctx: UsageFetchContext): Promise<UsageReport | null> {
 		if (params.provider !== "openai-codex") return null;
 		const { credential } = params;
@@ -384,7 +418,7 @@ export const openaiCodexUsageProvider: UsageProvider = {
 
 		const headers: Record<string, string> = {
 			Authorization: `Bearer ${accessToken}`,
-			"User-Agent": "OpenCode-Status-Plugin/1.0",
+			"User-Agent": USER_AGENT,
 		};
 		if (accountId) {
 			headers["ChatGPT-Account-Id"] = accountId;
@@ -410,6 +444,9 @@ export const openaiCodexUsageProvider: UsageProvider = {
 			(isRecord(payload) && typeof payload.plan_type === "string" ? payload.plan_type : undefined);
 
 		const limits: UsageLimit[] = [];
+		const meterStates: Record<string, { allowed?: boolean; limitReached?: boolean }> = {
+			chat: { allowed: parsed?.allowed, limitReached: parsed?.limitReached },
+		};
 		if (parsed?.primary) {
 			limits.push(
 				buildUsageLimit({
@@ -417,6 +454,7 @@ export const openaiCodexUsageProvider: UsageProvider = {
 					window: parsed.primary,
 					accountId,
 					planType,
+					allowed: parsed.allowed,
 					limitReached: parsed.limitReached,
 					nowMs,
 				}),
@@ -429,6 +467,7 @@ export const openaiCodexUsageProvider: UsageProvider = {
 					window: parsed.secondary,
 					accountId,
 					planType,
+					allowed: parsed.allowed,
 					limitReached: parsed.limitReached,
 					nowMs,
 				}),
@@ -437,6 +476,7 @@ export const openaiCodexUsageProvider: UsageProvider = {
 		for (const extra of parsed?.additional ?? []) {
 			const slug = additionalLimitSlug({ limitName: extra.limitName, meteredFeature: extra.meteredFeature });
 			const displayName = additionalDisplayName(slug, extra.limitName);
+			meterStates[slug] = { allowed: extra.allowed, limitReached: extra.limitReached };
 			if (extra.primary) {
 				limits.push(
 					buildAdditionalUsageLimit({
@@ -445,9 +485,10 @@ export const openaiCodexUsageProvider: UsageProvider = {
 						displayName,
 						window: extra.primary,
 						accountId,
-						limitReached: extra.limitReached,
 						limitName: extra.limitName,
 						meteredFeature: extra.meteredFeature,
+						allowed: extra.allowed,
+						limitReached: extra.limitReached,
 						nowMs,
 					}),
 				);
@@ -460,9 +501,10 @@ export const openaiCodexUsageProvider: UsageProvider = {
 						displayName,
 						window: extra.secondary,
 						accountId,
-						limitReached: extra.limitReached,
 						limitName: extra.limitName,
 						meteredFeature: extra.meteredFeature,
+						allowed: extra.allowed,
+						limitReached: extra.limitReached,
 						nowMs,
 					}),
 				);
@@ -470,6 +512,34 @@ export const openaiCodexUsageProvider: UsageProvider = {
 		}
 
 		const resetCredits = parseResetCredits(payload);
+		if (resetCredits && resetCredits.availableCount > 0) {
+			try {
+				const list = await listCodexResetCredits({
+					accessToken,
+					accountId,
+					baseUrl: params.baseUrl,
+					fetch: ctx.fetch,
+					signal: params.signal,
+				});
+				if (list?.credits.length) {
+					resetCredits.credits = list.credits
+						.filter(c => (c.status ?? "available") === "available")
+						.map(c => ({
+							grantedAt: c.grantedAt,
+							expiresAt: c.expiresAt,
+							status: c.status,
+						}));
+				}
+				// Always sync the live count from the detail endpoint — it may report
+				// fewer or zero available credits after expiry/redeem, even when the
+				// /wham/usage payload still has a stale count.
+				if (list) {
+					resetCredits.availableCount = list.availableCount;
+				}
+			} catch (error) {
+				ctx.logger?.warn("Codex reset credits detail fetch failed", { error: String(error) });
+			}
+		}
 		const report: UsageReport = {
 			provider: "openai-codex",
 			fetchedAt: nowMs,
@@ -481,6 +551,7 @@ export const openaiCodexUsageProvider: UsageProvider = {
 				limitReached: parsed?.limitReached,
 				email,
 				accountId,
+				meterStates,
 			},
 			raw: parsed?.raw ?? payload,
 		};
@@ -489,17 +560,53 @@ export const openaiCodexUsageProvider: UsageProvider = {
 	},
 };
 
-const FIVE_HOUR_MS = 5 * 60 * 60 * 1000;
+// A Codex request gates only on the chat windows it actually consumes. A
+// "-spark" model spends the separate Spark meter; every other Codex model spends
+// the 5h/weekly chat windows. Scoping the gating set this way keeps an exhausted
+// Spark meter from blocking a normal chat request (and vice versa), instead of
+// OR-ing every window and meter in the report into one provider-wide block.
+function scopeCodexLimitsForRequest(report: UsageReport, context?: CredentialRankingContext): UsageLimit[] {
+	const isSparkRequest = isCodexSparkRequest(context);
+	return report.limits.filter(limit => {
+		if (limit.id === "openai-codex:primary" || limit.id === "openai-codex:secondary") {
+			return !isSparkRequest;
+		}
+		// Additional metered features have ids of the form `openai-codex:<slug>:<key>`.
+		const slug = limit.id.split(":")[1];
+		return slug === "spark" ? isSparkRequest : false;
+	});
+}
+
+/** True when the requested model spends the separate Spark meter. */
+function isCodexSparkRequest(context?: CredentialRankingContext): boolean {
+	return (context?.modelId ?? "").toLowerCase().includes("-spark");
+}
 
 export const codexRankingStrategy: CredentialRankingStrategy = {
-	findWindowLimits(report) {
+	scopeLimits: scopeCodexLimitsForRequest,
+	// A `usage_limit_reached` from a Spark request means the Spark meter is
+	// spent, not the chat windows, so the two back off under separate scopes;
+	// one shared block would let an exhausted Spark meter stop ordinary chat
+	// requests, and the reverse.
+	blockScope(context) {
+		return isCodexSparkRequest(context) ? "spark" : "chat";
+	},
+	// "shared" is the scope earlier versions persisted under, and it meant "block
+	// everything", so it stays honoured by every request and healed by
+	// reconciliation. Without a context (reconciliation) this is the full set.
+	blockScopes(context) {
+		if (!context) return ["chat", "spark", "shared"];
+		return [isCodexSparkRequest(context) ? "spark" : "chat", "shared"];
+	},
+	findWindowLimits(report, context) {
+		const limits = scopeCodexLimitsForRequest(report, context);
 		const findLimit = (key: "primary" | "secondary"): UsageLimit | undefined => {
-			const direct = report.limits.find(l => l.id === `openai-codex:${key}`);
+			const direct = limits.find(l => l.id === `openai-codex:${key}`);
 			if (direct) return direct;
-			const byId = report.limits.find(l => l.id.toLowerCase().includes(key));
+			const byId = limits.find(l => l.id.toLowerCase().includes(key));
 			if (byId) return byId;
 			const windowId = key === "secondary" ? "7d" : "1h";
-			return report.limits.find(l => l.scope.windowId?.toLowerCase() === windowId);
+			return limits.find(l => l.scope.windowId?.toLowerCase() === windowId);
 		};
 		return { primary: findLimit("primary"), secondary: findLimit("secondary") };
 	},
@@ -512,7 +619,7 @@ export const codexRankingStrategy: CredentialRankingStrategy = {
 			windowId === "5h" ||
 			(typeof durationMs === "number" &&
 				Number.isFinite(durationMs) &&
-				Math.abs(durationMs - FIVE_HOUR_MS) <= 60_000);
+				Math.abs(durationMs - 5 * HOUR_MS) <= 60_000);
 		if (!isFiveHourWindow) return false;
 		const usedFraction = primary.amount.usedFraction;
 		return typeof usedFraction === "number" && Number.isFinite(usedFraction) && usedFraction === 0;

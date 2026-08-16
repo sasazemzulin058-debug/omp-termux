@@ -4,11 +4,75 @@
  * Both providers use the same authorization-code flow shape; only the client
  * credentials, scopes, endpoint constants, and project-discovery logic differ.
  */
+import * as AIError from "../../error";
 import { extractGoogleValidationUrl, formatGoogleValidationRequiredMessage } from "../../utils/google-validation";
 import { OAuthCallbackFlow } from "./callback-server";
 import type { OAuthController, OAuthCredentials } from "./types";
 
+/**
+ * Per-request timeout for the post-callback provisioning phase (token exchange,
+ * user-info, project discovery/onboarding, LRO polling). These Cloud Code
+ * Assist calls normally settle in well under this window; a longer stall means
+ * a hung endpoint that must surface a login error instead of hanging forever.
+ * The callback server's own 300s deadline covers only the browser-callback wait
+ * ({@link OAuthCallbackFlow}) and does not gate this phase.
+ */
+export const OAUTH_REQUEST_TIMEOUT_MS = 30_000;
+
+/** Options for {@link oauthFetch}. */
+export interface OAuthFetchOptions {
+	/** Provider id recorded on any {@link AIError.OAuthError} raised. */
+	provider: string;
+	/** Controller signal; when it aborts, the in-flight request is cancelled. */
+	signal?: AbortSignal;
+	/** Override the per-request timeout (defaults to {@link OAUTH_REQUEST_TIMEOUT_MS}). */
+	timeoutMs?: number;
+}
+
+/**
+ * Throw {@link AIError.LoginCancelledError} when the controller signal has
+ * already aborted. Gates each provisioning round-trip, which the callback-wait
+ * cancellation checks in {@link OAuthCallbackFlow} do not reach.
+ */
+export function throwIfLoginCancelled(signal: AbortSignal | undefined): void {
+	if (signal?.aborted) {
+		throw new AIError.LoginCancelledError(`OAuth login cancelled: ${String(signal.reason)}`);
+	}
+}
+
+/**
+ * `fetch` for the provisioning phase: composes the controller signal with a
+ * per-request timeout so a stalled endpoint aborts instead of hanging login,
+ * and user cancellation aborts the in-flight request. Cancellation surfaces as
+ * {@link AIError.LoginCancelledError}; a timeout surfaces as an
+ * {@link AIError.OAuthError} with `kind: "timeout"`.
+ */
+export async function oauthFetch(
+	url: string,
+	init: RequestInit,
+	{ provider, signal, timeoutMs = OAUTH_REQUEST_TIMEOUT_MS }: OAuthFetchOptions,
+): Promise<Response> {
+	const timeoutSignal = AbortSignal.timeout(timeoutMs);
+	const requestSignal = signal ? AbortSignal.any([signal, timeoutSignal]) : timeoutSignal;
+	try {
+		return await fetch(url, { ...init, signal: requestSignal });
+	} catch (err) {
+		if (signal?.aborted) {
+			throw new AIError.LoginCancelledError(`OAuth login cancelled: ${String(signal.reason)}`);
+		}
+		if (timeoutSignal.aborted) {
+			throw new AIError.OAuthError(`Timed out after ${timeoutMs}ms waiting for ${url}`, {
+				kind: "timeout",
+				provider,
+			});
+		}
+		throw err;
+	}
+}
+
 export interface GoogleOAuthFlowConfig {
+	/** Provider id used in progress/error reporting and per-request fetches. */
+	provider: string;
 	clientId: string;
 	clientSecret: string;
 	authUrl: string;
@@ -16,21 +80,31 @@ export interface GoogleOAuthFlowConfig {
 	scopes: string[];
 	callbackPort: number;
 	callbackPath: string;
-	discoverProject: (accessToken: string, onProgress?: (message: string) => void) => Promise<string>;
+	discoverProject: (
+		accessToken: string,
+		onProgress?: (message: string) => void,
+		signal?: AbortSignal,
+	) => Promise<string>;
 }
 
-async function getUserEmail(accessToken: string): Promise<string | undefined> {
+async function getUserEmail(
+	accessToken: string,
+	provider: string,
+	signal: AbortSignal | undefined,
+): Promise<string | undefined> {
 	try {
-		const response = await fetch("https://www.googleapis.com/oauth2/v1/userinfo?alt=json", {
-			headers: { Authorization: `Bearer ${accessToken}` },
-		});
+		const response = await oauthFetch(
+			"https://www.googleapis.com/oauth2/v1/userinfo?alt=json",
+			{ headers: { Authorization: `Bearer ${accessToken}` } },
+			{ provider, signal },
+		);
 
 		if (response.ok) {
 			const data = (await response.json()) as { email?: string };
 			return data.email;
 		}
 	} catch {
-		// Ignore errors, email is optional
+		// Ignore errors, email is optional; the caller re-checks cancellation.
 	}
 	return undefined;
 }
@@ -63,23 +137,30 @@ export class GoogleOAuthFlow extends OAuthCallbackFlow {
 	}
 
 	async exchangeToken(code: string, _state: string, redirectUri: string): Promise<OAuthCredentials> {
+		const { provider } = this.config;
+		const signal = this.ctrl.signal;
+		throwIfLoginCancelled(signal);
 		this.ctrl.onProgress?.("Exchanging authorization code for tokens...");
 
-		const tokenResponse = await fetch(this.config.tokenUrl, {
-			method: "POST",
-			headers: { "Content-Type": "application/x-www-form-urlencoded" },
-			body: new URLSearchParams({
-				client_id: this.config.clientId,
-				client_secret: this.config.clientSecret,
-				code,
-				grant_type: "authorization_code",
-				redirect_uri: redirectUri,
-			}),
-		});
+		const tokenResponse = await oauthFetch(
+			this.config.tokenUrl,
+			{
+				method: "POST",
+				headers: { "Content-Type": "application/x-www-form-urlencoded" },
+				body: new URLSearchParams({
+					client_id: this.config.clientId,
+					client_secret: this.config.clientSecret,
+					code,
+					grant_type: "authorization_code",
+					redirect_uri: redirectUri,
+				}),
+			},
+			{ provider, signal },
+		);
 
 		if (!tokenResponse.ok) {
 			const error = await tokenResponse.text();
-			throw new Error(`Token exchange failed: ${error}`);
+			throw new AIError.OAuthError(`Token exchange failed: ${error}`, { kind: "token-exchange", provider });
 		}
 
 		const tokenData = (await tokenResponse.json()) as {
@@ -89,18 +170,26 @@ export class GoogleOAuthFlow extends OAuthCallbackFlow {
 		};
 
 		if (!tokenData.refresh_token) {
-			throw new Error("No refresh token received. Please try again.");
+			throw new AIError.OAuthError("No refresh token received. Please try again.", {
+				kind: "validation",
+				provider,
+			});
 		}
 
+		throwIfLoginCancelled(signal);
 		this.ctrl.onProgress?.("Getting user info...");
-		const email = await getUserEmail(tokenData.access_token);
+		const email = await getUserEmail(tokenData.access_token, provider, signal);
+		throwIfLoginCancelled(signal);
 		let projectId: string;
 		try {
-			projectId = await this.config.discoverProject(tokenData.access_token, this.ctrl.onProgress);
+			projectId = await this.config.discoverProject(tokenData.access_token, this.ctrl.onProgress, signal);
 		} catch (err) {
 			const validationUrl = extractGoogleValidationUrl(err instanceof Error ? err.message : String(err));
 			if (!validationUrl) throw err;
-			throw new Error(formatGoogleValidationRequiredMessage(validationUrl, "sign in again", email));
+			throw new AIError.OAuthError(formatGoogleValidationRequiredMessage(validationUrl, "sign in again", email), {
+				kind: "validation",
+				provider,
+			});
 		}
 
 		return {

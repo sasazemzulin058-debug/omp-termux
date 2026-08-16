@@ -27,7 +27,6 @@ export interface DialectToolResult {
 
 export interface DialectRenderOptions {
 	readonly tools?: readonly InbandTool[];
-	readonly example?: boolean;
 }
 
 export interface DialectDefinition {

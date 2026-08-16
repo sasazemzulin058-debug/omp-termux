@@ -563,7 +563,7 @@
 
 .stats-metric-primary-grid {
   display: grid;
-  grid-template-columns: repeat(4, 1fr);
+  grid-template-columns: repeat(5, minmax(0, 1fr));
   gap: 16px;
 }
 
@@ -581,17 +581,17 @@
 
 .stats-metric-secondary-grid {
   display: grid;
-  grid-template-columns: repeat(6, 1fr);
+  grid-template-columns: repeat(8, 1fr);
   gap: 12px;
 }
 
-@media (max-width: 1023px) {
+@media (max-width: 1279px) {
   .stats-metric-secondary-grid {
-    grid-template-columns: repeat(3, 1fr);
+    grid-template-columns: repeat(4, 1fr);
   }
 }
 
-@media (max-width: 600px) {
+@media (max-width: 767px) {
   .stats-metric-secondary-grid {
     grid-template-columns: repeat(2, 1fr);
   }
@@ -1172,6 +1172,7 @@
 .stats-text-primary { color: var(--text); }
 .stats-text-secondary { color: var(--muted); }
 .stats-text-muted { color: var(--dim); }
+.stats-text-warning { color: var(--warning); }
 .stats-text-xs { font-size: 12px; }
 .stats-font-medium { font-weight: 500; }
 .stats-font-semibold { font-weight: 600; }

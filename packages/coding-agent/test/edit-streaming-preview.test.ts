@@ -4,6 +4,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { computeFileHash, formatHashlineHeader, InMemorySnapshotStore } from "@oh-my-pi/hashline";
 import { dropIncompleteLastEdit, EDIT_MODE_STRATEGIES } from "@oh-my-pi/pi-coding-agent/edit";
+import { removeWithRetries } from "@oh-my-pi/pi-utils";
 
 describe("dropIncompleteLastEdit", () => {
 	test("keeps all entries when partialJson is undefined", () => {
@@ -60,13 +61,13 @@ describe("hashline streaming preview (multi-section)", () => {
 	});
 
 	afterEach(async () => {
-		await fs.rm(tmpDir, { recursive: true, force: true });
+		await removeWithRetries(tmpDir);
 	});
 
 	const ctx = (cwd: string) => ({ cwd, signal: new AbortController().signal, snapshots });
 
 	test("keeps section A's preview when section B's header just arrived", async () => {
-		const input = [headerA, "INS.HEAD:", "+// new", headerB].join("\n");
+		const input = [headerA, "PUT <1:", "+// new", headerB].join("\n");
 		const previews = await strategy.computeDiffPreview({ input } as never, ctx(tmpDir) as never);
 		expect(previews).not.toBeNull();
 		expect(previews).toHaveLength(1);
@@ -77,7 +78,7 @@ describe("hashline streaming preview (multi-section)", () => {
 
 	test("ignores parse errors from the trailing in-progress section", async () => {
 		// `7:bad` has invalid payload — the trailing section is still being typed.
-		const input = [headerA, "INS.HEAD:", "+// new", headerB, "7:bad"].join("\n");
+		const input = [headerA, "PUT <1:", "+// new", headerB, "7:bad"].join("\n");
 		const previews = await strategy.computeDiffPreview({ input } as never, ctx(tmpDir) as never);
 		expect(previews).not.toBeNull();
 		expect(previews).toHaveLength(1);
@@ -86,7 +87,7 @@ describe("hashline streaming preview (multi-section)", () => {
 	});
 
 	test("renders both sections once each has at least one valid op", async () => {
-		const input = [headerA, "INS.HEAD:", "+// new a", headerB, "INS.HEAD:", "+// new b"].join("\n");
+		const input = [headerA, "PUT <1:", "+// new a", headerB, "PUT <1:", "+// new b"].join("\n");
 		const previews = await strategy.computeDiffPreview({ input } as never, ctx(tmpDir) as never);
 		expect(previews).toHaveLength(2);
 		expect(previews?.map(p => p.path).sort()).toEqual(["a.ts", "b.ts"]);
@@ -114,7 +115,7 @@ describe("hashline streaming preview (single-op trailing payload)", () => {
 	});
 
 	afterEach(async () => {
-		await fs.rm(tmpDir, { recursive: true, force: true });
+		await removeWithRetries(tmpDir);
 	});
 
 	const ctx = (cwd: string, isStreaming = true) => ({
@@ -128,7 +129,7 @@ describe("hashline streaming preview (single-op trailing payload)", () => {
 		// The `+` payload has no trailing newline — the common single-op case
 		// the trailing-line trim used to erase, collapsing the preview to a
 		// "No changes" error that rendered as a blank box for the whole stream.
-		const input = `${header}\nSWAP 2.=2:\n+const b = 22`;
+		const input = `${header}\nPUT 2-2:\n+const b = 22`;
 		const previews = await strategy.computeDiffPreview({ input } as never, ctx(tmpDir) as never);
 		expect(previews).toHaveLength(1);
 		expect(previews?.[0]?.error).toBeUndefined();
@@ -136,7 +137,7 @@ describe("hashline streaming preview (single-op trailing payload)", () => {
 	});
 
 	test("does not surface stale hash errors while streaming", async () => {
-		const input = "[a.ts#FFFF]\nSWAP 2.=2:\n+const b = 22";
+		const input = "[a.ts#FFFF]\nPUT 2-2:\n+const b = 22";
 		const previews = await strategy.computeDiffPreview({ input } as never, ctx(tmpDir) as never);
 		expect(previews).toHaveLength(1);
 		expect(previews?.[0]?.error).toBeUndefined();
@@ -145,7 +146,7 @@ describe("hashline streaming preview (single-op trailing payload)", () => {
 
 	test("final preview accepts a live content hash even when the snapshot store has no history", async () => {
 		const liveHeader = formatHashlineHeader("a.ts", computeFileHash(text));
-		const input = `${liveHeader}\nSWAP 2.=2:\n+const b = 22\n`;
+		const input = `${liveHeader}\nPUT 2-2:\n+const b = 22\n`;
 		const previews = await strategy.computeDiffPreview(
 			{ input } as never,
 			{
@@ -162,7 +163,7 @@ describe("hashline streaming preview (single-op trailing payload)", () => {
 
 	test("final preview recovers a stale tag from snapshot history", async () => {
 		await Bun.write(file, `// external\n${text}`);
-		const input = `${header}\nSWAP 2.=2:\n+const b = 22\n`;
+		const input = `${header}\nPUT 2-2:\n+const b = 22\n`;
 		const previews = await strategy.computeDiffPreview({ input } as never, ctx(tmpDir, false) as never);
 		expect(previews).toHaveLength(1);
 		expect(previews?.[0]?.error).toBeUndefined();
@@ -170,7 +171,7 @@ describe("hashline streaming preview (single-op trailing payload)", () => {
 	});
 
 	test("surfaces stale hash errors once streaming is complete", async () => {
-		const input = "[a.ts#FFFF]\nSWAP 2.=2:\n+const b = 22\n";
+		const input = "[a.ts#FFFF]\nPUT 2-2:\n+const b = 22\n";
 		const previews = await strategy.computeDiffPreview({ input } as never, ctx(tmpDir, false) as never);
 		expect(previews).toHaveLength(1);
 		expect(previews?.[0]?.error).toContain("not from this session");
@@ -180,7 +181,7 @@ describe("hashline streaming preview (single-op trailing payload)", () => {
 		// Op header typed, payload still empty: applyPartialTo drops the
 		// payload-less op so nothing changes yet. The preview must report null
 		// (preserving any prior frame), never a 'No changes' error that wipes it.
-		const input = `${header}\nSWAP 2.=2:\n`;
+		const input = `${header}\nPUT 2-2:\n`;
 		const previews = await strategy.computeDiffPreview({ input } as never, ctx(tmpDir) as never);
 		expect(previews).toBeNull();
 	});
@@ -211,13 +212,13 @@ describe("hashline streaming preview (monotonic growth)", () => {
 	});
 
 	afterEach(async () => {
-		await fs.rm(tmpDir, { recursive: true, force: true });
+		await removeWithRetries(tmpDir);
 	});
 
 	const ctx = (cwd: string) => ({ cwd, signal: new AbortController().signal, snapshots, isStreaming: true });
 	// Replace the 20-line body (lines 2..21) with the first `n` payload rows.
 	const buildInput = (n: number) =>
-		`${header}\nSWAP 2.=21:\n${payload
+		`${header}\nPUT 2-21:\n${payload
 			.slice(0, n)
 			.map(l => `+${l}`)
 			.join("\n")}`;
@@ -257,7 +258,7 @@ describe("apply_patch streaming preview (trailing partial line)", () => {
 	});
 
 	afterEach(async () => {
-		await fs.rm(tmpDir, { recursive: true, force: true });
+		await removeWithRetries(tmpDir);
 	});
 
 	const ctx = (cwd: string, isStreaming: boolean) => ({
@@ -304,12 +305,12 @@ describe("apply_patch streaming preview (trailing partial line)", () => {
 
 describe("matcherDigest", () => {
 	test("hashline: digests stripped `+` body rows only, never headers or op lines", () => {
-		const input = ["[a.ts#AB12]", "SWAP 1.=2:", "+const x = 1;", "+const y = 2;", "DEL 5", ""].join("\n");
+		const input = ["[a.ts#AB12]", "PUT 1-2:", "+const x = 1;", "+const y = 2;", "CUT 5", ""].join("\n");
 		expect(EDIT_MODE_STRATEGIES.hashline.matcherDigest({ input })).toBe("const x = 1;\nconst y = 2;");
 	});
 
 	test("hashline: grammar-only payload digests to empty, missing input to undefined", () => {
-		expect(EDIT_MODE_STRATEGIES.hashline.matcherDigest({ input: "[a.ts#AB12]\nDEL 3\n" })).toBe("");
+		expect(EDIT_MODE_STRATEGIES.hashline.matcherDigest({ input: "[a.ts#AB12]\nCUT 3\n" })).toBe("");
 		expect(EDIT_MODE_STRATEGIES.hashline.matcherDigest({})).toBeUndefined();
 	});
 
@@ -333,6 +334,11 @@ describe("matcherDigest", () => {
 				edits: [{ diff: " ctx\n-removed line\n+added line\n" }],
 			}),
 		).toBe("added line");
+		expect(
+			EDIT_MODE_STRATEGIES.patch.matcherDigest({
+				edits: [{ op: "delete", diff: " ctx\n-removed line\n" }],
+			}),
+		).toBe("");
 		const createContent = "full file content\nwith no diff markers\n";
 		expect(
 			EDIT_MODE_STRATEGIES.patch.matcherDigest({
@@ -341,15 +347,73 @@ describe("matcherDigest", () => {
 		).toBe(createContent);
 	});
 
-	test("replace: digests new_text of every edit", () => {
+	test("replace: digests new_string", () => {
 		expect(
 			EDIT_MODE_STRATEGIES.replace.matcherDigest({
-				edits: [
-					{ old_text: "a", new_text: "const b = 1;" },
-					{ old_text: "c", new_text: "const d = 2;" },
-				],
+				path: "foo.ts",
+				old_string: "a",
+				new_string: "const b = 1;",
 			}),
-		).toBe("const b = 1;\nconst d = 2;");
+		).toBe("const b = 1;");
 		expect(EDIT_MODE_STRATEGIES.replace.matcherDigest({})).toBeUndefined();
+	});
+});
+
+describe("hashline streaming preview (tag-based path recovery)", () => {
+	const strategy = EDIT_MODE_STRATEGIES.hashline;
+	const text = "const a = 1;\nconst b = 2;\n";
+	let tmpDir: string;
+	let nestedFile: string;
+	let snapshots: InMemorySnapshotStore;
+	let header: string;
+
+	beforeEach(async () => {
+		tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "hashline-recover-"));
+		// The file lives in a nested dir; the model authored a bare `[mod.ts#tag]`
+		// header (basename only), and the snapshot was recorded under the real
+		// nested path when the file was read. cwd has no top-level mod.ts.
+		nestedFile = path.join(tmpDir, "pkg", "src", "mod.ts");
+		await Bun.write(nestedFile, text);
+		snapshots = new InMemorySnapshotStore();
+		header = formatHashlineHeader("mod.ts", snapshots.record(nestedFile, text));
+	});
+
+	afterEach(async () => {
+		await removeWithRetries(tmpDir);
+	});
+
+	const ctx = (cwd: string, isStreaming: boolean) => ({
+		cwd,
+		signal: new AbortController().signal,
+		snapshots,
+		isStreaming,
+	});
+
+	test("streaming: recovers the bare header onto its nested file instead of blanking", async () => {
+		const input = `${header}\nPUT 1-1:\n+const a = 99;`;
+		const previews = await strategy.computeDiffPreview({ input } as never, ctx(tmpDir, true) as never);
+		expect(previews).not.toBeNull();
+		expect(previews).toHaveLength(1);
+		expect(previews?.[0]?.error).toBeUndefined();
+		expect(previews?.[0]?.diff).toContain("const a = 99;");
+	});
+
+	test("args-complete: recovers the bare header for the final Myers diff too", async () => {
+		const input = `${header}\nPUT 1-1:\n+const a = 99;`;
+		const previews = await strategy.computeDiffPreview({ input } as never, ctx(tmpDir, false) as never);
+		expect(previews).not.toBeNull();
+		expect(previews).toHaveLength(1);
+		expect(previews?.[0]?.error).toBeUndefined();
+		expect(previews?.[0]?.diff).toContain("const a = 99;");
+	});
+
+	test("no unique basename+tag match: surfaces the read error instead of recovering", async () => {
+		// A header whose basename matches no retained snapshot path cannot recover;
+		// the preview must report the failure rather than silently pick a file.
+		const orphan = formatHashlineHeader("absent.ts", snapshots.record(nestedFile, text));
+		const input = `${orphan}\nPUT 1-1:\n+const a = 99;`;
+		const previews = await strategy.computeDiffPreview({ input } as never, ctx(tmpDir, false) as never);
+		expect(previews).not.toBeNull();
+		expect(previews?.[0]?.error).toBeTruthy();
 	});
 });

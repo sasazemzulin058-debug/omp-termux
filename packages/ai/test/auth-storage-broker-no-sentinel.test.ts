@@ -9,6 +9,7 @@ import {
 	SqliteAuthCredentialStore,
 } from "@oh-my-pi/pi-ai/auth-storage";
 import * as oauthUtils from "@oh-my-pi/pi-ai/registry/oauth";
+import { removeWithRetries } from "../../utils/src/temp";
 
 describe("AuthStorage broker sentinel refresh", () => {
 	let tempDir = "";
@@ -43,7 +44,7 @@ describe("AuthStorage broker sentinel refresh", () => {
 		store = undefined;
 		authStorage = undefined;
 		if (tempDir) {
-			await fs.rm(tempDir, { recursive: true, force: true });
+			await removeWithRetries(tempDir);
 			tempDir = "";
 		}
 	});
@@ -69,6 +70,7 @@ describe("AuthStorage broker sentinel refresh", () => {
 
 		expect(access).toEqual({
 			accessToken: "broker-access-rotated",
+			credentialId: expect.any(Number),
 			accountId: "broker-account",
 			email: "broker@example.com",
 			projectId: "broker-project",

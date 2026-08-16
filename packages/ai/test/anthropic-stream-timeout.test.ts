@@ -1,7 +1,8 @@
-import { afterEach, describe, expect, it, vi } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
+import * as AIError from "@oh-my-pi/pi-ai/error";
 import { streamAnthropic } from "@oh-my-pi/pi-ai/providers/anthropic";
-import { AnthropicApiError, type AnthropicMessagesClientLike } from "@oh-my-pi/pi-ai/providers/anthropic-client";
-import type { Context, Model } from "@oh-my-pi/pi-ai/types";
+import { AnthropicMessagesClient, type AnthropicMessagesClientLike } from "@oh-my-pi/pi-ai/providers/anthropic-client";
+import type { Context, FetchImpl, Model } from "@oh-my-pi/pi-ai/types";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { waitForDelayOrAbort } from "./helpers";
 
@@ -89,6 +90,36 @@ function createSuccessfulAnthropicEvents(text: string): MockAnthropicEvent[] {
 	];
 }
 
+function createAnthropicSseResponse(text: string): Response {
+	const body = createSuccessfulAnthropicEvents(text)
+		.map(event => `event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`)
+		.join("");
+	return new Response(body, {
+		status: 200,
+		headers: { "content-type": "text/event-stream", "request-id": "req_retry_success" },
+	});
+}
+
+function createResponseClient(responses: Response[]): {
+	calls: { count: number };
+	client: AnthropicMessagesClientLike;
+} {
+	const calls = { count: 0 };
+	const fetch: FetchImpl = async () => {
+		const response = responses[Math.min(calls.count++, responses.length - 1)];
+		if (!response) throw new Error("Expected an Anthropic mock response");
+		return new Response(response.body, {
+			status: response.status,
+			statusText: response.statusText,
+			headers: response.headers,
+		});
+	};
+	return {
+		calls,
+		client: new AnthropicMessagesClient({ apiKey: "sk-test", maxRetries: 0, fetch }),
+	};
+}
+
 function createAnthropicMockStream({
 	signal,
 	connectDelayMs = 0,
@@ -173,7 +204,37 @@ async function resolveAfterMicrotasks<T>(promise: Promise<T>, errorMessage: stri
 	return outcome.value;
 }
 
+const STREAM_TIMEOUT_ENV_KEYS = [
+	"PI_STREAM_IDLE_TIMEOUT_MS",
+	"PI_OPENAI_STREAM_IDLE_TIMEOUT_MS",
+	"PI_STREAM_FIRST_EVENT_TIMEOUT_MS",
+] as const;
+
+type StreamTimeoutEnvKey = (typeof STREAM_TIMEOUT_ENV_KEYS)[number];
+
+const originalStreamTimeoutEnv: Record<StreamTimeoutEnvKey, string | undefined> = {
+	PI_STREAM_IDLE_TIMEOUT_MS: undefined,
+	PI_OPENAI_STREAM_IDLE_TIMEOUT_MS: undefined,
+	PI_STREAM_FIRST_EVENT_TIMEOUT_MS: undefined,
+};
+
+beforeEach(() => {
+	for (const key of STREAM_TIMEOUT_ENV_KEYS) {
+		originalStreamTimeoutEnv[key] = Bun.env[key];
+		delete Bun.env[key];
+	}
+});
+
 afterEach(() => {
+	for (const key of STREAM_TIMEOUT_ENV_KEYS) {
+		const previous = originalStreamTimeoutEnv[key];
+		if (previous === undefined) {
+			delete Bun.env[key];
+		} else {
+			Bun.env[key] = previous;
+		}
+	}
+
 	vi.useRealTimers();
 	vi.restoreAllMocks();
 });
@@ -236,7 +297,7 @@ describe("anthropic first-event timeout retries", () => {
 		expect(requestTimeouts).toEqual([1, 1]);
 		expect(requestMaxRetries).toEqual([0, 0]);
 		expect(result.stopReason).toBe("stop");
-		expect(result.content).toEqual([{ type: "text", text: "retry recovered" }]);
+		expect(JSON.parse(JSON.stringify(result.content))).toEqual([{ type: "text", text: "retry recovered" }]);
 		expect(result.responseId).toBe("msg_retry_success");
 	});
 
@@ -285,7 +346,7 @@ describe("anthropic first-event timeout retries", () => {
 
 		expect(attempt).toBe(2);
 		expect(result.stopReason).toBe("stop");
-		expect(result.content).toEqual([{ type: "text", text: "retry recovered" }]);
+		expect(JSON.parse(JSON.stringify(result.content))).toEqual([{ type: "text", text: "retry recovered" }]);
 	});
 
 	it("does not arm the Anthropic first-event watchdog before the stream connects", async () => {
@@ -313,7 +374,7 @@ describe("anthropic first-event timeout retries", () => {
 		expect(result.stopReason).toBe("stop");
 		expect(seenRequestTimeout).toBe(20);
 		expect(seenRequestMaxRetries).toBe(0);
-		expect(result.content).toEqual([{ type: "text", text: "delayed connect" }]);
+		expect(JSON.parse(JSON.stringify(result.content))).toEqual([{ type: "text", text: "delayed connect" }]);
 	});
 
 	it("times out before the Anthropic stream connects and forwards the budget to the SDK request", async () => {
@@ -418,7 +479,7 @@ describe("anthropic first-event timeout retries", () => {
 		expect(providerRetryWait).not.toHaveBeenCalled();
 		expect(result.stopReason).toBe("error");
 		expect(result.errorMessage).toBe("Anthropic stream stalled while waiting for the next event");
-		expect(result.content).toEqual([
+		expect(JSON.parse(JSON.stringify(result.content))).toEqual([
 			{
 				type: "toolCall",
 				id: "toolu_stalled_todo",
@@ -429,6 +490,114 @@ describe("anthropic first-event timeout retries", () => {
 	});
 });
 
+describe("anthropic model compat stream idle timeout floor", () => {
+	const baseModel = {
+		id: "claude-sonnet-4-5",
+		name: "Claude Sonnet 4.5",
+		api: "anthropic-messages" as const,
+		provider: "anthropic",
+		baseUrl: "https://api.anthropic.com",
+		reasoning: true,
+		input: ["text"],
+		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+		contextWindow: 200_000,
+		maxTokens: 8_192,
+	} satisfies Parameters<typeof buildModel>[0];
+
+	function createStalledAfterFirstEventClient(onIteratorStart?: () => void): {
+		attempt: () => number;
+		client: AnthropicMessagesClientLike;
+	} {
+		let attempt = 0;
+		const create = ((_body: unknown, requestOptions?: { signal?: AbortSignal }) => {
+			attempt += 1;
+			return createAnthropicMockStream({
+				signal: requestOptions?.signal,
+				events: [
+					{
+						type: "message_start",
+						message: {
+							id: "msg_compat_stall",
+							usage: {
+								input_tokens: 12,
+								output_tokens: 0,
+								cache_read_input_tokens: 0,
+								cache_creation_input_tokens: 0,
+							},
+						},
+					},
+				],
+				hangAfterEvents: true,
+				onIteratorStart,
+			}) as never;
+		}) as unknown as AnthropicMessagesClientLike["messages"]["create"];
+		return { attempt: () => attempt, client: { messages: { create } } as AnthropicMessagesClientLike };
+	}
+
+	it("uses model.compat.streamIdleTimeoutMs as the idle floor when no caller option is set", async () => {
+		const compatModel = buildModel({ ...baseModel, compat: { streamIdleTimeoutMs: 50 } });
+		const { attempt, client } = createStalledAfterFirstEventClient();
+
+		const result = await streamAnthropic(compatModel, context, {
+			client,
+			streamFirstEventTimeoutMs: 5_000,
+		}).result();
+
+		expect(attempt()).toBe(1);
+		expect(result.stopReason).toBe("error");
+		expect(result.errorMessage).toBe("Anthropic stream stalled while waiting for the next event");
+	});
+
+	it("disables the idle watchdog when model.compat.streamIdleTimeoutMs is 0", async () => {
+		vi.useFakeTimers();
+		const compatModel = buildModel({ ...baseModel, compat: { streamIdleTimeoutMs: 0 } });
+		const controller = new AbortController();
+		let iteratorStarted = false;
+		const { attempt, client } = createStalledAfterFirstEventClient(() => {
+			iteratorStarted = true;
+		});
+
+		let settled = false;
+		const resultPromise = streamAnthropic(compatModel, context, {
+			client,
+			signal: controller.signal,
+			// First-event watchdog stays out of this case's scope: it would need to
+			// be cleared by the mock's first event, and fake-timer advancement can
+			// outrun the microtask that consumes that event under filtered runs.
+			streamFirstEventTimeoutMs: 0,
+		}).result();
+		void resultPromise.then(
+			() => {
+				settled = true;
+			},
+			() => {
+				settled = true;
+			},
+		);
+
+		await drainMicrotasksUntil(
+			() => iteratorStarted,
+			"Anthropic mock stream did not start for the compat-disabled watchdog test",
+		);
+		// Well past the default 300s idle floor: the disabled watchdog must not
+		// classify the post-first-event silence as a stall.
+		vi.advanceTimersByTime(400_000);
+		await drainMicrotasksUntil(
+			() => vi.getTimerCount() === 0,
+			"Anthropic watchdog timer did not drain after advancing past the idle budget",
+		);
+		expect(settled).toBe(false);
+		expect(attempt()).toBe(1);
+
+		controller.abort();
+		const result = await resolveAfterMicrotasks(
+			resultPromise,
+			"Anthropic compat-disabled stream did not settle after the caller aborted",
+		);
+		expect(result.stopReason).toBe("aborted");
+	});
+});
+
 describe("anthropic provider retry delays", () => {
 	it("waits at least the server-suggested retry-after before retrying a retryable API error", async () => {
 		let attempt = 0;
@@ -436,7 +605,7 @@ describe("anthropic provider retry delays", () => {
 			attempt += 1;
 			if (attempt === 1) {
 				return createRejectedAnthropicRequest(
-					new AnthropicApiError(
+					new AIError.AnthropicApiError(
 						529,
 						'529 {"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}',
 						new Headers({ "retry-after": "30" }),
@@ -457,7 +626,7 @@ describe("anthropic provider retry delays", () => {
 		expect(attempt).toBe(2);
 		expect(providerRetryWait).toHaveBeenCalledWith(30_000, undefined);
 		expect(result.stopReason).toBe("stop");
-		expect(result.content).toEqual([{ type: "text", text: "after backoff" }]);
+		expect(JSON.parse(JSON.stringify(result.content))).toEqual([{ type: "text", text: "after backoff" }]);
 	});
 
 	it("retries transient TLS server errors before surfacing them to the session", async () => {
@@ -484,7 +653,7 @@ describe("anthropic provider retry delays", () => {
 		expect(attempt).toBe(2);
 		expect(providerRetryWait).toHaveBeenCalledTimes(1);
 		expect(result.stopReason).toBe("stop");
-		expect(result.content).toEqual([{ type: "text", text: "recovered from tls retry" }]);
+		expect(JSON.parse(JSON.stringify(result.content))).toEqual([{ type: "text", text: "recovered from tls retry" }]);
 	});
 
 	it("does not retry permanent TLS configuration failures", async () => {
@@ -511,7 +680,7 @@ describe("anthropic provider retry delays", () => {
 			attempt += 1;
 			if (attempt <= 10) {
 				return createRejectedAnthropicRequest(
-					new AnthropicApiError(502, "502 Bad Gateway", new Headers()),
+					new AIError.AnthropicApiError(502, "502 Bad Gateway", new Headers()),
 				) as never;
 			}
 			return createAnthropicMockStream({
@@ -529,6 +698,198 @@ describe("anthropic provider retry delays", () => {
 			500, 1000, 2000, 4000, 8000, 8000, 8000, 8000, 8000, 8000,
 		]);
 		expect(result.stopReason).toBe("stop");
-		expect(result.content).toEqual([{ type: "text", text: "recovered from 502" }]);
+		expect(JSON.parse(JSON.stringify(result.content))).toEqual([{ type: "text", text: "recovered from 502" }]);
+	});
+});
+
+describe("anthropic retry-after cap (maxRetryDelayMs)", () => {
+	it("surfaces the original HTTP error without a second attempt when retry-after exceeds the default 60s cap", async () => {
+		const { calls, client } = createResponseClient([
+			new Response('{"type":"error","error":{"type":"rate_limit_error","message":"Too many requests"}}', {
+				status: 429,
+				headers: { "retry-after": "120" },
+			}),
+		]);
+		const providerRetryWait = vi.fn(async () => {});
+
+		const result = await streamAnthropic(model, context, { client, providerRetryWait }).result();
+
+		expect(calls.count).toBe(1);
+		expect(providerRetryWait).not.toHaveBeenCalled();
+		expect(result.stopReason).toBe("error");
+		expect(result.errorStatus).toBe(429);
+		expect(result.errorMessage).toContain("rate_limit_error");
+	});
+
+	it("surfaces the original HTTP error when retry-after exceeds an explicit cap", async () => {
+		const { calls, client } = createResponseClient([
+			new Response('{"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}', {
+				status: 529,
+				headers: { "retry-after-ms": "10000" },
+			}),
+		]);
+		const providerRetryWait = vi.fn(async () => {});
+
+		const result = await streamAnthropic(model, context, {
+			client,
+			providerRetryWait,
+			maxRetryDelayMs: 5_000,
+		}).result();
+
+		expect(calls.count).toBe(1);
+		expect(providerRetryWait).not.toHaveBeenCalled();
+		expect(result.stopReason).toBe("error");
+		expect(result.errorStatus).toBe(529);
+	});
+
+	it("disables the cap when maxRetryDelayMs is negative", async () => {
+		const { calls, client } = createResponseClient([
+			new Response('{"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}', {
+				status: 529,
+				headers: { "retry-after": "1" },
+			}),
+			createAnthropicSseResponse("after unbounded wait"),
+		]);
+		const providerRetryWait = vi.fn(async () => {});
+
+		const result = await streamAnthropic(model, context, {
+			client,
+			providerRetryWait,
+			maxRetryDelayMs: -1,
+		}).result();
+
+		expect(calls.count).toBe(2);
+		expect(providerRetryWait).toHaveBeenCalledWith(1_000, undefined);
+		expect(result.stopReason).toBe("stop");
+	});
+
+	it("disables the cap when maxRetryDelayMs is 0 and waits the full server hint", async () => {
+		const { calls, client } = createResponseClient([
+			new Response('{"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}', {
+				status: 529,
+				headers: { "retry-after": "120" },
+			}),
+			createAnthropicSseResponse("after long wait"),
+		]);
+		const providerRetryWait = vi.fn(async () => {});
+
+		const result = await streamAnthropic(model, context, {
+			client,
+			providerRetryWait,
+			maxRetryDelayMs: 0,
+		}).result();
+
+		expect(calls.count).toBe(2);
+		expect(providerRetryWait).toHaveBeenCalledWith(120_000, undefined);
+		expect(result.stopReason).toBe("stop");
+	});
+
+	it("retries when the HTTP retry-after hint is under the cap", async () => {
+		const { calls, client } = createResponseClient([
+			new Response('{"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}', {
+				status: 529,
+				headers: { "retry-after": "30" },
+			}),
+			createAnthropicSseResponse("after backoff"),
+		]);
+		const providerRetryWait = vi.fn(async () => {});
+
+		const result = await streamAnthropic(model, context, {
+			client,
+			providerRetryWait,
+			maxRetryDelayMs: 60_000,
+		}).result();
+
+		expect(calls.count).toBe(2);
+		expect(providerRetryWait).toHaveBeenCalledWith(30_000, undefined);
+		expect(result.stopReason).toBe("stop");
+	});
+
+	it("honors retry headers from structurally compatible injected SDK errors", async () => {
+		let attempt = 0;
+		const error = Object.assign(new Error("529 overloaded"), {
+			status: 529,
+			headers: new Headers({ "retry-after-ms": "10000" }),
+		});
+		const create = ((_body: unknown) => {
+			attempt += 1;
+			return createRejectedAnthropicRequest(error) as never;
+		}) as unknown as AnthropicMessagesClientLike["messages"]["create"];
+		const providerRetryWait = vi.fn(async () => {});
+
+		const result = await streamAnthropic(model, context, {
+			client: { messages: { create } },
+			providerRetryWait,
+			maxRetryDelayMs: 5_000,
+		}).result();
+
+		expect(attempt).toBe(1);
+		expect(providerRetryWait).not.toHaveBeenCalled();
+		expect(result.stopReason).toBe("error");
+		expect(result.errorStatus).toBe(529);
+	});
+
+	it("honors record-valued retry headers from injected SDK errors", async () => {
+		let attempt = 0;
+		const error = Object.assign(new Error("529 overloaded"), {
+			status: 529,
+			headers: { "Retry-After-Ms": "10000" },
+		});
+		const create = ((_body: unknown) => {
+			attempt += 1;
+			return createRejectedAnthropicRequest(error) as never;
+		}) as unknown as AnthropicMessagesClientLike["messages"]["create"];
+		const providerRetryWait = vi.fn(async () => {});
+
+		const result = await streamAnthropic(model, context, {
+			client: { messages: { create } },
+			providerRetryWait,
+			maxRetryDelayMs: 5_000,
+		}).result();
+
+		expect(attempt).toBe(1);
+		expect(providerRetryWait).not.toHaveBeenCalled();
+		expect(result.stopReason).toBe("error");
+		expect(result.errorStatus).toBe(529);
+	});
+
+	it("honors nested response retry headers from injected SDK errors", async () => {
+		let attempt = 0;
+		const error = Object.assign(new Error("529 overloaded"), {
+			response: { status: 529, headers: { "retry-after-ms": "10000" } },
+		});
+		const create = ((_body: unknown) => {
+			attempt += 1;
+			return createRejectedAnthropicRequest(error) as never;
+		}) as unknown as AnthropicMessagesClientLike["messages"]["create"];
+		const providerRetryWait = vi.fn(async () => {});
+
+		const result = await streamAnthropic(model, context, {
+			client: { messages: { create } },
+			providerRetryWait,
+			maxRetryDelayMs: 5_000,
+		}).result();
+
+		expect(attempt).toBe(1);
+		expect(providerRetryWait).not.toHaveBeenCalled();
+		expect(result.stopReason).toBe("error");
+		expect(result.errorStatus).toBe(529);
+	});
+
+	it("passes maxRetryDelayMs to internally constructed Anthropic clients", async () => {
+		let calls = 0;
+		const fetch: FetchImpl = async () => {
+			calls += 1;
+			return new Response('{"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}', {
+				status: 429,
+				headers: { "retry-after-ms": "10" },
+			});
+		};
+
+		const result = await streamAnthropic(model, context, { fetch, maxRetryDelayMs: 5 }).result();
+
+		expect(calls).toBe(1);
+		expect(result.stopReason).toBe("error");
+		expect(result.errorStatus).toBe(429);
 	});
 });

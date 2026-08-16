@@ -36,6 +36,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { $ } from "bun";
 import { LEAF_TARGETS } from "../packages/natives/scripts/gen-npm-packages.ts";
+import { compareVersions } from "../packages/utils/src/version.ts";
 import { packages } from "./ci-release-publish.ts";
 
 const repoRoot = path.join(import.meta.dir, "..");
@@ -105,7 +106,12 @@ function parseArgs(argv: readonly string[]): Options {
 				opts.workflow = argv[++i];
 				break;
 			case "--only":
-				opts.only = new Set((argv[++i] ?? "").split(",").map(s => s.trim()).filter(Boolean));
+				opts.only = new Set(
+					(argv[++i] ?? "")
+						.split(",")
+						.map(s => s.trim())
+						.filter(Boolean),
+				);
 				break;
 			default:
 				console.error(`Unknown argument: ${arg}`);
@@ -172,17 +178,6 @@ async function collectTargets(): Promise<{ names: string[]; repoFromManifest: st
 		}
 	}
 	return { names, repoFromManifest };
-}
-
-/** Compare dotted version numbers; true when `version` >= `minimum`. */
-function meetsMinimum(version: string, minimum: string): boolean {
-	const a = version.split(".").map(Number);
-	const b = minimum.split(".").map(Number);
-	for (let i = 0; i < Math.max(a.length, b.length); i++) {
-		const diff = (a[i] ?? 0) - (b[i] ?? 0);
-		if (diff !== 0) return diff > 0;
-	}
-	return true;
 }
 
 /** Run npm with the terminal attached so the web 2FA flow stays interactive. */
@@ -291,7 +286,10 @@ function placeholderReadme(name: string, target: NativeLeafTarget): string {
 async function publishNativeLeafPlaceholder(name: string, target: NativeLeafTarget, repo: string): Promise<boolean> {
 	const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-native-placeholder-"));
 	try {
-		await Bun.write(path.join(tmpDir, "package.json"), `${JSON.stringify(placeholderManifest(name, target, repo), null, "\t")}\n`);
+		await Bun.write(
+			path.join(tmpDir, "package.json"),
+			`${JSON.stringify(placeholderManifest(name, target, repo), null, "\t")}\n`,
+		);
 		await Bun.write(path.join(tmpDir, "README.md"), placeholderReadme(name, target));
 		return (await npmInteractive(["publish", tmpDir, "--access", "public"])) === 0;
 	} finally {
@@ -313,7 +311,7 @@ async function main(): Promise<void> {
 		console.error("Could not determine npm version. Is npm installed and on PATH?");
 		process.exit(1);
 	}
-	if (!meetsMinimum(npmVersion, MIN_NPM)) {
+	if (compareVersions(npmVersion, MIN_NPM) < 0) {
 		console.error(`npm ${MIN_NPM}+ is required for trusted publishing (found ${npmVersion}).`);
 		console.error("Upgrade with: npm install -g npm@latest");
 		process.exit(1);
@@ -336,7 +334,9 @@ async function main(): Promise<void> {
 	const workflow = opts.workflow;
 
 	if (!(await Bun.file(path.join(repoRoot, ".github", "workflows", workflow)).exists())) {
-		console.warn(`Warning: .github/workflows/${workflow} not found; npm will still accept it, but OIDC won't match a non-existent workflow.`);
+		console.warn(
+			`Warning: .github/workflows/${workflow} not found; npm will still accept it, but OIDC won't match a non-existent workflow.`,
+		);
 	}
 
 	if (opts.dryRun) {
@@ -369,7 +369,9 @@ async function main(): Promise<void> {
 	}
 
 	console.log("The first mutating npm operation triggers 2FA. When prompted, complete it and choose");
-	console.log("'skip 2FA for the next 5 minutes' on the npm site so placeholder publishes and trust setup run unattended.\n");
+	console.log(
+		"'skip 2FA for the next 5 minutes' on the npm site so placeholder publishes and trust setup run unattended.\n",
+	);
 
 	const outcomes = new Map<string, Outcome>();
 	let bootstrapped = 0;

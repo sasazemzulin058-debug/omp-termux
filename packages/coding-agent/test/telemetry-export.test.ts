@@ -11,10 +11,16 @@ import { initTelemetryExport, isTelemetryExportEnabled } from "@oh-my-pi/pi-codi
 const OTEL_KEYS = [
 	"OTEL_EXPORTER_OTLP_ENDPOINT",
 	"OTEL_EXPORTER_OTLP_TRACES_ENDPOINT",
+	"OTEL_EXPORTER_OTLP_LOGS_ENDPOINT",
+	"OTEL_EXPORTER_OTLP_METRICS_ENDPOINT",
 	"OTEL_EXPORTER_OTLP_PROTOCOL",
 	"OTEL_EXPORTER_OTLP_TRACES_PROTOCOL",
+	"OTEL_EXPORTER_OTLP_LOGS_PROTOCOL",
+	"OTEL_EXPORTER_OTLP_METRICS_PROTOCOL",
 	"OTEL_SDK_DISABLED",
 	"OTEL_TRACES_EXPORTER",
+	"OTEL_LOGS_EXPORTER",
+	"OTEL_METRICS_EXPORTER",
 ] as const;
 
 let saved: Record<string, string | undefined>;
@@ -45,8 +51,8 @@ describe("initTelemetryExport gating", () => {
 		expect(isTelemetryExportEnabled()).toBe(false);
 	});
 
-	it("stays disabled when OTEL_TRACES_EXPORTER=none even with an endpoint", async () => {
-		process.env.OTEL_EXPORTER_OTLP_ENDPOINT = "http://localhost:4318";
+	it("stays disabled when OTEL_TRACES_EXPORTER=none and only the traces endpoint is set", async () => {
+		process.env.OTEL_EXPORTER_OTLP_TRACES_ENDPOINT = "http://localhost:4318";
 		process.env.OTEL_TRACES_EXPORTER = "none";
 		await initTelemetryExport();
 		expect(isTelemetryExportEnabled()).toBe(false);
@@ -71,21 +77,48 @@ describe("initTelemetryExport gating", () => {
 
 		delete process.env.OTEL_SDK_DISABLED;
 		process.env.OTEL_TRACES_EXPORTER = "otlp,None";
+		process.env.OTEL_LOGS_EXPORTER = "none";
+		process.env.OTEL_METRICS_EXPORTER = "none";
+		await initTelemetryExport();
+		expect(isTelemetryExportEnabled()).toBe(false);
+	});
+
+	it("stays disabled when every signal exporter is set to none", async () => {
+		process.env.OTEL_EXPORTER_OTLP_ENDPOINT = "http://localhost:4318";
+		process.env.OTEL_TRACES_EXPORTER = "none";
+		process.env.OTEL_LOGS_EXPORTER = "none";
+		process.env.OTEL_METRICS_EXPORTER = "none";
 		await initTelemetryExport();
 		expect(isTelemetryExportEnabled()).toBe(false);
 	});
 });
 
-describe("initTelemetryExport export path", () => {
-	it("registers a provider and exports spans to an OTLP/proto receiver", async () => {
-		// Run in a subprocess: initTelemetryExport() registers a process-global
-		// provider, so exercising the positive path in-process would leak that
-		// singleton into every later test. The probe stands up its own loopback
-		// receiver and exits 0 only when a protobuf trace export actually lands.
-		const probe = fileURLToPath(new URL("./otel-export-probe.ts", import.meta.url));
-		const proc = Bun.spawn(["bun", probe], { stdout: "pipe", stderr: "pipe" });
-		const [code, stdout] = await Promise.all([proc.exited, new Response(proc.stdout).text()]);
-		expect(stdout).toContain("PROBE: RECEIVED");
-		expect(code).toBe(0);
+describe("initTelemetryExport signals export path", () => {
+	it("exports every OTLP/proto signal and merged resource attributes", async () => {
+		// Positive initialization registers process-global providers, so each
+		// scenario still runs in its own process. Starting the independent probes
+		// together avoids serially paying three Bun startup and exporter-flush waits.
+		const probes = [
+			["traces", "./otel-export-probe.ts"],
+			["logs and metrics", "./otel-signals-probe.ts"],
+			["resource attributes", "./otel-resource-probe.ts"],
+		] as const;
+		const results = await Promise.all(
+			probes.map(async ([name, relativePath]) => {
+				const probe = fileURLToPath(new URL(relativePath, import.meta.url));
+				const proc = Bun.spawn([process.execPath, probe], {
+					stdin: "ignore",
+					stdout: "ignore",
+					stderr: "ignore",
+				});
+				return [name, await proc.exited] as const;
+			}),
+		);
+
+		expect(Object.fromEntries(results)).toEqual({
+			traces: 0,
+			"logs and metrics": 0,
+			"resource attributes": 0,
+		});
 	}, 20_000);
 });

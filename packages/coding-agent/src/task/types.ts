@@ -1,12 +1,41 @@
-import type { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
+import { type BaseType, type } from "@oh-my-pi/omptype";
 import type { Usage } from "@oh-my-pi/pi-ai";
 import { $env } from "@oh-my-pi/pi-utils";
-import { type } from "arktype";
 import type { AgentSessionEvent } from "../session/agent-session";
+import type { ConfiguredThinkingLevel, TaskEffort } from "../thinking";
 import type { NestedRepoPatch } from "./worktree";
 
 /** Source of an agent definition */
 export type AgentSource = "bundled" | "user" | "project";
+/**
+ * Enforcement policy for a structured subagent output schema.
+ *
+ * `permissive` preserves legacy retry-budget overrides; `strict` turns every
+ * invalid final payload, including an exhausted retry override, into a failed
+ * `schema_violation` result.
+ */
+export type StructuredSubagentSchemaMode = "permissive" | "strict";
+
+/** Origin of the schema selected for a structured subagent invocation. */
+export type StructuredSubagentSchemaSource = "caller" | "agent" | "session" | "none";
+
+/** Final validation state of a structured subagent invocation. */
+export type StructuredSubagentValidationStatus = "valid" | "invalid" | "unavailable";
+
+/**
+ * Parsed structured completion and its schema-validation metadata.
+ *
+ * `data` is present whenever a payload could be assembled or parsed, even when
+ * strict validation rejects it. `error` explains unavailable or invalid
+ * validation without requiring consumers to parse presentation text.
+ */
+export interface StructuredSubagentOutput {
+	source: StructuredSubagentSchemaSource;
+	mode: StructuredSubagentSchemaMode;
+	status: StructuredSubagentValidationStatus;
+	data?: unknown;
+	error?: string;
+}
 
 const parseNumber = (value: string | undefined, defaultValue: number): number => {
 	if (value) {
@@ -75,66 +104,72 @@ export interface SubagentLifecyclePayload {
 }
 
 /** Display cap for a normalized one-line label (roster line, registry `displayName`, prompt field). */
-export const ROLE_LABEL_MAX = 80;
-/** Schema bound on the raw `role` input, before it is label-normalized at every use site. */
-export const ROLE_INPUT_MAX = 256;
-const ROLE_INPUT_SCHEMA = `string <= ${ROLE_INPUT_MAX}` as const;
+export const LABEL_MAX = 80;
+
+// Keep this explicit: ArkType serializes `unknown` as a boolean subschema, which llama.cpp grammars reject.
+const outputSchemaInputSchema = type("object | boolean | string | null");
+// Coarse per-spawn thinking effort; must stay in sync with TASK_EFFORTS in ../thinking.
+const effortRule = '"lo" | "med" | "hi"' as const;
 
 export const taskItemSchema = type({
-	"id?": "string",
-	"description?": "string",
-	"role?": ROLE_INPUT_SCHEMA,
-	assignment: "string",
+	"name?": "string",
+	agent: "string = 'task'",
+	task: "string",
+	"outputSchema?": outputSchemaInputSchema,
+	"schemaMode?": '"permissive" | "strict"',
 	"+": "delete",
 });
 const taskItemSchemaIsolated = type({
-	"id?": "string",
-	"description?": "string",
-	"role?": ROLE_INPUT_SCHEMA,
-	assignment: "string",
+	"name?": "string",
+	agent: "string = 'task'",
+	task: "string",
+	"outputSchema?": outputSchemaInputSchema,
+	"schemaMode?": '"permissive" | "strict"',
 	"isolated?": "boolean",
 	"+": "delete",
 });
 
 /** Single task item. Fields are optional defensively: args stream in token by token. */
 export interface TaskItem {
-	/** Stable agent id; default = generated AdjectiveNoun. */
-	id?: string;
-	/** UI label, not seen by the subagent. */
-	description?: string;
-	/** Specialist role/expertise this subagent embodies; shapes its system-prompt identity and display name. */
-	role?: string;
+	/** Stable agent name; becomes the registry/IRC id. Default = generated AdjectiveNoun. */
+	name?: string;
+	/** Agent type to run this item (e.g. "scout"). Defaults to the spawn policy's default agent. */
+	agent?: string;
 	/** The work; required by the schema. */
-	assignment?: string;
+	task?: string;
+	/** Per-spawn thinking effort: lowest/middle/highest level the resolved model supports. Overrides the agent's default selector (e.g. `auto`). */
+	effort?: TaskEffort;
+	/** Caller-provided output schema; its presence overrides the selected agent's schema. */
+	outputSchema?: unknown;
+	/** Validation behavior for a caller-provided or inherited output schema. */
+	schemaMode?: "permissive" | "strict";
 	/** Run this spawn in an isolated worktree (batch form; flat form carries it top-level). */
 	isolated?: boolean;
 }
 
 export const taskSchema = type({
-	agent: "string",
-	"id?": "string",
-	"description?": "string",
-	"role?": ROLE_INPUT_SCHEMA,
-	assignment: "string",
+	"name?": "string",
+	agent: "string = 'task'",
+	task: "string",
+	"outputSchema?": outputSchemaInputSchema,
+	"schemaMode?": '"permissive" | "strict"',
 	"isolated?": "boolean",
 	"+": "delete",
 });
 const taskSchemaNoIsolation = type({
-	agent: "string",
-	"id?": "string",
-	"description?": "string",
-	"role?": ROLE_INPUT_SCHEMA,
-	assignment: "string",
+	"name?": "string",
+	agent: "string = 'task'",
+	task: "string",
+	"outputSchema?": outputSchemaInputSchema,
+	"schemaMode?": '"permissive" | "strict"',
 	"+": "delete",
 });
 const taskSchemaBatch = type({
-	agent: "string",
 	context: "string",
 	tasks: taskItemSchemaIsolated.array(),
 	"+": "delete",
 });
 const taskSchemaBatchNoIsolation = type({
-	agent: "string",
 	context: "string",
 	tasks: taskItemSchema.array(),
 	"+": "delete",
@@ -144,32 +179,123 @@ const ALL_TASK_SCHEMAS = [taskSchema, taskSchemaNoIsolation, taskSchemaBatch, ta
 type DynamicTaskSchema = (typeof ALL_TASK_SCHEMAS)[number];
 export type TaskSchema = typeof taskSchema;
 /** Active task tool parameter schema for the current isolation / batch flags */
-export type TaskToolSchemaInstance = DynamicTaskSchema;
+export type TaskToolSchemaInstance = DynamicTaskSchema | BaseType;
 
-export function getTaskSchema(options: { isolationEnabled: boolean; batchEnabled: boolean }): DynamicTaskSchema {
-	if (options.batchEnabled) {
-		return options.isolationEnabled ? taskSchemaBatch : taskSchemaBatchNoIsolation;
+const TASK_AGENT_NAME_PATTERN = /^[A-Za-z0-9_-]+$/;
+const taskSchemaCache = new Map<string, BaseType>();
+
+function taskAgentSchemaRule(defaultAgent: string): string {
+	const trimmed = defaultAgent.trim();
+	if (TASK_AGENT_NAME_PATTERN.test(trimmed)) {
+		return `string = '${trimmed}'`;
 	}
-	return options.isolationEnabled ? taskSchema : taskSchemaNoIsolation;
+	return "string";
+}
+
+function createTaskSchema(options: {
+	isolationEnabled: boolean;
+	batchEnabled: boolean;
+	defaultAgent: string;
+	effortEnabled: boolean;
+}): BaseType {
+	const agent = taskAgentSchemaRule(options.defaultAgent);
+	const effortField = options.effortEnabled ? { "effort?": effortRule } : {};
+	if (options.batchEnabled) {
+		if (options.isolationEnabled) {
+			const item = type.raw({
+				"name?": "string",
+				agent,
+				task: "string",
+				...effortField,
+				"outputSchema?": outputSchemaInputSchema,
+				"schemaMode?": '"permissive" | "strict"',
+				"isolated?": "boolean",
+				"+": "delete",
+			});
+			return type.raw({
+				context: "string",
+				tasks: item.array(),
+				"+": "delete",
+			});
+		}
+		const item = type.raw({
+			"name?": "string",
+			agent,
+			task: "string",
+			...effortField,
+			"outputSchema?": outputSchemaInputSchema,
+			"schemaMode?": '"permissive" | "strict"',
+			"+": "delete",
+		});
+		return type.raw({
+			context: "string",
+			tasks: item.array(),
+			"+": "delete",
+		});
+	}
+	if (options.isolationEnabled) {
+		return type.raw({
+			"name?": "string",
+			agent,
+			task: "string",
+			...effortField,
+			"outputSchema?": outputSchemaInputSchema,
+			"schemaMode?": '"permissive" | "strict"',
+			"isolated?": "boolean",
+			"+": "delete",
+		});
+	}
+	return type.raw({
+		"name?": "string",
+		agent,
+		task: "string",
+		...effortField,
+		"outputSchema?": outputSchemaInputSchema,
+		"schemaMode?": '"permissive" | "strict"',
+		"+": "delete",
+	});
+}
+
+/** Build the task wire schema for the current settings and spawn policy. */
+export function getTaskSchema(options: {
+	isolationEnabled: boolean;
+	batchEnabled: boolean;
+	effortEnabled?: boolean;
+	defaultAgent?: string;
+}): TaskToolSchemaInstance {
+	const defaultAgent = options.defaultAgent ?? "task";
+	const effortEnabled = options.effortEnabled ?? false;
+	if (defaultAgent === "task" && !effortEnabled) {
+		if (options.batchEnabled) return options.isolationEnabled ? taskSchemaBatch : taskSchemaBatchNoIsolation;
+		return options.isolationEnabled ? taskSchema : taskSchemaNoIsolation;
+	}
+	const key = `${options.isolationEnabled ? "iso" : "flat"}:${options.batchEnabled ? "batch" : "single"}:${effortEnabled ? "effort" : "default"}:${defaultAgent}`;
+	const cached = taskSchemaCache.get(key);
+	if (cached) return cached;
+	const schema = createTaskSchema({ ...options, effortEnabled, defaultAgent });
+	taskSchemaCache.set(key, schema);
+	return schema;
 }
 
 /**
  * Runtime params union over both wire shapes. The model sees exactly one shape
- * (`{ agent, context, tasks[] }` when `task.batch` is on, `{ agent, ...item }`
+ * (`{ context, tasks[] }` when `task.batch` is on, `{ name?, agent?, task }`
  * otherwise); runtime stays permissive so internal callers and stale
  * transcripts using the flat form keep working under either setting.
  */
 export interface TaskParams {
-	/** Agent type; required. */
+	/** Stable agent name (flat form). */
+	name?: string;
+	/** Agent type to spawn (flat form); omitted values resolve from the session spawn policy. */
 	agent?: string;
-	/** Stable agent id (flat form); default = generated AdjectiveNoun. */
-	id?: string;
-	/** UI label (flat form), not seen by the subagent. */
-	description?: string;
-	/** Specialist role/expertise this subagent embodies; shapes its system-prompt identity and display name. */
-	role?: string;
 	/** The work (flat form). */
-	assignment?: string;
+	task?: string;
+	/** Per-spawn thinking effort (flat form): lowest/middle/highest level the resolved model supports. */
+	effort?: TaskEffort;
+	/** Caller-provided output schema; its presence overrides the selected agent's schema. */
+	outputSchema?: unknown;
+	/** Validation behavior for a caller-provided or inherited output schema. */
+	schemaMode?: "permissive" | "strict";
 	/** Batch form (`task.batch`): one subagent per item. */
 	tasks?: TaskItem[];
 	/** Batch form: shared background prepended to every assignment; required by the batch schema. */
@@ -183,27 +309,17 @@ export interface TaskParams {
  * `displayName`, or a system-prompt field. Collapses every run of whitespace
  * AND control/format characters — including U+0085 NEL, ESC/ANSI, and the
  * zero-width separators that `\s` misses — to a single space, then caps length.
- * So untrusted text (a spawn `role`, a peer activity gist) can neither break the
- * line, inject prompt structure, nor smuggle terminal escapes. Caps at `max`
- * characters (clamped to >= 1; default `ROLE_LABEL_MAX`), appending an ellipsis when truncated.
+ * So untrusted text (a generated task label, a peer activity gist) can neither
+ * break the line, inject prompt structure, nor smuggle terminal escapes. Caps at
+ * `max` characters (clamped to >= 1; default `LABEL_MAX`), appending an ellipsis when truncated.
  */
-export function oneLineLabel(text: string, max = ROLE_LABEL_MAX): string {
+export function oneLineLabel(text: string, max = LABEL_MAX): string {
 	const oneLine = text.replace(/[\p{Cc}\p{Cf}\s]+/gu, " ").trim();
 	const cap = Math.max(1, max);
 	// Count/cut by code point, not UTF-16 code unit, so truncation can never
 	// split an astral character into a lone surrogate.
 	const chars = [...oneLine];
 	return chars.length > cap ? `${chars.slice(0, cap - 1).join("")}…` : oneLine;
-}
-
-/**
- * Display name for a spawned subagent: its tailored `role` (label-normalized)
- * when one is given, else the agent type's name. Empty/whitespace roles fall
- * back to the agent name.
- */
-export function resolveSubagentDisplayName(role: string | undefined, agentName: string): string {
-	const trimmed = role?.trim();
-	return trimmed ? oneLineLabel(trimmed) : agentName;
 }
 
 /**
@@ -247,14 +363,35 @@ export interface AgentDefinition {
 	tools?: string[];
 	spawns?: string[] | "*";
 	model?: string[];
-	thinkingLevel?: ThinkingLevel;
+	thinkingLevel?: ConfiguredThinkingLevel;
 	output?: unknown;
 	blocking?: boolean;
 	autoloadSkills?: string[];
 	/** When `false`, the agent's `read` tool returns verbatim file content instead of structural summaries. */
 	readSummarize?: boolean;
+	/** Prewalk hand-off for the spawned session: `true` = switch to the default prewalk target at the first edit/write, string = custom target model pattern. */
+	prewalk?: boolean | string;
+	/** Advisor for spawned sessions of this agent: `true` = advise with the default advisor-role model, string = advise with that model pattern (optional `:level` suffix). Absent/`false` = no advisor. */
+	advisor?: boolean | string;
 	source: AgentSource;
 	filePath?: string;
+}
+
+/** Details extracted from a subagent `yield` tool call for final-result assembly and task rendering. */
+export interface YieldItem {
+	data?: unknown;
+	status?: "success" | "aborted";
+	error?: string;
+	/** A string label is terminal; a non-empty array of labels is incremental. */
+	type?: string | string[];
+	/** Resolve this yield's payload from the latest durable assistant text instead of `data`. */
+	useLastTurn?: boolean;
+	/**
+	 * Set by the in-tool yield validator when it exhausted its retry budget and
+	 * accepted schema-invalid data anyway. The executor preserves that override
+	 * during post-mortem validation.
+	 */
+	schemaOverridden?: boolean;
 }
 
 /** Progress tracking for a single agent */
@@ -291,8 +428,12 @@ export interface AgentProgress {
 	cost: number;
 	durationMs: number;
 	modelOverride?: string | string[];
+	/** Explicit pre-expansion model role alias selected for this run. */
+	modelRole?: string;
 	/** Resolved model display string in the form `<provider>/<id>`, optionally suffixed with `:<thinkingLevel>` when the level was set explicitly. Undefined when the model could not be resolved. */
 	resolvedModel?: string;
+	/** True when {@link resolvedModel} is the target of an active retry fallback (not the originally configured model). Lets observer-only UIs (collab guests, Agent Hub rows with no live session) flag the fallback and keep the provider. */
+	resolvedModelIsFallback?: boolean;
 	/** Data extracted by registered subprocess tool handlers (keyed by tool name) */
 	extractedToolData?: Record<string, unknown[]>;
 	/**
@@ -343,6 +484,11 @@ export interface SingleResult {
 	output: string;
 	stderr: string;
 	truncated: boolean;
+	/**
+	 * Parsed structured completion and validation metadata, when this invocation
+	 * selected an output schema or strict schema mode.
+	 */
+	structuredOutput?: StructuredSubagentOutput;
 	durationMs: number;
 	/** Cumulative input + output + cacheWrite tokens across all turns. Excludes cacheRead (re-reads cached context every turn, making cumulative sum misleading). */
 	tokens: number;
@@ -353,8 +499,12 @@ export interface SingleResult {
 	/** Model's context window in tokens, when known. */
 	contextWindow?: number;
 	modelOverride?: string | string[];
+	/** Explicit pre-expansion model role alias selected for this run. */
+	modelRole?: string;
 	/** Resolved model display string in the form `<provider>/<id>`, optionally suffixed with `:<thinkingLevel>` when the level was set explicitly. Omitted from tool-result JSON when undefined to keep wire payloads small. */
 	resolvedModel?: string;
+	/** True when {@link resolvedModel} is the target of an active retry fallback. Mirrors {@link AgentProgress.resolvedModelIsFallback} onto the settled result. */
+	resolvedModelIsFallback?: boolean;
 	error?: string;
 	aborted?: boolean;
 	abortReason?: string;
@@ -366,6 +516,12 @@ export interface SingleResult {
 	patchPath?: string;
 	/** Branch name for isolated branch-mode output */
 	branchName?: string;
+	/**
+	 * Baseline commit SHA the task branch was created from. Passed to
+	 * `mergeTaskBranches` so cherry-pick uses the inclusive range
+	 * `branchBaseSha..branchName` and preserves every agent commit's message.
+	 */
+	branchBaseSha?: string;
 	/** Nested repo patches to apply after parent merge */
 	nestedPatches?: NestedRepoPatch[];
 	/** Data extracted by registered subprocess tool handlers (keyed by tool name) */

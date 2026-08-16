@@ -12,7 +12,7 @@ import { isEnoent, logger } from "@oh-my-pi/pi-utils";
 import type { SnapshotResponse } from "./types";
 
 const MAGIC = new Uint8Array([0x4f, 0x4d, 0x50, 0x53]); // "OMPS"
-const VERSION = 1;
+const VERSION = 2;
 const VERSION_OFFSET = MAGIC.byteLength;
 const IV_OFFSET = VERSION_OFFSET + 1;
 const IV_LENGTH = 12;
@@ -118,7 +118,7 @@ async function encryptCachePayload(snapshot: SnapshotResponse, token: string, ur
 			{
 				name: AES_ALGORITHM,
 				iv,
-				additionalData: TEXT_ENCODER.encode(url),
+				additionalData: cacheAdditionalData(url),
 			},
 			key,
 			plaintext,
@@ -156,7 +156,7 @@ async function decryptCachePayload(data: Uint8Array, token: string, url: string)
 				{
 					name: AES_ALGORITHM,
 					iv,
-					additionalData: TEXT_ENCODER.encode(url),
+					additionalData: cacheAdditionalData(url),
 				},
 				key,
 				ciphertext,
@@ -166,6 +166,15 @@ async function decryptCachePayload(data: Uint8Array, token: string, url: string)
 		logger.debug("auth-broker snapshot cache decrypt failed", { error: String(error) });
 		return null;
 	}
+}
+
+function cacheAdditionalData(url: string): Uint8Array<ArrayBuffer> {
+	const urlBytes = TEXT_ENCODER.encode(url);
+	const additionalData = new Uint8Array(IV_OFFSET + urlBytes.byteLength);
+	additionalData.set(MAGIC, 0);
+	additionalData[VERSION_OFFSET] = VERSION;
+	additionalData.set(urlBytes, IV_OFFSET);
+	return additionalData;
 }
 
 async function deriveAesKey(token: string, usages: Array<"encrypt" | "decrypt">): Promise<CryptoKey> {

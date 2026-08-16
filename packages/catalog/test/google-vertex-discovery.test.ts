@@ -44,7 +44,7 @@ const googleVertexModelsDevPayload = {
 } satisfies Record<string, unknown>;
 
 describe("google-vertex model catalog", () => {
-	it("maps the models.dev Vertex catalog instead of the project discovery endpoint", () => {
+	it("maps the stencil.so Vertex catalog instead of the project discovery endpoint", () => {
 		const models = mapModelsDevToModels(googleVertexModelsDevPayload, MODELS_DEV_PROVIDER_DESCRIPTORS).filter(
 			model => model.provider === "google-vertex",
 		);
@@ -85,9 +85,9 @@ describe("google-vertex model catalog", () => {
 		expect(options.fetchDynamicModels).toBeUndefined();
 		expect(options.staticModels).toBeUndefined();
 
-		const result = await resolveProviderModels(options, "offline");
+		const result = await resolveProviderModels({ ...options, cacheDbPath: ":memory:" }, "offline");
 		expect(result.stale).toBe(false);
-		expect(result.models.some(model => model.id === "deepseek-ai/deepseek-v3.2-maas")).toBe(true);
+		expect(result.models.some(model => model.id.endsWith("-maas") && model.api === "openai-completions")).toBe(true);
 		expect(result.models.some(model => model.id === "gemini-3.5-flash")).toBe(true);
 		expect(result.models.some(model => model.id === "gemini-1.5-pro")).toBe(false);
 	});

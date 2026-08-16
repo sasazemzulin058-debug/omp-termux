@@ -8,6 +8,9 @@ import { AuthStorage, SqliteAuthCredentialStore } from "@oh-my-pi/pi-ai/auth-sto
 import * as deepseekModule from "@oh-my-pi/pi-ai/registry/deepseek";
 import * as kagiModule from "@oh-my-pi/pi-ai/registry/kagi";
 import * as ollamaCloudModule from "@oh-my-pi/pi-ai/registry/ollama-cloud";
+import * as aiStream from "@oh-my-pi/pi-ai/stream";
+import { serializeAlibabaTokenPlanCredential } from "@oh-my-pi/pi-catalog/wire/alibaba-token-plan";
+import { removeWithRetries } from "../../utils/src/temp";
 
 function countCredentialRows(dbPath: string, provider: string): number {
 	const db = new Database(dbPath, { readonly: true });
@@ -37,6 +40,9 @@ function countCredentialRowsByDisabledState(dbPath: string, provider: string, di
 }
 
 describe("AuthStorage api-key login upsert", () => {
+	// Most tests neutralize the env leg so ambient shell / ~/.env keys cannot
+	// hide the stored credential behavior under test. Login-persisted API keys
+	// have their own precedence coverage below.
 	let tempDir = "";
 	let dbPath = "";
 	let store: SqliteAuthCredentialStore | null = null;
@@ -44,8 +50,10 @@ describe("AuthStorage api-key login upsert", () => {
 	let loginDeepSeekSpy: Mock<typeof deepseekModule.loginDeepSeek>;
 	let loginKagiSpy: Mock<typeof kagiModule.loginKagi>;
 	let loginOllamaCloudSpy: Mock<typeof ollamaCloudModule.loginOllamaCloud>;
+	let getEnvApiKeySpy: Mock<typeof aiStream.getEnvApiKey>;
 
 	beforeEach(async () => {
+		getEnvApiKeySpy = vi.spyOn(aiStream, "getEnvApiKey").mockReturnValue(undefined);
 		tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "pi-ai-auth-api-key-login-"));
 		dbPath = path.join(tempDir, "agent.db");
 		store = await SqliteAuthCredentialStore.open(dbPath);
@@ -62,7 +70,7 @@ describe("AuthStorage api-key login upsert", () => {
 		authStorage = null;
 		dbPath = "";
 		if (tempDir) {
-			await fs.rm(tempDir, { recursive: true, force: true });
+			await removeWithRetries(tempDir);
 			tempDir = "";
 		}
 	});
@@ -112,11 +120,60 @@ describe("AuthStorage api-key login upsert", () => {
 
 		const credentials = store.listAuthCredentials("kagi");
 		expect(credentials.map(entry => entry.credential)).toEqual([
-			{ type: "api_key", key: "first-kagi-key" },
-			{ type: "api_key", key: "second-kagi-key" },
+			{ type: "api_key", key: "first-kagi-key", source: "login" },
+			{ type: "api_key", key: "second-kagi-key", source: "login" },
 		]);
 		const rotatedKeys = [await authStorage.getApiKey("kagi"), await authStorage.getApiKey("kagi")].sort();
 		expect(rotatedKeys).toEqual(["first-kagi-key", "second-kagi-key"]);
+	});
+
+	it("replaces Token Plan Cookies by API-token identity without collapsing different tokens", () => {
+		if (!store) throw new Error("test setup failed");
+		const firstToken = "sk-sp-first";
+		const secondToken = "sk-sp-second";
+
+		store.upsertAuthCredentialForProvider("alibaba-token-plan", {
+			type: "api_key",
+			key: serializeAlibabaTokenPlanCredential(firstToken, "session=old"),
+			source: "login",
+		});
+		store.upsertAuthCredentialForProvider("alibaba-token-plan", {
+			type: "api_key",
+			key: serializeAlibabaTokenPlanCredential(firstToken, "session=fresh"),
+			source: "login",
+		});
+		store.upsertAuthCredentialForProvider("alibaba-token-plan", {
+			type: "api_key",
+			key: serializeAlibabaTokenPlanCredential(secondToken, "session=second"),
+			source: "login",
+		});
+
+		expect(store.listAuthCredentials("alibaba-token-plan").map(entry => entry.credential)).toEqual([
+			{
+				type: "api_key",
+				key: serializeAlibabaTokenPlanCredential(firstToken, "session=fresh"),
+				source: "login",
+			},
+			{
+				type: "api_key",
+				key: serializeAlibabaTokenPlanCredential(secondToken, "session=second"),
+				source: "login",
+			},
+		]);
+
+		store.upsertAuthCredentialForProvider("alibaba-token-plan", {
+			type: "api_key",
+			key: firstToken,
+			source: "login",
+		});
+		expect(store.listAuthCredentials("alibaba-token-plan").map(entry => entry.credential)).toEqual([
+			{ type: "api_key", key: firstToken, source: "login" },
+			{
+				type: "api_key",
+				key: serializeAlibabaTokenPlanCredential(secondToken, "session=second"),
+				source: "login",
+			},
+		]);
 	});
 
 	it("hard-deletes superseded api-key rows when a different key replaces them", () => {
@@ -181,5 +238,19 @@ describe("AuthStorage api-key login upsert", () => {
 		expect(stored.credential.key).toBe("same-deepseek-key");
 		expect(store.getApiKey("deepseek")).toBe("same-deepseek-key");
 		expect(await authStorage.getApiKey("deepseek", "session-deepseek-relogin")).toBe("same-deepseek-key");
+	});
+
+	it("uses a fresh OpenCode Go login over an existing env fallback", async () => {
+		if (!authStorage) throw new Error("test setup failed");
+
+		getEnvApiKeySpy.mockImplementation(provider => (provider === "opencode-go" ? "old-opencode-key" : undefined));
+
+		await authStorage.login("opencode-go", {
+			onAuth: () => {},
+			onPrompt: async () => "new-opencode-key",
+		});
+
+		expect(await authStorage.getApiKey("opencode-go", "session-opencode-go-login")).toBe("new-opencode-key");
+		expect(await authStorage.peekApiKey("opencode-go")).toBe("new-opencode-key");
 	});
 });

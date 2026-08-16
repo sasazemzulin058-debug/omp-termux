@@ -1,14 +1,14 @@
 /**
  * Custom tool loader - loads TypeScript tool modules using native Bun import.
  *
- * Dependencies (the zod-backed typebox shim and pi-coding-agent) are injected via the
- * CustomToolAPI to avoid import resolution issues with custom tools loaded from user directories.
+ * Dependencies are injected through CustomToolAPI so tools loaded from user
+ * directories do not depend on workspace module resolution.
  */
 import * as path from "node:path";
+import { type } from "@oh-my-pi/omptype";
+import * as zod from "@oh-my-pi/omptype/zod";
 import type { AgentToolResult } from "@oh-my-pi/pi-agent-core";
 import { logger } from "@oh-my-pi/pi-utils";
-import { type } from "arktype";
-import * as zodModule from "zod/v4";
 import { toolCapability } from "../../capability/tool";
 import { type CustomTool, loadCapability } from "../../discovery";
 import type { ExecOptions } from "../../exec/exec";
@@ -17,9 +17,37 @@ import type { HookUIContext } from "../../extensibility/hooks/types";
 import { getAllPluginToolPaths } from "../../extensibility/plugins/loader";
 // Runtime self-reference: dereference this namespace only inside loader functions to keep the index.ts cycle safe.
 import * as PiCodingAgent from "../../index";
-import * as typebox from "../typebox";
-import { createNoOpUIContext, resolvePath } from "../utils";
+import * as typebox from "../legacy-typebox";
+import { createNoOpUIContext, resolvePath, withHostGuard } from "../utils";
 import type { CustomToolAPI, CustomToolFactory, LoadedCustomTool, ToolLoadError } from "./types";
+
+interface LoadToolResult {
+	tools: LoadedCustomTool[];
+	errors: ToolLoadError[];
+}
+
+function isLoadableCustomTool(value: unknown): value is LoadedCustomTool["tool"] {
+	return (
+		typeof value === "object" &&
+		value !== null &&
+		"name" in value &&
+		typeof value.name === "string" &&
+		value.name.length > 0 &&
+		"description" in value &&
+		typeof value.description === "string" &&
+		"parameters" in value &&
+		"execute" in value &&
+		typeof value.execute === "function"
+	);
+}
+
+function invalidToolError(path: string, index: number, source: ToolLoadError["source"]): ToolLoadError {
+	return {
+		path,
+		error: `Tool factory returned invalid tool at index ${index}: expected object with string name, string description, parameters, and execute function`,
+		source,
+	};
+}
 
 /**
  * Load a single tool module using native Bun import.
@@ -29,43 +57,54 @@ async function loadTool(
 	cwd: string,
 	sharedApi: CustomToolAPI,
 	source?: { provider: string; providerName: string; level: "user" | "project" },
-): Promise<{ tools: LoadedCustomTool[] | null; error: ToolLoadError | null }> {
+): Promise<LoadToolResult> {
 	const resolvedPath = resolvePath(toolPath, cwd);
 
 	// Skip declarative tool files (.md, .json) - these are metadata only, not executable modules
 	if (resolvedPath.endsWith(".md") || resolvedPath.endsWith(".json")) {
 		return {
-			tools: null,
-			error: {
-				path: toolPath,
-				error: "Declarative tool files (.md, .json) cannot be loaded as executable modules",
-				source,
-			},
+			tools: [],
+			errors: [
+				{
+					path: toolPath,
+					error: "Declarative tool files (.md, .json) cannot be loaded as executable modules",
+					source,
+				},
+			],
 		};
 	}
 
 	try {
-		const module = await import(resolvedPath);
+		const module = await withHostGuard(() => import(resolvedPath));
 		const factory = (module.default ?? module) as CustomToolFactory;
 
 		if (typeof factory !== "function") {
-			return { tools: null, error: { path: toolPath, error: "Tool must export a default function", source } };
+			return { tools: [], errors: [{ path: toolPath, error: "Tool must export a default function", source }] };
 		}
 
-		const toolResult = await factory(sharedApi);
+		const toolResult: unknown = await withHostGuard(async () => factory(sharedApi));
 		const toolsArray = Array.isArray(toolResult) ? toolResult : [toolResult];
 
-		const loadedTools: LoadedCustomTool[] = toolsArray.map(tool => ({
-			path: toolPath,
-			resolvedPath,
-			tool,
-			source,
-		}));
+		const loadedTools: LoadedCustomTool[] = [];
+		const errors: ToolLoadError[] = [];
+		for (const [index, tool] of toolsArray.entries()) {
+			if (!isLoadableCustomTool(tool)) {
+				errors.push(invalidToolError(toolPath, index, source));
+				continue;
+			}
 
-		return { tools: loadedTools, error: null };
+			loadedTools.push({
+				path: toolPath,
+				resolvedPath,
+				tool,
+				source,
+			});
+		}
+
+		return { tools: loadedTools, errors };
 	} catch (err) {
 		const message = err instanceof Error ? err.message : String(err);
-		return { tools: null, error: { path: toolPath, error: `Failed to load tool: ${message}`, source } };
+		return { tools: [], errors: [{ path: toolPath, error: `Failed to load tool: ${message}`, source }] };
 	}
 }
 
@@ -110,7 +149,7 @@ export class CustomToolLoader {
 			logger,
 			typebox,
 			arktype: type,
-			zod: zodModule,
+			zod,
 			pi,
 			pushPendingAction: action => {
 				if (!pushPendingAction) {
@@ -129,28 +168,22 @@ export class CustomToolLoader {
 
 	async load(pathsWithSources: ToolPathWithSource[]): Promise<void> {
 		for (const { path: toolPath, source } of pathsWithSources) {
-			const { tools: loadedTools, error } = await loadTool(toolPath, this.#sharedApi.cwd, this.#sharedApi, source);
+			const { tools: loadedTools, errors } = await loadTool(toolPath, this.#sharedApi.cwd, this.#sharedApi, source);
+			this.errors.push(...errors);
 
-			if (error) {
-				this.errors.push(error);
-				continue;
-			}
-
-			if (loadedTools) {
-				for (const loadedTool of loadedTools) {
-					// Check for name conflicts
-					if (this.#seenNames.has(loadedTool.tool.name)) {
-						this.errors.push({
-							path: toolPath,
-							error: `Tool name "${loadedTool.tool.name}" conflicts with existing tool`,
-							source,
-						});
-						continue;
-					}
-
-					this.#seenNames.add(loadedTool.tool.name);
-					this.tools.push(loadedTool);
+			for (const loadedTool of loadedTools) {
+				// Check for name conflicts
+				if (this.#seenNames.has(loadedTool.tool.name)) {
+					this.errors.push({
+						path: toolPath,
+						error: `Tool name "${loadedTool.tool.name}" conflicts with existing tool`,
+						source,
+					});
+					continue;
 				}
+
+				this.#seenNames.add(loadedTool.tool.name);
+				this.tools.push(loadedTool);
 			}
 		}
 	}

@@ -1,16 +1,17 @@
+import * as AIError from "../error";
 import * as apiKeyValidation from "./api-key-validation";
 import type { OAuthController, OAuthCredentials, OAuthLoginCallbacks } from "./oauth/types";
 import type { ProviderDefinition } from "./types";
 
 const DEFAULT_AUTH_URL = "https://modelstudio.console.alibabacloud.com/";
-const CHINA_AUTH_URL = "https://dashscope.console.aliyun.com/";
+const CHINA_AUTH_URL = "https://bailian.console.aliyun.com/?tab=model#/api-key";
 const DEFAULT_API_BASE_URL = "https://coding-intl.dashscope.aliyuncs.com/v1";
 const CHINA_API_BASE_URL = "https://coding.dashscope.aliyuncs.com/v1";
 const VALIDATION_MODEL = "qwen3.5-plus";
 
 export async function loginAlibabaCodingPlan(options: OAuthController): Promise<OAuthCredentials> {
 	if (!options.onPrompt) {
-		throw new Error("Alibaba Coding Plan login requires onPrompt callback");
+		throw new AIError.OnPromptRequiredError("Alibaba Coding Plan");
 	}
 
 	// Ask which endpoint to use
@@ -21,7 +22,7 @@ export async function loginAlibabaCodingPlan(options: OAuthController): Promise<
 
 	// Check for abort after endpoint selection (Escape returns "")
 	if (options.signal?.aborted) {
-		throw new Error("Login cancelled");
+		throw new AIError.LoginCancelledError();
 	}
 
 	const choice = endpointChoice.trim();
@@ -31,7 +32,7 @@ export async function loginAlibabaCodingPlan(options: OAuthController): Promise<
 	if (choice === "2") {
 		baseUrl = CHINA_API_BASE_URL;
 		authUrl = CHINA_AUTH_URL;
-		instructions = "Copy your API key from the Alibaba Cloud DashScope console (China mainland)";
+		instructions = "Copy your API key from the Alibaba Cloud Bailian console (China mainland)";
 	} else if (choice === "3") {
 		const customUrl = await options.onPrompt({
 			message: "Enter custom base URL",
@@ -39,7 +40,7 @@ export async function loginAlibabaCodingPlan(options: OAuthController): Promise<
 		});
 		const trimmedUrl = customUrl.trim().replace(/\/+$/, "");
 		if (!trimmedUrl) {
-			throw new Error("Custom URL is required for option 3");
+			throw new AIError.ConfigurationError("Custom URL is required for option 3");
 		}
 		baseUrl = trimmedUrl;
 		authUrl = DEFAULT_AUTH_URL;
@@ -61,22 +62,31 @@ export async function loginAlibabaCodingPlan(options: OAuthController): Promise<
 	});
 
 	if (options.signal?.aborted) {
-		throw new Error("Login cancelled");
+		throw new AIError.LoginCancelledError();
 	}
 
 	const trimmed = apiKey.trim();
 	if (!trimmed) {
-		throw new Error("API key is required");
+		throw new AIError.ApiKeyRequiredError();
 	}
 
 	options.onProgress?.("Validating API key...");
-	await apiKeyValidation.validateOpenAICompatibleApiKey({
-		provider: "Alibaba Coding Plan",
-		apiKey: trimmed,
-		baseUrl,
-		model: VALIDATION_MODEL,
-		signal: options.signal,
-	});
+	if (choice === "3") {
+		await apiKeyValidation.validateApiKeyAgainstModelsEndpoint({
+			provider: "Alibaba Coding Plan",
+			apiKey: trimmed,
+			modelsUrl: `${baseUrl}/models`,
+			signal: options.signal,
+		});
+	} else {
+		await apiKeyValidation.validateOpenAICompatibleApiKey({
+			provider: "Alibaba Coding Plan",
+			apiKey: trimmed,
+			baseUrl,
+			model: VALIDATION_MODEL,
+			signal: options.signal,
+		});
+	}
 
 	return {
 		access: trimmed,

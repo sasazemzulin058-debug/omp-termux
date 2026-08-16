@@ -3,6 +3,8 @@
  *
  * Creates a .tar.gz archive with session data, logs, system info, and optional profiling data.
  */
+
+import type { Dirent } from "node:fs";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import type { WorkProfile } from "@oh-my-pi/pi-natives";
@@ -66,8 +68,8 @@ export interface DebugLogSource {
  *
  * Bundle contents:
  * - session.jsonl: Current session transcript
- * - artifacts/: Session artifacts directory
- * - subagents/: Subagent sessions + artifacts
+ * - artifacts/: Current session's artifacts subtree (recursive), including any
+ *   subagent session transcripts nested under it
  * - logs.txt: Recent log entries
  * - system.json: OS, arch, CPU, memory, versions
  * - env.json: Sanitized environment variables
@@ -105,9 +107,10 @@ export async function createReportBundle(options: ReportBundleOptions): Promise<
 		files.push("config.json");
 	}
 
-	// Recent logs (last 1000 lines)
-	const logPath = getLogPath();
-	const logs = await readLastLines(logPath, 1000);
+	// Recent logs (last 1000 lines) across every same-day process. PID-qualified
+	// filenames mean a report generated from a later invocation must still gather
+	// the crashed process's log, so read all of today's files, not just our own.
+	const logs = await collectSameDayLogs(1000);
 	if (logs) {
 		data["logs.txt"] = logs;
 		files.push("logs.txt");
@@ -129,14 +132,12 @@ export async function createReportBundle(options: ReportBundleOptions): Promise<
 			// Session file might not exist yet
 		}
 
-		// Artifacts directory (same path without .jsonl)
+		// Artifacts subtree (same path without .jsonl). Recursing captures the
+		// current session's nested subagent transcripts and their artifacts while
+		// staying inside this session's own directory — unrelated co-located
+		// sessions in the sessions root are never touched (#8648).
 		const artifactsDir = options.sessionFile.slice(0, -6);
 		await addDirectoryToArchive(data, files, artifactsDir, "artifacts");
-
-		// Look for subagent sessions in the same directory
-		const sessionDir = path.dirname(options.sessionFile);
-		const sessionBasename = path.basename(options.sessionFile, ".jsonl");
-		await addSubagentSessions(data, files, sessionDir, sessionBasename);
 	}
 
 	// CPU profile
@@ -171,68 +172,34 @@ export async function createReportBundle(options: ReportBundleOptions): Promise<
 	return { path: outputPath, files };
 }
 
-/** Add all files from a directory to the archive */
+/** Recursively add every file under a directory to the archive. */
 async function addDirectoryToArchive(
 	data: Record<string, string>,
 	files: string[],
 	dirPath: string,
 	archivePrefix: string,
 ): Promise<void> {
+	let entries: Dirent[];
 	try {
-		const entries = await fs.readdir(dirPath, { withFileTypes: true });
-		for (const entry of entries) {
-			if (!entry.isFile()) continue;
-			const filePath = path.join(dirPath, entry.name);
-			const archivePath = `${archivePrefix}/${entry.name}`;
-			try {
-				const content = await Bun.file(filePath).text();
-				data[archivePath] = content;
-				files.push(archivePath);
-			} catch {
-				// Skip files we can't read
-			}
-		}
+		entries = await fs.readdir(dirPath, { withFileTypes: true });
 	} catch {
 		// Directory doesn't exist
+		return;
 	}
-}
-
-/** Find and add subagent session files */
-async function addSubagentSessions(
-	data: Record<string, string>,
-	files: string[],
-	sessionDir: string,
-	parentBasename: string,
-): Promise<void> {
-	// Subagent sessions are named with task IDs in the same directory
-	// They follow the pattern: {timestamp}_{sessionId}.jsonl
-	// We look for any sessions created after the parent session
-	try {
-		const entries = await fs.readdir(sessionDir, { withFileTypes: true });
-		const sessionFiles = entries
-			.filter(e => e.isFile() && e.name.endsWith(".jsonl") && e.name !== `${parentBasename}.jsonl`)
-			.map(e => e.name);
-
-		// Limit to most recent 10 subagent sessions
-		const sortedFiles = sessionFiles.sort().slice(-10);
-
-		for (const filename of sortedFiles) {
-			const filePath = path.join(sessionDir, filename);
-			const archivePath = `subagents/${filename}`;
-			try {
-				const content = await Bun.file(filePath).text();
-				data[archivePath] = content;
-				files.push(archivePath);
-
-				// Also add artifacts for this subagent session
-				const artifactsDir = filePath.slice(0, -6);
-				await addDirectoryToArchive(data, files, artifactsDir, `subagents/${filename.slice(0, -6)}`);
-			} catch {
-				// Skip files we can't read
-			}
+	for (const entry of entries) {
+		const entryPath = path.join(dirPath, entry.name);
+		const archivePath = `${archivePrefix}/${entry.name}`;
+		if (entry.isDirectory()) {
+			await addDirectoryToArchive(data, files, entryPath, archivePath);
+			continue;
 		}
-	} catch {
-		// Directory doesn't exist
+		if (!entry.isFile()) continue;
+		try {
+			data[archivePath] = await Bun.file(entryPath).text();
+			files.push(archivePath);
+		} catch {
+			// Skip files we can't read
+		}
 	}
 }
 
@@ -241,7 +208,42 @@ export async function getLogText(): Promise<string> {
 	return readLastLines(getLogPath(), MAX_LOG_LINES);
 }
 
-const LOG_FILE_PATTERN = new RegExp(`^${APP_NAME}\\.(\\d{4}-\\d{2}-\\d{2})\\.log$`);
+/**
+ * Concatenate the tail of every same-day process log so a report generated
+ * after a crash still captures the fatal PID's `omp.<date>.<pid>.log`. Files
+ * are ordered oldest-first by mtime and separated by a filename header.
+ */
+async function collectSameDayLogs(linesPerFile: number): Promise<string> {
+	const logsDir = getLogsDir();
+	const today = new Date().toISOString().slice(0, 10);
+	const sameDay: Array<{ name: string; mtimeMs: number }> = [];
+	try {
+		const entries = await fs.readdir(logsDir, { withFileTypes: true });
+		for (const entry of entries) {
+			if (!entry.isFile()) continue;
+			const match = LOG_FILE_PATTERN.exec(entry.name);
+			if (!match || match[1] !== today) continue;
+			try {
+				const stat = await fs.stat(path.join(logsDir, entry.name));
+				sameDay.push({ name: entry.name, mtimeMs: stat.mtimeMs });
+			} catch {
+				// File may have rotated away between readdir and stat.
+			}
+		}
+	} catch {
+		return "";
+	}
+	sameDay.sort((a, b) => a.mtimeMs - b.mtimeMs);
+
+	const chunks: string[] = [];
+	for (const { name } of sameDay) {
+		const text = await readLastLines(path.join(logsDir, name), linesPerFile);
+		if (text) chunks.push(`===== ${name} =====\n${text}`);
+	}
+	return chunks.join("\n\n");
+}
+
+const LOG_FILE_PATTERN = new RegExp(`^${APP_NAME}\\.(\\d{4}-\\d{2}-\\d{2})\\.\\d+\\.log(?:\\.\\d+)?$`);
 
 export async function createDebugLogSource(): Promise<DebugLogSource> {
 	const logsDir = getLogsDir();

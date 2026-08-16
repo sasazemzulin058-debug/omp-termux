@@ -116,6 +116,28 @@ describe("beam recall free functions", () => {
 		expect(new Set(results.map(result => result.tier_label))).toEqual(new Set(["working", "episodic"]));
 	});
 
+	it("keeps global episodic rows visible when a channelId filter is active while still isolating other channels", async () => {
+		const beam = makeBeam();
+		// Global row with channel_id NULL — the shape produced by importFromDict()
+		// and by any cross-channel/global memory. Must survive a channelId filter.
+		insertEpisodic(beam, "em-global", "quokka migration protocol uses base64 snapshots");
+		// Non-global row owned by a different channel/session — must stay hidden.
+		beam.db.run(
+			"INSERT INTO episodic_memory (id, content, source, timestamp, session_id, importance, scope, channel_id, veracity, memory_type) VALUES ('em-other-channel', 'quokka migration protocol for team beta', 'test', ?, 'other-session', 0.5, 'session', 'other-bank', 'unknown', 'general')",
+			["2026-05-30T12:00:00.000Z"],
+		);
+
+		const results = await recall(beam, "quokka migration protocol", 5, {
+			queryTime: "2026-05-30T12:00:00.000Z",
+			channelId: "project-bank",
+			includeWorking: false,
+		});
+
+		const ids = results.map(result => result.id);
+		expect(ids).toContain("em-global");
+		expect(ids).not.toContain("em-other-channel");
+	});
+
 	it("boosts memories near the requested temporal target", async () => {
 		const beam = makeBeam();
 		insertEpisodic(beam, "em-old", "incident alpha resolved by rotating credentials", {
@@ -457,5 +479,53 @@ describe("beam recall free functions", () => {
 		expect(results[0]?.id).toBeTruthy();
 		expect(typeof results[0]?.score).toBe("number");
 		expect(results[0]?.explanation).toBeTruthy();
+	});
+
+	it("clips long content with a trailing ellipsis and reports the original length (issue #4443)", async () => {
+		const beam = makeBeam();
+		const head = "Decision record: the deploy pipeline uses blue-green cutover. ";
+		const body = "Detail sentence about rollout invariants. ".repeat(20);
+		const tail = "CRITICAL-TAIL: rollback requires restoring the previous DNS weight map first.";
+		const full = `${head}${body}${tail}`;
+		insertWorking(beam, "wm-long", full, { importance: 0.9 });
+
+		const results = await recall(beam, "deploy pipeline blue-green cutover", 5);
+		const hit = results.find(row => row.id === "wm-long");
+		expect(hit).toBeDefined();
+		expect(hit?.truncated).toBe(true);
+		expect(hit?.full_length).toBe(full.length);
+		expect(hit?.content.length).toBe(500);
+		expect(hit?.content.endsWith("…")).toBe(true);
+		expect(hit?.content.includes("CRITICAL-TAIL")).toBe(false);
+	});
+
+	it("returns short content untouched with truncated=false", async () => {
+		const beam = makeBeam();
+		const short = "quick working note that fits well under the preview cap";
+		insertWorking(beam, "wm-short", short);
+
+		const results = await recall(beam, "quick working note preview cap", 5);
+		const hit = results.find(row => row.id === "wm-short");
+		expect(hit).toBeDefined();
+		expect(hit?.truncated).toBe(false);
+		expect(hit?.full_length).toBe(short.length);
+		expect(hit?.content).toBe(short);
+	});
+
+	it("honours a caller-supplied contentPreviewChars cap and disables clipping when 0", async () => {
+		const beam = makeBeam();
+		const long = "long ".repeat(400).trim();
+		insertWorking(beam, "wm-cap", long);
+
+		const capped = await recall(beam, "long", 3, { contentPreviewChars: 40 });
+		const cappedHit = capped.find(row => row.id === "wm-cap");
+		expect(cappedHit?.content.length).toBe(40);
+		expect(cappedHit?.content.endsWith("…")).toBe(true);
+		expect(cappedHit?.full_length).toBe(long.length);
+
+		const full = await recall(beam, "long", 3, { contentPreviewChars: 0 });
+		const fullHit = full.find(row => row.id === "wm-cap");
+		expect(fullHit?.content).toBe(long);
+		expect(fullHit?.truncated).toBe(false);
 	});
 });

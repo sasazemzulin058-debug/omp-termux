@@ -21,6 +21,7 @@ function makeLimit(opts: {
 	windowId?: string;
 	tier?: string;
 	accountId?: string;
+	notes?: string[];
 }): UsageReport["limits"][number] {
 	return {
 		id: opts.id,
@@ -36,11 +37,12 @@ function makeLimit(opts: {
 				? { id: opts.windowId ?? opts.id, label: opts.windowId ?? opts.id, durationMs: opts.durationMs }
 				: undefined,
 		amount: { unit: "percent", usedFraction: opts.usedFraction },
+		...(opts.notes ? { notes: opts.notes } : {}),
 	};
 }
 
-function makeReport(provider: string, email: string, limits: UsageReport["limits"]): UsageReport {
-	return { provider, fetchedAt: Date.now(), limits, metadata: { email } };
+function makeReport(provider: string, email: string, limits: UsageReport["limits"], notes?: string[]): UsageReport {
+	return { provider, fetchedAt: Date.now(), limits, ...(notes ? { notes } : {}), metadata: { email } };
 }
 
 describe("buildRedactionMap", () => {
@@ -137,6 +139,88 @@ describe("collectUnreportedAccounts", () => {
 		const unreported = collectUnreportedAccounts(anonymous, accounts);
 		expect(unreported).toEqual([{ provider: "cerebras", type: "api_key" }]);
 	});
+
+	it("attributes org-decisively when either side carries an org", () => {
+		const shared = "shared@example.test";
+		const orgAccounts: UsageAccountIdentity[] = [
+			{ provider: "anthropic", type: "oauth", email: shared, orgId: "org-team" },
+			{ provider: "anthropic", type: "oauth", email: shared, orgId: "org-max" },
+			{ provider: "anthropic", type: "oauth", email: shared },
+		];
+		const teamReport = {
+			...makeReport("anthropic", shared, []),
+			metadata: { email: shared, orgId: "org-team" },
+		};
+		// Only the Team org reported: Max and the org-less legacy row must both
+		// surface as unreported despite the shared email.
+		const unreported = collectUnreportedAccounts([teamReport], orgAccounts);
+		expect(unreported).toEqual([
+			{ provider: "anthropic", type: "oauth", email: shared, orgId: "org-max" },
+			{ provider: "anthropic", type: "oauth", email: shared },
+		]);
+		// Both sides org-less: the email fallback still covers the account.
+		const orglessReport = { ...makeReport("anthropic", shared, []), metadata: { email: shared } };
+		const orglessAccounts: UsageAccountIdentity[] = [{ provider: "anthropic", type: "oauth", email: shared }];
+		expect(collectUnreportedAccounts([orglessReport], orglessAccounts)).toEqual([]);
+	});
+
+	it("gates same-org coverage on the member's own identity", () => {
+		const org = "org-team";
+		const alice: UsageAccountIdentity = {
+			provider: "anthropic",
+			type: "oauth",
+			email: "alice@example.test",
+			accountId: "account-alice",
+			orgId: org,
+		};
+		const bob: UsageAccountIdentity = {
+			provider: "anthropic",
+			type: "oauth",
+			email: "bob@example.test",
+			accountId: "account-bob",
+			orgId: org,
+		};
+		const orgOnly: UsageAccountIdentity = { provider: "anthropic", type: "oauth", orgId: org };
+		const aliceReport = {
+			...makeReport("anthropic", alice.email!, []),
+			metadata: { email: alice.email, accountId: alice.accountId, orgId: org },
+		};
+		// Alice reported, Bob not: the sibling's same-org report must not count
+		// as Bob's coverage — two Team members share the org id but draw on
+		// per-user pools. An org-only account (no base identifiers to gate on)
+		// stays covered by any same-org report.
+		expect(collectUnreportedAccounts([aliceReport], [alice, bob, orgOnly])).toEqual([bob]);
+	});
+
+	it("keeps an org-less account covered by its own org-less report when org-scoped siblings exist", () => {
+		// Live incident shape: legacy org-less rows (pre-org-capture logins)
+		// beside fresh org-scoped logins. Every account fetched successfully —
+		// nobody may be duplicated into a "no usage data" row.
+		const legacy: UsageAccountIdentity = {
+			provider: "anthropic",
+			type: "oauth",
+			email: "legacy@example.test",
+			accountId: "account-legacy",
+		};
+		const fresh: UsageAccountIdentity = {
+			provider: "anthropic",
+			type: "oauth",
+			email: "fresh@example.test",
+			accountId: "account-fresh",
+			orgId: "org-fresh",
+		};
+		const legacyReport = {
+			...makeReport("anthropic", legacy.email!, []),
+			metadata: { email: legacy.email, accountId: legacy.accountId },
+		};
+		const freshReport = {
+			...makeReport("anthropic", fresh.email!, []),
+			metadata: { email: fresh.email, accountId: fresh.accountId, orgId: "org-fresh" },
+		};
+		expect(collectUnreportedAccounts([legacyReport, freshReport], [legacy, fresh])).toEqual([]);
+		// The org-attributed sibling alone still does NOT cover the legacy row.
+		expect(collectUnreportedAccounts([freshReport], [legacy, fresh])).toEqual([legacy]);
+	});
 });
 
 describe("formatUsageBreakdown", () => {
@@ -154,6 +238,23 @@ describe("formatUsageBreakdown", () => {
 		{ provider: "cerebras", type: "api_key" },
 	];
 
+	it("renders used-only USD spend without fabricating quota data", () => {
+		const spendReport = makeReport("anthropic", "spend@example.test", [
+			{
+				id: "anthropic:extra",
+				label: "Claude Extra Usage",
+				scope: { provider: "anthropic", windowId: "extra" },
+				amount: { used: 123.45, unit: "usd" },
+			},
+		]);
+
+		const text = stripVTControlCharacters(formatUsageBreakdown([spendReport], [], Date.now()));
+
+		expect(text).toContain("$123.45 used");
+		expect(text).not.toContain("no data");
+		expect(text).not.toContain("%");
+		expect(text).not.toContain("resets");
+	});
 	it("renders every account: reported ones with limits, credential-only ones as no-data rows", () => {
 		const text = stripVTControlCharacters(formatUsageBreakdown(reports, accounts, Date.now()));
 		expect(text).toContain("dummy.primary@example.test");
@@ -177,12 +278,294 @@ describe("formatUsageBreakdown", () => {
 		expect(text).not.toContain("need:");
 	});
 
+	it("marks sibling provider limits that an account did not report", () => {
+		const providerReports = [
+			makeReport("anthropic", "account-a@example.test", [
+				makeLimit({ id: "Claude 5 Hour", usedFraction: 0.2, durationMs: FIVE_HOURS, windowId: "5 Hour" }),
+				makeLimit({ id: "Claude 7 Day", usedFraction: 0.4, durationMs: SEVEN_DAYS, windowId: "7 Day" }),
+			]),
+			makeReport("anthropic", "account-b@example.test", [
+				makeLimit({ id: "Claude 5 Hour", usedFraction: 0.3, durationMs: FIVE_HOURS, windowId: "5 Hour" }),
+				makeLimit({ id: "Claude 7 Day", usedFraction: 0.5, durationMs: SEVEN_DAYS, windowId: "7 Day" }),
+				makeLimit({
+					id: "Claude 7 Day (Fable)",
+					usedFraction: 0.6,
+					durationMs: SEVEN_DAYS,
+					windowId: "7 Day (Fable)",
+				}),
+			]),
+		];
+
+		const text = stripVTControlCharacters(formatUsageBreakdown(providerReports, [], Date.now()));
+
+		const accountAStart = text.indexOf("account-a@example.test");
+		const accountBStart = text.indexOf("account-b@example.test");
+		expect(text).toContain("Anthropic");
+		expect(accountAStart).toBeGreaterThan(-1);
+		expect(accountBStart).toBeGreaterThan(accountAStart);
+
+		const accountASection = text.slice(accountAStart, accountBStart);
+		const accountBSection = text.slice(accountBStart);
+		expect(accountASection).toContain("Claude 7 Day (Fable)");
+		expect(accountASection).toContain("not reported");
+		expect(accountBSection).toContain("Claude 7 Day (Fable)");
+		expect(accountBSection).toContain("60.0% used");
+	});
+
 	it("redacts account labels through the provided map without leaking the originals", () => {
 		const redaction = buildRedactionMap(["dummy.primary@example.test", "dummy.secondary@example.test"]);
 		const text = stripVTControlCharacters(formatUsageBreakdown(reports, accounts, Date.now(), redaction));
 		expect(text).not.toContain("dummy.primary@example.test");
 		expect(text).not.toContain("dummy.secondary@example.test");
 		for (const mask of redaction.values()) expect(text).toContain(mask);
+	});
+
+	it("renders auto-disabled tombstones with the upstream error_description and hides lifecycle noise", () => {
+		const now = Date.now();
+		const disabled = [
+			{
+				id: 26,
+				provider: "anthropic",
+				type: "oauth" as const,
+				email: "dead@example.test",
+				cause: 'oauth refresh failed: OAuthError: refresh request failed; body={"error": "invalid_grant", "error_description": "Refresh token expired"}',
+				disabledAtMs: now - 4 * HOUR,
+			},
+			{
+				id: 27,
+				provider: "anthropic",
+				type: "oauth" as const,
+				email: "rotated@example.test",
+				cause: "replaced by newer credential",
+			},
+			{
+				id: 28,
+				provider: "fireworks",
+				type: "api_key" as const,
+				cause: "oauth refresh failed: whatever",
+			},
+		];
+		const text = stripVTControlCharacters(formatUsageBreakdown(reports, accounts, now, undefined, disabled));
+		// Auto-disabled OAuth row: identity, age, shortened upstream cause, and the fix.
+		expect(text).toContain("✗ dead@example.test — disabled 4h ago: Refresh token expired (re-login to restore)");
+		// User-driven replacement and api_key tombstones are lifecycle noise, not lost capacity.
+		expect(text).not.toContain("rotated@example.test");
+		expect(text).not.toContain("Fireworks");
+	});
+	it("suppresses auto-disabled tombstones when an active account exists with the same identity", () => {
+		const now = Date.now();
+		const activeAccounts: UsageAccountIdentity[] = [
+			{
+				provider: "anthropic",
+				type: "oauth",
+				email: "active@example.test",
+			},
+		];
+		const disabled = [
+			{
+				id: 30,
+				provider: "anthropic",
+				type: "oauth" as const,
+				email: "active@example.test",
+				cause: "oauth refresh failed: Refresh token expired",
+			},
+			{
+				id: 31,
+				provider: "anthropic",
+				type: "oauth" as const,
+				email: "truly-dead@example.test",
+				cause: "oauth refresh failed: Refresh token expired",
+			},
+		];
+		const text = stripVTControlCharacters(formatUsageBreakdown([], activeAccounts, now, undefined, disabled));
+		expect(text).not.toContain("active@example.test — disabled");
+		expect(text).toContain("✗ truly-dead@example.test — disabled");
+	});
+
+	it("renders a tombstone-only provider section even when no active credential remains", () => {
+		const disabled = [
+			{
+				id: 50,
+				provider: "anthropic",
+				type: "oauth" as const,
+				email: "last@example.test",
+				cause: "oauth refresh failed: token endpoint said no",
+			},
+		];
+		const text = stripVTControlCharacters(formatUsageBreakdown([], [], Date.now(), undefined, disabled));
+		expect(text).toContain("Anthropic");
+		expect(text).toContain("✗ last@example.test — disabled: token endpoint said no (re-login to restore)");
+	});
+
+	it("warns about Anthropic's ~30d grant lifetime only inside the final week", () => {
+		const now = Date.now();
+		const DAY = 24 * HOUR;
+		const withAge = (email: string, ageDays: number): UsageAccountIdentity => ({
+			provider: "anthropic",
+			type: "oauth",
+			email,
+			authorizedAt: now - ageDays * DAY,
+		});
+		const text = stripVTControlCharacters(
+			formatUsageBreakdown(
+				[],
+				[withAge("fresh@example.test", 10), withAge("closing@example.test", 27), withAge("dead@example.test", 31)],
+				now,
+			),
+		);
+		// 10d-old grant: no countdown noise.
+		expect(text).not.toContain("fresh@example.test — re-login");
+		// 27d-old grant: 3 days left.
+		expect(text).toContain("⚠ closing@example.test — re-login within 3d");
+		// Past the lifetime: hard warning.
+		expect(text).toContain("⚠ dead@example.test — grant is past Anthropic's ~30d lifetime; re-login now");
+	});
+
+	it("renders provider-level notes once per provider, not duplicated per account or limit", () => {
+		const providerNote = "Usage data can be delayed by up to five minutes.";
+		const multiAccount = [
+			makeReport(
+				"anthropic",
+				"acct-a@example.test",
+				[makeLimit({ id: "5 Hour", usedFraction: 0.3, durationMs: FIVE_HOURS, windowId: "5h" })],
+				[providerNote],
+			),
+			makeReport(
+				"anthropic",
+				"acct-b@example.test",
+				[makeLimit({ id: "5 Hour", usedFraction: 0.6, durationMs: FIVE_HOURS, windowId: "5h" })],
+				[providerNote],
+			),
+		];
+		const text = stripVTControlCharacters(formatUsageBreakdown(multiAccount, [], Date.now()));
+		// The provider note appears exactly once, not once per account or limit.
+		const occurrences = text.split(providerNote).length - 1;
+		expect(occurrences).toBe(1);
+		// It appears above the per-account rows, not inline with a limit line.
+		const noteIdx = text.indexOf(providerNote);
+		const firstLimitIdx = text.indexOf("5 Hour");
+		expect(noteIdx).toBeLessThan(firstLimitIdx);
+	});
+
+	it("renders Antigravity weekly windows in the usage breakdown", () => {
+		const now = Date.parse("2026-01-01T00:00:00.000Z");
+		const reports: UsageReport[] = [
+			{
+				provider: "google-antigravity",
+				fetchedAt: now,
+				metadata: { email: "ag@example.test", projectId: "proj-1" },
+				limits: [
+					{
+						id: "google-antigravity:google:default:weekly",
+						label: "Usage (Google)",
+						scope: { provider: "google-antigravity", projectId: "proj-1", windowId: "weekly" },
+						window: {
+							id: "weekly",
+							label: "Weekly",
+							durationMs: SEVEN_DAYS,
+							resetsAt: now + SEVEN_DAYS,
+						},
+						amount: { unit: "percent", usedFraction: 0.6, remainingFraction: 0.4 },
+						status: "ok",
+					},
+				],
+			},
+		];
+
+		const text = stripVTControlCharacters(formatUsageBreakdown(reports, [], now));
+		expect(text).toContain("Google Antigravity");
+		expect(text).toContain("Usage (Google) (Weekly)");
+		expect(text).toContain("60.0% used");
+		expect(text).toContain("0.40× quota left");
+	});
+
+	it("renders Cursor request quotas in the usage breakdown", () => {
+		const now = Date.parse("2026-01-01T00:00:00.000Z");
+		const reports: UsageReport[] = [
+			{
+				provider: "cursor",
+				fetchedAt: now,
+				metadata: { email: "cursor@example.test" },
+				limits: [
+					{
+						id: "cursor:requests:gpt-4",
+						label: "gpt-4 requests",
+						scope: { provider: "cursor", windowId: "monthly" },
+						window: {
+							id: "monthly",
+							label: "Monthly",
+							resetsAt: Date.parse("2026-02-01T00:00:00.000Z"),
+						},
+						amount: {
+							unit: "requests",
+							used: 150,
+							limit: 500,
+							remaining: 350,
+							usedFraction: 0.3,
+							remainingFraction: 0.7,
+						},
+						status: "ok",
+					},
+				],
+			},
+		];
+
+		const text = stripVTControlCharacters(formatUsageBreakdown(reports, [], now));
+		expect(text).toContain("Cursor");
+		expect(text).toContain("gpt-4 requests");
+		expect(text).toContain("150 / 500 requests");
+		expect(text).toContain("30.0% used");
+		expect(text).toContain("resets in 31d");
+	});
+	it("renders saved reset expiry state for future and expired credits", () => {
+		const now = Date.parse("2026-01-01T00:00:00.000Z");
+		const reports: UsageReport[] = [
+			{
+				provider: "openai-codex",
+				fetchedAt: now,
+				limits: [],
+				metadata: { email: "future@example.test" },
+				resetCredits: {
+					availableCount: 1,
+					credits: [{ expiresAt: "2026-01-03T00:00:00.000Z" }],
+				},
+			},
+			{
+				provider: "openai-codex",
+				fetchedAt: now,
+				limits: [],
+				metadata: { email: "expired@example.test" },
+				resetCredits: {
+					availableCount: 1,
+					credits: [{ expiresAt: "2025-12-30T00:00:00.000Z" }],
+				},
+			},
+		];
+
+		const text = stripVTControlCharacters(formatUsageBreakdown(reports, [], now));
+		expect(text).toContain("future@example.test");
+		expect(text).toContain("soonest expires in 2d (2026-01-03)");
+		expect(text).toContain("expired@example.test");
+		expect(text).toContain("expired (2025-12-30)");
+	});
+
+	it("deduplicates identical per-limit notes across accounts sharing a window", () => {
+		const note = "Overage requests: 5";
+		const reports = [
+			makeReport("github-copilot", "acct-a@example.test", [
+				makeLimit({ id: "Copilot", usedFraction: 0.8, windowId: "monthly", notes: [note] }),
+			]),
+			makeReport("github-copilot", "acct-b@example.test", [
+				makeLimit({ id: "Copilot", usedFraction: 0.9, windowId: "monthly", notes: [note] }),
+			]),
+		];
+		const text = stripVTControlCharacters(formatUsageBreakdown(reports, [], Date.now()));
+		// CLI renders per-limit, so each account shows its own note — that's
+		// correct for the CLI path (one limit at a time). The dedup contract
+		// lives in the TUI aggregate path (command-controller), tested separately.
+		// Here we assert the CLI doesn't add spurious duplicates beyond one-per-limit.
+		const occurrences = text.split(note).length - 1;
+		expect(occurrences).toBe(2);
 	});
 });
 

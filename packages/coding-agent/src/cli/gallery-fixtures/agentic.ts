@@ -1,7 +1,7 @@
-// Gallery fixtures for the agentic orchestration tools (task, irc, goal, job).
+// Gallery fixtures for the agentic orchestration tools (task, hub, goal).
 import type { Usage } from "@oh-my-pi/pi-ai";
 import type { TaskToolDetails } from "../../task/types";
-import type { IrcDetails } from "../../tools/irc";
+import type { HubDetails } from "../../tools/hub";
 import type { GalleryFixture } from "./types";
 
 /** Message/activity timestamps are offsets from load time so gallery ages stay plausible. */
@@ -142,8 +142,9 @@ export const agenticFixtures: Record<string, GalleryFixture> = {
 		},
 	},
 
-	irc: {
-		label: "IRC",
+	hub_send: {
+		label: "Hub send",
+		renderer: "hub",
 		// Streaming: recipient known; the message body still arriving.
 		streamingArgs: { op: "send", to: "AuthLoader", message: "Are you still touching" },
 		args: {
@@ -178,7 +179,7 @@ export const agenticFixtures: Record<string, GalleryFixture> = {
 					ts: FIXTURE_NOW - 5_000,
 					replyTo: "7181122334455667788",
 				},
-			} satisfies IrcDetails,
+			} satisfies HubDetails,
 		},
 		errorResult: {
 			isError: true,
@@ -193,14 +194,14 @@ export const agenticFixtures: Record<string, GalleryFixture> = {
 				from: "Main",
 				to: "RateLimiter",
 				receipts: [{ to: "RateLimiter", outcome: "failed", error: 'unknown agent "RateLimiter"' }],
-			} satisfies IrcDetails,
+			} satisfies HubDetails,
 		},
 	},
 
-	irc_wait: {
-		label: "IRC (wait)",
+	hub_wait: {
+		label: "Hub wait",
 		customRendered: true,
-		renderer: "irc",
+		renderer: "hub",
 		streamingArgs: { op: "wait", from: "AuthLoader" },
 		args: { op: "wait", from: "AuthLoader", timeoutMs: 60_000 },
 		result: {
@@ -220,14 +221,14 @@ export const agenticFixtures: Record<string, GalleryFixture> = {
 					body: "session-store rename is merged; auth.ts is yours.",
 					ts: FIXTURE_NOW - 30_000,
 				},
-			} satisfies IrcDetails,
+			} satisfies HubDetails,
 		},
 	},
 
-	irc_inbox: {
-		label: "IRC (inbox)",
+	hub_inbox: {
+		label: "Hub inbox",
 		customRendered: true,
-		renderer: "irc",
+		renderer: "hub",
 		streamingArgs: { op: "inbox" },
 		args: { op: "inbox", peek: true },
 		result: {
@@ -261,14 +262,19 @@ export const agenticFixtures: Record<string, GalleryFixture> = {
 						replyTo: "7181122334455667791",
 					},
 				],
-			} satisfies IrcDetails,
+			} satisfies HubDetails,
+		},
+		errorResult: {
+			isError: true,
+			content: [{ type: "text", text: "IRC inbox failed: message store unavailable." }],
+			details: { op: "inbox" } satisfies HubDetails,
 		},
 	},
 
-	irc_list: {
-		label: "IRC (list)",
+	hub_list: {
+		label: "Hub peers",
 		customRendered: true,
-		renderer: "irc",
+		renderer: "hub",
 		streamingArgs: { op: "list" },
 		args: { op: "list" },
 		result: {
@@ -307,7 +313,12 @@ export const agenticFixtures: Record<string, GalleryFixture> = {
 						lastActivity: FIXTURE_NOW - 12 * 60_000,
 					},
 				],
-			} satisfies IrcDetails,
+			} satisfies HubDetails,
+		},
+		errorResult: {
+			isError: true,
+			content: [{ type: "text", text: "IRC list failed: agent hub is unavailable." }],
+			details: { op: "list" } satisfies HubDetails,
 		},
 	},
 
@@ -350,14 +361,32 @@ export const agenticFixtures: Record<string, GalleryFixture> = {
 		},
 	},
 
-	job: {
-		label: "Job",
-		// Streaming: polling a single job id; the second id is still arriving.
-		streamingArgs: { poll: ["job_a1"] },
-		args: { poll: ["job_a1", "job_b2", "job_c3"] },
+	think: {
+		label: "Think",
+		// Streaming: scratchpad thoughts still arriving.
+		streamingArgs: {
+			thoughts: "The retry loop re-reads the config after every failure, which explains the doubled latency.",
+		},
+		args: {
+			thoughts:
+				"The retry loop re-reads the config after every failure, which explains the doubled latency. Cache the parsed config outside the loop, then re-check the invalidation path.",
+		},
+		result: {
+			content: [{ type: "text", text: "------" }],
+			details: { recorded: true },
+		},
+	},
+
+	hub_jobs: {
+		label: "Hub jobs",
+		renderer: "hub",
+		// Streaming: waiting on a single job id; the second id is still arriving.
+		streamingArgs: { op: "wait", ids: ["job_a1"] },
+		args: { op: "wait", ids: ["job_a1", "job_b2", "job_c3"] },
 		result: {
 			content: [{ type: "text", text: "3 jobs settled." }],
 			details: {
+				op: "wait",
 				jobs: [
 					{
 						id: "job_a1",
@@ -388,19 +417,19 @@ export const agenticFixtures: Record<string, GalleryFixture> = {
 		},
 		errorResult: {
 			isError: true,
-			content: [{ type: "text", text: "Job cancelled by user." }],
+			content: [{ type: "text", text: "1 job failed." }],
 			details: {
+				op: "wait",
 				jobs: [
 					{
 						id: "job_d4",
 						type: "task",
-						status: "cancelled",
+						status: "failed",
 						label: "Refactor the session store to Redis",
 						durationMs: 52_300,
-						errorText: "Aborted: superseded by goal re-scope.",
+						errorText: "Subagent exited 1: Redis connection string is missing.",
 					},
 				],
-				cancelled: [{ id: "job_d4", status: "cancelled" }],
 			},
 		},
 	},

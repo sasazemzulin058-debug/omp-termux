@@ -1,6 +1,8 @@
 import { afterEach, describe, expect, it } from "bun:test";
 import type { ApiKeyResolveContext } from "@oh-my-pi/pi-ai";
 import { registerCustomApi, unregisterCustomApis } from "@oh-my-pi/pi-ai";
+import { ProviderHttpError } from "@oh-my-pi/pi-ai/error";
+import { classify } from "@oh-my-pi/pi-ai/error/flags";
 import { streamSimple } from "@oh-my-pi/pi-ai/stream";
 import type { Api, AssistantMessage, Context, Model, SimpleStreamOptions, Usage } from "@oh-my-pi/pi-ai/types";
 import { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream";
@@ -32,8 +34,8 @@ function assistant(content: string[] = []): AssistantMessage {
 	};
 }
 
-function assistantError(errorMessage: string, errorStatus?: number): AssistantMessage {
-	return { ...assistant(), stopReason: "error", errorMessage, errorStatus };
+function assistantError(errorMessage: string, errorStatus?: number, errorId?: number): AssistantMessage {
+	return { ...assistant(), stopReason: "error", errorMessage, errorStatus, errorId };
 }
 
 function authError(): Error & { status: number } {
@@ -114,7 +116,43 @@ describe("streamSimple resolver auth retry", () => {
 			{ lastChance: false, hasError: false },
 			{ lastChance: false, hasError: true },
 		]);
-		expect((contexts[1]?.error as { status?: number }).status).toBe(401);
+		expect(contexts[1]).toBeDefined();
+		expect((contexts[1]!.error as { status?: number }).status).toBe(401);
+	});
+
+	it("surfaces a 403 concurrency cap for transient backoff without rotating credentials", async () => {
+		const keys: unknown[] = [];
+		const contexts: ApiKeyResolveContext[] = [];
+		const concurrencyCap = Object.assign(new Error("concurrent requests limit reached"), { status: 403 });
+		registerCustomApi(
+			API,
+			(_model: Model<Api>, _context: Context, options?: SimpleStreamOptions) => {
+				pushKey(keys, options);
+				const stream = new AssistantMessageEventStream();
+				queueMicrotask(() => stream.fail(concurrencyCap));
+				return stream;
+			},
+			SOURCE_ID,
+		);
+
+		const stream = streamSimple(model(), context, {
+			apiKey: async ctx => {
+				contexts.push(ctx);
+				return ctx.error === undefined ? "old-key" : ctx.lastChance ? "sibling-key" : "refresh-key";
+			},
+		});
+		await expect(
+			(async () => {
+				for await (const _event of stream) {
+					// drain
+				}
+			})(),
+		).rejects.toBe(concurrencyCap);
+
+		expect(keys).toEqual(["old-key"]);
+		expect(contexts.map(ctx => ({ lastChance: ctx.lastChance, hasError: ctx.error !== undefined }))).toEqual([
+			{ lastChance: false, hasError: false },
+		]);
 	});
 
 	it("buffers the start event and retries on a 401 error event before content", async () => {
@@ -153,9 +191,9 @@ describe("streamSimple resolver auth retry", () => {
 
 		expect((await stream.result()).content).toEqual([{ type: "text", text: "ok" }]);
 		expect(keys).toEqual(["old-key", "new-key"]);
-		// The buffered `start` of the failed attempt must not leak — the user
-		// sees exactly one clean start/done pair.
-		expect(eventTypes).toEqual(["start", "done"]);
+		// The failed attempt's buffered start must not leak — the user sees a
+		// single start from the successful attempt, then its healed content.
+		expect(eventTypes).toEqual(["start", "text_start", "text_delta", "text_end", "done"]);
 	});
 
 	it("retries on a 401 carried only via errorStatus", async () => {
@@ -196,6 +234,41 @@ describe("streamSimple resolver auth retry", () => {
 		expect(keys).toEqual(["old-key", "new-key"]);
 	});
 
+	it("retries when Codex reports an invalidated OAuth token without an HTTP status", async () => {
+		const keys: unknown[] = [];
+		registerCustomApi(
+			API,
+			(_model: Model<Api>, _context: Context, options?: SimpleStreamOptions) => {
+				pushKey(keys, options);
+				const stream = new AssistantMessageEventStream();
+				queueMicrotask(() => {
+					if (keys.length === 1) {
+						stream.push({ type: "start", partial: assistant() });
+						stream.push({
+							type: "error",
+							reason: "error",
+							error: assistantError("Encountered invalidated oauth token for user, failing request"),
+						});
+						return;
+					}
+					ok(stream);
+				});
+				return stream;
+			},
+			SOURCE_ID,
+		);
+
+		const stream = streamSimple(model(), context, {
+			apiKey: async ctx => (ctx.error === undefined ? "invalidated-key" : "healthy-key"),
+		});
+		for await (const _event of stream) {
+			// drain
+		}
+
+		expect((await stream.result()).content).toEqual([{ type: "text", text: "ok" }]);
+		expect(keys).toEqual(["invalidated-key", "healthy-key"]);
+	});
+
 	it("does not retry after replay-unsafe content has been emitted", async () => {
 		let retryResolves = 0;
 		const failure = authError();
@@ -206,6 +279,12 @@ describe("streamSimple resolver auth retry", () => {
 				queueMicrotask(() => {
 					stream.push({ type: "start", partial: assistant() });
 					stream.push({ type: "text_start", contentIndex: 0, partial: assistant([""]) });
+					stream.push({
+						type: "text_delta",
+						contentIndex: 0,
+						delta: "partial",
+						partial: assistant(["partial"]),
+					});
 					stream.fail(failure);
 				});
 				return stream;
@@ -350,6 +429,171 @@ describe("streamSimple resolver auth retry", () => {
 		expect(keys).toEqual(["old-key", "new-key"]);
 	});
 
+	it("rotates on a machine-code-only usage error event before content", async () => {
+		const keys: unknown[] = [];
+		const contexts: ApiKeyResolveContext[] = [];
+		const errorId = classify(new ProviderHttpError("Generic provider failure", 429, { code: "insufficient_quota" }));
+		registerCustomApi(
+			API,
+			(_model: Model<Api>, _context: Context, options?: SimpleStreamOptions) => {
+				pushKey(keys, options);
+				const stream = new AssistantMessageEventStream();
+				queueMicrotask(() => {
+					if (keys.length === 1) {
+						stream.push({ type: "start", partial: assistant() });
+						stream.push({
+							type: "error",
+							reason: "error",
+							error: assistantError("Generic provider failure", 429, errorId),
+						});
+						return;
+					}
+					ok(stream);
+				});
+				return stream;
+			},
+			SOURCE_ID,
+		);
+
+		const stream = streamSimple(model(), context, {
+			apiKey: async ctx => {
+				contexts.push(ctx);
+				return ctx.error === undefined ? "old-key" : "new-key";
+			},
+		});
+		for await (const _event of stream) {
+			// drain
+		}
+
+		expect((await stream.result()).content).toEqual([{ type: "text", text: "ok" }]);
+		expect(keys).toEqual(["old-key", "new-key"]);
+		expect(contexts.map(ctx => ctx.lastChance)).toEqual([false, true]);
+	});
+
+	it("rotates through every distinct sibling while usage failures remain replay-safe", async () => {
+		const keys: unknown[] = [];
+		const eventTypes: string[] = [];
+		const contexts: ApiKeyResolveContext[] = [];
+		const pool = ["credential-A", "credential-B", "credential-C", "credential-D"];
+		let nextSibling = 0;
+		registerCustomApi(
+			API,
+			(_model: Model<Api>, _context: Context, options?: SimpleStreamOptions) => {
+				pushKey(keys, options);
+				const stream = new AssistantMessageEventStream();
+				queueMicrotask(() => {
+					if (options?.apiKey === "credential-D") {
+						ok(stream);
+						return;
+					}
+					stream.push({ type: "start", partial: assistant() });
+					stream.push({
+						type: "error",
+						reason: "error",
+						error: assistantError("You have hit your ChatGPT usage limit (pro plan). Try again later.", 429),
+					});
+				});
+				return stream;
+			},
+			SOURCE_ID,
+		);
+
+		const stream = streamSimple(model(), context, {
+			apiKey: async ctx => {
+				contexts.push(ctx);
+				return ctx.error === undefined ? pool[0] : pool[++nextSibling];
+			},
+		});
+		for await (const event of stream) {
+			eventTypes.push(event.type);
+		}
+
+		expect((await stream.result()).content).toEqual([{ type: "text", text: "ok" }]);
+		expect(keys).toEqual(pool);
+		expect(contexts.map(ctx => ctx.lastChance)).toEqual([false, true, true, true]);
+		expect(eventTypes).toEqual(["start", "text_start", "text_delta", "text_end", "done"]);
+	});
+
+	it("rotates through every distinct sibling on Codex cyber-policy denials", async () => {
+		const keys: unknown[] = [];
+		const eventTypes: string[] = [];
+		const contexts: ApiKeyResolveContext[] = [];
+		const pool = ["credential-A", "credential-B", "credential-C", "credential-D"];
+		const errorMessage =
+			"Codex error event: This content was flagged for possible cybersecurity risk. Join Trusted Access for Cyber. (code=cyber_policy)";
+		const errorId = classify(new Error(errorMessage), "openai-codex-responses");
+		let nextSibling = 0;
+		registerCustomApi(
+			API,
+			(_model: Model<Api>, _context: Context, options?: SimpleStreamOptions) => {
+				pushKey(keys, options);
+				const stream = new AssistantMessageEventStream();
+				queueMicrotask(() => {
+					if (options?.apiKey === "credential-D") {
+						ok(stream);
+						return;
+					}
+					stream.push({ type: "start", partial: assistant() });
+					stream.push({
+						type: "error",
+						reason: "error",
+						error: assistantError(errorMessage, undefined, errorId),
+					});
+				});
+				return stream;
+			},
+			SOURCE_ID,
+		);
+
+		const stream = streamSimple(model(), context, {
+			apiKey: async ctx => {
+				contexts.push(ctx);
+				return ctx.error === undefined ? pool[0] : pool[++nextSibling];
+			},
+		});
+		for await (const event of stream) {
+			eventTypes.push(event.type);
+		}
+
+		expect((await stream.result()).content).toEqual([{ type: "text", text: "ok" }]);
+		expect(keys).toEqual(pool);
+		expect(contexts.map(ctx => ctx.lastChance)).toEqual([false, true, true, true]);
+		expect(eventTypes).toEqual(["start", "text_start", "text_delta", "text_end", "done"]);
+	});
+
+	it("stops replay-safe usage rotation when the resolver cycles to an attempted credential", async () => {
+		const keys: unknown[] = [];
+		const resolved = ["credential-A", "credential-B", "credential-A"];
+		let resolveIndex = 0;
+		registerCustomApi(
+			API,
+			(_model: Model<Api>, _context: Context, options?: SimpleStreamOptions) => {
+				pushKey(keys, options);
+				const stream = new AssistantMessageEventStream();
+				queueMicrotask(() => {
+					stream.push({ type: "start", partial: assistant() });
+					stream.push({
+						type: "error",
+						reason: "error",
+						error: assistantError("You have hit your ChatGPT usage limit (pro plan). Try again later.", 429),
+					});
+				});
+				return stream;
+			},
+			SOURCE_ID,
+		);
+
+		const stream = streamSimple(model(), context, {
+			apiKey: async () => resolved[resolveIndex++],
+		});
+		for await (const _event of stream) {
+			// drain
+		}
+
+		expect((await stream.result()).stopReason).toBe("error");
+		expect(keys).toEqual(["credential-A", "credential-B"]);
+	});
+
 	it("rotates before emitting content for Codex quota payloads", async () => {
 		const payloads: Array<{ message: string; status?: number }> = [
 			{ message: "429", status: 429 },
@@ -398,8 +642,8 @@ describe("streamSimple resolver auth retry", () => {
 
 			expect((await stream.result()).content).toEqual([{ type: "text", text: "ok" }]);
 			expect(keys).toEqual(["credential-A", "credential-B"]);
-			expect(eventTypes).toEqual(["start", "done"]);
-			expect(retryContexts.map(ctx => ctx.lastChance)).toEqual([false, true]);
+			expect(eventTypes).toEqual(["start", "text_start", "text_delta", "text_end", "done"]);
+			expect(retryContexts.map(ctx => ctx.lastChance)).toEqual([true]);
 		}
 	});
 
@@ -495,10 +739,10 @@ describe("streamSimple resolver auth retry", () => {
 		expect((await stream.result()).content).toEqual([{ type: "text", text: "ok" }]);
 		expect(keys).toEqual(["old-key", "next-key"]);
 		expect(retryContexts.map(ctx => ({ lastChance: ctx.lastChance, hasError: ctx.error !== undefined }))).toEqual([
-			{ lastChance: false, hasError: true },
 			{ lastChance: true, hasError: true },
 		]);
-		expect((retryContexts[1]?.error as Error).message).toContain("Resource exhausted");
+		expect(retryContexts[0]).toBeDefined();
+		expect((retryContexts[0]!.error as Error).message).toContain("Resource exhausted");
 	});
 
 	it("surfaces the original error when the resolver declines every retry", async () => {

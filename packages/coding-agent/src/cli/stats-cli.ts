@@ -6,7 +6,7 @@
 
 import { truncateToWidth } from "@oh-my-pi/pi-tui/utils";
 import { APP_NAME, formatDuration, formatNumber, formatPercent } from "@oh-my-pi/pi-utils";
-import chalk from "chalk";
+import chalk from "@oh-my-pi/pi-utils/chalk";
 import { openPath } from "../utils/open";
 
 /**
@@ -136,11 +136,11 @@ export async function runStatsCommand(cmd: StatsCommandArgs): Promise<void> {
 	}
 
 	// Start the dashboard server
-	const { port } = await startServer(cmd.port);
-	console.log(chalk.green(`Dashboard available at: http://localhost:${port}`));
+	const { hostname, port } = await startServer(cmd.port);
+	const url = `http://${hostname}:${port}`;
+	console.log(chalk.green(`Dashboard available at: ${url}`));
 
 	// Open browser
-	const url = `http://localhost:${port}`;
 	openPath(url);
 
 	console.log("Press Ctrl+C to stop\n");
@@ -170,6 +170,7 @@ async function printStatsSummary(): Promise<void> {
 	console.log(`  Input Tokens: ${formatNumber(overall.totalInputTokens)}`);
 	console.log(`  Output Tokens: ${formatNumber(overall.totalOutputTokens)}`);
 	console.log(`  Cache Rate: ${formatPercent(overall.cacheRate)}`);
+	console.log(`  Cache Savings: ${formatPercent(overall.cacheSavings)}`);
 	console.log(`  Total Cost: ${formatCost(overall.totalCost)}`);
 	console.log(`  Premium Requests: ${formatNumber(normalizePremiumRequests(overall.totalPremiumRequests ?? 0))}`);
 	console.log(`  Avg Duration: ${overall.avgDuration !== null ? formatDuration(overall.avgDuration) : "-"}`);
@@ -182,7 +183,7 @@ async function printStatsSummary(): Promise<void> {
 		console.log(chalk.bold("\nBy Model:"));
 		for (const m of byModel.slice(0, 10)) {
 			console.log(
-				`  ${m.model}: ${formatNumber(m.totalRequests)} reqs, ${formatCost(m.totalCost)}, ${formatPercent(m.cacheRate)} cache`,
+				`  ${m.model}: ${formatNumber(m.totalRequests)} reqs, ${formatCost(m.totalCost)}, ${formatPercent(m.cacheRate)} cache rate, ${formatPercent(m.cacheSavings)} cache savings`,
 			);
 		}
 	}

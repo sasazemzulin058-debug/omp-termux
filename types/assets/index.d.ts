@@ -28,6 +28,16 @@ declare module "*.lark" {
 	export default content;
 }
 
+declare module "*.sh" {
+	const content: string;
+	export default content;
+}
+
+declare module "*.applescript" {
+	const content: string;
+	export default content;
+}
+
 declare module "*.bdf" {
 	const content: string;
 	export default content;
@@ -51,11 +61,3 @@ declare module "*.generated.js" {
 	export default content;
 }
 
-// turndown-plugin-gfm has no published types
-declare module "turndown-plugin-gfm" {
-	import type TurndownService from "turndown";
-	export const gfm: TurndownService.Plugin;
-	export const tables: TurndownService.Plugin;
-	export const strikethrough: TurndownService.Plugin;
-	export const taskListItems: TurndownService.Plugin;
-}

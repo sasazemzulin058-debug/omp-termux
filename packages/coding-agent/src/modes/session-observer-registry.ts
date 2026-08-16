@@ -24,6 +24,9 @@ export interface ObservableSession {
 	progress?: AgentProgress;
 }
 
+/** Coarse source of an observer change; callers use it to separate lifecycle work from high-frequency progress. */
+export type SessionObserverChangeKind = "main" | "reset" | "lifecycle" | "progress";
+
 const STATUS_MAP: Record<string, ObservableSession["status"]> = {
 	started: "active",
 	completed: "completed",
@@ -33,20 +36,20 @@ const STATUS_MAP: Record<string, ObservableSession["status"]> = {
 
 export class SessionObserverRegistry {
 	#sessions = new Map<string, ObservableSession>();
-	#listeners = new Set<() => void>();
+	#listeners = new Set<(kind: SessionObserverChangeKind) => void>();
 	#eventBusUnsubscribers: Array<() => void> = [];
 	#sortOrderById = new Map<string, number>();
 	#parentSortOrderById = new Map<string, number>();
 	#nextSortOrder = 0;
 
 	/** Add a change listener. Returns unsubscribe function. */
-	onChange(cb: () => void): () => void {
+	onChange(cb: (kind: SessionObserverChangeKind) => void): () => void {
 		this.#listeners.add(cb);
 		return () => this.#listeners.delete(cb);
 	}
 
-	#notifyListeners(): void {
-		for (const cb of this.#listeners) cb();
+	#notifyListeners(kind: SessionObserverChangeKind): void {
+		for (const cb of this.#listeners) cb(kind);
 	}
 
 	#ensureSortOrder(id: string): number {
@@ -85,7 +88,12 @@ export class SessionObserverRegistry {
 			sessionFile: sessionFile ?? existing?.sessionFile,
 			lastUpdate: Date.now(),
 		});
-		this.#notifyListeners();
+		this.#notifyListeners("main");
+	}
+
+	/** Return one tracked session without copying or sorting the registry. */
+	getSession(id: string): ObservableSession | undefined {
+		return this.#sessions.get(id);
 	}
 
 	getSessions(): ObservableSession[] {
@@ -121,7 +129,7 @@ export class SessionObserverRegistry {
 		this.#sortOrderById.clear();
 		this.#parentSortOrderById.clear();
 		this.#nextSortOrder = 0;
-		this.#notifyListeners();
+		this.#notifyListeners("reset");
 	}
 
 	dispose(): void {
@@ -171,7 +179,7 @@ export class SessionObserverRegistry {
 						lastUpdate: Date.now(),
 					});
 				}
-				this.#notifyListeners();
+				this.#notifyListeners("lifecycle");
 			}),
 		);
 
@@ -208,7 +216,7 @@ export class SessionObserverRegistry {
 						progress,
 					});
 				}
-				this.#notifyListeners();
+				this.#notifyListeners("progress");
 			}),
 		);
 	}

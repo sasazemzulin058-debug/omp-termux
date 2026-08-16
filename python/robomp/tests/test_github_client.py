@@ -62,6 +62,34 @@ def test_redirect_without_follow_raises_github_error() -> None:
     assert exc.value.status in (301, 410)
 
 
+def test_transient_5xx_retries_get_but_not_post(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A transient upstream 500 must be replayed for idempotent GETs (the
+    manual-triage fetch path) and surfaced immediately for non-idempotent
+    POSTs, where a blind replay could double-apply a write."""
+    monkeypatch.setattr(GitHubClient, "_TRANSIENT_RETRY_DELAYS", (0.01, 0.01))
+    get_calls = 0
+    post_calls = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal get_calls, post_calls
+        if request.method == "POST":
+            post_calls += 1
+            return httpx.Response(500, json={"message": "boom"})
+        get_calls += 1
+        if get_calls == 1:
+            return httpx.Response(500, json={"message": "boom"})
+        return httpx.Response(200, json={"ok": True})
+
+    client = GitHubClient("tok", transport=httpx.MockTransport(handler))
+    assert _run_async(client.request("GET", "/x")) == {"ok": True}
+    assert get_calls == 2
+
+    with pytest.raises(GitHubError) as exc:
+        _run_async(client.request("POST", "/x", json={}))
+    assert exc.value.status == 500
+    assert post_calls == 1
+
+
 def test_redirect_target_succeeds_when_followable() -> None:
     """A 301 → 200 chain should resolve to the followed payload."""
 

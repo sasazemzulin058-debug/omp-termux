@@ -2,6 +2,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { $which, hasFsCode, isEisdir, isEnoent, isEnotdir, Snowflake } from "@oh-my-pi/pi-utils";
+import type { Subprocess } from "bun";
 import {
 	parseDiffHunks as parseCommitDiffHunks,
 	parseFileDiffs,
@@ -9,6 +10,7 @@ import {
 	parseNumstat,
 } from "../commit/git/diff";
 import type { FileDiff, FileHunks, NumstatEntry } from "../commit/types";
+import { REJECT_PROMPT_COMMAND } from "../exec/non-interactive-env";
 import { ToolAbortError, ToolError, throwIfAborted } from "../tools/tool-errors";
 
 // ════════════════════════════════════════════════════════════════════════════
@@ -74,8 +76,20 @@ export interface StatusOptions {
 	readonly z?: boolean;
 }
 
+export interface CommitAuthor {
+	readonly date?: string;
+	readonly email: string;
+	readonly name: string;
+}
+
+export interface CommitDetails {
+	readonly author: CommitAuthor;
+	readonly message: string;
+}
+
 export interface CommitOptions {
 	readonly allowEmpty?: boolean;
+	readonly author?: CommitAuthor;
 	readonly files?: readonly string[];
 	readonly signal?: AbortSignal;
 }
@@ -91,6 +105,8 @@ export interface PatchOptions {
 	readonly cached?: boolean;
 	readonly check?: boolean;
 	readonly env?: Record<string, string | undefined>;
+	readonly reverse?: boolean;
+	readonly threeWay?: boolean;
 	readonly signal?: AbortSignal;
 }
 
@@ -102,10 +118,18 @@ export interface RestoreOptions {
 	readonly worktree?: boolean;
 }
 
+export interface FetchOptions {
+	readonly signal?: AbortSignal;
+	/** Deadline for the network transfer. Defaults to {@link GIT_NETWORK_TIMEOUT_MS}. */
+	readonly timeoutMs?: number;
+}
+
 export interface CloneOptions {
 	readonly ref?: string;
 	readonly sha?: string;
 	readonly signal?: AbortSignal;
+	/** Deadline for the network transfer. Defaults to {@link GIT_NETWORK_TIMEOUT_MS}. */
+	readonly timeoutMs?: number;
 }
 
 interface GitHeadBase extends GitRepository {
@@ -161,13 +185,206 @@ const SHORT_LIVED_GIT_CONFIG: readonly (readonly [key: string, value: string])[]
 	["core.fsmonitor", "false"],
 	["core.untrackedCache", "false"],
 ];
-const REMOTE_ALREADY_EXISTS = /remote .* already exists/i;
+const AMBIENT_GIT_ENV = {
+	GIT_DIR: undefined,
+	GIT_COMMON_DIR: undefined,
+	GIT_WORK_TREE: undefined,
+	GIT_INDEX_FILE: undefined,
+	GIT_OBJECT_DIRECTORY: undefined,
+	GIT_ALTERNATE_OBJECT_DIRECTORIES: undefined,
+} satisfies Record<string, undefined>;
+
+const GIT_NON_INTERACTIVE_ENV = {
+	GIT_ASKPASS: "true",
+	GIT_EDITOR: "true",
+	GIT_TERMINAL_PROMPT: "0",
+	LC_ALL: undefined,
+	LC_MESSAGES: "C",
+	SSH_ASKPASS: REJECT_PROMPT_COMMAND,
+} satisfies Record<string, string | undefined>;
+const GH_NON_INTERACTIVE_ENV = {
+	...GIT_NON_INTERACTIVE_ENV,
+	GH_PROMPT_DISABLED: "1",
+} satisfies Record<string, string | undefined>;
+
+/** Default deadline for git and gh subprocesses spawned by the coding agent. */
+export const GIT_COMMAND_TIMEOUT_MS = 5 * 60 * 1000;
+/**
+ * Default deadline for git subprocesses that perform network transfers
+ * (`clone`/`fetch`). Large-repo transfers legitimately outlive
+ * {@link GIT_COMMAND_TIMEOUT_MS}, so they get a wider deadline; local plumbing
+ * commands keep the short one.
+ */
+export const GIT_NETWORK_TIMEOUT_MS = 30 * 60 * 1000;
+/** Maximum captured stdout or stderr bytes retained from git and gh subprocesses. */
+export const GIT_COMMAND_OUTPUT_LIMIT_BYTES = 8 * 1024 * 1024;
+/**
+ * Deadline for synchronous git plumbing commands launched via
+ * {@link gitSpawnSyncText}. These run on the render path (e.g. reftable HEAD
+ * resolution), so the deadline is short: a command that has not exited by then
+ * is killed and reported as {@link GIT_COMMAND_TIMEOUT_EXIT_CODE} so the caller
+ * degrades instead of freezing the UI indefinitely.
+ */
+export const GIT_SPAWN_SYNC_TIMEOUT_MS = 5_000;
+/**
+ * Stat-poll interval for {@link head.watch}. One `stat` per interval keeps an
+ * always-on status line cheap while surfacing a branch switch within a second.
+ */
+export const HEAD_WATCH_INTERVAL_MS = 1000;
+
+const GIT_COMMAND_TIMEOUT_EXIT_CODE = 124;
+// Exit code returned when the `git` binary cannot be launched at all (spawn
+// ENOENT). Mirrors the POSIX "command not found" code so read-only callers that
+// degrade on any non-zero exit treat a missing git the same as a failed
+// invocation instead of letting the raw spawn ENOENT escape as an unhandled
+// rejection.
+const GIT_SPAWN_ENOENT_EXIT_CODE = 127;
+const GIT_OUTPUT_TRUNCATED_MARKER = "\n[git subprocess output truncated after 8 MiB]\n";
+const GIT_COMMAND_TERMINATE_GRACE_MS = 5_000;
+
+type CommandName = "git" | "gh";
+
+function resolveTimeoutMs(timeoutMs: number | undefined, fallback: number = GIT_COMMAND_TIMEOUT_MS): number {
+	if (timeoutMs === undefined) return fallback;
+	if (!Number.isFinite(timeoutMs) || timeoutMs < 0) return fallback;
+	return Math.trunc(timeoutMs);
+}
+
+function resolveOutputLimit(maxOutputBytes: number | undefined): number {
+	if (maxOutputBytes === undefined) return GIT_COMMAND_OUTPUT_LIMIT_BYTES;
+	if (!Number.isFinite(maxOutputBytes) || maxOutputBytes < 0) return GIT_COMMAND_OUTPUT_LIMIT_BYTES;
+	return Math.trunc(maxOutputBytes);
+}
+
+function formatCommandLabel(command: CommandName, args: readonly string[]): string {
+	return `${command} ${args.join(" ")}`.trim();
+}
+
+async function waitForChildExit(child: Subprocess, timeoutMs: number): Promise<boolean> {
+	if (timeoutMs <= 0) return false;
+	const timeout = Promise.withResolvers<false>();
+	const timer = setTimeout(() => timeout.resolve(false), timeoutMs);
+	timer.unref?.();
+	try {
+		return await Promise.race([
+			child.exited.then(
+				() => true,
+				() => true,
+			),
+			timeout.promise,
+		]);
+	} finally {
+		clearTimeout(timer);
+	}
+}
+
+async function terminateTimedOutChild(child: Subprocess): Promise<void> {
+	child.kill("SIGTERM");
+	if (await waitForChildExit(child, GIT_COMMAND_TERMINATE_GRACE_MS)) return;
+	child.kill("SIGKILL");
+	await waitForChildExit(child, GIT_COMMAND_TERMINATE_GRACE_MS);
+}
+
+async function waitForExitWithTimeout(
+	child: Subprocess,
+	commandLabel: string,
+	timeoutMs: number,
+): Promise<{ exitCode: number | null; timedOut: false } | { timedOut: true; stderr: string }> {
+	if (timeoutMs === 0) {
+		await terminateTimedOutChild(child);
+		return { timedOut: true, stderr: `${commandLabel} timed out after 0ms` };
+	}
+	const timeout = Promise.withResolvers<"timeout">();
+	const timer = setTimeout(() => timeout.resolve("timeout"), timeoutMs);
+	timer.unref?.();
+	try {
+		const result = await Promise.race([
+			child.exited.then(exitCode => ({ kind: "exit" as const, exitCode })),
+			timeout.promise.then(() => ({ kind: "timeout" as const })),
+		]);
+		if (result.kind === "exit") {
+			return { timedOut: false, exitCode: result.exitCode };
+		}
+		await terminateTimedOutChild(child);
+		return { timedOut: true, stderr: `${commandLabel} timed out after ${timeoutMs}ms` };
+	} finally {
+		clearTimeout(timer);
+	}
+}
+
+async function readCappedText(stream: ReadableStream<Uint8Array>, maxBytes: number): Promise<string> {
+	const reader = stream.getReader();
+	const decoder = new TextDecoder();
+	const chunks: string[] = [];
+	let remaining = maxBytes;
+	let truncated = false;
+	try {
+		while (true) {
+			const { done, value } = await reader.read();
+			if (done) break;
+			if (!truncated && value.length <= remaining) {
+				chunks.push(decoder.decode(value, { stream: true }));
+				remaining -= value.length;
+				continue;
+			}
+			if (!truncated && remaining > 0) {
+				chunks.push(decoder.decode(value.subarray(0, remaining), { stream: true }));
+				remaining = 0;
+			}
+			truncated = true;
+		}
+		chunks.push(decoder.decode());
+		if (truncated) chunks.push(GIT_OUTPUT_TRUNCATED_MARKER);
+		return chunks.join("");
+	} finally {
+		reader.releaseLock();
+	}
+}
+
+async function cancelOutput(stream: ReadableStream<Uint8Array>): Promise<void> {
+	try {
+		await stream.cancel();
+	} catch {
+		// Best-effort cleanup after a timeout; the subprocess has already been signaled.
+	}
+}
+
+async function collectSubprocessResult(
+	command: CommandName,
+	args: readonly string[],
+	child: Subprocess,
+	options: Pick<CommandOptions, "maxOutputBytes" | "timeoutMs"> = {},
+): Promise<GitCommandResult> {
+	const stdoutStream = child.stdout;
+	const stderrStream = child.stderr;
+	if (!(stdoutStream instanceof ReadableStream) || !(stderrStream instanceof ReadableStream)) {
+		throw new Error(`Failed to capture ${command} command output.`);
+	}
+	const maxOutputBytes = resolveOutputLimit(options.maxOutputBytes);
+	const stdoutPromise = readCappedText(stdoutStream, maxOutputBytes);
+	const stderrPromise = readCappedText(stderrStream, maxOutputBytes);
+	const exit = await waitForExitWithTimeout(
+		child,
+		formatCommandLabel(command, args),
+		resolveTimeoutMs(options.timeoutMs),
+	);
+	if (exit.timedOut) {
+		void stdoutPromise.catch(() => undefined);
+		void stderrPromise.catch(() => undefined);
+		await Promise.all([cancelOutput(stdoutStream), cancelOutput(stderrStream)]);
+		return { exitCode: GIT_COMMAND_TIMEOUT_EXIT_CODE, stdout: "", stderr: exit.stderr };
+	}
+	const [stdout, stderr] = await Promise.all([stdoutPromise, stderrPromise]);
+	return { exitCode: exit.exitCode ?? 0, stdout, stderr };
+}
 
 interface CommandOptions {
 	readonly env?: Record<string, string | undefined>;
+	readonly maxOutputBytes?: number;
 	readonly readOnly?: boolean;
 	readonly signal?: AbortSignal;
 	readonly stdin?: string | Uint8Array | ArrayBuffer | SharedArrayBuffer;
+	readonly timeoutMs?: number;
 }
 
 function normalizeStdin(input: CommandOptions["stdin"]): "ignore" | Uint8Array {
@@ -177,9 +394,76 @@ function normalizeStdin(input: CommandOptions["stdin"]): "ignore" | Uint8Array {
 	return new Uint8Array(input);
 }
 
+function buildNonInteractiveEnv(
+	env: Record<string, string | undefined>,
+	pinnedEnv: Record<string, string | undefined>,
+): Record<string, string | undefined> {
+	const preservedCharacterLocale =
+		env.LC_ALL !== undefined && /(?:^|[._-])utf-?8(?:$|[.@_-])/i.test(env.LC_ALL) ? env.LC_ALL : undefined;
+	return {
+		...env,
+		...(preservedCharacterLocale === undefined ? {} : { LC_CTYPE: preservedCharacterLocale }),
+		...pinnedEnv,
+	};
+}
+
+function buildGitEnv(overrides?: Record<string, string | undefined>): Record<string, string | undefined> {
+	return buildNonInteractiveEnv(
+		{
+			...process.env,
+			GIT_OPTIONAL_LOCKS: "0",
+			...AMBIENT_GIT_ENV,
+			...overrides,
+		},
+		GIT_NON_INTERACTIVE_ENV,
+	);
+}
+
+function buildGhEnv(): Record<string, string | undefined> {
+	return buildNonInteractiveEnv({ ...process.env }, GH_NON_INTERACTIVE_ENV);
+}
+
 function ensureAvailable(): void {
 	if (!$which("git")) {
 		throw new Error("git is not installed.");
+	}
+}
+
+/**
+ * Launch a `git` plumbing command synchronously and decode stdout. Returns the
+ * exit code plus trimmed stdout; a missing `git` binary (spawn ENOENT) is
+ * reported as {@link GIT_SPAWN_ENOENT_EXIT_CODE} so sync read-only callers
+ * degrade to `null` instead of throwing an uncaught error during rendering.
+ *
+ * A deadline ({@link GIT_SPAWN_SYNC_TIMEOUT_MS}) is enforced so a pathological
+ * git invocation (lock contention, NFS stall, …) cannot hang the render path
+ * indefinitely: a child killed by the deadline is reported as
+ * {@link GIT_COMMAND_TIMEOUT_EXIT_CODE} rather than a successful exit.
+ */
+function gitSpawnSyncText(
+	cwd: string,
+	args: readonly string[],
+	timeoutMs: number = GIT_SPAWN_SYNC_TIMEOUT_MS,
+): { exitCode: number; stdout: string } {
+	const commandArgs = withShortLivedGitConfig(withNoOptionalLocks(args));
+	try {
+		const result = Bun.spawnSync(["git", ...commandArgs], {
+			cwd,
+			env: buildGitEnv(),
+			stdout: "pipe",
+			stderr: "pipe",
+			windowsHide: true,
+			timeout: timeoutMs,
+		});
+		// Bun's timeout marker is authoritative even when process cleanup reports
+		// exit code zero, so render-path callers never trust partial output.
+		const exitCode = result.exitedDueToTimeout
+			? GIT_COMMAND_TIMEOUT_EXIT_CODE
+			: (result.exitCode ?? GIT_COMMAND_TIMEOUT_EXIT_CODE);
+		return { exitCode, stdout: new TextDecoder().decode(result.stdout).trim() };
+	} catch (err) {
+		if (isEnoent(err)) return { exitCode: GIT_SPAWN_ENOENT_EXIT_CODE, stdout: "" };
+		throw err;
 	}
 }
 
@@ -196,27 +480,28 @@ function formatCommandFailure(
 
 async function git(cwd: string, args: readonly string[], options: CommandOptions = {}): Promise<GitCommandResult> {
 	const commandArgs = withShortLivedGitConfig(options.readOnly ? withNoOptionalLocks(args) : [...args]);
-	const child = Bun.spawn(["git", ...commandArgs], {
-		cwd,
-		env: options.env ? { ...process.env, GIT_OPTIONAL_LOCKS: "0", ...options.env } : undefined,
-		signal: options.signal,
-		stdin: normalizeStdin(options.stdin),
-		stdout: "pipe",
-		stderr: "pipe",
-		windowsHide: true,
-	});
-
-	if (!child.stdout || !child.stderr) {
-		throw new Error("Failed to capture git command output.");
+	let child: Subprocess;
+	try {
+		child = Bun.spawn(["git", ...commandArgs], {
+			cwd,
+			env: buildGitEnv(options.env),
+			signal: options.signal,
+			stdin: normalizeStdin(options.stdin),
+			stdout: "pipe",
+			stderr: "pipe",
+			windowsHide: true,
+		});
+	} catch (err) {
+		if (isEnoent(err)) {
+			// A deleted/nonexistent cwd also surfaces as a spawn ENOENT; only blame
+			// the binary when the working directory actually exists.
+			const stderr = fs.existsSync(cwd) ? "git is not installed." : `working directory does not exist: ${cwd}`;
+			return { exitCode: GIT_SPAWN_ENOENT_EXIT_CODE, stdout: "", stderr };
+		}
+		throw err;
 	}
 
-	const [stdout, stderr, exitCode] = await Promise.all([
-		new Response(child.stdout).text(),
-		new Response(child.stderr).text(),
-		child.exited,
-	]);
-
-	return { exitCode: exitCode ?? 0, stdout, stderr };
+	return await collectSubprocessResult("git", commandArgs, child, options);
 }
 
 function withNoOptionalLocks(args: readonly string[]): string[] {
@@ -359,6 +644,8 @@ function buildApplyArgs(patchPath: string, options: PatchOptions): string[] {
 	const args = ["apply"];
 	if (options.check) args.push("--check");
 	if (options.cached) args.push("--cached");
+	if (options.reverse) args.push("--reverse");
+	if (options.threeWay) args.push("--3way");
 	args.push("--binary", patchPath);
 	return args;
 }
@@ -438,6 +725,10 @@ function readOptionalTextSync(filePath: string): string | null {
 
 async function readOptionalText(filePath: string): Promise<string | null> {
 	return retryOnEintr(async () => await Bun.file(filePath).text());
+}
+
+async function readOptionalBytes(filePath: string): Promise<Uint8Array | null> {
+	return retryOnEintr(async () => await Bun.file(filePath).bytes());
 }
 
 function parseGitDirPointer(content: string): string | null {
@@ -689,26 +980,12 @@ async function resolveHeadStateReftable(repository: GitRepository, signal?: Abor
 }
 
 function resolveHeadStateReftableSync(repository: GitRepository): GitHeadState | null {
-	ensureAvailable();
-	const symArgs = withShortLivedGitConfig(withNoOptionalLocks(["symbolic-ref", "HEAD"]));
-	const symResult = Bun.spawnSync(["git", ...symArgs], {
-		cwd: repository.repoRoot,
-		stdout: "pipe",
-		stderr: "pipe",
-		windowsHide: true,
-	});
-
-	const revArgs = withShortLivedGitConfig(withNoOptionalLocks(["rev-parse", "--verify", "HEAD"]));
-	const revResult = Bun.spawnSync(["git", ...revArgs], {
-		cwd: repository.repoRoot,
-		stdout: "pipe",
-		stderr: "pipe",
-		windowsHide: true,
-	});
-	const commit = revResult.exitCode === 0 ? new TextDecoder().decode(revResult.stdout).trim() || null : null;
+	const symResult = gitSpawnSyncText(repository.repoRoot, ["symbolic-ref", "HEAD"]);
+	const revResult = gitSpawnSyncText(repository.repoRoot, ["rev-parse", "--verify", "HEAD"]);
+	const commit = revResult.exitCode === 0 ? revResult.stdout || null : null;
 
 	if (symResult.exitCode === 0) {
-		const ref = new TextDecoder().decode(symResult.stdout).trim();
+		const ref = symResult.stdout;
 		const branchName = ref.startsWith(LOCAL_BRANCH_PREFIX) ? ref.slice(LOCAL_BRANCH_PREFIX.length) : null;
 		return {
 			...repository,
@@ -730,27 +1007,13 @@ function resolveHeadStateReftableSync(repository: GitRepository): GitHeadState |
 
 function readRefSync(repository: GitRepository, targetRef: string): string | null {
 	if (isReftableRepoSync(repository)) {
-		ensureAvailable();
-		const symArgs = withShortLivedGitConfig(withNoOptionalLocks(["symbolic-ref", targetRef]));
-		const symResult = Bun.spawnSync(["git", ...symArgs], {
-			cwd: repository.repoRoot,
-			stdout: "pipe",
-			stderr: "pipe",
-			windowsHide: true,
-		});
+		const symResult = gitSpawnSyncText(repository.repoRoot, ["symbolic-ref", targetRef]);
 		if (symResult.exitCode === 0) {
-			const stdoutText = new TextDecoder().decode(symResult.stdout).trim();
-			return `${HEAD_REF_PREFIX} ${stdoutText}`;
+			return `${HEAD_REF_PREFIX} ${symResult.stdout}`;
 		}
-		const revArgs = withShortLivedGitConfig(withNoOptionalLocks(["rev-parse", "--verify", targetRef]));
-		const revResult = Bun.spawnSync(["git", ...revArgs], {
-			cwd: repository.repoRoot,
-			stdout: "pipe",
-			stderr: "pipe",
-			windowsHide: true,
-		});
+		const revResult = gitSpawnSyncText(repository.repoRoot, ["rev-parse", "--verify", targetRef]);
 		if (revResult.exitCode === 0) {
-			return new TextDecoder().decode(revResult.stdout).trim() || null;
+			return revResult.stdout || null;
 		}
 		return null;
 	}
@@ -1122,6 +1385,10 @@ export const stage = {
 /** Create a commit with the given message (passed via stdin). */
 export async function commit(cwd: string, message: string, options: CommitOptions = {}): Promise<GitCommandResult> {
 	const args = ["commit", "-F", "-"];
+	if (options.author) {
+		args.push(`--author=${options.author.name} <${options.author.email}>`);
+		if (options.author.date) args.push(`--date=${options.author.date}`);
+	}
 	if (options.allowEmpty) args.push("--allow-empty");
 	if (options.files?.length) args.push("--", ...options.files);
 	return runChecked(cwd, args, { signal: options.signal, stdin: message });
@@ -1146,15 +1413,18 @@ export async function checkout(cwd: string, ref: string, signal?: AbortSignal): 
 	await runEffect(cwd, ["checkout", ref], { signal });
 }
 
-/** Fetch a specific refspec from a remote. */
+/** Fetch a specific refspec from a remote. Network transfer: defaults to the {@link GIT_NETWORK_TIMEOUT_MS} deadline. */
 export async function fetch(
 	cwd: string,
 	remote: string,
 	source: string,
 	target: string,
-	signal?: AbortSignal,
+	options: FetchOptions = {},
 ): Promise<void> {
-	await runEffect(cwd, ["fetch", remote, `+${source}:${target}`], { signal });
+	await runEffect(cwd, ["fetch", remote, `+${source}:${target}`], {
+		signal: options.signal,
+		timeoutMs: resolveTimeoutMs(options.timeoutMs, GIT_NETWORK_TIMEOUT_MS),
+	});
 }
 
 /** Read a tree-ish into the index. */
@@ -1169,6 +1439,239 @@ export async function readTree(
 /** Write the current index as a tree and return its object id. */
 export async function writeTree(cwd: string, options: Pick<CommandOptions, "env" | "signal"> = {}): Promise<string> {
 	return (await runText(cwd, ["write-tree"], options)).trim();
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// API: worktree isolation
+// ════════════════════════════════════════════════════════════════════════════
+
+/** Outcome of {@link detachGitDir}. */
+export type DetachGitDirResult =
+	/** `worktreeRoot` had no `.git`; nothing to detach. */
+	| "no-git"
+	/** `.git` already resolves to an independent object DB — left untouched. */
+	| "independent"
+	/** Detached into a standalone repo borrowing `sourceCommonDir`'s objects. */
+	| "detached";
+
+/**
+ * Sever a copied/mounted working tree from the git metadata it shares with a
+ * source checkout, turning it into a standalone repository that borrows the
+ * source object database through `objects/info/alternates`.
+ *
+ * Isolation backends (reflink/apfs/btrfs/rcopy…) materialise `merged` by
+ * copying `worktreeRoot` byte-for-byte. When `worktreeRoot` is a **linked git
+ * worktree** its `.git` is a pointer file (`gitdir: …/worktrees/<name>`), so
+ * the copy still resolves HEAD/index/refs through the source repo — a task's
+ * `git checkout`/`commit` inside the isolation then mutates the *parent*
+ * checkout. The rcopy `git worktree add` path leaks the other way: task
+ * branches land in the shared ref namespace and stack on each other.
+ *
+ * After detaching, the working tree keeps its files verbatim while:
+ * - HEAD, refs, and the index are frozen to the snapshot at call time;
+ * - all commits/branches the task creates stay private to the isolation;
+ * - objects resolve against `sourceCommonDir` via alternates, so history reads
+ *   and later `git fetch <merged>` object transfer keep working;
+ * - the source checkout's HEAD, branch, index, and working tree are untouched.
+ *
+ * A full-copy `.git` (non-worktree source) already owns its object DB and is
+ * returned as `"independent"` without modification. `worktreeRoot` without a
+ * `.git` yields `"no-git"`.
+ */
+export async function detachGitDir(worktreeRoot: string, sourceCommonDir: string): Promise<DetachGitDirResult> {
+	ensureAvailable();
+	const gitEntry = path.join(worktreeRoot, ".git");
+	let entryStat: fs.Stats;
+	try {
+		entryStat = await fs.promises.lstat(gitEntry);
+	} catch (err) {
+		if (isEnoent(err)) return "no-git";
+		throw err;
+	}
+	// Canonicalize both sides before comparing: `rev-parse` resolves symlinks
+	// (macOS `/tmp` → `/private/tmp`) while callers derive `sourceCommonDir`
+	// lexically from the session cwd. A lexical mismatch here would silently
+	// classify a shared linked-worktree copy as "independent" and skip the
+	// detach entirely — leaving the parent-mutation leak in place.
+	const parentCommon = await fs.promises.realpath(sourceCommonDir).catch(() => path.resolve(sourceCommonDir));
+	const isoCommonRaw = (
+		await runText(worktreeRoot, ["rev-parse", "--path-format=absolute", "--git-common-dir"], {
+			readOnly: true,
+		})
+	).trim();
+	const isoCommon = await fs.promises.realpath(isoCommonRaw).catch(() => path.resolve(isoCommonRaw));
+	// A full-copy `.git` already resolves to its own object DB — leave it alone.
+	if (isoCommon !== parentCommon) return "independent";
+
+	// Snapshot the state the standalone repo must preserve. HEAD may be a branch
+	// ref (normal checkout), detached, or unborn (a fresh/orphan branch with no
+	// commits — a linked worktree still shares the parent ref namespace, so it
+	// must be severed too). Refs are frozen so `baseSha..branch` ranges and
+	// history reads keep resolving after the source moves on.
+	const headSha = (await tryText(worktreeRoot, ["rev-parse", "HEAD"], { readOnly: true }))?.trim() ?? "";
+	const headRef = (await tryText(worktreeRoot, ["symbolic-ref", "-q", "HEAD"], { readOnly: true }))?.trim() ?? "";
+	const refDump = headSha
+		? (
+				await runText(worktreeRoot, ["for-each-ref", "--format=%(objectname) %(refname)"], {
+					readOnly: true,
+				})
+			).trim()
+		: "";
+	const objectFormat =
+		(await tryText(worktreeRoot, ["rev-parse", "--show-object-format"], { readOnly: true }))?.trim() || "sha1";
+	const userName = await config.get(worktreeRoot, "user.name");
+	const userEmail = await config.get(worktreeRoot, "user.email");
+
+	// Preserve the index verbatim rather than round-tripping through
+	// write-tree/read-tree: the raw index carries skip-worktree bits (sparse
+	// checkout), assume-unchanged flags, and exact stage entries. A rebuilt
+	// index drops skip-worktree, so files intentionally absent from a sparse
+	// working tree would read as deletions and delta capture would apply those
+	// deletions back to the parent. Sparse config + patterns are carried too so
+	// later git operations in the isolation keep honouring the sparse view.
+	const indexPath = (
+		await runText(worktreeRoot, ["rev-parse", "--path-format=absolute", "--git-path", "index"], {
+			readOnly: true,
+		})
+	).trim();
+	const indexBytes = await readOptionalBytes(indexPath);
+	const sparseCheckout = await config.get(worktreeRoot, "core.sparseCheckout");
+	const sparseCone = await config.get(worktreeRoot, "core.sparseCheckoutCone");
+	const sparsePatternPath = (
+		await runText(worktreeRoot, ["rev-parse", "--path-format=absolute", "--git-path", "info/sparse-checkout"], {
+			readOnly: true,
+		})
+	).trim();
+	const sparsePatterns = await readOptionalText(sparsePatternPath);
+	// Status parity with the source: an explicit core.filemode (e.g. false on
+	// mounts ignoring the executable bit) must carry over, or the re-inited
+	// repo's platform default makes clean files read as mode-changed and delta
+	// capture would apply bogus chmod diffs back to the parent.
+	const fileMode = await config.get(worktreeRoot, "core.fileMode");
+	// A split index references sharedindex.* files beside the source index;
+	// restoring the raw index without them makes every git read fail. Carry the
+	// shared files (and the config) alongside the verbatim index bytes.
+	const splitIndex = await config.get(worktreeRoot, "core.splitIndex");
+	const sharedIndexFiles: Array<{ name: string; bytes: Uint8Array }> = [];
+	if (indexBytes) {
+		const indexDir = path.dirname(indexPath);
+		let entries: string[] = [];
+		try {
+			entries = await fs.promises.readdir(indexDir);
+		} catch {}
+		for (const name of entries) {
+			if (!name.startsWith("sharedindex.")) continue;
+			const bytes = await readOptionalBytes(path.join(indexDir, name));
+			if (bytes) sharedIndexFiles.push({ name, bytes });
+		}
+	}
+	// A shallow source deliberately lacks parents beyond its `shallow` boundary
+	// file; without it, history traversal over the borrowed objects treats the
+	// boundary commit's missing parent as corruption.
+	const shallowBoundary = await readOptionalText(path.join(parentCommon, "shallow"));
+
+	// A pointer `.git` file whose worktree-admin dir back-references this exact
+	// tree is the rcopy `git worktree add` registration. Remove that admin entry
+	// so the source repo's worktree list stops tracking the isolation. A pointer
+	// referencing the *source's* admin (a copied linked-worktree `.git`) is not
+	// ours to delete — only the local pointer file is discarded. Compare via
+	// realpath: git canonicalizes the back-reference (e.g. macOS `/var` →
+	// `/private/var`), so a lexical path comparison would miss the match and
+	// leave a stale registration in the source repo's worktree list.
+	let ownWorktreeAdmin: string | undefined;
+	if (entryStat.isFile()) {
+		const pointer = parseGitDirPointer((await readOptionalText(gitEntry)) ?? "");
+		if (pointer) {
+			const adminDir = path.resolve(path.dirname(gitEntry), pointer);
+			const backRef = (await readOptionalText(path.join(adminDir, "gitdir")))?.trim();
+			if (backRef) {
+				const [realBackRef, realGitEntry] = await Promise.all([
+					fs.promises.realpath(backRef).catch(() => path.resolve(backRef)),
+					fs.promises.realpath(gitEntry).catch(() => path.resolve(gitEntry)),
+				]);
+				if (realBackRef === realGitEntry) ownWorktreeAdmin = adminDir;
+			}
+		}
+	}
+
+	await fs.promises.rm(gitEntry, { recursive: true, force: true });
+	if (ownWorktreeAdmin) await fs.promises.rm(ownWorktreeAdmin, { recursive: true, force: true });
+
+	// Preserve the checked-out branch name so an unborn HEAD (fresh/orphan
+	// branch with no commits) keeps its symbolic ref after `init` rather than
+	// snapping to the init default; born HEADs get the ref rewritten below anyway.
+	const initArgs = ["init", "--object-format", objectFormat, "-q"];
+	const initialBranch = headRef.startsWith(LOCAL_BRANCH_PREFIX) ? headRef.slice(LOCAL_BRANCH_PREFIX.length) : "";
+	if (initialBranch) initArgs.push("-b", initialBranch);
+	await runEffect(worktreeRoot, initArgs);
+	const objectsInfo = path.join(gitEntry, "objects", "info");
+	await fs.promises.mkdir(objectsInfo, { recursive: true });
+	const alternates = [path.join(parentCommon, "objects")];
+	const chained = await readOptionalText(path.join(parentCommon, "objects", "info", "alternates"));
+	if (chained) {
+		for (const line of chained.split("\n")) {
+			const entry = line.trim();
+			if (!entry) continue;
+			alternates.push(path.isAbsolute(entry) ? entry : path.resolve(parentCommon, "objects", entry));
+		}
+	}
+	await Bun.write(path.join(objectsInfo, "alternates"), `${alternates.join("\n")}\n`);
+
+	// Freeze refs when HEAD is born. Point HEAD at the raw SHA first so
+	// `update-ref` writes land even for the branch HEAD currently names, then
+	// restore the symbolic HEAD. An unborn HEAD has no refs to freeze; `init -b`
+	// above already set the symbolic HEAD to the unborn branch.
+	if (headSha) {
+		await Bun.write(path.join(gitEntry, "HEAD"), `${headSha}\n`);
+		if (refDump) {
+			const commands = refDump
+				.split("\n")
+				.filter(Boolean)
+				.map(line => {
+					const sep = line.indexOf(" ");
+					return `create ${line.slice(sep + 1)} ${line.slice(0, sep)}`;
+				})
+				.join("\n");
+			await runEffect(worktreeRoot, ["update-ref", "--stdin"], { stdin: `${commands}\n` });
+		}
+		if (headRef) await Bun.write(path.join(gitEntry, "HEAD"), `ref: ${headRef}\n`);
+	} else if (headRef && !initialBranch) {
+		// Unborn detached HEAD (no branch, no commit) — restore the raw ref target.
+		await Bun.write(path.join(gitEntry, "HEAD"), `ref: ${headRef}\n`);
+	}
+
+	// Carry the source identity so isolated commits have an author.
+	if (userName) await config.set(worktreeRoot, "user.name", userName);
+	if (userEmail) await config.set(worktreeRoot, "user.email", userEmail);
+	if (fileMode !== undefined) await config.set(worktreeRoot, "core.fileMode", fileMode);
+	if (splitIndex !== undefined) await config.set(worktreeRoot, "core.splitIndex", splitIndex);
+	// Preserve the shallow boundary so history traversal over the borrowed
+	// object DB stops at the boundary instead of failing on missing parents.
+	if (shallowBoundary !== null) await Bun.write(path.join(gitEntry, "shallow"), shallowBoundary);
+
+	// Restore sparse-checkout state before the index so skip-worktree entries
+	// keep resolving against the carried patterns.
+	if (sparseCheckout) await config.set(worktreeRoot, "core.sparseCheckout", sparseCheckout);
+	if (sparseCone) await config.set(worktreeRoot, "core.sparseCheckoutCone", sparseCone);
+	if (sparsePatterns !== null) {
+		const infoDir = path.join(gitEntry, "info");
+		await fs.promises.mkdir(infoDir, { recursive: true });
+		await Bun.write(path.join(infoDir, "sparse-checkout"), sparsePatterns);
+	}
+
+	// Restore the index verbatim (skip-worktree, assume-unchanged, exact stage
+	// entries) so the working tree's dirty set — including sparse-excluded files
+	// — matches the source. Fall back to rebuilding from HEAD only when the
+	// source had no index (a bare-ish/never-staged checkout).
+	if (indexBytes) {
+		for (const shared of sharedIndexFiles) {
+			await Bun.write(path.join(gitEntry, shared.name), shared.bytes);
+		}
+		await Bun.write(path.join(gitEntry, "index"), indexBytes);
+	} else if (headSha) {
+		await readTree(worktreeRoot, headSha);
+	}
+	return "detached";
 }
 
 // ════════════════════════════════════════════════════════════════════════════
@@ -1195,6 +1698,19 @@ export const show = Object.assign(
 	},
 );
 
+/** Read commit message and author metadata for replay/rewrite flows. */
+export async function commitDetails(cwd: string, revision: string, signal?: AbortSignal): Promise<CommitDetails> {
+	const raw = await runText(cwd, ["show", "-s", "--format=%an%x00%ae%x00%aI%x00%B", revision], {
+		readOnly: true,
+		signal,
+	});
+	const [name = "", email = "", date = "", ...messageParts] = raw.split("\0");
+	return {
+		author: { date, email, name },
+		message: messageParts.join("\0").replace(/\n$/, ""),
+	};
+}
+
 // ════════════════════════════════════════════════════════════════════════════
 // API: log
 // ════════════════════════════════════════════════════════════════════════════
@@ -1208,6 +1724,19 @@ export const log = {
 	async onelines(cwd: string, count: number, signal?: AbortSignal): Promise<string[]> {
 		return splitLines(
 			await runText(cwd, ["log", `-${count}`, "--oneline", "--no-decorate"], { readOnly: true, signal }),
+		);
+	},
+};
+
+export const revList = {
+	/** Commits in `base..head`, oldest first. */
+	async range(cwd: string, base: string, head: string, signal?: AbortSignal): Promise<string[]> {
+		return splitLines(await runText(cwd, ["rev-list", "--reverse", `${base}..${head}`], { readOnly: true, signal }));
+	},
+	/** Commits reachable from `ref` that touched `file`, newest first, capped at `limit`. */
+	async touching(cwd: string, ref: string, file: string, limit: number, signal?: AbortSignal): Promise<string[]> {
+		return splitLines(
+			await runText(cwd, ["rev-list", `--max-count=${limit}`, ref, "--", file], { readOnly: true, signal }),
 		);
 	},
 };
@@ -1311,10 +1840,10 @@ export const remote = {
 	async add(cwd: string, name: string, url: string, signal?: AbortSignal): Promise<void> {
 		const result = await git(cwd, ["remote", "add", name, url], { signal });
 		if (result.exitCode === 0) return;
-		if (REMOTE_ALREADY_EXISTS.test(result.stderr)) {
-			const existing = await remote.url(cwd, name, signal);
+		const existing = await remote.url(cwd, name, signal);
+		if (existing !== undefined) {
 			if (existing === url) return;
-			throw new ToolError(`remote ${name} already exists with URL ${existing ?? "(unset)"}, expected ${url}`);
+			throw new ToolError(`remote ${name} already exists with URL ${existing}, expected ${url}`);
 		}
 		throw new GitCommandError(["remote", "add", name, url], result);
 	},
@@ -1497,6 +2026,26 @@ export const cherryPick = Object.assign(
 		async abort(cwd: string, signal?: AbortSignal): Promise<void> {
 			await runEffect(cwd, ["cherry-pick", "--abort"], { signal });
 		},
+		/**
+		 * Skip the current commit of an in-progress cherry-pick sequence and
+		 * continue with the rest of the range. Use after {@link isEmptyError}
+		 * reports the current attempt collapsed to a no-op — the alternative,
+		 * `--abort`, throws away every remaining commit in the range.
+		 */
+		async skip(cwd: string, signal?: AbortSignal): Promise<void> {
+			await runEffect(cwd, ["cherry-pick", "--skip"], { signal });
+		},
+		/**
+		 * True when a cherry-pick failure was caused by the current commit
+		 * being empty against HEAD — either redundant with an already-applied
+		 * change, or auto-resolved to HEAD by a 3-way merge. Callers should
+		 * `--skip` in this case to advance the sequencer rather than aborting
+		 * the whole range: an empty commit is not a merge conflict, and any
+		 * later commits in the range still deserve to land.
+		 */
+		isEmptyError(err: unknown): boolean {
+			return err instanceof GitCommandError && /the previous cherry-pick is now empty/i.test(err.result.stderr);
+		},
 	},
 );
 
@@ -1521,6 +2070,69 @@ export const stash = {
 		if (options?.index) args.push("--index");
 		await runEffect(cwd, args);
 	},
+	/**
+	 * Return the working-tree patch that `stash@{0}` would apply, in a form
+	 * that `git apply --check` can consume. Empty string when no stash entry
+	 * exists or the stash contains no diffable working-tree changes.
+	 */
+	async showPatch(cwd: string): Promise<string> {
+		return (await tryText(cwd, ["stash", "show", "-p", "--binary", "stash@{0}"], { readOnly: true })) ?? "";
+	},
+	/** Return untracked paths stored in the top stash entry. */
+	async untrackedFiles(cwd: string): Promise<string[]> {
+		const output = await tryText(cwd, ["ls-tree", "-r", "-z", "--name-only", "stash@{0}^3"], { readOnly: true });
+		return output?.split("\0").filter(Boolean) ?? [];
+	},
+	/**
+	 * Attempt to restore the top stash entry. On success returns `true` and
+	 * git drops the stash entry. On conflict returns `false`, leaves the stash
+	 * entry preserved for manual resolution, and guarantees the failed restore
+	 * leaves no unmerged index entries or partially-restored untracked files.
+	 *
+	 * The historical raw `pop` catches the failure in a `finally` block and
+	 * only logs — it leaves `.git/index` with stage 1/2/3 unmerged entries
+	 * that survive indefinitely, corrupting every subsequent overlay-isolated
+	 * task that reads through this repo's `.git/`. See issue #4175.
+	 */
+	async tryPop(cwd: string, options?: { index?: boolean }): Promise<boolean> {
+		// Preflight: `git stash pop` internally does a 3-way merge, so a plain
+		// `git apply --check` is too strict — it rejects hunks whose context
+		// drifted from HEAD even when 3-way merge would resolve them cleanly.
+		// Match pop's semantics with `--3way --check`, which succeeds iff the
+		// patch either applies directly or merges without conflict against
+		// the patch's `index abc..def` base blobs.
+		const workingPatch = await stash.showPatch(cwd);
+		if (workingPatch.trim() && !(await patch.canApplyText(cwd, workingPatch, { threeWay: true }))) {
+			return false;
+		}
+		const restoredUntracked = await stash.untrackedFiles(cwd);
+		try {
+			await stash.pop(cwd, options);
+			return true;
+		} catch {
+			// Preflight can still miss mode-only or delete/modify conflicts. If
+			// the pop left unmerged entries, wipe them: HEAD holds the merged
+			// state so `reset --hard HEAD` restores a clean index and working
+			// tree without losing the cherry-picked commits. A failed pop can
+			// still restore unrelated untracked files before exiting while
+			// preserving the stash entry, so clean only the untracked paths
+			// recorded in that stash. The user's WIP remains recoverable via
+			// `git stash pop`.
+			try {
+				await reset(cwd, { hard: true });
+			} catch {
+				/* best-effort cleanup — do not mask the primary conflict */
+			}
+			if (restoredUntracked.length > 0) {
+				try {
+					await clean(cwd, { includeIgnored: true, literalPathspecs: true, paths: restoredUntracked });
+				} catch {
+					/* best-effort cleanup — do not mask the primary conflict */
+				}
+			}
+			return false;
+		}
+	},
 };
 
 // ════════════════════════════════════════════════════════════════════════════
@@ -1544,7 +2156,10 @@ export async function clone(url: string, targetDir: string, options: CloneOption
 	args.push(url, absoluteTarget);
 
 	try {
-		await runEffect(path.dirname(absoluteTarget), args, { signal: options.signal });
+		await runEffect(path.dirname(absoluteTarget), args, {
+			signal: options.signal,
+			timeoutMs: resolveTimeoutMs(options.timeoutMs, GIT_NETWORK_TIMEOUT_MS),
+		});
 		if (options.sha) {
 			try {
 				await checkout(absoluteTarget, options.sha, options.signal);
@@ -1587,9 +2202,18 @@ export async function reset(
 
 export async function clean(
 	cwd: string,
-	options: { ignoredOnly?: boolean; paths?: readonly string[]; signal?: AbortSignal } = {},
+	options: {
+		ignoredOnly?: boolean;
+		includeIgnored?: boolean;
+		literalPathspecs?: boolean;
+		paths?: readonly string[];
+		signal?: AbortSignal;
+	} = {},
 ): Promise<void> {
-	const args = ["clean", options.ignoredOnly ? "-fdX" : "-fd"];
+	const args = [options.literalPathspecs ? "--literal-pathspecs" : undefined, "clean"].filter(
+		(arg): arg is string => arg !== undefined,
+	);
+	args.push(options.ignoredOnly ? "-fdX" : options.includeIgnored ? "-fdx" : "-fd");
 	if (options.paths?.length) args.push("--", ...options.paths);
 	await runEffect(cwd, args, { signal: options.signal });
 }
@@ -1613,6 +2237,14 @@ export const ls = {
 	/** List untracked files (excludes ignored). */
 	async untracked(cwd: string, signal?: AbortSignal): Promise<string[]> {
 		return ls.files(cwd, { others: true, excludeStandard: true, signal });
+	},
+
+	/** List paths present in a ref, optionally filtered to specific paths. */
+	async tree(cwd: string, ref: string, files: readonly string[] = [], signal?: AbortSignal): Promise<string[]> {
+		const args = ["ls-tree", "--name-only", "-r", "-z", ref];
+		if (files.length > 0) args.push("--", ...files);
+		const raw = await runText(cwd, args, { readOnly: true, signal });
+		return raw.split("\0").filter(entry => entry.length > 0);
 	},
 
 	/** List submodule paths (recursive). */
@@ -1669,6 +2301,28 @@ export const head = {
 		if (result.exitCode !== 0) return null;
 		return result.stdout.trim() || null;
 	},
+
+	/**
+	 * Watch the repository's HEAD for branch moves. Returns a disposer.
+	 *
+	 * Deliberately stat-polls via `fs.watchFile` instead of `fs.watch`: git
+	 * swaps HEAD with `HEAD.lock` + atomic rename, which unlinks the HEAD inode
+	 * — and Bun's inotify-backed `fs.watch` permanently stops delivering events
+	 * after observing a rename in the watched directory (oven-sh/bun#24875), so
+	 * an event watcher fires once and then freezes on Linux (issue #8412 was
+	 * the same freeze for file-inode watches on every platform). A path-based
+	 * stat poll re-resolves the path each interval and survives inode swaps
+	 * everywhere. Reftable repos keep ref state in `<gitDir>/reftable` (their
+	 * HEAD file is a static stub), so the poll targets that directory instead.
+	 */
+	watch(repository: GitRepository, onChange: () => void): () => void {
+		const target = isReftableRepoSync(repository) ? path.join(repository.gitDir, "reftable") : repository.headPath;
+		const listener = (curr: fs.Stats, prev: fs.Stats) => {
+			if (curr.mtimeMs !== prev.mtimeMs || curr.ino !== prev.ino || curr.size !== prev.size) onChange();
+		};
+		fs.watchFile(target, { interval: HEAD_WATCH_INTERVAL_MS }, listener).unref();
+		return () => fs.unwatchFile(target, listener);
+	},
 };
 
 // ════════════════════════════════════════════════════════════════════════════
@@ -1710,6 +2364,19 @@ export const repo = {
 		const repository = resolveRepositorySync(cwd);
 		if (!repository) return null;
 		return primaryRootFromRepositorySync(repository);
+	},
+
+	/**
+	 * Linked-worktree metadata for `cwd`, or `null` when `cwd` is the primary
+	 * checkout (or outside a repository). `root` is the worktree's own checkout
+	 * root; `primaryRoot` is the shared main checkout that names the project.
+	 * Resolves purely via on-disk `.git`/`commondir` walking — no subprocess —
+	 * so the status line may call it on every render.
+	 */
+	linkedWorktreeSync(cwd: string): { root: string; primaryRoot: string } | null {
+		const repository = resolveRepositorySync(cwd);
+		if (!repository || !isLinkedWorktree(repository)) return null;
+		return { root: repository.repoRoot, primaryRoot: primaryRootFromRepositorySync(repository) };
 	},
 
 	/** Full GitRepository metadata (sync). */
@@ -1785,20 +2452,14 @@ export const github = {
 		try {
 			const child = Bun.spawn(["gh", ...args], {
 				cwd,
+				env: buildGhEnv(),
 				stdin: "ignore",
 				stdout: "pipe",
 				stderr: "pipe",
 				windowsHide: true,
 				signal,
 			});
-			if (!child.stdout || !child.stderr) {
-				throw new ToolError("Failed to capture GitHub CLI output.");
-			}
-			const [stdout, stderr, exitCode] = await Promise.all([
-				new Response(child.stdout).text(),
-				new Response(child.stderr).text(),
-				child.exited,
-			]);
+			const { stdout, stderr, exitCode } = await collectSubprocessResult("gh", args, child, {});
 			throwIfAborted(signal);
 			const trim = options?.trimOutput !== false;
 			return {

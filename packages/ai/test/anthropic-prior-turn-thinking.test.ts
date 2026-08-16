@@ -1,4 +1,5 @@
 import { describe, expect, it } from "bun:test";
+import { renderDemotedThinking } from "@oh-my-pi/pi-ai/dialect";
 import { convertAnthropicMessages } from "@oh-my-pi/pi-ai/providers/anthropic";
 import type {
 	AssistantMessage,
@@ -24,11 +25,10 @@ import { buildModel } from "@oh-my-pi/pi-catalog/build";
  * The signature policy is a second axis: official Anthropic cryptographically
  * binds signatures to its key+session+model, so cross-model signatures must
  * be stripped (and matching redacted siblings dropped) whenever either side
- * of the replay is official Anthropic. Third-party endpoints (Z.AI, DeepSeek,
- * custom anthropic-messages providers) treat signatures as opaque
- * continuation hints they pass through unchanged, so 3p ↔ 3p replays
- * preserve them as-is to keep the reasoning chain signed for the next
- * turn (#2265).
+ * of the replay is official Anthropic. Unsigned-replay third-party fixtures
+ * treat signatures as opaque continuation hints they pass through unchanged,
+ * so 3p ↔ 3p replays preserve them as-is to keep the reasoning chain signed
+ * for the next turn (#2265).
  */
 function makeAnthropicModel(overrides: Partial<ModelSpec<"anthropic-messages">> = {}): Model<"anthropic-messages"> {
 	return buildModel({
@@ -259,9 +259,224 @@ describe("Anthropic prior-turn thinking preservation (#2257, #2265)", () => {
 		const assistants = params.filter(p => p.role === "assistant");
 		const priorBlocks = assistants[0].content as WireBlock[];
 		const text = priorBlocks.find(b => b.type === "text") as WireTextBlock | undefined;
-		expect(text?.text).toBe("visible reasoning");
+		expect(text?.text).toBe(renderDemotedThinking(target.id, "visible reasoning"));
 		expect(priorBlocks.find(b => b.type === "thinking")).toBeUndefined();
 		expect(priorBlocks.find(b => b.type === "redacted_thinking")).toBeUndefined();
+	});
+
+	it("demotes invalid official Anthropic prior signatures to bare Claude prose after a model switch", () => {
+		// official Anthropic → official Anthropic sibling, with the signed turn
+		// no longer latest. The source signature is bound to the issuing
+		// Anthropic model, so replaying it after the switch must not emit
+		// native thinking or `<thinking>` tags — Anthropic's
+		// `reasoning_extraction` classifier flags wrapped chain-of-thought
+		// across the whole Claude family (Fable refuses outright,
+		// Opus/Sonnet/Haiku/Mythos leak it as visible reasoning). Every
+		// Anthropic-dialect target therefore receives bare assistant prose.
+		const cases = [
+			{ id: "claude-opus-4-8", name: "Claude Opus 4.8" },
+			{ id: "claude-sonnet-4-6", name: "Claude Sonnet 4.6" },
+			{ id: "claude-haiku-4-5", name: "Claude Haiku 4.5" },
+			{ id: "claude-fable-5", name: "Claude Fable 5" },
+			{ id: "claude-mythos-5", name: "Claude Mythos 5" },
+		] as const;
+
+		for (const targetCase of cases) {
+			const target = makeAnthropicModel({
+				provider: "anthropic",
+				id: targetCase.id,
+				name: targetCase.name,
+				baseUrl: "https://api.anthropic.com",
+			});
+			// Source model differs from the target so the transition triggers
+			// signature stripping + demotion. Pick a source with a different
+			// bare id from the target regardless of which target we're on.
+			const sourceModel = targetCase.id === "claude-sonnet-4-6" ? "claude-opus-4-8" : "claude-sonnet-4-6";
+			const reasoning = `Need to preserve the plan while switching to ${targetCase.name}.`;
+			const messages: Message[] = [
+				makeUser("Read the project notes"),
+				makeAssistant(
+					[
+						{ type: "thinking", thinking: reasoning, thinkingSignature: "sig_source" },
+						{ type: "toolCall", id: "toolu_prior", name: "read", arguments: { path: "NOTES.md" } },
+					],
+					{ provider: "anthropic", model: sourceModel },
+				),
+				toolResult("toolu_prior", "notes body"),
+				makeAssistant([{ type: "text", text: "I found the relevant notes." }], {
+					provider: "anthropic",
+					model: targetCase.id,
+					stopReason: "stop",
+				}),
+				makeUser("Continue from those notes."),
+			];
+
+			const params = convertAnthropicMessages(messages, target, false);
+			const assistants = params.filter(p => p.role === "assistant");
+			expect(assistants).toHaveLength(2);
+			const priorBlocks = assistants[0].content as WireBlock[];
+			const text = priorBlocks.find(b => b.type === "text") as WireTextBlock | undefined;
+			expect(text?.text).toBe(renderDemotedThinking(targetCase.id, reasoning));
+			expect(text?.text).toBe(reasoning);
+			expect(text?.text).not.toContain("<thinking>");
+			expect(text?.text).not.toContain("</thinking>");
+			expect(text?.text).not.toContain("<think>");
+			expect(text?.text).not.toContain("</think>");
+			expect(priorBlocks.find(b => b.type === "thinking")).toBeUndefined();
+		}
+	});
+
+	it("does not demote same-model official Anthropic unsigned thinking to text", () => {
+		// Same-model Anthropic replay is not a dialect transition. If a committed
+		// tool-use turn lacks a usable thinking signature, the native thinking block
+		// is unreplayable, but serializing it as target-dialect text would
+		// incorrectly apply the cross-model fallback intended for real transitions.
+		for (const modelCase of [
+			{ id: "claude-sonnet-4-6", name: "Claude Sonnet 4.6" },
+			{ id: "claude-fable-5", name: "Claude Fable 5" },
+		]) {
+			const target = makeAnthropicModel({
+				provider: "anthropic",
+				id: modelCase.id,
+				name: modelCase.name,
+				baseUrl: "https://api.anthropic.com",
+			});
+			const reasoning = `Need to inspect the layout before editing with ${modelCase.id}.`;
+			const toolCallId = `toolu_${modelCase.id.replaceAll("-", "_")}`;
+			const messages: Message[] = [
+				makeUser("Fix the layout"),
+				makeAssistant(
+					[
+						{ type: "thinking", thinking: reasoning, thinkingSignature: "" },
+						{ type: "toolCall", id: toolCallId, name: "read", arguments: { path: "src/view.ts" } },
+					],
+					{ provider: "anthropic", model: modelCase.id },
+				),
+				toolResult(toolCallId, "view body"),
+				makeUser("Continue."),
+			];
+
+			const params = convertAnthropicMessages(messages, target, false);
+			const assistant = params.find(p => p.role === "assistant");
+			if (!assistant) throw new Error("expected assistant wire message");
+			const blocks = assistant.content as WireBlock[];
+			const textBlocks = blocks.filter((b): b is WireTextBlock => b.type === "text");
+			expect(textBlocks).toHaveLength(0);
+			expect(blocks.find(b => b.type === "thinking")).toBeUndefined();
+			const toolUse = blocks.find(b => b.type === "tool_use") as WireToolUseBlock | undefined;
+			expect(toolUse?.id).toBe(toolCallId);
+		}
+	});
+
+	it("drops same-model Anthropic thinking blocks with undefined signatures (regression test for 018b3dc61, restoring 93996bc48)", () => {
+		// Regression: commit 018b3dc61 narrowed the drop guard to catch only
+		// empty-string signatures, but same-model thinking blocks from aborted
+		// or prior turns may have undefined signatures (marked by the
+		// untrustworthy-turn recovery at :410-414). These must also be dropped,
+		// not demoted to text, because demotion triggers the reasoning_extraction
+		// safety classifier and causes hard refusals from Fable 5 and Opus 4.8.
+		for (const modelCase of [
+			{ id: "claude-sonnet-4-6", name: "Claude Sonnet 4.6" },
+			{ id: "claude-fable-5", name: "Claude Fable 5" },
+		]) {
+			const target = makeAnthropicModel({
+				provider: "anthropic",
+				id: modelCase.id,
+				name: modelCase.name,
+				baseUrl: "https://api.anthropic.com",
+			});
+			const reasoning = `Internal reasoning that should not leak for ${modelCase.id}.`;
+			const toolCallId = `toolu_${modelCase.id.replaceAll("-", "_")}`;
+			const messages: Message[] = [
+				makeUser("Fix the layout"),
+				makeAssistant(
+					[
+						{ type: "thinking", thinking: reasoning, thinkingSignature: undefined },
+						{ type: "toolCall", id: toolCallId, name: "read", arguments: { path: "src/view.ts" } },
+					],
+					{ provider: "anthropic", model: modelCase.id },
+				),
+				toolResult(toolCallId, "view body"),
+				makeUser("Continue."),
+			];
+
+			const params = convertAnthropicMessages(messages, target, false);
+			const assistant = params.find(p => p.role === "assistant");
+			if (!assistant) throw new Error("expected assistant wire message");
+			const blocks = assistant.content as WireBlock[];
+			// Must not produce a native thinking block
+			expect(blocks.find(b => b.type === "thinking")).toBeUndefined();
+			// Must not demote to text (neither <thinking> tags nor plain text containing the reasoning)
+			const textBlocks = blocks.filter((b): b is WireTextBlock => b.type === "text");
+			expect(textBlocks).toHaveLength(0);
+			// Tool call must still be present
+			const toolUse = blocks.find(b => b.type === "tool_use") as WireToolUseBlock | undefined;
+			expect(toolUse?.id).toBe(toolCallId);
+		}
+	});
+
+	it("drops redacted siblings when same-model unsigned visible thinking is discarded", () => {
+		const target = makeAnthropicModel({
+			provider: "anthropic",
+			id: "claude-sonnet-4-6",
+			baseUrl: "https://api.anthropic.com",
+		});
+		const toolCallId = "toolu_redacted_dropped";
+		const messages: Message[] = [
+			makeUser("Fix the layout"),
+			makeAssistant(
+				[
+					{ type: "thinking", thinking: "Private discarded reasoning.", thinkingSignature: undefined },
+					{ type: "redactedThinking", data: "encrypted-sibling" },
+					{ type: "toolCall", id: toolCallId, name: "read", arguments: { path: "src/view.ts" } },
+				],
+				{ provider: "anthropic", model: "claude-sonnet-4-6" },
+			),
+			toolResult(toolCallId, "view body"),
+			makeUser("Continue."),
+		];
+
+		const params = convertAnthropicMessages(messages, target, false);
+		const assistant = params.find(p => p.role === "assistant");
+		if (!assistant) throw new Error("expected assistant wire message");
+		const blocks = assistant.content as WireBlock[];
+		expect(blocks.find(b => b.type === "thinking")).toBeUndefined();
+		expect(blocks.find(b => b.type === "redacted_thinking")).toBeUndefined();
+		expect(blocks.filter((b): b is WireTextBlock => b.type === "text")).toHaveLength(0);
+		const toolUse = blocks.find(b => b.type === "tool_use") as WireToolUseBlock | undefined;
+		expect(toolUse?.id).toBe(toolCallId);
+	});
+
+	it("keeps redacted siblings when signed same-model thinking survives beside a discarded final block", () => {
+		const target = makeAnthropicModel({
+			provider: "anthropic",
+			id: "claude-sonnet-4-6",
+			baseUrl: "https://api.anthropic.com",
+		});
+		const messages: Message[] = [
+			makeUser("Fix the layout"),
+			makeAssistant(
+				[
+					{ type: "thinking", thinking: "Completed signed reasoning.", thinkingSignature: "sig_complete" },
+					{ type: "redactedThinking", data: "encrypted-complete-sibling" },
+					{ type: "text", text: "Visible anchor." },
+					{ type: "thinking", thinking: "Partial final reasoning.", thinkingSignature: "sig_partial" },
+				],
+				{ provider: "anthropic", model: "claude-sonnet-4-6", stopReason: "error" },
+			),
+			makeUser("Continue."),
+		];
+
+		const params = convertAnthropicMessages(messages, target, false);
+		const assistant = params.find(p => p.role === "assistant");
+		if (!assistant) throw new Error("expected assistant wire message");
+		const blocks = assistant.content as WireBlock[];
+		const thinking = blocks.find(b => b.type === "thinking") as WireThinkingBlock | undefined;
+		expect(thinking?.thinking).toBe("Completed signed reasoning.");
+		expect(thinking?.signature).toBe("sig_complete");
+		const redacted = blocks.find(b => b.type === "redacted_thinking") as WireRedactedBlock | undefined;
+		expect(redacted?.data).toBe("encrypted-complete-sibling");
+		expect(blocks.some(b => b.type === "thinking" && b.thinking === "Partial final reasoning.")).toBe(false);
 	});
 
 	it("strips official Anthropic source signatures on cross-model replay to a 3p target", () => {
@@ -300,11 +515,9 @@ describe("Anthropic prior-turn thinking preservation (#2257, #2265)", () => {
 		expect(thinking?.signature).toBe("");
 	});
 
-	it("does not promote prior unsigned thinking from non-anthropic sources to thinking blocks", () => {
-		// Cross-API replay: prior turn came from OpenAI-responses with no
-		// Anthropic signature. The all-or-none rule scope is per-API; we must
-		// not invent thinking blocks for a turn whose source can't sign them —
-		// the existing cross-API text demotion is the right behavior.
+	it("preserves prior unsigned thinking from non-anthropic sources on unsigned-replay targets", () => {
+		// Anthropic-compatible targets that advertise `replayUnsignedThinking`
+		// accept unsigned native thinking as their semantic-carry analogue.
 		const target = makeAnthropicModel();
 		const messages: Message[] = [
 			makeUser("Summarize README"),
@@ -333,10 +546,272 @@ describe("Anthropic prior-turn thinking preservation (#2257, #2265)", () => {
 		const params = convertAnthropicMessages(messages, target, false);
 		const assistants = params.filter(p => p.role === "assistant");
 		const priorBlocks = assistants[0].content as WireBlock[];
-		expect(priorBlocks.find(b => b.type === "thinking")).toBeUndefined();
-		// Reasoning text still survives on the wire (as text, via the existing
-		// cross-API demotion path).
+		const thinking = priorBlocks.find(b => b.type === "thinking") as WireThinkingBlock | undefined;
+		expect(thinking?.thinking).toBe("openai chain-of-thought");
+		expect(thinking?.signature).toBe("");
+	});
+
+	it("strips stale cross-model signatures when the target is a Cloudflare AI Gateway Anthropic proxy (#4297)", () => {
+		// cf-anthropic gateway forwards to signature-enforcing Anthropic but
+		// resolves `officialEndpoint: false`. A prior Claude Sonnet 4.6 turn's
+		// signature is bound to the source model+session, so replaying it to
+		// Claude Opus 4.8 on the same gateway would 400 with `Invalid signature
+		// in thinking block`. Signature stripping must key off the
+		// `signingEndpoint` classification, not `officialEndpoint`.
+		const target = makeAnthropicModel({
+			provider: "cloudflare-ai-gateway",
+			id: "cf-anthropic/claude-opus-4-8",
+			name: "Claude Opus 4.8 via Cloudflare AI Gateway",
+			baseUrl: "https://gateway.ai.cloudflare.com/v1/acct/gate/anthropic",
+		});
+		const messages: Message[] = [
+			makeUser("Summarize README"),
+			makeAssistant(
+				[
+					{ type: "thinking", thinking: "prior reasoning", thinkingSignature: "sig_prior" },
+					{ type: "toolCall", id: "toolu_prior", name: "read", arguments: { path: "README.md" } },
+				],
+				{ provider: "cloudflare-ai-gateway", model: "cf-anthropic/claude-sonnet-4-6" },
+			),
+			toolResult("toolu_prior", "README body"),
+			makeAssistant(
+				[
+					{ type: "thinking", thinking: "opus latest", thinkingSignature: "sig_latest" },
+					{ type: "text", text: "summary" },
+				],
+				{ provider: "cloudflare-ai-gateway", model: "cf-anthropic/claude-opus-4-8", stopReason: "stop" },
+			),
+			makeUser("Translate"),
+		];
+
+		const params = convertAnthropicMessages(messages, target, false);
+		const assistants = params.filter(p => p.role === "assistant");
+		const priorBlocks = assistants[0].content as WireBlock[];
+		const thinking = priorBlocks.find(b => b.type === "thinking") as WireThinkingBlock | undefined;
+		// Signature-only replay is unsafe on a signing target with a stale
+		// (cross-model) source signature — that's the whole 400 failure class.
+		// The transform strips the signature (so `signingEndpoint` demotes the
+		// unsigned block to text) and no stale `sig_prior` reaches the wire.
+		expect(thinking).toBeUndefined();
 		const text = priorBlocks.find(b => b.type === "text") as WireTextBlock | undefined;
-		expect(text?.text).toBe("openai chain-of-thought");
+		expect(text?.text).toContain("prior reasoning");
+		const wireBlobs = JSON.stringify(priorBlocks);
+		expect(wireBlobs).not.toContain("sig_prior");
+	});
+
+	it("strips stale cross-model signatures on Google Vertex publishers/anthropic (#4297)", () => {
+		const target = makeAnthropicModel({
+			provider: "google-vertex",
+			id: "claude-opus-4-8@20260215",
+			name: "Claude Opus 4.8 via Vertex",
+			baseUrl:
+				"https://us-central1-aiplatform.googleapis.com/v1/projects/p/locations/us-central1/publishers/anthropic/models/claude-opus-4-8@20260215:streamRawPredict",
+		});
+		const messages: Message[] = [
+			makeUser("Summarize README"),
+			makeAssistant(
+				[
+					{ type: "thinking", thinking: "sonnet reasoning", thinkingSignature: "sig_sonnet" },
+					{ type: "toolCall", id: "toolu_prior", name: "read", arguments: { path: "README.md" } },
+				],
+				{ provider: "google-vertex", model: "claude-sonnet-4-6@20260101" },
+			),
+			toolResult("toolu_prior", "README body"),
+			makeAssistant(
+				[
+					{ type: "thinking", thinking: "opus latest", thinkingSignature: "sig_latest" },
+					{ type: "text", text: "summary" },
+				],
+				{ provider: "google-vertex", model: "claude-opus-4-8@20260215", stopReason: "stop" },
+			),
+			makeUser("Translate"),
+		];
+
+		const params = convertAnthropicMessages(messages, target, false);
+		const assistants = params.filter(p => p.role === "assistant");
+		const priorBlocks = assistants[0].content as WireBlock[];
+		const thinking = priorBlocks.find(b => b.type === "thinking") as WireThinkingBlock | undefined;
+		expect(thinking).toBeUndefined();
+		const text = priorBlocks.find(b => b.type === "text") as WireTextBlock | undefined;
+		expect(text?.text).toContain("sonnet reasoning");
+		const wireBlobs = JSON.stringify(priorBlocks);
+		expect(wireBlobs).not.toContain("sig_sonnet");
+	});
+});
+
+describe("Latest-turn foreign thinking signatures (model switch mid tool-loop)", () => {
+	// Production forensics: a session ran on kimi-code/k3 (an Anthropic-
+	// compatible endpoint that signs thinking blocks with its own scheme —
+	// per-turn signatures Anthropic can never verify), the user switched back
+	// to official Anthropic while the kimi turn was still the LATEST assistant
+	// message of an in-flight tool loop, and every request 400'd with
+	// `messages.N.content.M: Invalid \`signature\` in \`thinking\` block`,
+	// wedging the session onto its fallback model. The signature strip used to
+	// be gated on `!isLatestSurvivingAssistant`; the latest turn replayed the
+	// foreign signature verbatim. The latest-turn strip keys on the ISSUER
+	// (source provider ≠ target provider): same-provider cross-model-id
+	// switches keep the byte-for-byte latest turn pinned by the prefill suite.
+	const officialFable = () =>
+		makeAnthropicModel({
+			provider: "anthropic",
+			id: "claude-fable-5",
+			name: "Claude Fable 5",
+			baseUrl: "https://api.anthropic.com",
+		});
+	const KIMI_SIG = "kimi-issued-foreign-signature";
+
+	it("strips a foreign signature from the latest in-flight tool-use turn for official Anthropic", () => {
+		const reasoning = "The PR body is final and verified. One formatting nit remains.";
+		const target = officialFable();
+		const messages: Message[] = [
+			makeUser("Fix the PR body"),
+			makeAssistant(
+				[
+					{ type: "thinking", thinking: reasoning, thinkingSignature: KIMI_SIG },
+					{ type: "text", text: "한 군데 렌더링 닛: 빈 줄 하나 추가." },
+					{ type: "toolCall", id: "toolu_send", name: "send", arguments: { text: "patch" } },
+				],
+				{ provider: "kimi-code", model: "k3" },
+			),
+			toolResult("toolu_send", "sent"),
+			makeUser("<user_interjection>switch happened here</user_interjection>"),
+		];
+
+		const params = convertAnthropicMessages(messages, target, false);
+		const assistants = params.filter(p => p.role === "assistant");
+		expect(assistants).toHaveLength(1);
+		const blocks = assistants[0].content as WireBlock[];
+		// No native thinking block may survive: the foreign signature cannot
+		// verify, and official Anthropic never replays unsigned thinking.
+		expect(blocks.find(b => b.type === "thinking")).toBeUndefined();
+		expect(JSON.stringify(blocks)).not.toContain(KIMI_SIG);
+		// The reasoning survives as demoted text ahead of the visible text.
+		const texts = blocks.filter(b => b.type === "text") as WireTextBlock[];
+		expect(texts[0]?.text).toBe(renderDemotedThinking(target.id, reasoning));
+		expect(texts.some(t => t.text.includes("렌더링"))).toBe(true);
+		// The pending tool loop stays intact.
+		const toolUse = blocks.find(b => b.type === "tool_use") as WireToolUseBlock | undefined;
+		expect(toolUse?.id).toBe("toolu_send");
+	});
+
+	it("keeps the latest same-model official Anthropic turn byte-for-byte", () => {
+		const target = officialFable();
+		const messages: Message[] = [
+			makeUser("Fix the PR body"),
+			makeAssistant(
+				[
+					{ type: "thinking", thinking: "own reasoning", thinkingSignature: "sig_fable" },
+					{ type: "toolCall", id: "toolu_send", name: "send", arguments: {} },
+				],
+				{ provider: "anthropic", model: "claude-fable-5" },
+			),
+			toolResult("toolu_send", "sent"),
+		];
+
+		const params = convertAnthropicMessages(messages, target, false);
+		const assistants = params.filter(p => p.role === "assistant");
+		const blocks = assistants[0].content as WireBlock[];
+		const thinking = blocks.find(b => b.type === "thinking") as WireThinkingBlock | undefined;
+		expect(thinking?.thinking).toBe("own reasoning");
+		expect(thinking?.signature).toBe("sig_fable");
+	});
+
+	it("strips a foreign signature from the latest ABANDONED tool-use turn for official Anthropic", () => {
+		// stopReason !== "toolUse" with toolCall blocks = abandoned turn. The
+		// byte-for-byte exemption only covers Anthropic's own latest response,
+		// not a foreign one.
+		const reasoning = "kimi reasoning on an abandoned turn";
+		const target = officialFable();
+		const messages: Message[] = [
+			makeUser("Do the thing"),
+			makeAssistant(
+				[
+					{ type: "thinking", thinking: reasoning, thinkingSignature: KIMI_SIG },
+					{ type: "toolCall", id: "toolu_left", name: "read", arguments: { path: "a" } },
+				],
+				{ provider: "kimi-code", model: "k3", stopReason: "stop" },
+			),
+			toolResult("toolu_left", "placeholder"),
+			makeUser("continue"),
+		];
+
+		const params = convertAnthropicMessages(messages, target, false);
+		const assistants = params.filter(p => p.role === "assistant");
+		const blocks = assistants[0].content as WireBlock[];
+		expect(blocks.find(b => b.type === "thinking")).toBeUndefined();
+		expect(JSON.stringify(blocks)).not.toContain(KIMI_SIG);
+		const text = blocks.find(b => b.type === "text") as WireTextBlock | undefined;
+		expect(text?.text).toBe(renderDemotedThinking(target.id, reasoning));
+	});
+
+	it("keeps the latest ABANDONED same-model turn untouched (byte-for-byte rule)", () => {
+		const target = officialFable();
+		const messages: Message[] = [
+			makeUser("Do the thing"),
+			makeAssistant(
+				[
+					{ type: "thinking", thinking: "fable reasoning", thinkingSignature: "sig_fable" },
+					{ type: "toolCall", id: "toolu_left", name: "read", arguments: { path: "a" } },
+				],
+				{ provider: "anthropic", model: "claude-fable-5", stopReason: "stop" },
+			),
+			toolResult("toolu_left", "placeholder"),
+			makeUser("continue"),
+		];
+
+		const params = convertAnthropicMessages(messages, target, false);
+		const assistants = params.filter(p => p.role === "assistant");
+		const blocks = assistants[0].content as WireBlock[];
+		const thinking = blocks.find(b => b.type === "thinking") as WireThinkingBlock | undefined;
+		expect(thinking?.thinking).toBe("fable reasoning");
+		expect(thinking?.signature).toBe("sig_fable");
+	});
+
+	it("drops a foreign redacted_thinking sibling on the latest turn for signing targets", () => {
+		const target = officialFable();
+		const messages: Message[] = [
+			makeUser("Fix it"),
+			makeAssistant(
+				[
+					{ type: "thinking", thinking: "visible", thinkingSignature: KIMI_SIG },
+					{ type: "redactedThinking", data: "foreign-blob" },
+					{ type: "toolCall", id: "toolu_x", name: "read", arguments: {} },
+				],
+				{ provider: "kimi-code", model: "k3" },
+			),
+			toolResult("toolu_x", "ok"),
+		];
+
+		const params = convertAnthropicMessages(messages, target, false);
+		const assistants = params.filter(p => p.role === "assistant");
+		const blocks = assistants[0].content as WireBlock[];
+		expect(blocks.find(b => b.type === "redacted_thinking")).toBeUndefined();
+		expect(blocks.find(b => b.type === "thinking")).toBeUndefined();
+	});
+
+	it("strips the latest official Anthropic signature when replaying to an unsigned-replay 3p target", () => {
+		// Reverse direction: official → 3p. The signature is bound to
+		// Anthropic's key+session+model; the 3p target replays the thinking
+		// natively but unsigned.
+		const target = makeAnthropicModel();
+		const messages: Message[] = [
+			makeUser("Fix it"),
+			makeAssistant(
+				[
+					{ type: "thinking", thinking: "fable reasoning", thinkingSignature: "sig_fable" },
+					{ type: "toolCall", id: "toolu_y", name: "read", arguments: {} },
+				],
+				{ provider: "anthropic", model: "claude-fable-5" },
+			),
+			toolResult("toolu_y", "ok"),
+		];
+
+		const params = convertAnthropicMessages(messages, target, false);
+		const assistants = params.filter(p => p.role === "assistant");
+		const blocks = assistants[0].content as WireBlock[];
+		const thinking = blocks.find(b => b.type === "thinking") as WireThinkingBlock | undefined;
+		expect(thinking?.thinking).toBe("fable reasoning");
+		expect(thinking?.signature ?? "").toBe("");
+		expect(JSON.stringify(blocks)).not.toContain("sig_fable");
 	});
 });

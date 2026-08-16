@@ -9,67 +9,250 @@
  * regression that motivated the split.
  */
 import type { CommandEntry } from "@oh-my-pi/pi-utils/cli";
+import * as commandHelp from "./cli/command-help";
 import { flagConsumesValue } from "./cli/flag-tables";
+import { launchHelp } from "./commands/launch-help";
 
 export const commands: CommandEntry[] = [
-	{ name: "launch", load: () => import("./commands/launch").then(m => m.default) },
-	{ name: "acp", load: () => import("./commands/acp").then(m => m.default) },
-	{ name: "auth-broker", load: () => import("./commands/auth-broker").then(m => m.default) },
-	{ name: "auth-gateway", load: () => import("./commands/auth-gateway").then(m => m.default) },
-	{ name: "agents", load: () => import("./commands/agents").then(m => m.default) },
-	{ name: "bench", load: () => import("./commands/bench").then(m => m.default) },
-	{ name: "commit", load: () => import("./commands/commit").then(m => m.default) },
-	{ name: "completions", load: () => import("./commands/completions").then(m => m.default) },
-	{ name: "__complete", load: () => import("./commands/complete").then(m => m.default) },
-	{ name: "config", load: () => import("./commands/config").then(m => m.default) },
-	{ name: "dry-balance", load: () => import("./commands/dry-balance").then(m => m.default) },
-	{ name: "grep", load: () => import("./commands/grep").then(m => m.default) },
-	{ name: "gallery", load: () => import("./commands/gallery").then(m => m.default) },
-	{ name: "grievances", load: () => import("./commands/grievances").then(m => m.default) },
-	{ name: "install", load: () => import("./commands/install").then(m => m.default) },
-	{ name: "join", load: () => import("./commands/join").then(m => m.default) },
-	{ name: "models", load: () => import("./commands/models").then(m => m.default) },
-	{ name: "plugin", load: () => import("./commands/plugin").then(m => m.default) },
-	{ name: "say", load: () => import("./commands/say").then(m => m.default) },
-	{ name: "setup", load: () => import("./commands/setup").then(m => m.default) },
-	{ name: "shell", load: () => import("./commands/shell").then(m => m.default) },
-	{ name: "read", load: () => import("./commands/read").then(m => m.default) },
-	{ name: "ssh", load: () => import("./commands/ssh").then(m => m.default) },
-	{ name: "stats", load: () => import("./commands/stats").then(m => m.default) },
-	{ name: "update", load: () => import("./commands/update").then(m => m.default) },
-	{ name: "usage", load: () => import("./commands/usage").then(m => m.default) },
-	{ name: "tiny-models", load: () => import("./commands/tiny-models").then(m => m.default) },
-	{ name: "token", load: () => import("./commands/token").then(m => m.default) },
-	{ name: "ttsr", load: () => import("./commands/ttsr").then(m => m.default) },
-	{ name: "worktree", load: () => import("./commands/worktree").then(m => m.default), aliases: ["wt"] },
-	{ name: "search", load: () => import("./commands/web-search").then(m => m.default), aliases: ["q"] },
+	{ name: "launch", load: () => import("./commands/launch").then(m => m.default), help: launchHelp },
+	{
+		name: "acp",
+		load: () => import("./commands/acp").then(m => m.default),
+		help: commandHelp.acpHelp,
+	},
+	{
+		name: "auth-broker",
+		load: () => import("./commands/auth-broker").then(m => m.default),
+		help: commandHelp.authBrokerHelp,
+	},
+	{
+		name: "auth-gateway",
+		load: () => import("./commands/auth-gateway").then(m => m.default),
+		help: commandHelp.authGatewayHelp,
+	},
+	{
+		name: "agents",
+		load: () => import("./commands/agents").then(m => m.default),
+		help: commandHelp.agentsHelp,
+	},
+	{
+		name: "bench",
+		load: () => import("./commands/bench").then(m => m.default),
+		help: commandHelp.benchHelp,
+	},
+	{
+		name: "browser-relay",
+		load: () => import("./commands/browser-relay").then(m => m.default),
+		help: commandHelp.browserRelayHelp,
+	},
+	{
+		name: "cleanse",
+		load: () => import("./commands/cleanse").then(m => m.default),
+		help: commandHelp.cleanseHelp,
+	},
+	{
+		name: "commit",
+		load: () => import("./commands/commit").then(m => m.default),
+		help: commandHelp.commitHelp,
+	},
+	{
+		name: "completions",
+		load: () => import("./commands/completions").then(m => m.default),
+		help: commandHelp.completionsHelp,
+	},
+	{
+		name: "__complete",
+		load: () => import("./commands/complete").then(m => m.default),
+		help: commandHelp.completeHelp,
+	},
+	{
+		name: "compress",
+		load: () => import("./commands/compress").then(m => m.default),
+		help: commandHelp.compressHelp,
+	},
+	{
+		name: "config",
+		load: () => import("./commands/config").then(m => m.default),
+		help: commandHelp.configHelp,
+	},
+	{
+		name: "dry-balance",
+		load: () => import("./commands/dry-balance").then(m => m.default),
+		help: commandHelp.dryBalanceHelp,
+	},
+	{
+		name: "gc",
+		load: () => import("./commands/gc").then(m => m.default),
+		help: commandHelp.gcHelp,
+	},
+	{
+		name: "grep",
+		load: () => import("./commands/grep").then(m => m.default),
+		help: commandHelp.grepHelp,
+	},
+	{
+		name: "gallery",
+		load: () => import("./commands/gallery").then(m => m.default),
+		help: commandHelp.galleryHelp,
+	},
+	{
+		name: "grievances",
+		load: () => import("./commands/grievances").then(m => m.default),
+		help: commandHelp.grievancesHelp,
+	},
+	{
+		name: "install",
+		load: () => import("./commands/install").then(m => m.default),
+		help: commandHelp.installHelp,
+	},
+	{
+		name: "join",
+		load: () => import("./commands/join").then(m => m.default),
+		help: commandHelp.joinHelp,
+	},
+	{
+		name: "models",
+		load: () => import("./commands/models").then(m => m.default),
+		help: commandHelp.modelsHelp,
+	},
+	{
+		name: "plugin",
+		load: () => import("./commands/plugin").then(m => m.default),
+		help: commandHelp.pluginHelp,
+	},
+	{
+		name: "say",
+		load: () => import("./commands/say").then(m => m.default),
+		help: commandHelp.sayHelp,
+	},
+	{
+		name: "share",
+		load: () => import("./commands/share").then(m => m.default),
+		help: commandHelp.shareHelp,
+	},
+	{
+		name: "setup",
+		load: () => import("./commands/setup").then(m => m.default),
+		help: commandHelp.setupHelp,
+	},
+	{
+		name: "shell",
+		load: () => import("./commands/shell").then(m => m.default),
+		help: commandHelp.shellHelp,
+	},
+	{
+		name: "read",
+		load: () => import("./commands/read").then(m => m.default),
+		help: commandHelp.readHelp,
+	},
+	{
+		name: "ssh",
+		load: () => import("./commands/ssh").then(m => m.default),
+		help: commandHelp.sshHelp,
+	},
+	{
+		name: "stats",
+		load: () => import("./commands/stats").then(m => m.default),
+		help: commandHelp.statsHelp,
+	},
+	{
+		name: "update",
+		load: () => import("./commands/update").then(m => m.default),
+		help: commandHelp.updateHelp,
+	},
+	{
+		name: "usage",
+		load: () => import("./commands/usage").then(m => m.default),
+		help: commandHelp.usageHelp,
+	},
+	{
+		name: "tiny-models",
+		load: () => import("./commands/tiny-models").then(m => m.default),
+		help: commandHelp.tinyModelsHelp,
+	},
+	{
+		name: "token",
+		load: () => import("./commands/token").then(m => m.default),
+		help: commandHelp.tokenHelp,
+	},
+	{
+		name: "ttsr",
+		load: () => import("./commands/ttsr").then(m => m.default),
+		help: commandHelp.ttsrHelp,
+	},
+	{
+		name: "worktree",
+		load: () => import("./commands/worktree").then(m => m.default),
+		aliases: ["wt"],
+		help: commandHelp.worktreeHelp,
+	},
+	{
+		name: "search",
+		load: () => import("./commands/web-search").then(m => m.default),
+		aliases: ["q"],
+		help: commandHelp.searchHelp,
+	},
 ];
 
-// Documented-looking plugin-management verbs that are NOT registered top-level
-// commands. Without a guard `resolveCliArgv` rewrites e.g. `omp list` to
-// `omp launch list`, silently forwarding the bare verb to the model as a prompt
-// instead of managing plugins (#2935; same class as the `install` leak fixed in
-// #1496/#1498). A bare (single-arg) use gets a hint pointing at the real
-// `omp plugin <action>` command; multi-word invocations still fall through to
-// `launch`, so genuine prompts that merely begin with one of these words work.
-const RESERVED_TOP_LEVEL_WORDS = new Map<string, string>([
-	[
-		"extensions",
+// Documented-looking plugin/marketplace verbs that are NOT registered top-level
+// commands. Without a guard `resolveCliArgv` rewrites e.g. `omp marketplace add
+// xyz` to `omp launch marketplace add xyz`, silently forwarding the argv to the
+// model as a prompt instead of managing plugins (#4845; same class as the
+// `list`/`remove` leak fixed in #2935 and the `install` leak in #1496/#1498).
+// The real commands live under `omp plugin <action>`; each entry maps a verb to
+// a hint pointing there. See {@link reservedTopLevelWordMessage} for when a hint
+// fires vs. when the argv still falls through to `launch`.
+const RESERVED_TOP_LEVEL_WORDS: Record<string, string> = {
+	extensions:
 		'`omp extensions` is not a management command. Use `omp plugin list` / `omp plugin install`, or run `omp launch extensions` if you meant to send "extensions" as a prompt.',
-	],
-	[
-		"list",
-		'`omp list` is not a top-level command. Use `omp plugin list` to list installed plugins, or run `omp launch list` if you meant to send "list" as a prompt.',
-	],
-	[
-		"remove",
+	list: '`omp list` is not a top-level command. Use `omp plugin list` to list installed plugins, or run `omp launch list` if you meant to send "list" as a prompt.',
+	remove:
 		'`omp remove` is not a top-level command. Use `omp plugin uninstall <name>` to remove a plugin, or run `omp launch remove` if you meant to send "remove" as a prompt.',
-	],
-]);
+	uninstall:
+		'`omp uninstall` is not a top-level command. Use `omp plugin uninstall <name@marketplace>` to remove a plugin, or run `omp launch uninstall` if you meant to send "uninstall" as a prompt.',
+	marketplace:
+		'`omp marketplace` is not a top-level command. Use `omp plugin marketplace <add|remove|update|list>` to manage marketplaces, or run `omp launch marketplace` if you meant to send "marketplace" as a prompt.',
+	discover:
+		'`omp discover` is not a top-level command. Use `omp plugin discover [marketplace]` to browse available plugins, or run `omp launch discover` if you meant to send "discover" as a prompt.',
+	upgrade:
+		'`omp upgrade` is not a top-level command. Use `omp plugin upgrade [name@marketplace]` to upgrade plugins, or run `omp launch upgrade` if you meant to send "upgrade" as a prompt.',
+	enable:
+		'`omp enable` is not a top-level command. Use `omp plugin enable <name@marketplace>` to enable a plugin, or run `omp launch enable` if you meant to send "enable" as a prompt.',
+	disable:
+		'`omp disable` is not a top-level command. Use `omp plugin disable <name@marketplace>` to disable a plugin, or run `omp launch disable` if you meant to send "disable" as a prompt.',
+};
 
-export function reservedTopLevelWordMessage(first: string | undefined, argc = 1): string | undefined {
-	if (argc !== 1 || !first || first.startsWith("-") || first.startsWith("@")) return undefined;
-	return RESERVED_TOP_LEVEL_WORDS.get(first);
+// Sub-actions that make `omp marketplace <sub>` unambiguously a management
+// command even when multi-word (the reporter's `omp marketplace add xyz`,
+// #4845). Mirrors the switch in `handleMarketplace` (cli/plugin-cli.ts).
+const MARKETPLACE_SUBCOMMANDS: Record<string, true> = { add: true, remove: true, rm: true, update: true, list: true };
+
+/**
+ * Hint for a reserved plugin/marketplace verb used as a top-level command, or
+ * `undefined` when the argv should fall through to `launch`.
+ *
+ * A bare verb (`omp marketplace`) always hints. A multi-word invocation only
+ * hints when the arguments follow the documented plugin grammar — a marketplace
+ * sub-action (`omp marketplace add …`) or a `name@marketplace` plugin id
+ * (`omp uninstall foo@bar`) — so genuine prompts that merely begin with one of
+ * these words (`omp list all my files`, `omp upgrade the deps`) still launch.
+ *
+ * Flags (`-…`) and `@file` arguments in the verb slot are never management
+ * commands; those fall through to the default `launch` command.
+ */
+export function reservedTopLevelWordMessage(argv: readonly string[]): string | undefined {
+	const first = argv[0];
+	if (!first || first.startsWith("-") || first.startsWith("@")) return undefined;
+	const hint = RESERVED_TOP_LEVEL_WORDS[first];
+	if (!hint) return undefined;
+	const second = argv[1];
+	if (second === undefined) return hint;
+	if (first === "marketplace" && MARKETPLACE_SUBCOMMANDS[second]) return hint;
+	for (let index = 1; index < argv.length; index += 1) {
+		const arg = argv[index];
+		if (!arg.startsWith("-") && arg.includes("@")) return hint;
+	}
+	return undefined;
 }
 
 /**
@@ -111,7 +294,7 @@ function leadingSubcommandIndex(argv: string[]): number {
  */
 export function resolveCliArgv(argv: string[]): ResolvedCliArgv {
 	const first = argv[0];
-	const reservedMessage = reservedTopLevelWordMessage(first, argv.length);
+	const reservedMessage = reservedTopLevelWordMessage(argv);
 	if (reservedMessage) return { error: reservedMessage };
 	if (first === "--help" || first === "-h" || first === "--version" || first === "-v" || first === "help") {
 		return { argv };

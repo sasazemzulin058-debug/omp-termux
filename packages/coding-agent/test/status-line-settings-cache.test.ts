@@ -8,7 +8,7 @@ import { StatusLineComponent, type StatusLineSettings } from "@oh-my-pi/pi-codin
 import { STATUS_LINE_PRESETS } from "@oh-my-pi/pi-coding-agent/modes/components/status-line/presets";
 import { initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
 import * as git from "@oh-my-pi/pi-coding-agent/utils/git";
-import { setProjectDir } from "@oh-my-pi/pi-utils";
+import { removeSyncWithRetries, setProjectDir } from "@oh-my-pi/pi-utils";
 import { beginSettingsTest, restoreSettingsTestState, type SettingsTestState } from "./helpers/settings-test-state";
 
 let settingsState: SettingsTestState | undefined;
@@ -26,7 +26,7 @@ afterEach(() => {
 	restoreSettingsTestState(settingsState);
 	settingsState = undefined;
 	if (projectDir) {
-		fs.rmSync(projectDir, { recursive: true, force: true });
+		removeSyncWithRetries(projectDir);
 	}
 	projectDir = "";
 });
@@ -46,7 +46,7 @@ function makeSession(sessionName = "Cache Session") {
 		autoResolvedThinkingLevel: () => undefined,
 		isFastModeActive: () => false,
 		isAdvisorActive: () => false,
-		getGoalModeState: () => null,
+		getAdvisorStatusOverview: () => ({ configured: false, advisors: [] }),
 		getAsyncJobSnapshot: () => ({ running: [] }),
 		settings: { get: () => false },
 		modelRegistry: { isUsingOAuth: () => false },
@@ -57,6 +57,10 @@ function makeSession(sessionName = "Cache Session") {
 				output: 0,
 				cacheRead: 0,
 				cacheWrite: 0,
+				totalTokens: 0,
+				orchestrationInput: 0,
+				orchestrationOutput: 0,
+				orchestrationCacheRead: 0,
 				premiumRequests: 0,
 				cost: 0,
 			}),
@@ -153,7 +157,17 @@ describe("StatusLineComponent effective settings cache", () => {
 		const customComponent = makeComponent({ preset: "custom", leftSegments: [], rightSegments: [] });
 		expect(customComponent.getEffectiveSettingsForTest().leftSegments).toEqual([]);
 		expect(customComponent.getEffectiveSettingsForTest().rightSegments).toEqual([]);
-		expect(customComponent.getTopBorder(120)).toEqual({ content: "", width: 0 });
+		expect(customComponent.getTopBorder(120)).toEqual({ content: "", width: 0, revision: 0 });
+	});
+
+	it("surfaces active subagents even when custom segments omit subagents", () => {
+		const component = makeComponent({ preset: "custom", leftSegments: [], rightSegments: [] });
+
+		component.setSubagentCount(2);
+
+		const content = stripVTControlCharacters(component.getTopBorder(120).content);
+		expect(content).toContain("2 agents");
+		expect(content).not.toContain("running");
 	});
 
 	it("keeps plan and hook state dynamic without settings invalidation", () => {
@@ -252,5 +266,15 @@ describe("StatusLineComponent effective settings cache", () => {
 			statusSpy.mockRestore();
 			headSpy.mockRestore();
 		}
+	});
+});
+
+describe("StatusLineComponent hook statuses", () => {
+	it("renders every keyed status on a deterministic line", () => {
+		const component = makeComponent({ showHookStatus: true });
+		component.setHookStatus("project-time", "$0.04 (dev)");
+		component.setHookStatus("ponytail", "Ponytail");
+
+		expect(component.render(8)).toEqual(["Ponytail", "$0.04 (…"]);
 	});
 });

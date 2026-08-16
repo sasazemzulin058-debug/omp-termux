@@ -1,3 +1,6 @@
+import type { FetchImpl } from "../types";
+import { isRecord } from "../utils";
+
 /**
  * GitHub Copilot wire metadata: API-key envelope parsing and endpoint
  * derivation shared by catalog discovery and the pi-ai OAuth flow. The device
@@ -45,6 +48,14 @@ export function isPublicGitHubHost(host: string): boolean {
 	return PUBLIC_GITHUB_HOSTS.has(host.trim().toLowerCase());
 }
 
+/** Canonical personal-Copilot API host. */
+export const PERSONAL_GITHUB_COPILOT_BASE_URL = "https://api.githubcopilot.com" as const;
+
+/** `true` when the resolved base URL is the canonical personal-Copilot host. */
+export function isPersonalGitHubCopilotBaseUrl(baseUrl: string | undefined): boolean {
+	return baseUrl === PERSONAL_GITHUB_COPILOT_BASE_URL;
+}
+
 export function normalizeGitHubCopilotEnterpriseDomain(input: string | undefined): string | undefined {
 	const trimmed = input?.trim();
 	if (!trimmed) return undefined;
@@ -60,6 +71,35 @@ export function normalizeGitHubCopilotApiEndpoint(input: string | undefined): st
 		const url = new URL(trimmed);
 		if (url.protocol !== "https:" || !url.hostname) return undefined;
 		return trimmed.replace(/\/+$/, "");
+	} catch {
+		return undefined;
+	}
+}
+/**
+ * Resolve the plan-specific Copilot API endpoint advertised for a GitHub token.
+ * Login and raw environment-token discovery share this best-effort probe. Pass
+ * a `signal` to bound it against the same discovery deadline as `/models`; a
+ * stalled probe otherwise blocks discovery indefinitely.
+ */
+export async function discoverGitHubCopilotApiEndpoint(
+	token: string,
+	fetchImpl: FetchImpl,
+	signal?: AbortSignal,
+): Promise<string | undefined> {
+	try {
+		const response = await fetchImpl("https://api.github.com/copilot_internal/user", {
+			headers: {
+				Accept: "application/json",
+				Authorization: `token ${token}`,
+				...OPENCODE_HEADERS,
+			},
+			signal,
+		});
+		if (!response.ok) return undefined;
+		const data: unknown = await response.json();
+		if (!isRecord(data) || !isRecord(data.endpoints)) return undefined;
+		const endpoint = data.endpoints.api;
+		return typeof endpoint === "string" ? normalizeGitHubCopilotApiEndpoint(endpoint) : undefined;
 	} catch {
 		return undefined;
 	}

@@ -47,12 +47,42 @@ function normalizeForSearch(value: string): string {
 		.replace(/([A-Z]+)([A-Z][a-z])/g, "$1 $2")
 		.replace(/([a-z0-9])([A-Z])/g, "$1 $2")
 		.toLowerCase()
-		.replace(/[^a-z0-9]+/g, " ")
+		.replace(/[^\p{Letter}\p{Mark}\p{Number}]+/gu, " ")
 		.trim()
 		.replace(/\s+/g, " ");
 }
 
+// Module-level memo of the per-text search index. `buildSearchIndex` is a pure
+// function of `text`, but selectors call it once per candidate per keystroke —
+// the same stable candidate list is re-filtered as the user types. Caching the
+// index across keystrokes eliminates the redundant normalize + word-split + Set
+// build on every character. Consumers only read the result, so sharing is safe.
+//
+// Admission is conservative so the cache helps the repeated-filter hot path
+// without paying for one-off text: only short texts are cached (long inputs —
+// pasted prompts, transcripts searched via the message selector — would bloat
+// memory), and admission stops at the cap instead of evicting, so a stream of
+// unique texts (message/session search) can't churn the map.
+const INDEX_CACHE_MAX = 4096;
+const MAX_CACHED_TEXT_LEN = 4096;
+const indexCache = new Map<string, SearchIndex>();
+
 function buildSearchIndex(text: string): SearchIndex {
+	// Long inputs (pasted prompts, transcripts) are never cached; bypass the Map
+	// entirely so they don't pay a hash lookup on every search.
+	if (text.length > MAX_CACHED_TEXT_LEN) return buildUncachedSearchIndex(text);
+
+	const cached = indexCache.get(text);
+	if (cached !== undefined) return cached;
+
+	const result = buildUncachedSearchIndex(text);
+	if (indexCache.size < INDEX_CACHE_MAX) {
+		indexCache.set(text, result);
+	}
+	return result;
+}
+
+function buildUncachedSearchIndex(text: string): SearchIndex {
 	const normalized = normalizeForSearch(text);
 	if (normalized.length === 0) {
 		return { normalized, compact: "", compactWordStarts: new Set(), words: [] };
@@ -236,32 +266,43 @@ function scoreToken(token: string, index: SearchIndex): FuzzyMatch {
 	return best;
 }
 
-export function fuzzyMatch(query: string, text: string): FuzzyMatch {
-	const normalizedQuery = normalizeForSearch(query);
-	if (normalizedQuery.length === 0) {
+/** A query normalized and split once, so `fuzzyRank` doesn't re-normalize the
+ * same query for every candidate in the list. */
+interface PreparedQuery {
+	normalized: string;
+	tokens: string[];
+	compact: string;
+}
+
+function prepareQuery(query: string): PreparedQuery | null {
+	const normalized = normalizeForSearch(query);
+	if (normalized.length === 0) return null;
+	return { normalized, tokens: normalized.split(" "), compact: normalized.replaceAll(" ", "") };
+}
+
+function fuzzyMatchCore(pq: PreparedQuery | null, index: SearchIndex): FuzzyMatch {
+	if (pq === null) {
 		return { matches: true, score: 0 };
 	}
 
-	const index = buildSearchIndex(text);
 	if (index.words.length === 0) {
 		return { matches: false, score: 0 };
 	}
 
 	let totalScore = 0;
-	const phraseIndex = index.normalized.indexOf(normalizedQuery);
-	if (phraseIndex >= 0 && isWordBoundaryPhrase(index.normalized, phraseIndex, normalizedQuery.length)) {
+	const phraseIndex = index.normalized.indexOf(pq.normalized);
+	if (phraseIndex >= 0 && isWordBoundaryPhrase(index.normalized, phraseIndex, pq.normalized.length)) {
 		totalScore -= PHRASE_BONUS;
 		totalScore += phraseIndex * 0.01;
 	}
 
-	const compactQuery = normalizedQuery.replaceAll(" ", "");
-	const compactPhraseIndex = index.compact.indexOf(compactQuery);
+	const compactPhraseIndex = index.compact.indexOf(pq.compact);
 	if (compactPhraseIndex >= 0 && index.compactWordStarts.has(compactPhraseIndex)) {
 		totalScore -= COMPACT_PHRASE_BONUS;
 		totalScore += compactPhraseIndex * 0.01;
 	}
 
-	for (const token of normalizedQuery.split(" ")) {
+	for (const token of pq.tokens) {
 		const match = scoreToken(token, index);
 		if (!match.matches) {
 			return { matches: false, score: 0 };
@@ -270,6 +311,35 @@ export function fuzzyMatch(query: string, text: string): FuzzyMatch {
 	}
 
 	return { matches: true, score: totalScore };
+}
+
+export function fuzzyMatch(query: string, text: string): FuzzyMatch {
+	const pq = prepareQuery(query);
+	if (pq === null) return { matches: true, score: 0 };
+	return fuzzyMatchCore(pq, buildSearchIndex(text));
+}
+
+/**
+ * A text prepared once for repeated fuzzy matching.
+ *
+ * `fuzzyMatch` builds a search index per call; the module cache only admits
+ * texts up to {@link MAX_CACHED_TEXT_LEN}, so long corpora (session or
+ * transcript search) rebuild the index on every keystroke — the dominant cost
+ * when a selector re-filters a stable candidate list as the user types. Build
+ * one `FuzzyText` per candidate and call {@link match} per query instead; the
+ * index lives exactly as long as the caller's reference.
+ */
+export class FuzzyText {
+	readonly #index: SearchIndex;
+
+	constructor(text: string) {
+		this.#index = buildUncachedSearchIndex(text);
+	}
+
+	/** Match `query` (space-separated tokens; all must match) against the prepared text. */
+	match(query: string): FuzzyMatch {
+		return fuzzyMatchCore(prepareQuery(query), this.#index);
+	}
 }
 
 /**
@@ -281,9 +351,14 @@ export function fuzzyRank<T>(items: T[], query: string, getText: (item: T) => st
 		return items.map(item => ({ item, score: 0 }));
 	}
 
+	// A non-blank query that normalizes to empty (pure punctuation) matches
+	// everything with score 0, but still calls getText per item — consumers rely
+	// on its side effects (see fuzzy-cache.test.ts).
+	const pq = prepareQuery(query);
 	const results: FuzzyFilterResult<T>[] = [];
 	for (const item of items) {
-		const match = fuzzyMatch(query, getText(item));
+		const text = getText(item);
+		const match = pq === null ? { matches: true, score: 0 } : fuzzyMatchCore(pq, buildSearchIndex(text));
 		if (match.matches) {
 			results.push({ item, score: match.score });
 		}
@@ -295,4 +370,15 @@ export function fuzzyRank<T>(items: T[], query: string, getText: (item: T) => st
 
 export function fuzzyFilter<T>(items: T[], query: string, getText: (item: T) => string): T[] {
 	return fuzzyRank(items, query, getText).map(result => result.item);
+}
+
+/**
+ * Clear the fuzzy search-index cache. Intended for tests/benchmarks so a fresh
+ * cold-start typing session can be measured on demand; not part of the supported
+ * TUI API.
+ *
+ * @internal
+ */
+export function resetFuzzyIndexCache(): void {
+	indexCache.clear();
 }

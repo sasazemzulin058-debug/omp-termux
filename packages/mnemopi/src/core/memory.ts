@@ -59,6 +59,10 @@ export interface RememberInput extends MemoryInput {
 	readonly extract?: boolean;
 	readonly extractEntities?: boolean;
 	readonly extract_entities?: boolean;
+	readonly extractText?: string | null;
+	readonly extract_text?: string | null;
+	readonly embedText?: string | null;
+	readonly embed_text?: string | null;
 	readonly trustTier?: string | null;
 	readonly trust_tier?: string | null;
 	readonly memoryType?: string | null;
@@ -75,6 +79,18 @@ export interface RememberFacadeOptions {
 	readonly extractEntities?: boolean;
 	readonly extract_entities?: boolean;
 	readonly extract?: boolean;
+	/**
+	 * Override the text passed to fact/entity extraction. When unset, the
+	 * stored content is used. See {@link RememberOptions.extractText}.
+	 */
+	readonly extractText?: string | null;
+	readonly extract_text?: string | null;
+	/**
+	 * Override the text passed to embeddings and FTS indexing. Stored content
+	 * remains unchanged; when unset, embeddings and FTS use stored content.
+	 */
+	readonly embedText?: string | null;
+	readonly embed_text?: string | null;
 	readonly trustTier?: string | null;
 	readonly trust_tier?: string | null;
 	readonly timestamp?: string | Date | null;
@@ -139,6 +155,8 @@ type FacadeRememberOptions = {
 	scope: string;
 	extractEntities: boolean;
 	extract: boolean;
+	extractText: string | undefined;
+	embedText: string | undefined;
 	trustTier: string | undefined;
 	veracity: string | undefined;
 	memoryType: string | undefined;
@@ -259,6 +277,9 @@ function resolveDbPath(options: MnemopiOptions, bank: string): string | undefine
 function toRememberOptions(input: string | RememberInput, options: RememberFacadeOptions) {
 	const memory = typeof input === "string" ? null : input;
 	const timestamp = normalizeDate(options.timestamp ?? memory?.timestamp);
+	const extractText =
+		options.extractText ?? options.extract_text ?? memory?.extractText ?? memory?.extract_text ?? null;
+	const embedText = options.embedText ?? options.embed_text ?? memory?.embedText ?? memory?.embed_text ?? null;
 	const rememberOptions: FacadeRememberOptions = {
 		source: options.source ?? memory?.source ?? "conversation",
 		importance: options.importance ?? memory?.importance ?? 0.5,
@@ -272,6 +293,8 @@ function toRememberOptions(input: string | RememberInput, options: RememberFacad
 			memory?.extract_entities ??
 			false,
 		extract: options.extract ?? memory?.extract ?? false,
+		extractText: extractText ?? undefined,
+		embedText: embedText ?? undefined,
 		trustTier: options.trustTier ?? options.trust_tier ?? memory?.trustTier ?? memory?.trust_tier ?? undefined,
 		veracity: options.veracity ?? memory?.veracity ?? undefined,
 		memoryType: options.memoryType ?? options.memory_type ?? memory?.memoryType ?? memory?.memory_type ?? undefined,
@@ -296,6 +319,7 @@ function toRecallOptions(options: RecallFacadeOptions): BeamRecallFacadeOptions 
 		vecWeight: options.vecWeight ?? options.vec_weight ?? undefined,
 		ftsWeight: options.ftsWeight ?? options.fts_weight ?? undefined,
 		importanceWeight: options.importanceWeight ?? options.importance_weight ?? undefined,
+		contentPreviewChars: options.contentPreviewChars,
 	};
 	// Preserve the three-state semantics (`undefined` = auto-derive, `null` = explicitly
 	// FTS-only, `number[]` = caller-supplied) so callers can opt out of `recall()`'s
@@ -305,7 +329,8 @@ function toRecallOptions(options: RecallFacadeOptions): BeamRecallFacadeOptions 
 }
 
 function countRows(db: Database, sql: string, ...params: (string | number | null)[]): number {
-	const row = db.prepare(sql).get(...params) as { total?: number; count?: number } | null;
+	using statement = db.prepare(sql);
+	const row = statement.get(...params) as { total?: number; count?: number } | null;
 	return row?.total ?? row?.count ?? 0;
 }
 
@@ -320,9 +345,8 @@ function dataDirForDbPath(path: string): string | undefined {
 
 function sourceCounts(db: Database): Record<string, number> {
 	const counts: Record<string, number> = {};
-	for (const row of db
-		.prepare("SELECT source, COUNT(*) AS total FROM working_memory GROUP BY source")
-		.all() as Row[]) {
+	using statement = db.prepare("SELECT source, COUNT(*) AS total FROM working_memory GROUP BY source");
+	for (const row of statement.all() as Row[]) {
 		counts[String(row.source ?? "") || "conversation"] = Number(row.total ?? 0);
 	}
 	return counts;
@@ -372,6 +396,7 @@ export class Mnemopi {
 	constructor(options: MnemopiOptions = {}) {
 		this.sessionId = options.sessionId ?? options.session_id ?? "default";
 		this.bank = options.bank ?? "default";
+
 		this.authorId = options.authorId ?? options.author_id ?? null;
 		this.authorType = options.authorType ?? options.author_type ?? null;
 		this.channelId = options.channelId ?? options.channel_id ?? this.sessionId;
@@ -458,7 +483,8 @@ export class Mnemopi {
 		const episodic = this.#withRuntimeOptions(() => this.beam.getEpisodicStats(authorId, authorType, channelId));
 		const totalMemories = countRows(this.conn, "SELECT COUNT(*) AS total FROM working_memory");
 		const totalSessions = countRows(this.conn, "SELECT COUNT(DISTINCT session_id) AS total FROM working_memory");
-		const last = this.conn.prepare("SELECT timestamp FROM working_memory ORDER BY timestamp DESC LIMIT 1").get() as {
+		using lastStatement = this.conn.prepare("SELECT timestamp FROM working_memory ORDER BY timestamp DESC LIMIT 1");
+		const last = lastStatement.get() as {
 			timestamp: string | null;
 		} | null;
 		const tripleTotal = countRows(this.conn, "SELECT COUNT(*) AS total FROM triples");

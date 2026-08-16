@@ -9,7 +9,7 @@ import {
 	TUI_KEYBINDINGS,
 	KeybindingsManager as TuiKeybindingsManager,
 } from "@oh-my-pi/pi-tui";
-import { getAgentDir, isEnoent, logger } from "@oh-my-pi/pi-utils";
+import { getActiveProfile, getAgentDir, getProfileRootDir, isEnoent, logger } from "@oh-my-pi/pi-utils";
 import { JSONC, YAML } from "bun";
 
 /**
@@ -29,6 +29,7 @@ interface AppKeybindings {
 	"app.model.select": true;
 	"app.model.selectTemporary": true;
 	"app.tools.expand": true;
+	"app.tools.toggleVisibility": true;
 	"app.editor.external": true;
 	"app.message.followUp": true;
 	"app.retry": true;
@@ -53,6 +54,7 @@ interface AppKeybindings {
 	"app.plan.toggle": true;
 	"app.history.search": true;
 	"app.stt.toggle": true;
+	"app.live.toggle": true;
 }
 
 export type AppKeybinding = keyof AppKeybindings;
@@ -65,7 +67,9 @@ declare module "@oh-my-pi/pi-tui" {
  * Resolve default image-paste shortcuts for the current terminal platform.
  */
 export function getDefaultPasteImageKeys(platform: NodeJS.Platform = process.platform): KeyId[] {
-	return platform === "win32" ? ["ctrl+v", "alt+v"] : ["ctrl+v"];
+	if (platform === "win32") return ["ctrl+v", "alt+v"];
+	if (platform === "darwin") return ["ctrl+v", "super+v"];
+	return ["ctrl+v"];
 }
 
 /**
@@ -90,7 +94,7 @@ export const KEYBINDINGS = {
 		description: "Suspend application",
 	},
 	"app.display.reset": {
-		defaultKeys: "ctrl+l",
+		defaultKeys: "alt+l",
 		description: "Reset terminal display",
 	},
 	"app.thinking.cycle": {
@@ -121,6 +125,10 @@ export const KEYBINDINGS = {
 		defaultKeys: "ctrl+o",
 		description: "Expand tools",
 	},
+	"app.tools.toggleVisibility": {
+		defaultKeys: "ctrl+shift+o",
+		description: "Show or hide tool activity",
+	},
 	"app.editor.external": {
 		defaultKeys: "ctrl+g",
 		description: "Open external editor",
@@ -137,7 +145,9 @@ export const KEYBINDINGS = {
 		description: "Retry last failed assistant turn",
 	},
 	"app.message.dequeue": {
-		defaultKeys: "alt+up",
+		// Shift+Up is listed alongside Alt+Up because macOS Terminal.app consumes Option
+		// for character composition, leaving Alt+Up unreachable there.
+		defaultKeys: ["alt+up", "shift+up"],
 		description: "Dequeue message",
 	},
 	"app.clipboard.pasteImage": {
@@ -219,6 +229,10 @@ export const KEYBINDINGS = {
 	"app.stt.toggle": {
 		defaultKeys: [],
 		description: "Toggle speech-to-text (default gesture: hold Space)",
+	},
+	"app.live.toggle": {
+		defaultKeys: "ctrl+l",
+		description: "Start or stop live voice mode (/live)",
 	},
 } as const satisfies KeybindingDefinitions;
 
@@ -373,6 +387,12 @@ interface KeybindingsConfigPaths {
 	writeBackPath: string;
 }
 
+/** Controls inherited keybinding lookup when creating a manager for a named profile. */
+export interface KeybindingsCreateOptions {
+	/** Default-profile agent directory whose keybindings are merged before profile-specific bindings. */
+	inheritedAgentDir?: string;
+}
+
 /**
  * Load raw config from a file synchronously.
  * Returns parsed JSON/YAML or null if file doesn't exist or is invalid.
@@ -426,6 +446,48 @@ function resolveKeybindingsConfigPaths(agentDir: string): KeybindingsConfigPaths
 	return { readPath: ymlPath, writeBackPath: ymlPath };
 }
 
+function mergeKeybindingsConfig(
+	inheritedConfig: KeybindingsConfig,
+	profileConfig: KeybindingsConfig,
+): KeybindingsConfig {
+	return { ...inheritedConfig, ...profileConfig };
+}
+
+function resolveInheritedAgentDir(agentDir: string, options: KeybindingsCreateOptions): string | undefined {
+	const inheritedAgentDir =
+		options.inheritedAgentDir ?? (getActiveProfile() ? path.join(getProfileRootDir(undefined), "agent") : undefined);
+	if (!inheritedAgentDir) return undefined;
+	if (path.resolve(inheritedAgentDir) === path.resolve(agentDir)) return undefined;
+	return inheritedAgentDir;
+}
+
+function loadMergedKeybindingsConfig(
+	agentDir: string,
+	options: KeybindingsCreateOptions,
+): {
+	config: KeybindingsConfig;
+	profilePath: string;
+	inheritedPath: string | undefined;
+} {
+	const profilePaths = resolveKeybindingsConfigPaths(agentDir);
+	const profile = loadKeybindingsConfig(profilePaths.readPath, profilePaths.writeBackPath);
+	const inheritedAgentDir = resolveInheritedAgentDir(agentDir, options);
+	if (!inheritedAgentDir) {
+		return { config: profile.config, profilePath: profile.persistedPath, inheritedPath: undefined };
+	}
+
+	const inheritedPaths = resolveKeybindingsConfigPaths(inheritedAgentDir);
+	// Read-only: a named-profile process must never write migration output into
+	// the default profile's agent dir. Name migration still applies in-memory;
+	// the on-disk migration happens when the default profile itself launches.
+	const inherited = loadKeybindingsConfig(inheritedPaths.readPath, undefined);
+	return {
+		config: mergeKeybindingsConfig(inherited.config, profile.config),
+		profilePath: profile.persistedPath,
+		inheritedPath: inherited.persistedPath,
+	};
+}
+
 /**
  * Load and migrate keybindings config.
  * Legacy JSON is read for compatibility, but successful write-back goes to YAML.
@@ -461,6 +523,13 @@ function migrateKeybindingsConfigFile(agentDir: string): void {
 
 const FOLLOW_UP_KEYBINDING: AppKeybinding = "app.message.followUp";
 const WINDOWS_FOLLOW_UP_FALLBACK_KEY: KeyId = "ctrl+q";
+const DEQUEUE_KEYBINDING: AppKeybinding = "app.message.dequeue";
+const MACOS_DEQUEUE_FALLBACK_KEY: KeyId = "shift+up";
+function getFallbackKey(keybinding: Keybinding): KeyId | undefined {
+	if (keybinding === FOLLOW_UP_KEYBINDING) return WINDOWS_FOLLOW_UP_FALLBACK_KEY;
+	if (keybinding === DEQUEUE_KEYBINDING) return MACOS_DEQUEUE_FALLBACK_KEY;
+	return undefined;
+}
 function keyListIncludes(keys: KeyId | KeyId[] | undefined, target: KeyId): boolean {
 	if (keys === undefined) return false;
 	const keyList = Array.isArray(keys) ? keys : [keys];
@@ -497,22 +566,23 @@ function keyConfigValue(keys: KeyId[]): KeyId | KeyId[] {
  */
 export class KeybindingsManager extends TuiKeybindingsManager {
 	#configPath: string | undefined;
+	#inheritedConfigPath: string | undefined;
 	#userBindings: KeybindingsConfig;
 
-	constructor(userBindings: KeybindingsConfig = {}, configPath?: string) {
+	constructor(userBindings: KeybindingsConfig = {}, configPath?: string, inheritedConfigPath?: string) {
 		super(KEYBINDINGS, userBindings);
 		this.#configPath = configPath;
+		this.#inheritedConfigPath = inheritedConfigPath;
 		this.#userBindings = userBindings;
 	}
 
 	/**
-	 * Create from config file at agentDir/keybindings.yml.
+	 * Create from config files at agentDir/keybindings.yml and the default profile.
 	 * Legacy keybindings.json is migrated to keybindings.yml on load.
 	 */
-	static create(agentDir: string = getAgentDir()): KeybindingsManager {
-		const { readPath, writeBackPath } = resolveKeybindingsConfigPaths(agentDir);
-		const { config: userBindings, persistedPath } = KeybindingsManager.#loadFromFile(readPath, writeBackPath);
-		const manager = new KeybindingsManager(userBindings, persistedPath);
+	static create(agentDir: string = getAgentDir(), options: KeybindingsCreateOptions = {}): KeybindingsManager {
+		const { config: userBindings, profilePath, inheritedPath } = loadMergedKeybindingsConfig(agentDir, options);
+		const manager = new KeybindingsManager(userBindings, profilePath, inheritedPath);
 		// Set globally so getKeybindings() returns this manager
 		setKeybindings(manager);
 		return manager;
@@ -526,32 +596,31 @@ export class KeybindingsManager extends TuiKeybindingsManager {
 	}
 
 	/**
-	 * Reload keybindings from the config file.
+	 * Reload keybindings from the config files.
 	 */
 	reload(): void {
 		if (!this.#configPath) return;
-		const { config } = KeybindingsManager.#loadFromFile(this.#configPath);
-		this.setUserBindings(config);
+		const { config: inheritedConfig } = this.#inheritedConfigPath
+			? KeybindingsManager.#loadFromFile(this.#inheritedConfigPath)
+			: { config: {} };
+		const { config: profileConfig } = KeybindingsManager.#loadFromFile(this.#configPath);
+		this.setUserBindings(mergeKeybindingsConfig(inheritedConfig, profileConfig));
 	}
 
-	setUserBindings(userBindings: KeybindingsConfig): void {
+	override setUserBindings(userBindings: KeybindingsConfig): void {
 		this.#userBindings = userBindings;
 		super.setUserBindings(userBindings);
 	}
 
-	getKeys(keybinding: Keybinding): KeyId[] {
+	override getKeys(keybinding: Keybinding): KeyId[] {
 		const keys = super.getKeys(keybinding);
-		if (keybinding === FOLLOW_UP_KEYBINDING) {
-			if (this.#userBindings[FOLLOW_UP_KEYBINDING] !== undefined) return keys;
-			if (!userBindingClaimsKey(this.#userBindings, WINDOWS_FOLLOW_UP_FALLBACK_KEY, FOLLOW_UP_KEYBINDING)) {
-				return keys;
-			}
-			return removeKey(keys, WINDOWS_FOLLOW_UP_FALLBACK_KEY);
-		}
-		return keys;
+		const fallbackKey = getFallbackKey(keybinding);
+		if (fallbackKey === undefined || this.#userBindings[keybinding] !== undefined) return keys;
+		if (!userBindingClaimsKey(this.#userBindings, fallbackKey, keybinding)) return keys;
+		return removeKey(keys, fallbackKey);
 	}
 
-	getResolvedBindings(): KeybindingsConfig {
+	override getResolvedBindings(): KeybindingsConfig {
 		const resolved = super.getResolvedBindings();
 		resolved[FOLLOW_UP_KEYBINDING] = keyConfigValue(this.getKeys(FOLLOW_UP_KEYBINDING));
 		return resolved;
@@ -585,12 +654,52 @@ export class KeybindingsManager extends TuiKeybindingsManager {
 
 /**
  * Key hint formatting utilities for UI labels.
+ *
+ * Modifier labels are platform-aware: macOS names the physical keys `Option`
+ * (`alt`) and `Cmd` (`super`), so rendering `Alt`/`Super` there would name keys
+ * absent from a Mac keyboard. Every other platform keeps `Alt`/`Super`.
  */
-const MODIFIER_LABELS: Record<string, string> = {
-	ctrl: "Ctrl",
-	shift: "Shift",
-	alt: "Alt",
-};
+
+/**
+ * Platform override for key-hint rendering; `undefined` resolves to the host
+ * `process.platform`. Mirrors `setKittyProtocolActive` in the TUI keys module:
+ * a single seam that keeps hint output deterministic in tests without mutating
+ * the global `process.platform`.
+ */
+let keyHintPlatformOverride: NodeJS.Platform | undefined;
+
+/** Pin the platform used to render modifier labels (test seam). */
+export function setKeyHintPlatform(platform: NodeJS.Platform | undefined): void {
+	keyHintPlatformOverride = platform;
+}
+
+/** Platform currently used for key-hint rendering. */
+export function keyHintPlatform(): NodeJS.Platform {
+	return keyHintPlatformOverride ?? process.platform;
+}
+
+type Modifier = "ctrl" | "shift" | "alt" | "super";
+
+function isModifier(part: string): part is Modifier {
+	return part === "ctrl" || part === "shift" || part === "alt" || part === "super";
+}
+
+/**
+ * Human label for a modifier, using each platform's own key names. `ctrl` and
+ * `shift` are the same everywhere; `alt`/`super` become `Option`/`Cmd` on macOS.
+ */
+export function modifierLabel(mod: Modifier, platform: NodeJS.Platform = keyHintPlatform()): string {
+	switch (mod) {
+		case "ctrl":
+			return "Ctrl";
+		case "shift":
+			return "Shift";
+		case "alt":
+			return platform === "darwin" ? "Option" : "Alt";
+		case "super":
+			return platform === "darwin" ? "Cmd" : "Super";
+	}
+}
 
 const KEY_LABELS: Record<string, string> = {
 	esc: "Esc",
@@ -611,10 +720,9 @@ const KEY_LABELS: Record<string, string> = {
 	right: "Right",
 };
 
-function formatKeyPart(part: string): string {
+function formatKeyPart(part: string, platform: NodeJS.Platform): string {
 	const lower = part.toLowerCase();
-	const modifier = MODIFIER_LABELS[lower];
-	if (modifier) return modifier;
+	if (isModifier(lower)) return modifierLabel(lower, platform);
 	const label = KEY_LABELS[lower];
 	if (label) return label;
 	if (part.length === 1) return part.toUpperCase();
@@ -622,7 +730,11 @@ function formatKeyPart(part: string): string {
 }
 
 export function formatKeyHint(key: KeyId): string {
-	return key.split("+").map(formatKeyPart).join("+");
+	const platform = keyHintPlatform();
+	return key
+		.split("+")
+		.map(part => formatKeyPart(part, platform))
+		.join("+");
 }
 
 export function formatKeyHints(keys: KeyId | KeyId[]): string {

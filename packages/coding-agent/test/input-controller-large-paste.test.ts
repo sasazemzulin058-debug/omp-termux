@@ -1,3 +1,4 @@
+import { removeWithRetries } from "@oh-my-pi/pi-utils";
 /**
  * Large-paste menu: when a paste reaches the configured `paste.largeMenuThreshold` line count,
  * the editor's `onLargePaste` hook routes through `InputController.handleLargePaste`, which offers
@@ -15,15 +16,17 @@ import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/typ
 function createContext(options?: { threshold?: number; choice?: string; artifactsDir?: string }) {
 	const insertPaste = vi.fn();
 	const insertText = vi.fn();
+	const pasteText = vi.fn();
 	const requestRender = vi.fn();
 	const showStatus = vi.fn();
 	const showError = vi.fn();
 	const showHookSelector = vi.fn(async (_title: string, _options: unknown, _dialog?: unknown) => options?.choice);
 	const ctx = {
-		editor: { insertPaste, insertText } as unknown as InteractiveModeContext["editor"],
+		editor: { insertPaste, insertText, pasteText } as unknown as InteractiveModeContext["editor"],
 		ui: { requestRender } as unknown as InteractiveModeContext["ui"],
 		settings: { get: () => options?.threshold ?? 100 } as unknown as InteractiveModeContext["settings"],
 		sessionManager: {
+			getCwd: () => process.cwd(),
 			getArtifactsDir: () => options?.artifactsDir ?? null,
 			getSessionId: () => "test-session",
 		} as unknown as InteractiveModeContext["sessionManager"],
@@ -32,7 +35,10 @@ function createContext(options?: { threshold?: number; choice?: string; artifact
 		showError,
 	} as unknown as InteractiveModeContext;
 	const controller = new InputController(ctx);
-	return { controller, spies: { insertPaste, insertText, requestRender, showStatus, showError, showHookSelector } };
+	return {
+		controller,
+		spies: { insertPaste, insertText, pasteText, requestRender, showStatus, showError, showHookSelector },
+	};
 }
 
 afterEach(() => {
@@ -116,32 +122,32 @@ describe("InputController.presentLargePasteMenu file attachment", () => {
 	let dir: string | undefined;
 
 	afterEach(async () => {
-		if (dir) await fs.rm(dir, { recursive: true, force: true });
+		if (dir) await removeWithRetries(dir);
 		dir = undefined;
 	});
 
-	it("saves the paste to local:// and inserts a clean local://attachment reference", async () => {
+	it("saves the paste to local:// and inserts a clean local://paste reference", async () => {
 		dir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-paste-test-"));
 		const { controller, spies } = createContext({ choice: "Attach as local file", artifactsDir: dir });
 
 		await controller.presentLargePasteMenu("line one\nline two", 2);
 
-		expect(spies.insertText).toHaveBeenCalledWith("local://attachment-1 ");
+		expect(spies.insertText).toHaveBeenCalledWith("local://paste-1.md ");
 		expect(spies.insertPaste).not.toHaveBeenCalled();
 		// resolveLocalRoot maps an artifacts dir to "<dir>/local"; the reference resolves there.
-		const saved = await Bun.file(path.join(dir, "local", "attachment-1")).text();
+		const saved = await Bun.file(path.join(dir, "local", "paste-1.md")).text();
 		expect(saved).toBe("line one\nline two");
 	});
 
-	it("does not overwrite an existing attachment file", async () => {
+	it("does not overwrite an existing paste file", async () => {
 		dir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-paste-test-"));
-		await Bun.write(path.join(dir, "local", "attachment-1"), "previous");
+		await Bun.write(path.join(dir, "local", "paste-1.md"), "previous");
 		const { controller, spies } = createContext({ choice: "Attach as local file", artifactsDir: dir });
 
 		await controller.presentLargePasteMenu("fresh", 1);
 
-		expect(spies.insertText).toHaveBeenCalledWith("local://attachment-2 ");
-		expect(await Bun.file(path.join(dir, "local", "attachment-1")).text()).toBe("previous");
-		expect(await Bun.file(path.join(dir, "local", "attachment-2")).text()).toBe("fresh");
+		expect(spies.insertText).toHaveBeenCalledWith("local://paste-2.md ");
+		expect(await Bun.file(path.join(dir, "local", "paste-1.md")).text()).toBe("previous");
+		expect(await Bun.file(path.join(dir, "local", "paste-2.md")).text()).toBe("fresh");
 	});
 });

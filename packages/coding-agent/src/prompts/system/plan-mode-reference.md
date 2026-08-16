@@ -1,11 +1,10 @@
 ## Existing Plan
 
-<plan path="{{planFilePath}}">
-{{planContent}}
-</plan>
+Approved plan: `{{planFilePath}}`.
 
 <instruction>
-If this plan is relevant to current work and not complete, you MUST continue executing it.
-If the plan is stale or unrelated, you MUST ignore it.
-The plan path is for subagent handoff only. You already have the plan; NEVER read it.
+Relevant to current work and incomplete → MUST continue executing.
+Current plan content not visible → MUST read `{{planFilePath}}`.
+Stale or unrelated → MUST ignore.
+Inline content compressed, expired, or unrecoverable → NEVER stop; read file.
 </instruction>

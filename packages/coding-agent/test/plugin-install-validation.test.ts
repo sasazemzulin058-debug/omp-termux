@@ -4,6 +4,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { PluginManager } from "@oh-my-pi/pi-coding-agent/extensibility/plugins/manager";
 import * as piUtils from "@oh-my-pi/pi-utils";
+import { removeWithRetries } from "@oh-my-pi/pi-utils";
 import type { Subprocess } from "bun";
 
 function emptyStream(): ReadableStream<Uint8Array> {
@@ -12,6 +13,25 @@ function emptyStream(): ReadableStream<Uint8Array> {
 		throw new Error("Failed to create empty response stream");
 	}
 	return body;
+}
+
+/**
+ * Mock response for the `bun pm cache` probe the manager runs before a git
+ * re-install (refreshBunGitCache). Points at a nonexistent directory so the
+ * cache refresh is a no-op.
+ */
+function pmCacheSubprocess(tmpRoot: string, cmd: string[]): Subprocess {
+	expect(cmd).toEqual(["bun", "pm", "cache"]);
+	const body = new Response(path.join(tmpRoot, "no-such-bun-cache")).body;
+	if (!body) {
+		throw new Error("Failed to create response stream");
+	}
+	return {
+		pid: 3,
+		stdout: body,
+		stderr: emptyStream(),
+		exited: Promise.resolve(0),
+	} as Subprocess;
 }
 
 interface PluginFixture {
@@ -64,7 +84,88 @@ describe("PluginManager.install load validation", () => {
 
 	afterEach(async () => {
 		vi.restoreAllMocks();
-		await fs.rm(tmpRoot, { recursive: true, force: true });
+		await removeWithRetries(tmpRoot);
+	});
+
+	test("installs npm protocol specs with the resolved package name", async () => {
+		vi.spyOn(Bun, "spawn").mockImplementation(((cmd: string[]) => {
+			expect(cmd).toEqual(["bun", "install", "npm:pi-figma-remote-auth"]);
+
+			const prepare = (async () => {
+				await Bun.write(
+					pluginsPkgJson,
+					JSON.stringify(
+						{
+							name: "omp-plugins",
+							private: true,
+							dependencies: { "pi-figma-remote-auth": "npm:pi-figma-remote-auth" },
+						},
+						null,
+						2,
+					),
+				);
+				await writePluginPackage(pluginsNodeModules, "pi-figma-remote-auth", {
+					version: "1.2.3",
+					source:
+						'export default function(pi) { pi.registerCommand("figma-auth", { handler: async () => {} }); }\n',
+				});
+			})();
+
+			return {
+				pid: 1,
+				stdout: emptyStream(),
+				stderr: emptyStream(),
+				exited: prepare.then(() => 0),
+			} as Subprocess;
+		}) as typeof Bun.spawn);
+
+		const result = await new PluginManager(tmpRoot).install("npm:pi-figma-remote-auth");
+
+		expect(result.name).toBe("pi-figma-remote-auth");
+		expect(result.version).toBe("1.2.3");
+		expect(result.path).toBe(path.join(pluginsNodeModules, "pi-figma-remote-auth"));
+	});
+
+	test("rejects and rolls back an install when the extension factory throws", async () => {
+		vi.spyOn(Bun, "spawn").mockImplementation(((cmd: string[]) => {
+			expect(cmd).toEqual(["bun", "install", "factory-failure-plugin"]);
+
+			const prepare = (async () => {
+				await Bun.write(
+					pluginsPkgJson,
+					JSON.stringify(
+						{
+							name: "omp-plugins",
+							private: true,
+							dependencies: { "factory-failure-plugin": "1.0.0" },
+						},
+						null,
+						2,
+					),
+				);
+				await writePluginPackage(pluginsNodeModules, "factory-failure-plugin", {
+					version: "1.0.0",
+					source: 'export default function() { throw new Error("factory-time failure"); }\n',
+				});
+			})();
+
+			return {
+				pid: 1,
+				stdout: emptyStream(),
+				stderr: emptyStream(),
+				exited: prepare.then(() => 0),
+			} as Subprocess;
+		}) as typeof Bun.spawn);
+
+		await expect(new PluginManager(tmpRoot).install("factory-failure-plugin")).rejects.toThrow(
+			/factory-time failure/,
+		);
+
+		const pluginsPackage = await Bun.file(pluginsPkgJson).json();
+		expect(pluginsPackage.dependencies ?? {}).toEqual({});
+		expect(await Bun.file(path.join(pluginsNodeModules, "factory-failure-plugin", "package.json")).exists()).toBe(
+			false,
+		);
 	});
 
 	test("rejects an install whose extension entry cannot resolve its dependencies", async () => {
@@ -215,6 +316,7 @@ describe("PluginManager.install load validation", () => {
 					exited: prepare.then(() => 0),
 				} as Subprocess;
 			}
+			if (cmd[1] === "pm") return pmCacheSubprocess(tmpRoot, cmd);
 			// The manager follows a git re-install with `bun update <name>` to refresh
 			// the lockfile pin (#3063). The mock treats it as a no-op exit-0 — the
 			// on-disk state already reflects the v2 install above.
@@ -350,6 +452,7 @@ describe("PluginManager.install load validation", () => {
 					exited: prepare.then(() => 0),
 				} as Subprocess;
 			}
+			if (cmd[1] === "pm") return pmCacheSubprocess(tmpRoot, cmd);
 			expect(cmd).toEqual(["bun", "update", "git-plugin"]);
 			const prepare = (async () => {
 				// bun update re-resolves the ref and rewrites the lockfile pin
@@ -463,6 +566,7 @@ describe("PluginManager.install load validation", () => {
 					exited: prepare.then(() => 0),
 				} as Subprocess;
 			}
+			if (cmd[1] === "pm") return pmCacheSubprocess(tmpRoot, cmd);
 			expect(cmd).toEqual(["bun", "update", "git-plugin"]);
 			const prepare = (async () => {
 				await Bun.write(bunLockPath, '# bun.lock\n"git-plugin": "github:org/plugin#sha-update"\n');

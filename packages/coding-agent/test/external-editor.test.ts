@@ -1,5 +1,8 @@
 import { afterEach, describe, expect, it } from "bun:test";
-import { getEditorCommand } from "../src/utils/external-editor";
+import * as fs from "node:fs";
+import * as path from "node:path";
+import { TempDir } from "@oh-my-pi/pi-utils";
+import { getEditorCommand, openInEditor, resolveEditorSpawnCommand } from "../src/utils/external-editor";
 
 interface MutableProcess {
 	platform: NodeJS.Platform;
@@ -59,5 +62,38 @@ describe("getEditorCommand", () => {
 		delete Bun.env.EDITOR;
 		setPlatform("linux");
 		expect(getEditorCommand()).toBeUndefined();
+	});
+});
+
+describe("openInEditor", () => {
+	it("passes the cmd.exe command line verbatim on Windows", () => {
+		const tmpFile = String.raw`C:\Users\Example User\AppData\Local\Temp\omp-editor-123.omp.md`;
+
+		expect(resolveEditorSpawnCommand('"C:\\Program Files\\Code.exe" --wait', tmpFile, "win32")).toEqual({
+			cmd: [
+				"cmd.exe",
+				"/d",
+				"/s",
+				"/c",
+				String.raw`""C:\Program Files\Code.exe" --wait "C:\Users\Example User\AppData\Local\Temp\omp-editor-123.omp.md""`,
+			],
+			windowsVerbatimArguments: true,
+		});
+	});
+
+	it.skipIf(process.platform === "win32")("supports quoted editor paths containing spaces", async () => {
+		const tempDir = TempDir.createSync("@external-editor-");
+		try {
+			const editorPath = path.join(tempDir.path(), "My Editor", "edit");
+			fs.mkdirSync(path.dirname(editorPath), { recursive: true });
+			await Bun.write(editorPath, '#!/bin/sh\nprintf "edited" > "$1"\n');
+			fs.chmodSync(editorPath, 0o755);
+
+			const result = await openInEditor(`"${editorPath}"`, "original");
+
+			expect(result).toBe("edited");
+		} finally {
+			await tempDir.remove();
+		}
 	});
 });

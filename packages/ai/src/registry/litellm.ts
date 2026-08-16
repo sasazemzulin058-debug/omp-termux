@@ -1,4 +1,5 @@
-import type { OAuthController, OAuthLoginCallbacks } from "./oauth/types";
+import { createApiKeyLogin } from "./api-key-login";
+import type { OAuthLoginCallbacks } from "./oauth/types";
 import type { ProviderDefinition } from "./types";
 
 const AUTH_URL = "https://docs.litellm.ai/docs/proxy/deploy";
@@ -9,33 +10,15 @@ const AUTH_URL = "https://docs.litellm.ai/docs/proxy/deploy";
  * Opens browser to LiteLLM setup docs, prompts user to paste their API key.
  * Returns the API key directly (not OAuthCredentials - this isn't OAuth).
  */
-export async function loginLiteLLM(options: OAuthController): Promise<string> {
-	if (!options.onPrompt) {
-		throw new Error("LiteLLM login requires onPrompt callback");
-	}
-
-	options.onAuth?.({
-		url: AUTH_URL,
-		instructions:
-			"Run LiteLLM proxy (default http://localhost:4000/v1; set LITELLM_BASE_URL to customize it), then copy your master key or virtual key",
-	});
-
-	const apiKey = await options.onPrompt({
-		message: "Paste your LiteLLM API key (master key or virtual key)",
-		placeholder: "sk-...",
-	});
-
-	if (options.signal?.aborted) {
-		throw new Error("Login cancelled");
-	}
-
-	const trimmed = apiKey.trim();
-	if (!trimmed) {
-		throw new Error("API key is required");
-	}
-
-	return trimmed;
-}
+export const loginLiteLLM = createApiKeyLogin({
+	providerLabel: "LiteLLM",
+	authUrl: AUTH_URL,
+	instructions:
+		"Run LiteLLM proxy (default http://localhost:4000/v1; set LITELLM_BASE_URL to customize it), then copy your master key or virtual key",
+	promptMessage: "Paste your LiteLLM API key (master key or virtual key)",
+	placeholder: "sk-...",
+	validation: null,
+});
 
 export const litellmProvider = {
 	id: "litellm",

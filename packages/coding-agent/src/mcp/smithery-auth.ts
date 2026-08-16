@@ -2,16 +2,19 @@ import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { isEnoent, logger } from "@oh-my-pi/pi-utils";
 import { getAgentDir } from "@oh-my-pi/pi-utils/dirs";
+import { withTimeoutSignal } from "../utils/fetch-timeout";
 
 const SMITHERY_AUTH_FILENAME = "smithery.json";
 const SMITHERY_URL = process.env.SMITHERY_URL || "https://smithery.ai";
+const SMITHERY_AUTH_TIMEOUT_MS = 10_000;
+const SMITHERY_POLL_TIMEOUT_MS = 30_000;
 
 type SmitheryCliAuthSession = {
 	sessionId: string;
 	authUrl: string;
 };
 
-type SmitheryCliPollResponse = {
+export type SmitheryCliPollResponse = {
 	status: "pending" | "success" | "error";
 	apiKey?: string;
 	message?: string;
@@ -38,6 +41,7 @@ export function getSmitheryLoginUrl(): string {
 export async function createSmitheryCliAuthSession(): Promise<SmitheryCliAuthSession> {
 	const response = await fetch(`${SMITHERY_URL}/api/auth/cli/session`, {
 		method: "POST",
+		signal: withTimeoutSignal(SMITHERY_AUTH_TIMEOUT_MS),
 	});
 	if (!response.ok) {
 		throw new Error(`Failed to create Smithery auth session: ${response.status} ${response.statusText}`);
@@ -50,7 +54,7 @@ export async function pollSmitheryCliAuthSession(
 	signal?: AbortSignal,
 ): Promise<SmitheryCliPollResponse> {
 	const response = await fetch(`${SMITHERY_URL}/api/auth/cli/poll/${sessionId}`, {
-		signal,
+		signal: withTimeoutSignal(SMITHERY_POLL_TIMEOUT_MS, signal),
 	});
 	if (!response.ok) {
 		if (response.status === 404 || response.status === 410) {

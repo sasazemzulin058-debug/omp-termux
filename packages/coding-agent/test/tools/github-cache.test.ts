@@ -21,6 +21,7 @@ import {
 } from "@oh-my-pi/pi-coding-agent/tools/github-cache";
 import { ToolAbortError, throwIfAborted } from "@oh-my-pi/pi-coding-agent/tools/tool-errors";
 import * as git from "@oh-my-pi/pi-coding-agent/utils/git";
+import { removeWithRetries } from "@oh-my-pi/pi-utils";
 
 const TEST_REPO = "owner/example";
 const TEST_AUTH_KEY = "test-auth";
@@ -43,7 +44,7 @@ afterEach(async () => {
 		process.env.OMP_GITHUB_CACHE_DB = originalEnv;
 	}
 	vi.restoreAllMocks();
-	await fs.rm(tempDir, { recursive: true, force: true });
+	await removeWithRetries(tempDir);
 });
 
 function issuePayload(number: number, body: string) {
@@ -443,8 +444,11 @@ describe("getOrFetchView (TTL semantics)", () => {
 		expect(result.status).toBe("stale");
 		expect(result.rendered).toBe("old-diff");
 
-		await Promise.resolve();
-		await Bun.sleep(5);
+		for (let i = 0; i < 100; i++) {
+			const refreshed = getCached<{ refreshed: boolean }>(TEST_REPO, "pr-diff", 52, false);
+			if (refreshed?.payload.refreshed) break;
+			await Bun.sleep(0);
+		}
 
 		expect(fetchFresh).toHaveBeenCalledTimes(1);
 		const updated = getCached<{ refreshed: boolean }>(TEST_REPO, "pr-diff", 52, false);

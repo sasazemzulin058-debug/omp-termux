@@ -1,5 +1,6 @@
 import { describe, expect, it } from "bun:test";
 import MODELS_JSON from "@oh-my-pi/pi-catalog/models.json" with { type: "json" };
+import { CATALOG_PROVIDERS, DEFAULT_MODEL_PER_PROVIDER } from "@oh-my-pi/pi-catalog/provider-models/descriptors";
 import { buildXaiOAuthStaticSeed } from "@oh-my-pi/pi-catalog/provider-models/openai-compat";
 import type { ModelSpec } from "@oh-my-pi/pi-catalog/types";
 
@@ -11,11 +12,18 @@ import type { ModelSpec } from "@oh-my-pi/pi-catalog/types";
 // `refresh()`, but interactive boot resolves the persisted default
 // synchronously from `#loadModels()`, which reads only `models.json`.
 //
-// Failure here means: run `bun run generate-models` and commit the diff.
+// Failure here means: run `bun run gen:models` and commit the diff.
 describe("xai-oauth bundled catalog (regression)", () => {
 	const bundled =
 		(MODELS_JSON as unknown as Record<string, Record<string, ModelSpec<"openai-responses">>>)["xai-oauth"] ?? {};
 	const seed = buildXaiOAuthStaticSeed();
+
+	it("defaults SuperGrok selection to grok-4.5", () => {
+		const entry = CATALOG_PROVIDERS.find(provider => provider.id === "xai-oauth");
+		expect(entry?.defaultModel).toBe("grok-4.5");
+		expect(DEFAULT_MODEL_PER_PROVIDER["xai-oauth"]).toBe("grok-4.5");
+		expect(bundled["grok-4.5"], "xai-oauth/grok-4.5 must be bundled for the default").toBeDefined();
+	});
 
 	it("bundles every curated id", () => {
 		const seededIds = seed.map(model => model.id).sort();
@@ -52,7 +60,7 @@ describe("xai-oauth bundled catalog (regression)", () => {
 		expect(composer!.contextWindow).toBe(200_000);
 		expect(composer!.input).toEqual(["text"]);
 		// The bundled models.json entry is byte-identical to the generator's
-		// deterministic xai-oauth output: generate-models.ts pushes
+		// deterministic xai-oauth output: gen:models pushes
 		// buildXaiOAuthStaticSeed() (offline — xai-oauth has no upstream catalog
 		// source) and applyGeneratedModelPolicies(), so a regen reproduces these
 		// exact bytes; only unrelated other-provider network churn was excluded

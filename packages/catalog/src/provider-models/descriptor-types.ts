@@ -2,7 +2,13 @@ import type { ModelManagerOptions } from "../model-manager";
 import type { Api, FetchImpl } from "../types";
 
 /** Config passed to a provider's runtime model-manager factory. */
-export type ModelManagerConfig = { apiKey?: string; baseUrl?: string; fetch?: FetchImpl };
+export type ModelManagerConfig = {
+	apiKey?: string;
+	baseUrl?: string;
+	fetch?: FetchImpl;
+	/** The supplied fetch already applies provider-specific authentication. */
+	authenticated?: boolean;
+};
 
 /** Catalog discovery configuration for providers that support endpoint-based model listing. */
 export interface CatalogDiscoveryConfig {
@@ -55,7 +61,7 @@ export function allowsUnauthenticatedCatalogDiscovery(descriptor: CatalogProvide
  * - Every entry is a member of `KnownProvider`.
  * - `createModelManagerOptions` present (and not `specialModelManager`) ⇒
  *   appears in `PROVIDER_DESCRIPTORS` for runtime model discovery.
- * - `catalogDiscovery` present ⇒ participates in `generate-models.ts`.
+ * - \`catalogDiscovery\` present ⇒ participates in \`generate-models.ts\`.
  */
 export interface ProviderCatalogEntry {
 	readonly id: string;

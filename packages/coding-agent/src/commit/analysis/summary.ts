@@ -1,8 +1,8 @@
+import { type } from "@oh-my-pi/omptype";
 import type { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import type { Api, ApiKey, AssistantMessage, Model } from "@oh-my-pi/pi-ai";
-import { completeSimple, validateToolCall } from "@oh-my-pi/pi-ai";
+import { completeSimple, retryTransientCompletion, validateToolCall } from "@oh-my-pi/pi-ai";
 import { prompt } from "@oh-my-pi/pi-utils";
-import { type } from "arktype";
 import summarySystemPrompt from "../../commit/prompts/summary-system.md" with { type: "text" };
 import summaryUserPrompt from "../../commit/prompts/summary-user.md" with { type: "text" };
 import type { CommitSummary } from "../../commit/types";
@@ -52,15 +52,21 @@ export async function generateSummary({
 		stat,
 	});
 
-	const response = await completeSimple(
-		model,
-		{
-			systemPrompt: [systemPrompt],
-			messages: [{ role: "user", content: userPrompt, timestamp: Date.now() }],
-			tools: [SummaryTool],
-		},
-		{ apiKey, maxTokens: 200, reasoning: toReasoningEffort(thinkingLevel) },
+	const response = await retryTransientCompletion(() =>
+		completeSimple(
+			model,
+			{
+				systemPrompt: [systemPrompt],
+				messages: [{ role: "user", content: userPrompt, timestamp: Date.now() }],
+				tools: [SummaryTool],
+			},
+			{ apiKey, maxTokens: 200, reasoning: toReasoningEffort(thinkingLevel) },
+		),
 	);
+
+	if (response.stopReason === "error") {
+		throw new Error(response.errorMessage ?? "provider error");
+	}
 
 	return parseSummaryFromResponse(response, commitType, scope);
 }

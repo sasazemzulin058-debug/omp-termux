@@ -1,56 +1,39 @@
-import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "bun:test";
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "bun:test";
 import * as path from "node:path";
 import { Agent } from "@oh-my-pi/pi-agent-core";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { InteractiveMode } from "@oh-my-pi/pi-coding-agent/modes/interactive-mode";
-import { initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
+import { initTheme, theme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import { TASK_SUBAGENT_LIFECYCLE_CHANNEL } from "@oh-my-pi/pi-coding-agent/task";
 import type { TodoPhase } from "@oh-my-pi/pi-coding-agent/tools/todo";
+import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
+import type { NativeScrollbackLiveRegion } from "@oh-my-pi/pi-tui";
 import { TempDir } from "@oh-my-pi/pi-utils";
 
 function renderTodos(mode: InteractiveMode): string {
 	return Bun.stripANSI(mode.todoContainer.render(120).join("\n"));
 }
 
-describe("InteractiveMode todo auto-clear", () => {
+describe("InteractiveMode todo HUD persistence", () => {
 	let tempDir: TempDir;
 	let authStorage: AuthStorage;
 	let session: AgentSession;
 	let mode: InteractiveMode;
+	let eventBus: EventBus;
+	let modelRegistry: ModelRegistry;
 
-	beforeAll(async () => {
-		await initTheme();
-	});
-
-	beforeEach(async () => {
-		resetSettingsForTest();
-		tempDir = TempDir.createSync("@pi-todo-clear-");
-	});
-
-	afterEach(async () => {
-		mode?.stop();
-		await session?.dispose();
-		authStorage?.close();
-		tempDir?.removeSync();
-		vi.useRealTimers();
-		vi.restoreAllMocks();
-		resetSettingsForTest();
-	});
-
-	async function createMode(todoClearDelay: number): Promise<void> {
-		await Settings.init({
-			inMemory: true,
-			cwd: tempDir.path(),
-			overrides: { "tasks.todoClearDelay": todoClearDelay },
-		});
-		authStorage = await AuthStorage.create(path.join(tempDir.path(), "testauth.db"));
-		const modelRegistry = new ModelRegistry(authStorage);
+	async function replaceMode(): Promise<void> {
+		if (mode) {
+			mode.stop();
+			await session.dispose();
+		}
 		const model = modelRegistry.find("anthropic", "claude-sonnet-4-5");
 		if (!model) throw new Error("Expected claude-sonnet-4-5 to exist in registry");
-
+		eventBus = new EventBus();
 		session = new AgentSession({
 			agent: new Agent({
 				initialState: {
@@ -61,14 +44,43 @@ describe("InteractiveMode todo auto-clear", () => {
 				},
 			}),
 			sessionManager: SessionManager.create(tempDir.path(), tempDir.path()),
-			settings: Settings.isolated({ "tasks.todoClearDelay": todoClearDelay }),
+			settings: Settings.isolated(),
 			modelRegistry,
 		});
-		mode = new InteractiveMode(session, "test");
+		mode = new InteractiveMode(session, "test", undefined, undefined, undefined, undefined, eventBus);
 	}
 
-	it("clears closed todos from the panel instantly without mutating session history", async () => {
-		await createMode(0);
+	beforeAll(async () => {
+		await initTheme();
+		resetSettingsForTest();
+		tempDir = TempDir.createSync("@pi-todo-clear-");
+		await Settings.init({ inMemory: true, cwd: tempDir.path() });
+		authStorage = await AuthStorage.create(path.join(tempDir.path(), "testauth.db"));
+		modelRegistry = new ModelRegistry(authStorage);
+		await replaceMode();
+	});
+
+	afterEach(() => {
+		session.setTodoPhases([]);
+		mode.setTodos([]);
+		vi.useRealTimers();
+		vi.restoreAllMocks();
+	});
+
+	afterAll(async () => {
+		mode?.stop();
+		await session?.dispose();
+		authStorage?.close();
+		tempDir?.removeSync();
+		resetSettingsForTest();
+	});
+
+	function setTodoClearDelay(todoClearDelay: number): void {
+		session.settings.override("tasks.todoClearDelay", todoClearDelay);
+	}
+
+	it("clears closed todos from the panel instantly without mutating session history", () => {
+		setTodoClearDelay(0);
 		const phases: TodoPhase[] = [
 			{
 				name: "Implementation",
@@ -87,16 +99,58 @@ describe("InteractiveMode todo auto-clear", () => {
 		expect(session.getTodoPhases()).toEqual(phases);
 	});
 
-	it("leaves closed todos visible when auto-clear is disabled", async () => {
-		await createMode(-1);
+	/**
+	 * Auto-clear used to fire on any list holding a closed task, so a plan the
+	 * agent was mid-way through had its finished tasks deleted from the HUD's
+	 * copy: the phase counter reset, the checked row vanished, and the stage
+	 * renumbered — the panel reported no progress at all until the next `todo`
+	 * call restored the real snapshot. It may only fire on a settled list.
+	 */
+	const unfinishedPlan = (): TodoPhase[] => [
+		{
+			name: "Implementation",
+			tasks: [
+				{ content: "done task", status: "completed" },
+				{ content: "abandoned task", status: "abandoned" },
+				{ content: "current task", status: "in_progress" },
+			],
+		},
+	];
+
+	it("keeps an unfinished plan's progress when the auto-clear delay elapses", () => {
+		setTodoClearDelay(1);
+		vi.useFakeTimers();
+
+		mode.setTodos(unfinishedPlan());
+		vi.advanceTimersByTime(60_000);
+
+		const rendered = renderTodos(mode);
+		// Progress counts every closed task, abandoned included: the walking
+		// viewport hides both, so the counter is the only signal they existed.
+		expect(rendered).toContain("2/3");
+		expect(rendered).toContain("current task");
+	});
+
+	it("keeps an unfinished plan's progress when auto-clear is instant", () => {
+		setTodoClearDelay(0);
+
+		mode.setTodos(unfinishedPlan());
+
+		const rendered = renderTodos(mode);
+		expect(rendered).toContain("2/3");
+		expect(rendered).toContain("current task");
+	});
+
+	it("leaves closed todos visible when auto-clear is disabled", () => {
+		setTodoClearDelay(-1);
 
 		mode.setTodos([{ name: "Implementation", tasks: [{ content: "done task", status: "completed" }] }]);
 
 		expect(renderTodos(mode)).toContain("done task");
 	});
 
-	it("clears closed todos after the configured delay", async () => {
-		await createMode(1);
+	it("clears closed todos after the configured delay", () => {
+		setTodoClearDelay(1);
 		vi.useFakeTimers();
 
 		mode.setTodos([{ name: "Implementation", tasks: [{ content: "done task", status: "completed" }] }]);
@@ -107,5 +161,224 @@ describe("InteractiveMode todo auto-clear", () => {
 
 		vi.advanceTimersByTime(1);
 		expect(renderTodos(mode)).not.toContain("done task");
+	});
+
+	it("keeps the anchored todo panel in the live region while visible", () => {
+		setTodoClearDelay(-1);
+
+		mode.setTodos([{ name: "Implementation", tasks: [{ content: "pending task", status: "pending" }] }]);
+		const liveRegion = mode.todoContainer as unknown as NativeScrollbackLiveRegion;
+		expect(liveRegion.getNativeScrollbackLiveRegionStart?.()).toBe(0);
+
+		mode.setTodos([]);
+		expect(liveRegion.getNativeScrollbackLiveRegionStart?.()).toBeUndefined();
+	});
+
+	it("marks todos complete when subagent reconciliation reports a finished agent", async () => {
+		await replaceMode();
+		setTodoClearDelay(-1);
+		vi.spyOn(mode.statusLine, "watchBranch").mockImplementation(() => {});
+		session.setTodoPhases([
+			{ name: "Implementation", tasks: [{ content: "Fix review comments", status: "pending" }] },
+		]);
+		mode.setTodos(session.getTodoPhases());
+
+		await mode.init();
+		// Subagent lifecycle changes coalesce behind a 100ms observer UI sync
+		// timer before todo reconciliation runs; flush it deterministically.
+		vi.useFakeTimers();
+		eventBus.emit(TASK_SUBAGENT_LIFECYCLE_CHANNEL, {
+			id: "ReviewFixer",
+			index: 0,
+			agent: "task",
+			description: "Fix review comments",
+			status: "completed",
+			detached: true,
+		});
+		vi.advanceTimersByTime(100);
+
+		expect(session.getTodoPhases()[0]?.tasks[0]?.status).toBe("completed");
+	});
+
+	it("completes a blocked todo when the detached subagent it waits on finishes", async () => {
+		await replaceMode();
+		setTodoClearDelay(-1);
+		vi.spyOn(mode.statusLine, "watchBranch").mockImplementation(() => {});
+		// A todo blocked while waiting on a detached subagent. Blocked todos are
+		// excluded from the stop reminder, so if reconciliation skipped them this
+		// would strand silently after the subagent completes.
+		session.setTodoPhases([
+			{
+				name: "Implementation",
+				tasks: [{ content: "Fix review comments", status: "blocked", blocker: "waiting on ReviewFixer" }],
+			},
+		]);
+		mode.setTodos(session.getTodoPhases());
+
+		await mode.init();
+		vi.useFakeTimers();
+		eventBus.emit(TASK_SUBAGENT_LIFECYCLE_CHANNEL, {
+			id: "ReviewFixer",
+			index: 0,
+			agent: "task",
+			description: "Fix review comments",
+			status: "completed",
+			detached: true,
+		});
+		vi.advanceTimersByTime(100);
+
+		const task = session.getTodoPhases()[0]?.tasks[0];
+		expect(task?.status).toBe("completed");
+		// The blocker note is dropped with the blocked status — the wait is over.
+		expect(task?.blocker).toBeUndefined();
+	});
+});
+
+describe("InteractiveMode todo HUD anchor", () => {
+	let tempDir: TempDir;
+	let authStorage: AuthStorage;
+	let session: AgentSession;
+	let mode: InteractiveMode;
+
+	beforeAll(async () => {
+		await initTheme();
+		resetSettingsForTest();
+		tempDir = TempDir.createSync("@pi-todo-hud-");
+		await Settings.init({ inMemory: true, cwd: tempDir.path() });
+		authStorage = await AuthStorage.create(path.join(tempDir.path(), "testauth.db"));
+		const modelRegistry = new ModelRegistry(authStorage);
+		const model = modelRegistry.find("anthropic", "claude-sonnet-4-5");
+		if (!model) throw new Error("Expected claude-sonnet-4-5 to exist in registry");
+		session = new AgentSession({
+			agent: new Agent({
+				initialState: { model, systemPrompt: ["Test"], tools: [], messages: [] },
+			}),
+			sessionManager: SessionManager.create(tempDir.path(), tempDir.path()),
+			settings: Settings.isolated({}),
+			modelRegistry,
+		});
+		mode = new InteractiveMode(session, "test");
+	});
+
+	afterEach(() => {
+		mode.setTodos([]);
+		vi.useRealTimers();
+		vi.restoreAllMocks();
+	});
+
+	afterAll(async () => {
+		mode?.stop();
+		await session?.dispose();
+		authStorage?.close();
+		tempDir?.removeSync();
+		resetSettingsForTest();
+	});
+
+	it("renders a Todos tree: stage progression header, active stage expanded, others collapsed", () => {
+		mode.setTodos([
+			{
+				name: "Foundation",
+				tasks: [
+					{ content: "first task", status: "completed" },
+					{ content: "second task", status: "in_progress" },
+					{ content: "third task", status: "pending" },
+				],
+			},
+			{
+				name: "Verification",
+				tasks: [{ content: "run tests", status: "pending" }],
+			},
+		]);
+
+		const lines = mode.todoContainer
+			.render(80)
+			.flatMap(line => line.split("\n"))
+			.map(line => Bun.stripANSI(line));
+
+		// Lightened: no boxed top/bottom rules.
+		expect(lines.some(line => line === "─".repeat(80))).toBe(false);
+		// Root header carries overall stage progression (on stage 1 of 2).
+		const root = lines.find(line => line.includes("Todos"));
+		expect(root).toContain("1/2");
+		// Active stage: highlighted header with its own task progress, expanded as a
+		// connector tree; the just-completed task stays as the lead row so progress
+		// is visible while the stage still has open work.
+		expect(lines.some(line => line.includes("I. Foundation") && line.includes("1/3"))).toBe(true);
+		const secondLine = lines.find(line => line.includes("second task"));
+		expect(secondLine).toContain(theme.tree.branch);
+		expect(secondLine).toContain(theme.checkbox.unchecked);
+		expect(lines.some(line => line.includes("third task"))).toBe(true);
+		const firstLine = lines.find(line => line.includes("first task"));
+		expect(firstLine).toContain(theme.checkbox.checked);
+		// Upcoming stage: header with its own progress, but collapsed (no task rows).
+		expect(lines.some(line => line.includes("II. Verification") && line.includes("0/1"))).toBe(true);
+		expect(lines.some(line => line.includes("run tests"))).toBe(false);
+		// No overflow rows — the header/progress counts imply what is hidden.
+		expect(lines.some(line => line.includes("more"))).toBe(false);
+	});
+
+	it("renders nothing when there are no todos", () => {
+		mode.setTodos([]);
+		expect(mode.todoContainer.render(80)).toHaveLength(0);
+	});
+
+	it("omits the stage count and roman numeral for a single-phase list", () => {
+		mode.setTodos([
+			{
+				name: "Tasks",
+				tasks: [
+					{ content: "alpha", status: "pending" },
+					{ content: "beta", status: "pending" },
+				],
+			},
+		]);
+		const lines = mode.todoContainer
+			.render(80)
+			.flatMap(line => line.split("\n"))
+			.map(line => Bun.stripANSI(line));
+		// One stage → no redundant "1/1" stage count on the root.
+		const root = lines.find(line => line.includes("Todos"));
+		expect(root).not.toContain("/");
+		// The stage keeps its task progress; no roman numeral for a lone stage.
+		expect(lines.some(line => line.includes("Tasks") && line.includes("0/2"))).toBe(true);
+		expect(lines.some(line => line.includes("I. Tasks"))).toBe(false);
+		expect(lines.some(line => line.includes("alpha"))).toBe(true);
+	});
+
+	it("caps the visible stage list and leaves the hidden ones to the header count", () => {
+		const stage = (name: string): TodoPhase => ({ name, tasks: [{ content: `${name} task`, status: "pending" }] });
+		mode.setTodos([
+			stage("Discovery"),
+			stage("Two"),
+			stage("Three"),
+			stage("Four"),
+			stage("Five"),
+			stage("Six"),
+			stage("Seven"),
+		]);
+		const lines = mode.todoContainer
+			.render(80)
+			.flatMap(line => line.split("\n"))
+			.map(line => Bun.stripANSI(line));
+		// Active stage + four following stages render; the rest are dropped.
+		expect(lines.some(line => line.includes("II. Two"))).toBe(true);
+		expect(lines.some(line => line.includes("V. Five"))).toBe(true);
+		expect(lines.some(line => line.includes("Six"))).toBe(false);
+		// No overflow row — the header's "1/7" implies the hidden stages.
+		expect(lines.some(line => line.includes("more"))).toBe(false);
+		const root = lines.find(line => line.includes("Todos"));
+		expect(root).toContain("1/7");
+	});
+
+	it("anchors the todo HUD as a native-scrollback live region while populated", () => {
+		// The loader sits below this HUD, so the HUD must report its own seam or
+		// its rows commit to scrollback as stale duplicates on short terminals.
+		const seam = () =>
+			(mode.todoContainer as Partial<NativeScrollbackLiveRegion>).getNativeScrollbackLiveRegionStart?.();
+		expect(seam()).toBeUndefined();
+		mode.setTodos([{ name: "Tasks", tasks: [{ content: "alpha", status: "pending" }] }]);
+		expect(seam()).toBe(0);
+		mode.setTodos([]);
+		expect(seam()).toBeUndefined();
 	});
 });

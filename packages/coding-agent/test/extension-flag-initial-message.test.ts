@@ -4,6 +4,7 @@ import { applyExtensionFlags, type ExtensionFlagSink } from "@oh-my-pi/pi-coding
 import { buildInitialMessage } from "@oh-my-pi/pi-coding-agent/cli/initial-message";
 import { ExtensionRuntime, loadExtensionFromFactory } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/loader";
 import { ExtensionRunner } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/runner";
+import { normalizeContinueSessionArgs } from "@oh-my-pi/pi-coding-agent/main";
 import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
 
 // Regression coverage for extension-registered flags leaking into the initial
@@ -98,6 +99,78 @@ describe("extension flags vs initial message", () => {
 		expect(initialMessage).toBe("diff-context\nreview the diff");
 	});
 
+	it("keeps a continued session id out of the prompt after extension-aware reparse", () => {
+		const sessionId = "019ea530-ffff-7000-8000-000000000000";
+		const sink: ExtensionFlagSink = {
+			getFlags: () => extFlags,
+			setFlagValue: () => {},
+		};
+		const parsed = applyExtensionFlags(sink, ["--continue", sessionId]);
+		expect(parsed).not.toBeNull();
+		if (!parsed) return;
+
+		normalizeContinueSessionArgs(parsed);
+		const { initialMessage } = buildInitialMessage({ parsed });
+
+		expect(parsed.resume).toBe(sessionId);
+		expect(parsed.continue).toBe(false);
+		expect(parsed.messages).toEqual([]);
+		expect(initialMessage).toBeUndefined();
+	});
+
+	it("removes a continued session id while preserving a following prompt after extension reparse", () => {
+		const sessionId = "019ea530-ffff-7000-8000-000000000000";
+		const rawArgs = ["--continue", sessionId, "--spawn-peer", "reviewer", "do next"];
+		const sink: ExtensionFlagSink = {
+			getFlags: () => extFlags,
+			setFlagValue: () => {},
+		};
+		const parsed = applyExtensionFlags(sink, rawArgs);
+		expect(parsed).not.toBeNull();
+		if (!parsed) return;
+
+		normalizeContinueSessionArgs(parsed, rawArgs);
+
+		expect(parsed.resume).toBe(sessionId);
+		expect(parsed.messages).toEqual(["do next"]);
+	});
+
+	it("does not consume a UUID-shaped extension flag value before extension-aware reparse", () => {
+		const sessionId = "019ea530-ffff-7000-8000-000000000000";
+		const rawArgs = ["--continue", "--spawn-peer", sessionId];
+		const startupArgs = parseArgs(rawArgs);
+
+		normalizeContinueSessionArgs(startupArgs);
+		expect(startupArgs.continue).toBe(true);
+		expect(startupArgs.resume).toBeUndefined();
+		expect(startupArgs.messages).toEqual([sessionId]);
+
+		const sink: ExtensionFlagSink = {
+			getFlags: () => extFlags,
+			setFlagValue: () => {},
+		};
+		const extensionArgs = applyExtensionFlags(sink, rawArgs);
+		expect(extensionArgs).not.toBeNull();
+		if (!extensionArgs) return;
+
+		normalizeContinueSessionArgs(extensionArgs);
+		expect(extensionArgs.continue).toBe(true);
+		expect(extensionArgs.resume).toBeUndefined();
+		expect(extensionArgs.messages).toEqual([]);
+	});
+
+	it("resolves a continued session id before a later extension flag is known", () => {
+		const sessionId = "019ea530-ffff-7000-8000-000000000000";
+		const rawArgs = ["--continue", sessionId, "--spawn-peer", "reviewer"];
+		const startupArgs = parseArgs(rawArgs);
+
+		normalizeContinueSessionArgs(startupArgs, rawArgs);
+
+		expect(startupArgs.continue).toBe(false);
+		expect(startupArgs.resume).toBe(sessionId);
+		expect(startupArgs.messages).toEqual(["reviewer"]);
+	});
+
 	it("documents the pre-fix leak: without the flag map the value becomes the first prompt", () => {
 		// This is exactly the startup parse: extensions have not loaded, so the
 		// flag map is absent. `--spawn-peer` is dropped (it starts with `-`) but
@@ -148,8 +221,8 @@ describe("applyExtensionFlags (single-parser flag resolution)", () => {
 	it("returns null when there is no runner", () => {
 		expect(applyExtensionFlags(undefined, ["--spawn-peer", "x", "task"])).toBeNull();
 	});
-	it("returns null when the runner registered no flags", () => {
-		expect(applyExtensionFlags(fakeRunner({}), ["--whatever", "task"])).toBeNull();
+	it("reparses with an empty extension registry so unknown flags remain visible", () => {
+		expect(applyExtensionFlags(fakeRunner({}), ["--whatever", "task"])?.unrecognizedFlags).toEqual(["--whatever"]);
 	});
 	it("applies and strips a string flag in space form", () => {
 		const runner = fakeRunner({ "spawn-peer": "string" });

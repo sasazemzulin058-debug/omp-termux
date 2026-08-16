@@ -1,16 +1,167 @@
-import { afterEach, describe, expect, it } from "bun:test";
+import { afterEach, describe, expect, it, vi } from "bun:test";
+import * as fs from "node:fs/promises";
+import * as os from "node:os";
+import * as path from "node:path";
 import { stripVTControlCharacters } from "node:util";
-import { CURSOR_MARKER } from "@oh-my-pi/pi-tui";
+import { CURSOR_MARKER, TUI } from "@oh-my-pi/pi-tui";
 import { CombinedAutocompleteProvider } from "@oh-my-pi/pi-tui/autocomplete";
 import { Editor } from "@oh-my-pi/pi-tui/components/editor";
 import { KeybindingsManager, setKeybindings, TUI_KEYBINDINGS } from "@oh-my-pi/pi-tui/keybindings";
 import { setKittyProtocolActive } from "@oh-my-pi/pi-tui/keys";
 import { visibleWidth } from "@oh-my-pi/pi-tui/utils";
 import { defaultEditorTheme } from "./test-themes";
+import { VirtualTerminal } from "./virtual-terminal";
 
 describe("Editor component", () => {
 	afterEach(() => {
 		setKeybindings(new KeybindingsManager(TUI_KEYBINDINGS));
+	});
+
+	it("advances its width-epoch revision for text changes but not cursor movement", () => {
+		const editor = new Editor(defaultEditorTheme);
+		const initial = editor.getNativeScrollbackWidthEpochRevision();
+		editor.setText("draft");
+		const changed = editor.getNativeScrollbackWidthEpochRevision();
+		expect(changed).toBeGreaterThan(initial);
+		editor.moveToLineStart();
+		expect(editor.getNativeScrollbackWidthEpochRevision()).toBe(changed);
+	});
+
+	it("advances its width-epoch revision when max height exposes more draft rows", () => {
+		const editor = new Editor(defaultEditorTheme);
+		editor.setText("draft-0\ndraft-1\ndraft-2\ndraft-3");
+		editor.setMaxHeight(3);
+		const clippedRows = editor.render(40).length;
+		const clippedRevision = editor.getNativeScrollbackWidthEpochRevision();
+
+		editor.setMaxHeight(6);
+
+		expect(editor.render(40).length).toBeGreaterThan(clippedRows);
+		expect(editor.getNativeScrollbackWidthEpochRevision()).toBeGreaterThan(clippedRevision);
+	});
+
+	it("advances its width-epoch revision when terminal-cursor layout adds a row", () => {
+		const editor = new Editor(defaultEditorTheme);
+		editor.focused = true;
+		editor.setText("draft");
+		editor.setImeSafeCursorLayout(true);
+		const inlineRows = editor.render(40).length;
+		const inlineRevision = editor.getNativeScrollbackWidthEpochRevision();
+
+		editor.setUseTerminalCursor(true);
+
+		expect(editor.render(40).length).toBeGreaterThan(inlineRows);
+		const terminalCursorRevision = editor.getNativeScrollbackWidthEpochRevision();
+		expect(terminalCursorRevision).toBeGreaterThan(inlineRevision);
+		editor.setUseTerminalCursor(true);
+		expect(editor.getNativeScrollbackWidthEpochRevision()).toBe(terminalCursorRevision);
+	});
+
+	it("advances its width-epoch revision when border visibility adds rows", () => {
+		const editor = new Editor(defaultEditorTheme);
+		editor.setText("draft");
+		editor.setBorderVisible(false);
+		const borderlessRows = editor.render(40).length;
+		const borderlessRevision = editor.getNativeScrollbackWidthEpochRevision();
+
+		editor.setBorderVisible(true);
+
+		expect(editor.render(40).length).toBeGreaterThan(borderlessRows);
+		const borderedRevision = editor.getNativeScrollbackWidthEpochRevision();
+		expect(borderedRevision).toBeGreaterThan(borderlessRevision);
+		editor.setBorderVisible(true);
+		expect(editor.getNativeScrollbackWidthEpochRevision()).toBe(borderedRevision);
+	});
+
+	it("tracks lazy top-border changes independently of width reflow", () => {
+		const editor = new Editor(defaultEditorTheme);
+		let status = "idle";
+		let revision = 0;
+		editor.setTopBorderProvider(availableWidth => {
+			const content = `${status}:${availableWidth}`;
+			return { content, width: visibleWidth(content), revision };
+		});
+		editor.render(40);
+		const idleRevision = editor.getNativeScrollbackWidthEpochRevision();
+
+		status = "streaming";
+		revision++;
+		editor.render(30);
+		const streamingRevision = editor.getNativeScrollbackWidthEpochRevision();
+		expect(streamingRevision).toBeGreaterThan(idleRevision);
+
+		editor.render(50);
+		expect(editor.getNativeScrollbackWidthEpochRevision()).toBe(streamingRevision);
+	});
+
+	it("advances its width-epoch revision when autocomplete changes without changing text", async () => {
+		const editor = new Editor(defaultEditorTheme);
+		const { promise: autocompleteUpdated, resolve: resolveAutocompleteUpdated } = Promise.withResolvers<void>();
+		editor.setAutocompleteProvider({
+			async getSuggestions() {
+				return {
+					items: Array.from({ length: 8 }, (_value, index) => ({
+						label: `/item-${index}`,
+						value: `/item-${index}`,
+						description:
+							index === 1
+								? "A deliberately long description that wraps across several narrow popup rows."
+								: "Short",
+					})),
+					prefix: "/",
+				};
+			},
+			applyCompletion(lines, cursorLine, cursorCol) {
+				return { lines, cursorLine, cursorCol };
+			},
+		});
+		editor.onAutocompleteUpdate = resolveAutocompleteUpdated;
+		editor.handleInput("/");
+		const textRevision = editor.getNativeScrollbackWidthEpochRevision();
+
+		await autocompleteUpdated;
+		const popupRevision = editor.getNativeScrollbackWidthEpochRevision();
+		expect(editor.getText()).toBe("/");
+		expect(popupRevision).toBeGreaterThan(textRevision);
+		const initialPopupRows = editor.render(30).length;
+
+		editor.handleInput("\x1b[B");
+		const selectedRevision = editor.getNativeScrollbackWidthEpochRevision();
+		expect(selectedRevision).toBeGreaterThan(popupRevision);
+
+		editor.setAutocompleteMaxVisible(8);
+		const resizedRevision = editor.getNativeScrollbackWidthEpochRevision();
+		expect(resizedRevision).toBeGreaterThan(selectedRevision);
+		expect(editor.render(30).length).toBeGreaterThan(initialPopupRows);
+
+		editor.handleInput("\x1b");
+		expect(editor.isShowingAutocomplete()).toBe(false);
+		expect(editor.getNativeScrollbackWidthEpochRevision()).toBeGreaterThan(resizedRevision);
+	});
+
+	describe("Word delete keybindings", () => {
+		it("honors a keybindings.yml remap of deleteWordBackward in the multi-line editor", () => {
+			setKeybindings(new KeybindingsManager(TUI_KEYBINDINGS, { "tui.editor.deleteWordBackward": "alt+g" }));
+			const editor = new Editor(defaultEditorTheme);
+			editor.setText("alfa beta gamma");
+			editor.handleInput("\x1bg"); // Alt+G
+			expect(editor.getText()).toBe("alfa beta ");
+		});
+
+		it("stops firing a hardcoded chord once the config replaces the action's keys", () => {
+			setKeybindings(new KeybindingsManager(TUI_KEYBINDINGS, { "tui.editor.deleteWordBackward": "alt+g" }));
+			const editor = new Editor(defaultEditorTheme);
+			editor.setText("alfa beta gamma");
+			editor.handleInput("\x17"); // Ctrl+W, no longer bound to deleteWordBackward
+			expect(editor.getText()).toBe("alfa beta gamma");
+		});
+
+		it("deletes a word on ctrl+backspace via its registry default key", () => {
+			const editor = new Editor(defaultEditorTheme);
+			editor.setText("alfa beta gamma");
+			editor.handleInput("\x1b[127;5u"); // kitty CSI-u ctrl+backspace
+			expect(editor.getText()).toBe("alfa beta ");
+		});
 	});
 
 	describe("Prompt history navigation", () => {
@@ -289,9 +440,12 @@ describe("Editor component", () => {
 	});
 
 	describe("autocomplete triggers", () => {
-		it("triggers slash-command autocomplete when typing slash", async () => {
+		it("triggers slash-command autocomplete without losing the hardware cursor anchor", async () => {
 			const editor = new Editor(defaultEditorTheme);
+			editor.focused = true;
+			editor.setUseTerminalCursor(true);
 			const { promise, resolve } = Promise.withResolvers<string>();
+			const { promise: autocompleteUpdated, resolve: resolveAutocompleteUpdated } = Promise.withResolvers<void>();
 
 			editor.setAutocompleteProvider({
 				async getSuggestions(lines, cursorLine, cursorCol) {
@@ -303,10 +457,36 @@ describe("Editor component", () => {
 					return { lines, cursorLine, cursorCol };
 				},
 			});
+			editor.onAutocompleteUpdate = resolveAutocompleteUpdated;
 
 			editor.handleInput("/");
 
 			await expect(promise).resolves.toBe("/");
+			await autocompleteUpdated;
+			expect(editor.isShowingAutocomplete()).toBe(true);
+			expect(editor.render(80).some(line => line.includes(CURSOR_MARKER))).toBe(true);
+		});
+
+		it("wraps long slash-command descriptions instead of dropping the tail", async () => {
+			const editor = new Editor(defaultEditorTheme);
+			const longDescription =
+				"Plan and execute non-trivial architectural improvements to the codebase. Use this skill when you need to refactor existing systems.";
+			editor.setAutocompleteProvider(
+				new CombinedAutocompleteProvider(
+					[{ name: "improve-codebase-architecture", description: longDescription }],
+					"/tmp",
+				),
+			);
+
+			const { promise: autocompleteUpdated, resolve: resolveAutocompleteUpdated } = Promise.withResolvers<void>();
+			editor.onAutocompleteUpdate = resolveAutocompleteUpdated;
+
+			editor.handleInput("/");
+			await autocompleteUpdated;
+
+			const rendered = editor.render(80).map(line => stripVTControlCharacters(line));
+			expect(rendered.some(line => line.includes("improve-codebase-architecture"))).toBe(true);
+			expect(rendered.join("\n")).toContain("refactor existing systems.");
 		});
 
 		it("triggers file-reference autocomplete when typing at-sign", async () => {
@@ -395,6 +575,46 @@ describe("Editor component", () => {
 
 			expect(editor.getText()).toBe("/help ");
 			expect(editor.isShowingAutocomplete()).toBe(false);
+		});
+
+		it("does not open file autocomplete after tab-completing no-arg slash commands", async () => {
+			vi.useFakeTimers();
+			const baseDir = await fs.mkdtemp(path.join(os.tmpdir(), "slash-tab-no-arg-"));
+			try {
+				await Bun.write(path.join(baseDir, "visible-file.ts"), "export {};\n");
+				const editor = new Editor(defaultEditorTheme);
+				editor.setAutocompleteProvider(
+					new CombinedAutocompleteProvider([{ name: "quit", description: "Quit", allowArgs: false }], baseDir),
+				);
+
+				let nextUpdate = Promise.withResolvers<void>();
+				editor.onAutocompleteUpdate = () => nextUpdate.resolve();
+				editor.handleInput("/");
+				await nextUpdate.promise;
+
+				nextUpdate = Promise.withResolvers<void>();
+				editor.onAutocompleteUpdate = () => nextUpdate.resolve();
+				editor.handleInput("q");
+				vi.advanceTimersByTime(100);
+				await nextUpdate.promise;
+
+				const chainedUpdates = Promise.withResolvers<void>();
+				let updateCount = 0;
+				editor.onAutocompleteUpdate = () => {
+					updateCount += 1;
+					if (updateCount === 2) {
+						chainedUpdates.resolve();
+					}
+				};
+				editor.handleInput("	");
+				await chainedUpdates.promise;
+
+				expect(editor.getText()).toBe("/quit ");
+				expect(editor.isShowingAutocomplete()).toBe(false);
+			} finally {
+				vi.useRealTimers();
+				await fs.rm(baseDir, { recursive: true, force: true });
+			}
 		});
 	});
 
@@ -590,6 +810,11 @@ describe("Editor component", () => {
 			editor.handleInput("\x17");
 			expect(editor.getText()).toBe("foo bar");
 
+			// snake_case identifier deletes as a single word (issue #4776)
+			editor.setText("allowed_openai_params");
+			editor.handleInput("\x17");
+			expect(editor.getText()).toBe("");
+
 			// Delete across multiple lines
 			editor.setText("line one\nline two");
 			editor.handleInput("\x17");
@@ -752,6 +977,69 @@ describe("Editor component", () => {
 			expect(contentLine).not.toContain("\x1b[5m");
 			// Line should still be correct width
 			expect(visibleWidth(contentLine)).toBeLessThanOrEqual(width);
+		});
+
+		it("keeps the bordered editor inside `width` when the cursor lands past a wide trailing grapheme (#3431)", () => {
+			// Regression: typing a fullwidth char (e.g. CJK comma `，`, U+FF0C) at the end
+			// of the input used to push the bottom-right `─╯` 1–2 cells past the terminal
+			// edge, wrapping `╯` to its own row. The end-of-line cursor glyph + wide grapheme
+			// extends into the right padding zone; the right chrome must shrink by the exact
+			// overflow cell count.
+			for (const paddingX of [1, 2]) {
+				const theme = { ...defaultEditorTheme, editorPaddingX: paddingX };
+				const minContentWidth = 2 * (paddingX + 1) + 3; // chrome + "，" (2) + cursor (1)
+				for (let width = minContentWidth; width <= minContentWidth + 6; width++) {
+					const editor = new Editor(theme);
+					editor.focused = true;
+					for (const c of "asd，") editor.handleInput(c);
+					const lines = editor.render(width);
+					for (const line of lines) {
+						const stripped = line.replaceAll(CURSOR_MARKER, "");
+						expect(visibleWidth(stripped)).toBeLessThanOrEqual(width);
+					}
+				}
+			}
+		});
+
+		it("keeps the terminal-cursor editor compact by default", () => {
+			const editor = new Editor(defaultEditorTheme);
+			editor.focused = true;
+			editor.setUseTerminalCursor(true);
+			editor.setText("ast");
+
+			const lines = editor.render(20).map(line => stripVTControlCharacters(line.replaceAll(CURSOR_MARKER, "")));
+			expect(lines).toEqual(["+------------------+", "+- ast            -+"]);
+		});
+
+		it("keeps terminal-local IME preedit from displacing the editor border (#5563)", async () => {
+			const width = 20;
+			const terminal = new VirtualTerminal(width, 6, 1_000);
+			const tui = new TUI(terminal, true);
+			const editor = new Editor(defaultEditorTheme);
+			editor.setImeSafeCursorLayout(true);
+			tui.addChild(editor);
+			tui.setFocus(editor);
+
+			try {
+				tui.start();
+				await terminal.waitForRender();
+				for (const char of "ast") editor.handleInput(char);
+				tui.requestRender();
+				await terminal.waitForRender();
+
+				const beforePreedit = terminal.getViewport().map(row => row.trimEnd());
+				expect(beforePreedit.slice(0, 3)).toEqual(["+------------------+", "|  ast", "+------------------+"]);
+
+				// macOS Terminal renders marked text locally in insertion mode before
+				// committed bytes reach OMP. The open cursor row must not carry right
+				// chrome that the marked text can shift onto another row.
+				terminal.write("\x1b[4hast，\x1b[4l");
+				const afterPreedit = terminal.getViewport().map(row => row.trimEnd());
+				expect(afterPreedit[1]).toBe("|  astast，");
+				expect(afterPreedit[2]).toBe(beforePreedit[2]);
+			} finally {
+				tui.stop();
+			}
 		});
 
 		it("shows cursor at end before wrap and wraps on next char", () => {
@@ -1914,6 +2202,27 @@ describe("Editor component", () => {
 			expect(editor.getCursor()).toEqual({ line: 6, col: 2 });
 		});
 
+		it("PageUp/PageDown on an idle editor never step prompt history (#4754)", () => {
+			const editor = new Editor(defaultEditorTheme);
+
+			editor.addToHistory("first prompt");
+			editor.addToHistory("second prompt");
+			editor.render(80);
+			expect(editor.getText()).toBe("");
+
+			editor.handleInput("\x1b[5~"); // PageUp on empty editor
+			expect(editor.getText()).toBe("");
+
+			editor.handleInput("\x1b[6~"); // PageDown on empty editor
+			expect(editor.getText()).toBe("");
+
+			// While browsing history (entered via Up), PageUp must not advance it.
+			editor.handleInput("\x1b[A"); // Up - shows "second prompt"
+			expect(editor.getText()).toBe("second prompt");
+			editor.handleInput("\x1b[5~"); // PageUp - stays put
+			expect(editor.getText()).toBe("second prompt");
+		});
+
 		it("moves correctly through wrapped visual lines without getting stuck", () => {
 			const editor = new Editor(defaultEditorTheme);
 
@@ -2206,6 +2515,110 @@ describe("Editor component", () => {
 
 			editor.handleInput("\r");
 			expect(submitted).toBe(wrapped);
+		});
+	});
+
+	describe("Bulk input fast path and paste iteration", () => {
+		it("produces identical state for a chunked paste and a single-sequence paste", () => {
+			const content = "alpha beta\ngamma delta\nepsilon";
+			const single = new Editor(defaultEditorTheme);
+			single.handleInput(`\x1b[200~${content}\x1b[201~`);
+
+			const chunked = new Editor(defaultEditorTheme);
+			chunked.handleInput("\x1b[200~");
+			for (const ch of content) chunked.handleInput(ch);
+			chunked.handleInput("\x1b[201~");
+
+			expect(chunked.getText()).toBe(single.getText());
+			expect(chunked.getCursor()).toEqual(single.getCursor());
+		});
+
+		it("normalizes CRLF identically for single and chunked paste delivery", () => {
+			const single = new Editor(defaultEditorTheme);
+			single.handleInput("\x1b[200~one\r\ntwo\rthree\x1b[201~");
+
+			const chunked = new Editor(defaultEditorTheme);
+			chunked.handleInput("\x1b[200~one\r");
+			chunked.handleInput("\ntwo");
+			chunked.handleInput("\rthree\x1b[201~");
+
+			expect(single.getText()).toBe("one\ntwo\nthree");
+			expect(chunked.getText()).toBe(single.getText());
+			expect(chunked.getCursor()).toEqual(single.getCursor());
+		});
+
+		it("processes paste remainders iteratively, applying every trailing paste and keystroke", () => {
+			const editor = new Editor(defaultEditorTheme);
+			// One read carrying two complete pastes plus trailing typed text: the
+			// remainder after each paste loops back through input handling.
+			editor.handleInput("\x1b[200~ab\x1b[201~\x1b[200~cd\x1b[201~ef");
+			expect(editor.getText()).toBe("abcdef");
+			expect(editor.getCursor()).toEqual({ line: 0, col: 6 });
+		});
+
+		it("handles a long train of pastes in one read without recursing per remainder", () => {
+			const editor = new Editor(defaultEditorTheme);
+			editor.handleInput("\x1b[200~x\x1b[201~".repeat(2000));
+			expect(editor.getText()).toBe("x".repeat(2000));
+		});
+
+		it("inserts a plain printable run identically to per-scalar delivery", () => {
+			const run = "The quick brown fox 123 -_. naïve 😀 path";
+			const bulk = new Editor(defaultEditorTheme);
+			bulk.handleInput(run);
+
+			const perChar = new Editor(defaultEditorTheme);
+			for (const ch of run) perChar.handleInput(ch);
+
+			expect(bulk.getText()).toBe(perChar.getText());
+			expect(bulk.getCursor()).toEqual(perChar.getCursor());
+		});
+
+		it("keeps escape sequences interleaved with printable runs on the dispatch path", () => {
+			const editor = new Editor(defaultEditorTheme);
+			editor.handleInput("abc");
+			editor.handleInput("\x1b[D"); // Left
+			editor.handleInput("XY"); // bulk run lands before "c"
+			expect(editor.getText()).toBe("abXYc");
+			expect(editor.getCursor()).toEqual({ line: 0, col: 4 });
+		});
+
+		it("opens @ autocomplete when the trigger arrives inside a bulk printable run", async () => {
+			const editor = new Editor(defaultEditorTheme);
+			const { promise: autocompleteUpdated, resolve: resolveAutocompleteUpdated } = Promise.withResolvers<void>();
+			editor.setAutocompleteProvider({
+				async getSuggestions() {
+					return { items: [{ label: "src/", value: "src/" }], prefix: "@sr" };
+				},
+				applyCompletion(lines, cursorLine, cursorCol) {
+					return { lines, cursorLine, cursorCol };
+				},
+			});
+			editor.onAutocompleteUpdate = resolveAutocompleteUpdated;
+
+			editor.handleInput("see @sr"); // one bulk run ending in an @-token
+
+			await autocompleteUpdated;
+			expect(editor.isShowingAutocomplete()).toBe(true);
+		});
+
+		it("opens @ autocomplete after a bracketed paste ending in a trigger token", async () => {
+			const editor = new Editor(defaultEditorTheme);
+			const { promise: autocompleteUpdated, resolve: resolveAutocompleteUpdated } = Promise.withResolvers<void>();
+			editor.setAutocompleteProvider({
+				async getSuggestions() {
+					return { items: [{ label: "src/", value: "src/" }], prefix: "@sr" };
+				},
+				applyCompletion(lines, cursorLine, cursorCol) {
+					return { lines, cursorLine, cursorCol };
+				},
+			});
+			editor.onAutocompleteUpdate = resolveAutocompleteUpdated;
+
+			editor.handleInput("\x1b[200~see @sr\x1b[201~");
+
+			await autocompleteUpdated;
+			expect(editor.isShowingAutocomplete()).toBe(true);
 		});
 	});
 

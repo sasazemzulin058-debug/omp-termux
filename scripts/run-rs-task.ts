@@ -1,7 +1,7 @@
 #!/usr/bin/env bun
 
-import { $ } from "bun";
 import * as path from "node:path";
+import { $ } from "bun";
 
 const RUST_AFFECTING_FILE_NAMES = [
 	"Cargo.toml",
@@ -14,10 +14,19 @@ const RUST_AFFECTING_FILE_NAMES = [
 	"rustfmt.toml",
 	".rustfmt.toml",
 ] as const satisfies readonly string[];
+// brush-core became a workspace member for Bazel hermeticity (path-patch
+// rendering is machine-local), but the cargo dev tasks keep their historical
+// scope: the vendored fork is not held to workspace lint/test gates.
+//
+// pi-builtins is NOT excluded. It is first-party, and although it opts out of
+// the workspace's pedantic/nursery lints in its own manifest (most of it is
+// ported third-party code), it is held to default clippy and to zero rustc
+// warnings like everything else.
+const VENDORED_FORK_EXCLUDES = ["--exclude", "brush-core"] as const satisfies readonly string[];
 const TASK_COMMANDS = {
 	"check:rs": [
 		["cargo", "fmt", "--all", "--", "--check"],
-		["cargo", "clippy", "--workspace", "--", "-D", "warnings"],
+		["cargo", "clippy", "--workspace", ...VENDORED_FORK_EXCLUDES, "--no-deps", "--", "-D", "warnings"],
 	],
 	"fix:rs": [
 		["cargo", "fmt", "--all"],
@@ -25,6 +34,7 @@ const TASK_COMMANDS = {
 			"cargo",
 			"clippy",
 			"--workspace",
+			...VENDORED_FORK_EXCLUDES,
 			"--fix",
 			"--allow-dirty",
 			"--no-deps",
@@ -33,8 +43,18 @@ const TASK_COMMANDS = {
 		],
 	],
 	"fmt:rs": [["cargo", "fmt", "--all"]],
-	"lint:rs": [["cargo", "clippy", "--workspace", "--", "-D", "warnings"]],
-	"test:rs": [["cargo", "nextest", "run", "--workspace", "--status-level=fail", "--final-status-level=fail"]],
+	"lint:rs": [["cargo", "clippy", "--workspace", ...VENDORED_FORK_EXCLUDES, "--no-deps", "--", "-D", "warnings"]],
+	"test:rs": [
+		[
+			"cargo",
+			"nextest",
+			"run",
+			"--workspace",
+			...VENDORED_FORK_EXCLUDES,
+			"--status-level=fail",
+			"--final-status-level=fail",
+		],
+	],
 } as const satisfies Record<string, readonly (readonly string[])[]>;
 
 type RustTaskName = keyof typeof TASK_COMMANDS;
@@ -112,9 +132,7 @@ function isRustAffectingPath(changedPath: string): boolean {
 	const normalized = changedPath.replace(/\\/g, "/");
 	const fileName = normalized.slice(normalized.lastIndexOf("/") + 1);
 	return (
-		normalized.endsWith(".rs") ||
-		normalized.startsWith(".cargo/") ||
-		isOneOf(fileName, RUST_AFFECTING_FILE_NAMES)
+		normalized.endsWith(".rs") || normalized.startsWith(".cargo/") || isOneOf(fileName, RUST_AFFECTING_FILE_NAMES)
 	);
 }
 

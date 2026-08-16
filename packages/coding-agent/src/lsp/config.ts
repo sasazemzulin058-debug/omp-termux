@@ -1,7 +1,7 @@
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { $which, isRecord, logger, pathIsWithin } from "@oh-my-pi/pi-utils";
+import { $which, isRecord, logger, pathIsWithin, type WhichOptions } from "@oh-my-pi/pi-utils";
 import { YAML } from "bun";
 import { getConfigDirPaths } from "../config";
 import { type ClaudePluginRoot, getPreloadedPluginRoots } from "../discovery/helpers";
@@ -74,6 +74,8 @@ function normalizeServerConfig(name: string, config: RawServerConfig): ServerCon
 	const fileTypes =
 		normalizeStringArray(config.fileTypes) ?? normalizeExtensionToFileTypes(config.extensionToLanguage);
 	const rootMarkers = normalizeStringArray(config.rootMarkers) ?? (config.extensionToLanguage ? ["."] : null);
+	const languageId =
+		typeof config.languageId === "string" && config.languageId.length > 0 ? config.languageId : undefined;
 
 	if (!command || !fileTypes || !rootMarkers) {
 		logger.warn("Ignoring invalid LSP server config (missing required fields).", { name });
@@ -95,6 +97,7 @@ function normalizeServerConfig(name: string, config: RawServerConfig): ServerCon
 		args,
 		fileTypes,
 		rootMarkers,
+		languageId,
 		...(initOptions ? { initOptions } : {}),
 	};
 }
@@ -201,6 +204,21 @@ export function hasRootMarkers(cwd: string, markers: string[]): boolean {
 	return false;
 }
 
+/**
+ * Check whether any ancestor directory of a file is an LSP project root.
+ */
+export function hasRootMarkerAncestor(filePath: string, markers: string[]): boolean {
+	if (markers.length === 0) return false;
+
+	let dir = path.dirname(path.resolve(filePath));
+	while (true) {
+		if (hasRootMarkers(dir, markers)) return true;
+		const parent = path.dirname(dir);
+		if (parent === dir) return false;
+		dir = parent;
+	}
+}
+
 // =============================================================================
 // Local Binary Resolution
 // =============================================================================
@@ -209,18 +227,33 @@ export function hasRootMarkers(cwd: string, markers: string[]): boolean {
  * Local bin directories to check before $PATH, ordered by priority.
  * Each entry maps a root marker to the bin directory to check.
  */
+const PYTHON_ROOT_MARKERS = [
+	"pyproject.toml",
+	"ty.toml",
+	"requirements.txt",
+	"setup.py",
+	"setup.cfg",
+	"Pipfile",
+	"pyrightconfig.json",
+	"ruff.toml",
+	".ruff.toml",
+];
+
 const LOCAL_BIN_PATHS: Array<{ markers: string[]; binDir: string }> = [
 	// Node.js - check node_modules/.bin/
 	{ markers: ["package.json", "package-lock.json", "yarn.lock", "pnpm-lock.yaml"], binDir: "node_modules/.bin" },
 	// Python - check virtual environment bin directories
-	{ markers: ["pyproject.toml", "requirements.txt", "setup.py", "Pipfile"], binDir: ".venv/bin" },
-	{ markers: ["pyproject.toml", "requirements.txt", "setup.py", "Pipfile"], binDir: "venv/bin" },
-	{ markers: ["pyproject.toml", "requirements.txt", "setup.py", "Pipfile"], binDir: ".env/bin" },
+	{ markers: PYTHON_ROOT_MARKERS, binDir: ".venv/bin" },
+	{ markers: PYTHON_ROOT_MARKERS, binDir: ".venv/Scripts" },
+	{ markers: PYTHON_ROOT_MARKERS, binDir: "venv/bin" },
+	{ markers: PYTHON_ROOT_MARKERS, binDir: "venv/Scripts" },
+	{ markers: PYTHON_ROOT_MARKERS, binDir: ".env/bin" },
+	{ markers: PYTHON_ROOT_MARKERS, binDir: ".env/Scripts" },
 	// Ruby - check vendor bundle and binstubs
 	{ markers: ["Gemfile", "Gemfile.lock"], binDir: "vendor/bundle/bin" },
 	{ markers: ["Gemfile", "Gemfile.lock"], binDir: "bin" },
 	// Go - check project-local bin
-	{ markers: ["go.mod", "go.sum"], binDir: "bin" },
+	{ markers: ["go.mod", "go.sum", "go.work"], binDir: "bin" },
 ];
 
 const WINDOWS_LOCAL_EXECUTABLE_EXTENSIONS = [".exe", ".cmd", ".bat"] as const;
@@ -238,6 +271,21 @@ function resolveLocalCommand(basePath: string): string | null {
 	return null;
 }
 
+function resolveCommandFromLocalRoot(command: string, cwd: string): string | null {
+	for (const { markers, binDir } of LOCAL_BIN_PATHS) {
+		if (!hasRootMarkers(cwd, markers)) continue;
+		const resolved = resolveLocalCommand(path.join(cwd, binDir, command));
+		if (resolved) return resolved;
+	}
+	return null;
+}
+
+/** Controls project-local and PATH executable lookup. */
+export interface ResolveCommandOptions extends Pick<WhichOptions, "cache" | "PATH"> {
+	/** Ordered project roots checked before PATH; defaults to the command cwd. */
+	localRoots?: readonly string[];
+}
+
 /**
  * Resolve a command to an executable path.
  * Checks project-local bin directories first, then falls back to $PATH.
@@ -246,20 +294,19 @@ function resolveLocalCommand(basePath: string): string | null {
  * @param cwd - Working directory to search from
  * @returns Absolute path to the executable, or null if not found
  */
-export function resolveCommand(command: string, cwd: string): string | null {
-	// Check local bin directories based on project markers
-	for (const { markers, binDir } of LOCAL_BIN_PATHS) {
-		if (hasRootMarkers(cwd, markers)) {
-			const localPath = path.join(cwd, binDir, command);
-			const resolvedLocalPath = resolveLocalCommand(localPath);
-			if (resolvedLocalPath) {
-				return resolvedLocalPath;
-			}
+export function resolveCommand(command: string, cwd: string, options?: ResolveCommandOptions): string | null {
+	if (options?.localRoots) {
+		for (const root of options.localRoots) {
+			const resolved = resolveCommandFromLocalRoot(command, root);
+			if (resolved) return resolved;
 		}
+	} else {
+		const resolved = resolveCommandFromLocalRoot(command, cwd);
+		if (resolved) return resolved;
 	}
 
-	// Fall back to $PATH
-	return $which(command);
+	if (!options) return $which(command);
+	return $which(command, { cache: options.cache, PATH: options.PATH });
 }
 
 interface ConfigSource {
@@ -380,6 +427,7 @@ function getConfigSources(cwd: string): ConfigSource[] {
  *       "command": "/path/to/server",
  *       "args": ["--stdio"],
  *       "fileTypes": [".xyz"],
+ *       "languageId": "xyz",
  *       "rootMarkers": [".xyz-project"]
  *     }
  *   }

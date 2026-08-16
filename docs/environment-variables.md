@@ -15,12 +15,14 @@ Most runtime lookups use `$env` from `@oh-my-pi/pi-utils` (`packages/utils/src/e
 `$env` loading order:
 
 1. Existing process environment (`Bun.env`)
-2. Project `.env` (`$PWD/.env`) for keys not already set
-3. Agent `.env` (`~/.omp/agent/.env`, respecting `PI_CONFIG_DIR` / `PI_CODING_AGENT_DIR`) for keys not already set
-4. Config-root `.env` (`~/.omp/.env`, respecting `PI_CONFIG_DIR`) for keys not already set
-5. Home `.env` (`~/.env`) for keys not already set
+2. Project `.env` from the launch working directory for keys whose current value is empty/unset
+3. Active agent `.env` (normally `~/.omp/agent/.env`) for keys whose current value is empty/unset
+4. Active config-root `.env` (normally `~/.omp/.env`) for keys whose current value is empty/unset
+5. Home `.env` (`~/.env`) for keys whose current value is empty/unset
 
-Additional rule inside each `.env` file: `OMP_*` keys are mirrored to `PI_*` keys in that parsed file.
+The agent/root locations respect profiles, `PI_CONFIG_DIR`, and—only for the default profile—`PI_CODING_AGENT_DIR`. Dotenv names must be shell identifiers (`[A-Za-z_][A-Za-z0-9_]*`); unsafe names/values are discarded. OMP's parser keeps values literal; only Bun's own launch-directory dotenv autoload may perform Bun-supported expansion before this module runs.
+
+Additional rule inside each `.env` file: every `OMP_*` key is mirrored to its `PI_*` alias, and that mirrored value replaces a same-file `PI_*` value. This mirroring applies to parsed dotenv files, not arbitrary variables inherited from the parent process.
 
 ---
 
@@ -43,12 +45,13 @@ These are consumed via `getEnvApiKey()` (`packages/ai/src/stream.ts`) unless not
 | `FIREWORKS_API_KEY`             | Fireworks auth                                   | Using Fireworks models                                         |                                                                                                     |
 | `FIREPASS_API_KEY`              | Fire Pass auth                                   | Using Fire Pass models                                         |                                                                                                     |
 | `TOGETHER_API_KEY`              | Together auth                                    | Using `together` provider                                      |                                                                                                     |
-| `AIMLAPI_API_KEY`               | AIML API auth                                   | Using `aimlapi` provider                                       | OpenAI-compatible AIML API endpoint at `https://api.aimlapi.com/v1`                                  |
+| `AIMLAPI_API_KEY`               | AIML API auth                                    | Using `aimlapi` provider                                       | OpenAI-compatible AIML API endpoint at `https://api.aimlapi.com/v1`                                 |
 | `HUGGINGFACE_HUB_TOKEN`         | Hugging Face auth                                | Using `huggingface` provider                                   | Primary Hugging Face token env var                                                                  |
 | `HF_TOKEN`                      | Hugging Face auth                                | Using `huggingface` provider                                   | Fallback when `HUGGINGFACE_HUB_TOKEN` is unset                                                      |
 | `SYNTHETIC_API_KEY`             | Synthetic auth                                   | Using Synthetic models                                         |                                                                                                     |
 | `NVIDIA_API_KEY`                | NVIDIA auth                                      | Using `nvidia` provider                                        |                                                                                                     |
 | `NANO_GPT_API_KEY`              | NanoGPT auth                                     | Using `nanogpt` provider                                       |                                                                                                     |
+| `NOVITA_API_KEY`                | Novita auth                                      | Using `novita` provider                                        |                                                                                                     |
 | `VENICE_API_KEY`                | Venice auth                                      | Using `venice` provider                                        |                                                                                                     |
 | `LITELLM_API_KEY`               | LiteLLM auth                                     | Using `litellm` provider                                       | OpenAI-compatible LiteLLM proxy key                                                                 |
 | `LM_STUDIO_API_KEY`             | LM Studio auth (optional)                        | Using `lm-studio` provider with authenticated hosts            | Local LM Studio usually runs without auth; any non-empty token works when a key is required         |
@@ -65,7 +68,7 @@ These are consumed via `getEnvApiKey()` (`packages/ai/src/stream.ts`) unless not
 | `MISTRAL_API_KEY`               | Mistral auth                                     | Using Mistral models                                           |                                                                                                     |
 | `ZAI_API_KEY`                   | z.ai auth                                        | Using z.ai models                                              | Also used by z.ai web search provider                                                               |
 | `ZHIPU_API_KEY`                 | Zhipu Coding Plan auth                           | Using `zhipu-coding-plan` provider                             |                                                                                                     |
-| `UMANS_AI_CODING_PLAN_API_KEY` | Umans AI Coding Plan auth                        | Using `umans` provider                                         |                                                                                                     |
+| `UMANS_AI_CODING_PLAN_API_KEY`  | Umans AI Coding Plan auth                        | Using `umans` provider                                         |                                                                                                     |
 | `MINIMAX_API_KEY`               | MiniMax auth                                     | Using `minimax` provider                                       |                                                                                                     |
 | `MINIMAX_CODE_API_KEY`          | MiniMax Code auth                                | Using `minimax-code` provider                                  |                                                                                                     |
 | `MINIMAX_CODE_CN_API_KEY`       | MiniMax Code CN auth                             | Using `minimax-code-cn` provider                               |                                                                                                     |
@@ -79,7 +82,11 @@ These are consumed via `getEnvApiKey()` (`packages/ai/src/stream.ts`) unless not
 | `AI_GATEWAY_API_KEY`            | Vercel AI Gateway auth                           | Using `vercel-ai-gateway` provider                             |                                                                                                     |
 | `CLOUDFLARE_AI_GATEWAY_API_KEY` | Cloudflare AI Gateway auth                       | Using `cloudflare-ai-gateway` provider                         | Base URL must be configured as `https://gateway.ai.cloudflare.com/v1/<account>/<gateway>/anthropic` |
 | `ALIBABA_CODING_PLAN_API_KEY`   | Alibaba Coding Plan auth                         | Using `alibaba-coding-plan` provider                           |                                                                                                     |
+| `ALIBABA_TOKEN_PLAN_API_KEY`    | QwenCloud Token Plan auth                        | Using `alibaba-token-plan` provider                            | Preferred provider-specific name                                                                    |
+| `BAILIAN_TOKEN_PLAN_API_KEY`    | QwenCloud Token Plan auth                        | Using `alibaba-token-plan` provider                            | Compatible with Qwen Code's Token Plan preset                                                       |
 | `DEEPSEEK_API_KEY`              | DeepSeek auth                                    | Using DeepSeek models                                          |                                                                                                     |
+| `SILICONFLOW_API_KEY`           | SiliconFlow auth                                 | Using `siliconflow` provider                                   |                                                                                                     |
+| `SILICONFLOW_CN_API_KEY`        | SiliconFlow (China) auth                         | Using `siliconflow-cn` provider                                |                                                                                                     |
 | `KILO_API_KEY`                  | Kilo auth                                        | Using Kilo models                                              |                                                                                                     |
 | `OLLAMA_CLOUD_API_KEY`          | Ollama Cloud auth                                | Using `ollama-cloud` provider                                  |                                                                                                     |
 | `WAFER_SERVERLESS_API_KEY`      | Wafer Serverless auth                            | Using `wafer-serverless` provider                              | Pay-as-you-go Wafer SKU; validated against `https://pass.wafer.ai/v1/models`                        |
@@ -87,28 +94,40 @@ These are consumed via `getEnvApiKey()` (`packages/ai/src/stream.ts`) unless not
 
 ### GitHub/Copilot tokens
 
-| Variable               | Used for                                         | Notes                                      |
-| ---------------------- | ------------------------------------------------ | ------------------------------------------ |
-| `COPILOT_GITHUB_TOKEN` | GitHub Copilot provider auth                     | Generic GitHub tokens are not used here    |
-| `GH_TOKEN`             | GitHub API auth in web scraper                   | Web scraper fallback after `GITHUB_TOKEN`  |
-| `GITHUB_TOKEN`         | GitHub API auth in web scraper                   | Web scraper checks this before `GH_TOKEN`  |
+| Variable               | Used for                       | Notes                                     |
+| ---------------------- | ------------------------------ | ----------------------------------------- |
+| `COPILOT_GITHUB_TOKEN` | GitHub Copilot provider auth   | Generic GitHub tokens are not used here   |
+| `GH_TOKEN`             | GitHub API auth in web scraper | Web scraper fallback after `GITHUB_TOKEN` |
+| `GITHUB_TOKEN`         | GitHub API auth in web scraper | Web scraper checks this before `GH_TOKEN` |
 
 ### Auth broker / auth gateway (remote credential vault)
 
 When the broker is enabled, the local SQLite credential store is bypassed and all OAuth refresh / access tokens live on the broker host. See [`auth-broker-gateway.md`](./auth-broker-gateway.md) for the full protocol, CLI surface, and 5-min/15-s usage cache layering.
 
-| Variable                | Used for                                                                                     | Required when                                                                                                             | Notes / precedence                                                                                                                                                                         |
-| ----------------------- | -------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `OMP_AUTH_BROKER_URL`   | Base URL of the remote auth-broker (e.g. `https://broker.tailnet:8765`); selects broker mode | Resolving credentials through a broker; also required by `omp auth-gateway serve` (the gateway is itself a broker client) | Wins over `auth.broker.url` in `config.yml`. When set with no resolvable token, `resolveAuthBrokerConfig()` hard-errors instead of falling back to local SQLite.                           |
-| `OMP_AUTH_BROKER_TOKEN` | Bearer token sent on every broker endpoint except `/v1/healthz`                              | `OMP_AUTH_BROKER_URL` is set and no token is available from `auth.broker.token` or `<config-dir>/auth-broker.token`       | Resolution: this env → `auth.broker.token` (`$ENV_NAME` indirection supported) → `<config-dir>/auth-broker.token` (mode `0600`). `<config-dir>` is `~/.omp/` (respecting `PI_CONFIG_DIR`). |
-| `OMP_AUTH_BROKER_SNAPSHOT_TTL_MS` | Freshness window for the encrypted local broker snapshot cache | Optional in broker mode | Default `3600000` (1 h). Freshness is based on broker `snapshot.generatedAt`; `0` disables cache reads/writes and forces the old blocking fetch every startup. |
-| `OMP_AUTH_BROKER_SNAPSHOT_CACHE` | Path to the encrypted local broker snapshot cache | Optional in broker mode | Defaults to `~/.omp/cache/auth-broker-snapshot.enc` (or XDG cache equivalent). Useful for tests, ephemeral hosts, or relocating the `0600` cache file. |
+| Variable                            | Used for                                                                                     | Required when                                                                                                             | Notes / precedence                                                                                                                                                                                                                                                                   |
+| ----------------------------------- | -------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `OMP_AUTH_BROKER_URL`               | Base URL of the remote auth-broker (e.g. `https://broker.tailnet:8765`); selects broker mode | Resolving credentials through a broker; also required by `omp auth-gateway serve` (the gateway is itself a broker client) | Wins over `auth.broker.url` in `config.yml`. When set with no resolvable token, `resolveAuthBrokerConfig()` hard-errors instead of falling back to local SQLite.                                                                                                                     |
+| `OMP_AUTH_BROKER_TOKEN`             | Bearer token sent on every broker endpoint except `/v1/healthz`                              | `OMP_AUTH_BROKER_URL` is set and no token is available from `auth.broker.token` or `<config-dir>/auth-broker.token`       | Resolution: this env → `auth.broker.token` (`$ENV_NAME` indirection supported) → `<config-dir>/auth-broker.token` (mode `0600`). `<config-dir>` is `~/.omp/` (respecting `PI_CONFIG_DIR`).                                                                                           |
+| `OMP_AUTH_BROKER_SNAPSHOT_TTL_MS`   | Freshness window for the encrypted local broker snapshot cache                               | Optional in broker mode                                                                                                   | Default `3600000` (1 h). Freshness is based on broker `snapshot.generatedAt`; `0` disables cache reads/writes and forces the old blocking fetch every startup.                                                                                                                       |
+| `OMP_AUTH_BROKER_SNAPSHOT_CACHE`    | Path to the encrypted local broker snapshot cache                                            | Optional in broker mode                                                                                                   | Defaults to `~/.omp/cache/auth-broker-snapshot.enc` (or XDG cache equivalent). Useful for tests, ephemeral hosts, or relocating the `0600` cache file.                                                                                                                               |
+| `OMP_AUTH_BROKER_ACCOUNT_POOL_FILE` | Process-scoped OAuth account routing for a trusted broker client                             | Optional in broker mode                                                                                                   | Path to a JSON object mapping provider IDs to exact broker `identityKey` arrays. Missing providers are unrestricted; `[]` hides that provider's OAuth accounts; API keys remain visible. Parsed once at startup and fails closed on invalid input. This is not server authorization. |
 
 The gateway has no dedicated env vars — it inherits `OMP_AUTH_BROKER_*`. Its own inbound bearer token lives at `<config-dir>/auth-gateway.token` and is managed via `omp auth-gateway token`.
 
 ---
 
 ## 2) Provider-specific runtime configuration
+
+### Outbound proxy routing
+
+Provider HTTP fetches resolve proxies in this order after applying `NO_PROXY` / `no_proxy`:
+
+1. `PI_PROXY_<PROVIDER>` (provider ID uppercased, non-alphanumerics replaced with `_`, for example `PI_PROXY_GITHUB_COPILOT`)
+2. `PI_PROXY`
+3. `HTTPS_PROXY` / `https_proxy` for HTTPS and WebSocket targets, or `HTTP_PROXY` / `http_proxy` for HTTP
+4. `ALL_PROXY` / `all_proxy`
+
+Provider proxy lookups are cached for the process lifetime. Localhost targets bypass the provider fetch wrapper.
 
 ### Anthropic Foundry Gateway (Azure / enterprise proxy)
 
@@ -128,32 +147,50 @@ When `CLAUDE_CODE_USE_FOUNDRY` is enabled, Anthropic requests switch to Foundry 
   - a filesystem path to PEM content, or
   - inline PEM (including escaped `\n` sequences).
 
-| Variable                    | Value type                                     | Behavior                                                                      |
-| --------------------------- | ---------------------------------------------- | ----------------------------------------------------------------------------- |
-| `CLAUDE_CODE_USE_FOUNDRY`   | Boolean-like string (`1`, `true`, `yes`, `on`) | Enables Foundry mode for Anthropic provider                                   |
-| `FOUNDRY_BASE_URL`          | URL string                                     | Anthropic endpoint base URL in Foundry mode                                   |
-| `ANTHROPIC_FOUNDRY_API_KEY` | Token string                                   | Used for `Authorization: Bearer <token>`                                      |
+  `NODE_EXTRA_CA_CERTS` is honoured for every provider fetch (OpenAI-compatible,
+  Codex, Ollama, Azure Responses, Google, Anthropic), not just Foundry — Bun's
+  `fetch` does not consume the env var natively, so the bundle is merged into
+  `RequestInit.tls.ca` alongside the system root store. The `CLAUDE_CODE_*` mTLS
+  material remains Anthropic-Foundry-specific.
+
+| Variable                    | Value type                                     | Behavior                                                                                                                                                      |
+| --------------------------- | ---------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `CLAUDE_CODE_USE_FOUNDRY`   | Boolean-like string (`1`, `true`, `yes`, `on`) | Enables Foundry mode for Anthropic provider                                                                                                                   |
+| `FOUNDRY_BASE_URL`          | URL string                                     | Anthropic endpoint base URL in Foundry mode                                                                                                                   |
+| `ANTHROPIC_FOUNDRY_API_KEY` | Token string                                   | Used for `Authorization: Bearer <token>`                                                                                                                      |
 | `ANTHROPIC_CUSTOM_HEADERS`  | Header list string                             | Extra headers; format `header-a: value, header-b: value` or newline-separated. Also forwarded outside Foundry whenever `ANTHROPIC_BASE_URL` is non-Anthropic. |
-| `NODE_EXTRA_CA_CERTS`       | PEM path or inline PEM                         | Extra CA chain for server certificate validation                              |
-| `CLAUDE_CODE_CLIENT_CERT`   | PEM path or inline PEM                         | mTLS client certificate                                                       |
-| `CLAUDE_CODE_CLIENT_KEY`    | PEM path or inline PEM                         | mTLS client private key (must be paired with cert)                            |
+| `NODE_EXTRA_CA_CERTS`       | PEM path or inline PEM                         | Extra CA chain for server certificate validation                                                                                                              |
+| `CLAUDE_CODE_CLIENT_CERT`   | PEM path or inline PEM                         | mTLS client certificate                                                                                                                                       |
+| `CLAUDE_CODE_CLIENT_KEY`    | PEM path or inline PEM                         | mTLS client private key (must be paired with cert)                                                                                                            |
 
 ### Amazon Bedrock
 
-| Variable                                                                        | Default / behavior                                                                            |
-| ------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------- |
-| `AWS_REGION`                                                                    | Primary region source                                                                         |
-| `AWS_DEFAULT_REGION`                                                            | Fallback if `AWS_REGION` unset                                                                |
-| `AWS_PROFILE`                                                                   | Enables named profile auth path                                                               |
-| `AWS_ACCESS_KEY_ID` + `AWS_SECRET_ACCESS_KEY`                                   | Enables IAM key auth path                                                                     |
-| `AWS_BEARER_TOKEN_BEDROCK`                                                      | Highest-precedence bearer token auth path; skips AWS profile/credential-chain lookup when set |
+| Variable                                                                        | Default / behavior                                                                                                                              |
+| ------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------- |
+| `AWS_REGION`                                                                    | Primary region source                                                                                                                           |
+| `AWS_DEFAULT_REGION`                                                            | Fallback if `AWS_REGION` unset                                                                                                                  |
+| `AWS_PROFILE`                                                                   | Enables named profile auth path                                                                                                                 |
+| `AWS_ACCESS_KEY_ID` + `AWS_SECRET_ACCESS_KEY`                                   | Enables IAM key auth path                                                                                                                       |
+| `AWS_BEARER_TOKEN_BEDROCK`                                                      | Highest-precedence bearer token auth path; skips AWS profile/credential-chain lookup when set                                                   |
 | `AWS_CONTAINER_CREDENTIALS_RELATIVE_URI` / `AWS_CONTAINER_CREDENTIALS_FULL_URI` | Marks Bedrock as available in provider detection (credential resolution itself covers env keys, profiles/SSO/`credential_process`, then IMDSv2) |
-| `AWS_WEB_IDENTITY_TOKEN_FILE` + `AWS_ROLE_ARN`                                  | Marks Bedrock as available in provider detection (same caveat as the ECS variables above)     |
-| `AWS_BEDROCK_SKIP_AUTH`                                                         | If `1`, injects dummy credentials (proxy/non-auth scenarios)                                  |
-| `HTTPS_PROXY` / `HTTP_PROXY`                                                    | Honored via Bun's native fetch proxy support (the provider no longer ships an AWS SDK / proxy-agent transport) |
-| `NO_PROXY`                                                                      | Excludes matching hosts from Bun's native proxy routing                                       |
+| `AWS_WEB_IDENTITY_TOKEN_FILE` + `AWS_ROLE_ARN`                                  | Marks Bedrock as available in provider detection (same caveat as the ECS variables above)                                                       |
+| `AWS_BEDROCK_SKIP_AUTH`                                                         | If `1`, injects dummy credentials (proxy/non-auth scenarios)                                                                                    |
+| `HTTPS_PROXY` / `HTTP_PROXY`                                                    | Honored via Bun's native fetch proxy support (the provider no longer ships an AWS SDK / proxy-agent transport)                                  |
+| `NO_PROXY`                                                                      | Excludes matching hosts from Bun's native proxy routing                                                                                         |
 
 Region fallback in provider code: `options.region` → `AWS_REGION` → `AWS_DEFAULT_REGION` → `us-east-1`.
+
+Additional credential-chain controls implemented by the native Bedrock resolver:
+
+| Variable                                                                      | Behavior                                                                |
+| ----------------------------------------------------------------------------- | ----------------------------------------------------------------------- |
+| `AWS_SESSION_TOKEN`                                                           | Session token paired with `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` |
+| `AWS_SHARED_CREDENTIALS_FILE`, `AWS_CONFIG_FILE`                              | Override the shared credentials/config INI paths                        |
+| `AWS_SDK_LOAD_CONFIG`                                                         | `1`/`true` enables shared config loading without an explicit profile    |
+| `AWS_ROLE_SESSION_NAME`                                                       | Session name for web-identity role assumption                           |
+| `AWS_CONTAINER_AUTHORIZATION_TOKEN`, `AWS_CONTAINER_AUTHORIZATION_TOKEN_FILE` | Authorization for ECS container credentials                             |
+| `AWS_EC2_METADATA_DISABLED`                                                   | `true` disables IMDSv2                                                  |
+| `AWS_EC2_METADATA_SERVICE_ENDPOINT`, `AWS_EC2_METADATA_SERVICE_ENDPOINT_MODE` | Override IMDS endpoint / select the IPv6 fallback                       |
 
 ### Azure OpenAI Responses
 
@@ -181,6 +218,8 @@ Base URL resolution: option `azureBaseUrl` → env `AZURE_OPENAI_BASE_URL` → o
 | `GOOGLE_CLOUD_API_KEY`           | Conditional                    | Direct Vertex API-key auth; otherwise ADC fallback can authenticate when project and location are set                     |
 | `GOOGLE_APPLICATION_CREDENTIALS` | Conditional                    | If set, file must exist; otherwise ADC fallback path is checked (`~/.config/gcloud/application_default_credentials.json`) |
 
+`GOOGLE_CLOUD_ACCESS_TOKEN` (or the compatible `CLOUDSDK_AUTH_ACCESS_TOKEN` fallback) supplies an explicit Google OAuth access token and bypasses ADC token acquisition.
+
 ### Kimi
 
 | Variable               | Default / behavior                                       |
@@ -191,24 +230,69 @@ Base URL resolution: option `azureBaseUrl` → env `AZURE_OPENAI_BASE_URL` → o
 
 OAuth host chain: `KIMI_CODE_OAUTH_HOST` → `KIMI_OAUTH_HOST` → `https://auth.kimi.com`.
 
-### Gemini CLI compatibility
+### OpenAI-compatible endpoint controls
 
-| Variable                   | Default / behavior                                              |
-| -------------------------- | --------------------------------------------------------------- |
-| `PI_AI_GEMINI_CLI_VERSION` | Overrides Gemini CLI user-agent version tag (`0.35.3` if unset) |
+| Variable                            | Default / behavior                                                                          |
+| ----------------------------------- | ------------------------------------------------------------------------------------------- |
+| `OPENAI_BASE_URL`                   | Base URL fallback for OpenAI-compatible requests when the model/provider supplies a default |
+| `MOONSHOT_BASE_URL`                 | Moonshot chat and model-discovery endpoint override                                         |
+| `XAI_BASE_URL`                      | xAI HTTP endpoint override                                                                  |
+| `SAKANA_BASE_URL` / `FUGU_BASE_URL` | Sakana/Fugu endpoint override (`SAKANA_BASE_URL` wins)                                      |
+| `PI_OPENROUTER_RESPONSES`           | Responses API is enabled unless set to `0`; `0` selects the OpenAI Completions route        |
+| `UMANS_WEBSEARCH_PROVIDER`          | Default Umans Anthropic web-search provider selection when not supplied explicitly          |
+
+### Gemini CLI and Antigravity compatibility
+
+| Variable                    | Default / behavior                                              |
+| --------------------------- | --------------------------------------------------------------- |
+| `PI_AI_GEMINI_CLI_VERSION`  | Overrides Gemini CLI user-agent version tag (`0.46.0` if unset) |
+| `PI_AI_ANTIGRAVITY_VERSION` | Overrides the auto-discovered Antigravity hub user-agent version; when unset and discovery fails, the fallback is `2.8.0` |
+| `PI_AI_ANTIGRAVITY_CL`      | Overrides Antigravity hub user-agent build changelist (`963137146` if unset) |
+| `PI_AI_ANTIGRAVITY_OS`      | Overrides Antigravity hub user-agent os_type (pinned `darwin` if unset) |
+| `PI_AI_ANTIGRAVITY_ARCH`    | Overrides Antigravity hub user-agent arch (pinned `arm64` if unset) |
+
+### GitLab Duo
+
+| Variable                         | Default / behavior                                                                                                                                                                                                                                                                                               |
+| -------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `GITLAB_CLIENT_ID`               | OAuth client ID. If unset, the bundled GitLab OAuth application client ID is used.                                                                                                                                                                                                                               |
+| `GITLAB_REDIRECT_URI`            | Exact OAuth redirect URI advertised to GitLab. If unset, the local callback uses `http://localhost:8080/callback`, with random-port fallback. Must use HTTP or HTTPS; loopback callbacks must use HTTP and bind the URI's host and port.                                                                         |
+| `GITLAB_DUO_NAMESPACE_ID`        | Workflow namespace override. Runtime options take precedence; otherwise namespace/project discovery uses the current credentials and working directory.                                                                                                                                                          |
+| `GITLAB_DUO_PROJECT_ID`          | Workflow project override by ID. Runtime `projectId`, then runtime `projectPath`, take precedence; this variable takes precedence over `GITLAB_DUO_PROJECT_PATH`.                                                                                                                                                |
+| `GITLAB_DUO_PROJECT_PATH`        | Workflow project override by path when no runtime project or `GITLAB_DUO_PROJECT_ID` is set.                                                                                                                                                                                                                     |
+| `GITLAB_DUO_WORKFLOW_DEFINITION` | Workflow definition override; runtime `workflowDefinition` takes precedence. Defaults to `ambient`.                                                                                                                                                                                                              |
+| `GITLAB_DUO_WORKFLOW_TRACE`      | Workflow tracing is enabled only when the value is exactly `1`. Each trace event is appended as one JSON object per line; trace write failures are ignored.                                                                                                                                                      |
+| `GITLAB_DUO_WORKFLOW_TRACE_FILE` | Trace output path. The value is trimmed; unset or blank defaults to the absolute path obtained by resolving `../../../../.tmp/gitlab-duo-workflow-trace.log` from the provider module (in a source checkout, `<repo>/.tmp/gitlab-duo-workflow-trace.log`). Missing parent directories are created automatically. |
+
+`GITLAB_CLIENT_ID` and `GITLAB_REDIRECT_URI` affect OAuth login. The four routing/creation
+overrides (`GITLAB_DUO_NAMESPACE_ID`, `GITLAB_DUO_PROJECT_ID`,
+`GITLAB_DUO_PROJECT_PATH`, and `GITLAB_DUO_WORKFLOW_DEFINITION`) affect
+`gitlab-duo-agent` Workflow namespace/project resolution or workflow creation; they
+do not configure OAuth. The two trace variables above affect only local diagnostic
+output. A non-loopback
+redirect URI cannot be served directly by the local callback listener and
+therefore completes through the paste-code path.
 
 ### OpenAI Codex responses (feature/debug controls)
 
-| Variable                                   | Behavior                                             |
-| ------------------------------------------ | ---------------------------------------------------- |
-| `PI_CODEX_DEBUG`                           | `1`/`true` enables Codex provider debug logging      |
-| `PI_CODEX_WEBSOCKET`                       | `1`/`true` enables websocket transport preference    |
-| `PI_OPENAI_STATEFUL`                       | Overrides the stateful-chaining default for the platform OpenAI Responses API (`previous_response_id`, forces `store: true`): on by default against api.openai.com, off elsewhere |
-| `PI_CODEX_WEBSOCKET_IDLE_TIMEOUT_MS`       | Positive integer override (default 300000)           |
-| `PI_CODEX_WEBSOCKET_RETRY_BUDGET`          | Non-negative integer override (default 5)            |
-| `PI_CODEX_WEBSOCKET_RETRY_DELAY_MS`        | Positive integer base backoff override (default 500) |
-| `PI_OPENAI_STREAM_FIRST_EVENT_TIMEOUT_MS`  | Positive integer OpenAI first-event timeout override |
-| `PI_OPENAI_STREAM_IDLE_TIMEOUT_MS`         | Positive integer OpenAI stream idle timeout override |
+| Variable                                    | Behavior                                                                                                                                                                                                      |
+| ------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `PI_CODEX_DEBUG`                            | `1`/`true` enables Codex provider debug logging                                                                                                                                                               |
+| `PI_CODEX_WEBSOCKET`                        | `1`/`true` enables websocket transport preference                                                                                                                                                             |
+| `PI_CODEX_RESPONSES_LITE`                   | `1`/`true` forces Responses Lite; `0`/`false` forces the standard Responses body; unset uses the model catalog default                                                                                        |
+| `PI_OPENAI_STATEFUL`                        | Overrides the stateful-chaining default for the platform OpenAI Responses API (`previous_response_id`, forces `store: true`): on by default against api.openai.com, off elsewhere                             |
+| `PI_CODEX_WEBSOCKET_IDLE_TIMEOUT_MS`        | Positive integer override (default `300000`)                                                                                                                                                                  |
+| `PI_CODEX_WEBSOCKET_FIRST_EVENT_TIMEOUT_MS` | First-event timeout override (default `300000`)                                                                                                                                                               |
+| `PI_CODEX_WEBSOCKET_PING_INTERVAL_MS`       | Ping interval override (default `10000`)                                                                                                                                                                      |
+| `PI_CODEX_WEBSOCKET_PONG_TIMEOUT_MS`        | Pong timeout override (default `60000`)                                                                                                                                                                       |
+| `PI_CODEX_WEBSOCKET_MESSAGE_QUEUE_CAPACITY` | Buffered message capacity override (default `4096`)                                                                                                                                                           |
+| `PI_CODEX_WEBSOCKET_MAX_IDLE_REUSE_MS`      | Maximum idle time before a connection is not reused (default `30000`)                                                                                                                                         |
+| `PI_CODEX_WEBSOCKET_RETRY_BUDGET`           | Non-negative integer override (default `5`)                                                                                                                                                                   |
+| `PI_CODEX_WEBSOCKET_RETRY_DELAY_MS`         | Positive integer base backoff override (default `500`)                                                                                                                                                        |
+| `PI_STREAM_FIRST_EVENT_TIMEOUT_MS`          | Generic stream first-event timeout; `0` disables                                                                                                                                                              |
+| `PI_STREAM_IDLE_TIMEOUT_MS`                 | Generic stream idle timeout; `0` disables                                                                                                                                                                     |
+| `PI_OPENAI_STREAM_FIRST_EVENT_TIMEOUT_MS`   | OpenAI-specific first-event timeout override; `0` disables and takes precedence over the generic value. `omp config set providers.streamFirstEventTimeoutSeconds <seconds>` provides the persisted equivalent |
+| `PI_OPENAI_STREAM_IDLE_TIMEOUT_MS`          | OpenAI-specific idle timeout override; `0` disables and takes precedence over the generic value. `omp config set providers.streamIdleTimeoutSeconds <seconds>` provides the persisted equivalent              |
 
 ### Cursor provider debug
 
@@ -219,9 +303,9 @@ OAuth host chain: `KIMI_CODE_OAUTH_HOST` → `KIMI_OAUTH_HOST` → `https://auth
 
 ### Prompt cache compatibility switch
 
-| Variable             | Behavior                                                                                                          |
-| -------------------- | ----------------------------------------------------------------------------------------------------------------- |
-| `PI_CACHE_RETENTION` | If `long`, enables long retention where supported (`anthropic`, `openai-responses`, Bedrock retention resolution) |
+| Variable             | Behavior                                                                                                                                          |
+| -------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `PI_CACHE_RETENTION` | Cache-retention override where supported (`anthropic`, `openai-responses`, Bedrock). Accepts `long`, `short`, or `none`; other values are ignored |
 
 ---
 
@@ -229,23 +313,25 @@ OAuth host chain: `KIMI_CODE_OAUTH_HOST` → `KIMI_OAUTH_HOST` → `https://auth
 
 ### Search provider credentials
 
-| Variable                                            | Used by                                                       |
-| --------------------------------------------------- | ------------------------------------------------------------- |
-| `EXA_API_KEY`                                       | Exa search provider and Exa MCP tools                         |
-| `BRAVE_API_KEY`                                     | Brave search provider                                         |
-| `PERPLEXITY_API_KEY`                                | Perplexity search provider API-key mode                       |
-| `PERPLEXITY_COOKIES`                                | Perplexity cookie-auth search mode                            |
-| `TAVILY_API_KEY`                                    | Tavily search provider                                        |
-| `ZAI_API_KEY`                                       | z.ai search provider (also checks stored OAuth in `agent.db`) |
-| `OPENAI_API_KEY` / Codex OAuth in DB                | Codex search provider availability/auth                       |
-| `PI_CODEX_WEB_SEARCH_MODEL`                         | Codex search provider model override                          |
-| `MOONSHOT_SEARCH_API_KEY` / `KIMI_SEARCH_API_KEY`   | Kimi/Moonshot search provider env auth                        |
-| `MOONSHOT_SEARCH_BASE_URL` / `KIMI_SEARCH_BASE_URL` | Kimi/Moonshot search endpoint override                        |
-| `KAGI_API_KEY`                                      | Kagi search provider                                          |
-| `JINA_API_KEY`                                      | Jina search provider                                          |
-| `PARALLEL_API_KEY`                                  | Parallel search provider                                      |
-| `SEARXNG_ENDPOINT`, `SEARXNG_TOKEN`                 | SearXNG endpoint and optional bearer token                    |
-| `SEARXNG_BASIC_USERNAME`, `SEARXNG_BASIC_PASSWORD`  | SearXNG HTTP Basic Auth credentials                           |
+| Variable                                            | Used by                                                                   |
+| --------------------------------------------------- | ------------------------------------------------------------------------- |
+| `EXA_API_KEY`                                       | Exa search/MCP; alternatively use `/login exa`                            |
+| `BRAVE_API_KEY`                                     | Brave search provider                                                     |
+| `PERPLEXITY_API_KEY`                                | Perplexity search provider API-key mode                                   |
+| `PERPLEXITY_COOKIES`                                | Perplexity cookie-auth search mode                                        |
+| `PI_PERPLEXITY_RESPONSES`                           | `1` selects the Perplexity Responses endpoint instead of Chat Completions |
+| `TAVILY_API_KEY`                                    | Tavily search provider                                                    |
+| `ZAI_API_KEY`                                       | z.ai search provider (also checks stored OAuth in `agent.db`)             |
+| `OPENAI_API_KEY` / Codex OAuth in DB                | Codex search provider availability/auth                                   |
+| `PI_CODEX_WEB_SEARCH_MODEL`                         | Codex search provider model override                                      |
+| `GEMINI_SEARCH_MODEL`                               | Gemini search model override                                              |
+| `MOONSHOT_SEARCH_API_KEY` / `KIMI_SEARCH_API_KEY`   | Kimi/Moonshot search provider env auth                                    |
+| `MOONSHOT_SEARCH_BASE_URL` / `KIMI_SEARCH_BASE_URL` | Kimi/Moonshot search endpoint override                                    |
+| `KAGI_API_KEY`                                      | Kagi search provider                                                      |
+| `JINA_API_KEY`                                      | Jina search provider                                                      |
+| `PARALLEL_API_KEY`                                  | Parallel search provider                                                  |
+| `SEARXNG_ENDPOINT`, `SEARXNG_TOKEN`                 | SearXNG endpoint and optional bearer token                                |
+| `SEARXNG_BASIC_USERNAME`, `SEARXNG_BASIC_PASSWORD`  | SearXNG HTTP Basic Auth credentials                                       |
 
 SearXNG also reads the equivalent `searxng.endpoint`, `searxng.token`, `searxng.basicUsername`, and `searxng.basicPassword` settings from `~/.omp/agent/config.yml`; environment variables are fallbacks.
 
@@ -254,7 +340,7 @@ SearXNG also reads the equivalent `searxng.endpoint`, `searxng.token`, `searxng.
 `searchAnthropic()` resolves credentials in this order:
 
 1. `ANTHROPIC_SEARCH_API_KEY`
-2. `authStorage.getApiKey("anthropic")` fallback credentials (runtime/config overrides, stored API-key credentials, stored OAuth credentials, then generic Anthropic env fallback: `ANTHROPIC_FOUNDRY_API_KEY` in Foundry mode, otherwise `ANTHROPIC_OAUTH_TOKEN` / `ANTHROPIC_API_KEY`)
+2. `authStorage.getApiKey("anthropic")` fallback credentials (runtime and config overrides, stored OAuth, a login-sourced API key, generic Anthropic environment fallback, then other stored API keys; the environment fallback is `ANTHROPIC_FOUNDRY_API_KEY` → `ANTHROPIC_OAUTH_TOKEN` → `ANTHROPIC_API_KEY` in Foundry mode, or `ANTHROPIC_OAUTH_TOKEN` → `ANTHROPIC_API_KEY` otherwise)
 
 For either credential path, base URL resolution is:
 
@@ -265,12 +351,12 @@ For either credential path, base URL resolution is:
 
 Related vars:
 
-| Variable                    | Default / behavior                                                                                                                                                                                |
-| --------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `ANTHROPIC_SEARCH_API_KEY`  | API key used exclusively for the Anthropic web search provider. Highest-priority search auth; overrides `ANTHROPIC_API_KEY` / OAuth / Foundry for search calls without affecting chat completions. |
+| Variable                    | Default / behavior                                                                                                                                                                                                                         |
+| --------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `ANTHROPIC_SEARCH_API_KEY`  | API key used exclusively for the Anthropic web search provider. Highest-priority search auth; overrides `ANTHROPIC_API_KEY` / OAuth / Foundry for search calls without affecting chat completions.                                         |
 | `ANTHROPIC_SEARCH_BASE_URL` | Base URL used exclusively for the Anthropic web search provider. Applied to either `ANTHROPIC_SEARCH_API_KEY` or fallback Anthropic credentials; overrides `ANTHROPIC_BASE_URL` (and `FOUNDRY_BASE_URL` in Foundry mode) for search calls. |
-| `ANTHROPIC_SEARCH_MODEL`    | Search model override. Defaults to `claude-haiku-4-5`.                                                                                                                                             |
-| `ANTHROPIC_BASE_URL`        | Generic fallback base URL for Anthropic requests when no search-specific base URL is set.                                                                                                          |
+| `ANTHROPIC_SEARCH_MODEL`    | Search model override. Defaults to `claude-haiku-4-5`.                                                                                                                                                                                     |
+| `ANTHROPIC_BASE_URL`        | Generic fallback base URL for Anthropic requests when no search-specific base URL is set.                                                                                                                                                  |
 
 Use `ANTHROPIC_SEARCH_BASE_URL` (optionally with `ANTHROPIC_SEARCH_API_KEY`) to keep chat routed through an enterprise gateway (`ANTHROPIC_BASE_URL` or `CLAUDE_CODE_USE_FOUNDRY=true`) while pointing web search at a direct Anthropic endpoint, or vice versa.
 
@@ -284,19 +370,21 @@ Use `ANTHROPIC_SEARCH_BASE_URL` (optionally with `ANTHROPIC_SEARCH_API_KEY`) to 
 
 ## 4) Python tooling and kernel runtime
 
-| Variable                | Default / behavior                                                                                                  |
-| ----------------------- | ------------------------------------------------------------------------------------------------------------------- |
-| `PI_PY`                 | Boolean-like override for the Python eval backend: truthy (`1`/`true`/`yes`/`on`) enables, any other value disables; unset defers to the `eval.py` setting (default enabled)        |
-| `PI_JS`                 | Same boolean-like override for the JavaScript eval backend; unset defers to the `eval.js` setting (default enabled)                                                                 |
-| `PI_PYTHON_SKIP_CHECK`  | If `1`, skips Python interpreter availability checks (subprocess runner still starts on demand)                     |
-| `PI_PYTHON_INTEGRATION` | If `1`, opts gated integration tests in (e.g. `python-runner.integration.test.ts`) into running against real Python |
-| `PI_PYTHON_IPC_TRACE`   | If `1`, logs NDJSON frames exchanged with the Python runner subprocess                                              |
-| `VIRTUAL_ENV`           | Highest-priority venv path for Python runtime resolution                                                            |
+| Variable               | Default / behavior                                                                                  |
+| ---------------------- | --------------------------------------------------------------------------------------------------- |
+| `PI_PY`                | Boolean-like override for Python; unset defers to `eval.py` (default enabled)                       |
+| `PI_JS`                | Boolean-like override for JavaScript; unset defers to `eval.js` (default enabled)                   |
+| `PI_RB`                | Boolean-like override for Ruby; unset defers to `eval.rb` (default disabled)                        |
+| `PI_JL`                | Boolean-like override for Julia; unset defers to `eval.jl` (default disabled)                       |
+| `PI_PYTHON_SKIP_CHECK` | Truthy flag skips Python interpreter availability checks (subprocess runner still starts on demand) |
+| `PI_RUBY_SKIP_CHECK`   | Truthy flag skips Ruby interpreter availability checks                                              |
+| `PI_PYTHON_IPC_TRACE`  | Truthy flag logs NDJSON frames exchanged with the Python runner subprocess                          |
+| `PI_RUBY_IPC_TRACE`    | Truthy flag logs Ruby runner IPC frames                                                             |
+| `PI_JULIA_IPC_TRACE`   | Truthy flag logs Julia runner IPC frames                                                            |
+| `VIRTUAL_ENV`          | Highest-priority venv path for Python runtime resolution                                            |
+| `CONDA_PREFIX`         | Python environment fallback after `VIRTUAL_ENV`, before local `.venv` / `venv` directories          |
 
-Extra conditional behavior:
-
-- If `BUN_ENV=test` or `NODE_ENV=test`, Python availability checks are treated as OK and warming is skipped.
-- Python env filtering denies common API keys and allows safe base vars + `LC_`, `XDG_`, `PI_` prefixes.
+Python subprocess filtering denies common API keys and allows safe base variables plus `LC_`, `XDG_`, and `PI_` prefixes.
 
 ---
 
@@ -311,6 +399,7 @@ Extra conditional behavior:
 | `PI_TINY_DEVICE`             | ONNX execution provider for local tiny models; overrides the `providers.tinyModelDevice` setting (default: CPU; supports `cpu`, `gpu`, `metal`/`webgpu`, `auto`, `cuda`, `dml`, `coreml`, `wasm`, `webnn`, `webnn-gpu`, `webnn-cpu`, `webnn-npu`)                                                                                                                                                                                                                                                                                                                                                          |
 | `PI_TINY_DTYPE`              | ONNX quantization/precision for local tiny models; overrides the `providers.tinyModelDtype` setting (default: each model's shipped dtype, currently `q4`; supports `auto`, `fp32`, `fp16`, `q8`, `int8`, `uint8`, `q4`, `bnb4`, `q4f16`, `q2`, `q2f16`, `q1`, `q1f16`)                                                                                                                                                                                                                                                                                                                                     |
 | `PI_NO_INTERLEAVED_THINKING` | If `1`, disables Anthropic interleaved thinking budget behavior and uses output-token inflation for older thinking mode                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
+| `PI_NO_THINKING_LOOP_GUARD`  | If `1`, disables the model thinking-loop guard                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
 | `NULL_PROMPT`                | If `true`, system prompt builder returns empty string                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
 | `PI_BLOCKED_AGENT`           | Blocks a specific subagent type in task tool                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
 | `PI_SUBPROCESS_CMD`          | Overrides subagent spawn command (`omp` / `omp.cmd` resolution bypass)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
@@ -319,23 +408,59 @@ Extra conditional behavior:
 | `PI_TIMING`                  | If set (any non-empty value), prints a hierarchical timing-span tree to **stderr** via `logger.printTimings()`. In interactive mode the tree prints once the agent is ready (before the TUI starts); in print mode it prints after the whole prompt batch completes. Print-mode prompts are wrapped in `print:prompt:initial` / `print:prompt:next` spans so each user message shows up as its own row. `PI_TIMING=x` exits the process with code 0 right after printing in interactive mode (use to measure cold startup only). `PI_TIMING=full` lists every module-load entry instead of just the top N. |
 | `PI_DEBUG_STARTUP`           | If set (any non-empty value), streams one synchronous `[startup] <phase>:start` / `:done` marker line to **stderr** as each startup phase begins/ends — including command-module imports (`cli:load:<name>`) and the native addon extraction/`dlopen` (`native:*`). Unlike `PI_TIMING` (which prints only once startup completes), the markers survive a hard hang: the last line on stderr names the phase the process is stuck in. Combine with `PI_TIMING` freely; markers and the span tree share the same phase names.                                                                                |
 | `PI_PACKAGE_DIR`             | Overrides package asset base dir resolution (`docs/`, `examples/`, `CHANGELOG.md`)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
+| `OMP_SKIP_SETUP`             | Any non-empty value except `0`, `false`, or `no` skips automatic interactive setup scenes; an explicitly forced setup ignores it                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
 | `PI_DISABLE_LSPMUX`          | If `1`, disables lspmux detection/integration and forces direct LSP server spawning                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
 | `PI_RPC_EMIT_TITLE`          | Boolean-like flag enabling title events in RPC mode                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
 | `SMITHERY_URL`               | Smithery web URL override (default `https://smithery.ai`)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
 | `SMITHERY_API_URL`           | Smithery API base URL override (default `https://api.smithery.ai`)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
 | `SMITHERY_API_KEY`           | Smithery API key for managed MCP auth lookup                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
 | `PUPPETEER_EXECUTABLE_PATH`  | Browser tool Chromium executable override                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
-| `LITELLM_BASE_URL`          | LiteLLM proxy base URL fallback (`http://localhost:4000/v1` if unset); explicit `providers.litellm.baseUrl` / `models.yml` config wins                                                                                                                                                                                                                                                                                                                                                                                                     |
+| `LITELLM_BASE_URL`           | LiteLLM proxy base URL fallback (`http://localhost:4000/v1` if unset); explicit `providers.litellm.baseUrl` / `models.yml` config wins                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
 | `LM_STUDIO_BASE_URL`         | Default implicit LM Studio discovery base URL override (`http://127.0.0.1:1234/v1` if unset)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
-| `OLLAMA_BASE_URL`            | Default implicit Ollama discovery base URL override (`OLLAMA_HOST` if unset, then `http://127.0.0.1:11434`)                                                                                                                                                                                                                                                                                                                                                                                                                                     |
-| `OLLAMA_HOST`                | Ollama host used for implicit Ollama discovery when `OLLAMA_BASE_URL` is unset; accepts Ollama-style values such as `127.0.0.1:11434` or `http://host:11434`                                                                                                                                                                                                                                                                                                                                                                                     |
-| `OLLAMA_CONTEXT_LENGTH`      | Positive integer context-window override for implicit Ollama discovery; affects OMP context budgeting only and does not change Ollama's runtime `num_ctx`                                                                                                                                                                                                                                                                                                                                                                                           |
+| `OLLAMA_BASE_URL`            | Default implicit Ollama discovery base URL override (`OLLAMA_HOST` if unset, then `http://127.0.0.1:11434`)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
+| `OLLAMA_HOST`                | Ollama host used for implicit Ollama discovery when `OLLAMA_BASE_URL` is unset; accepts Ollama-style values such as `127.0.0.1:11434` or `http://host:11434`                                                                                                                                                                                                                                                                                                                                                                                                                                               |
+| `OLLAMA_CONTEXT_LENGTH`      | Positive integer context-window override for implicit Ollama discovery; affects OMP context budgeting only and does not change Ollama's runtime `num_ctx`                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
 | `LLAMA_CPP_BASE_URL`         | Default implicit Llama.cpp discovery base URL override (`http://127.0.0.1:8080` if unset)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
 | `PI_EDIT_VARIANT`            | Forces edit tool variant when valid (`patch`, `replace`, `hashline`, `apply_patch`)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
-| `PI_FORCE_IMAGE_PROTOCOL`    | Forces supported image protocol (`kitty`, `iterm2`/`iterm`, `sixel`, `none`) where used                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
+| `PI_INTENT_TRACING`          | Boolean-like override for tool intent metadata; falls back to `tools.intentTracing`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
+| `PI_STRICT_EDIT_MODE`        | If `1`, disables built-in model-specific edit-mode fallbacks, so the configured/global `edit.mode` is used unless `PI_EDIT_VARIANT` or `edit.modelVariants` overrides it                                                                                                                                                                                                                                                                                                                                                                                                                                   |
+| `PI_FORCE_IMAGE_PROTOCOL`    | Forces supported image protocol (`kitty`, `iterm2`/`iterm`, `sixel`, `none`) where used. Setting `kitty` inside tmux also opts into Kitty Unicode placeholder placement unless `PI_KITTY_PLACEHOLDERS=0` or `PI_NO_KITTY_PLACEHOLDERS=1` disables it                                                                                                                                                                                                                                                                                                                                                       |
 | `PI_ALLOW_SIXEL_PASSTHROUGH` | Allows SIXEL passthrough when `PI_FORCE_IMAGE_PROTOCOL=sixel`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
 | `PI_NO_PTY`                  | If `1`, disables interactive PTY path for bash tool                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
 | `OMP_MCP_TIMEOUT_MS`         | Overrides MCP client request timeout (ms) for every MCP server. `0` disables client-side timeouts (`AbortSignal` never fires). Invalid (negative or non-numeric) values are ignored with a warning and the per-server config or default (`30000`) is used.                                                                                                                                                                                                                                                                                                                                                 |
+| `PI_DISABLE_UUTILS_BUILTINS` | Non-empty except `0`/`false` disables the bash tool's uutils built-ins; `shell.env.PI_DISABLE_UUTILS_BUILTINS` wins                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
+| `OMP_NO_WEBP`                | `1` or `true` (case-insensitive) disables WebP in image-resize format selection                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
+| `MNEMOPI_EMBEDDING_MODEL`    | Embedding-model override for mnemopi memory configuration when no explicit override is supplied                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
+
+### Hindsight memory backend
+
+`loadHindsightConfig()` resolves each supported environment override over the corresponding
+`hindsight.*` setting and then its built-in default. String values are trimmed and an empty
+string is ignored. Boolean values are case-insensitive: only `true`, `1`, and `yes` mean true;
+any other defined value means false. Integer values use base-10 `parseInt`; non-numeric values
+are ignored and the loader does not clamp the parsed integer. Enum values must exactly match
+one of the listed lowercase values; invalid values are ignored.
+
+| Variable                           | Setting overridden              | Accepted value / built-in default                                                 |
+| ---------------------------------- | ------------------------------- | --------------------------------------------------------------------------------- |
+| `HINDSIGHT_API_URL`                | `hindsight.apiUrl`              | Non-empty string; default `http://localhost:8888`                                 |
+| `HINDSIGHT_API_TOKEN`              | `hindsight.apiToken`            | Non-empty string; unset by default                                                |
+| `HINDSIGHT_BANK_ID`                | `hindsight.bankId`              | Non-empty string; unset by default, so the selected scoping mode derives the bank |
+| `HINDSIGHT_BANK_MISSION`           | `hindsight.bankMission`         | Non-empty string; default empty string                                            |
+| `HINDSIGHT_RETAIN_MODE`            | `hindsight.retainMode`          | `full-session` or `last-turn`; default `full-session`                             |
+| `HINDSIGHT_RECALL_BUDGET`          | `hindsight.recallBudget`        | `low`, `mid`, or `high`; default `mid`                                            |
+| `HINDSIGHT_AUTO_RECALL`            | `hindsight.autoRecall`          | Boolean; default `true`                                                           |
+| `HINDSIGHT_AUTO_RETAIN`            | `hindsight.autoRetain`          | Boolean; default `true`                                                           |
+| `HINDSIGHT_SCOPING`                | `hindsight.scoping`             | `global`, `per-project`, or `per-project-tagged`; default `per-project-tagged`    |
+| `HINDSIGHT_DEBUG`                  | `hindsight.debug`               | Boolean; default `false`                                                          |
+| `HINDSIGHT_RECALL_MAX_TOKENS`      | `hindsight.recallMaxTokens`     | Integer; default `1024`                                                           |
+| `HINDSIGHT_RECALL_CONTEXT_TURNS`   | `hindsight.recallContextTurns`  | Integer; default `1`                                                              |
+| `HINDSIGHT_RECALL_MAX_QUERY_CHARS` | `hindsight.recallMaxQueryChars` | Integer; default `800`                                                            |
+| `HINDSIGHT_RETAIN_EVERY_N_TURNS`   | `hindsight.retainEveryNTurns`   | Integer; default `3`                                                              |
+| `HINDSIGHT_REQUEST_TIMEOUT_MS`     | `hindsight.requestTimeoutMs`    | Integer milliseconds; default `30000`                                             |
+| `HINDSIGHT_REFLECT_TIMEOUT_MS`     | `hindsight.reflectTimeoutMs`    | Integer milliseconds; default `120000`                                            |
+| `HINDSIGHT_RECALL_TIMEOUT_MS`      | `hindsight.recallTimeoutMs`     | Integer milliseconds; default `30000`                                             |
+| `HINDSIGHT_RETAIN_TIMEOUT_MS`      | `hindsight.retainTimeoutMs`     | Integer milliseconds; default `60000`                                             |
 
 `PI_NO_PTY` is also set internally when CLI `--no-pty` is used.
 
@@ -343,13 +468,19 @@ Extra conditional behavior:
 
 ## 6) Storage and config root paths
 
-These are consumed via `@oh-my-pi/pi-utils/dirs` and affect where coding-agent stores data.
+These affect where coding-agent stores data and which process-local settings overlays it loads.
 
-| Variable              | Default / behavior                                                            |
-| --------------------- | ----------------------------------------------------------------------------- |
-| `PI_CONFIG_DIR`       | Config root dirname under home (default `.omp`)                               |
-| `PI_CODING_AGENT_DIR` | Full override for agent directory (default `~/<PI_CONFIG_DIR or .omp>/agent`) |
-| `PWD`                 | Used when matching canonical current working directory in path helpers        |
+| Variable                                            | Default / behavior                                                                                                         |
+| --------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------- |
+| `OMP_PROFILE`                                       | Canonical named profile selector; wins over `PI_PROFILE` even when explicitly empty                                        |
+| `PI_PROFILE`                                        | Legacy profile selector used only when `OMP_PROFILE` is undefined                                                          |
+| `PI_CONFIG_DIR`                                     | Config root dirname under home (default `.omp`)                                                                            |
+| `PI_CODING_AGENT_DIR`                               | Full agent-directory override for the default profile only; named profiles ignore it                                       |
+| `PI_CODING_AGENT_SESSION_DIR`                       | Initial session-directory override consumed by launch argument parsing                                                     |
+| `PI_CONFIG_FILES`                                   | Platform path-list of settings overlays (`:` on Unix, `;` on Windows); loaded in order before explicit `--config` overlays |
+| `OMP_AUTORESEARCH_DB_DIR`                           | Directory override for per-project autoresearch DB and project-artifact roots                                              |
+| `XDG_DATA_HOME`, `XDG_STATE_HOME`, `XDG_CACHE_HOME` | On macOS/Linux, redirect corresponding OMP paths only when the target `omp` root (or named-profile root) already exists    |
+| `PWD`                                               | Used when matching canonical current working directory in path helpers                                                     |
 
 ---
 
@@ -370,36 +501,53 @@ These are consumed via `@oh-my-pi/pi-utils/dirs` and affect where coding-agent s
 
 Current implementation: `PI_BASH_NO_LOGIN`/`CLAUDE_BASH_NO_LOGIN` are active; when either is set, `getShellArgs()` returns `['-c']`.
 
+`PI_BASH_NO_CI`, `PI_BASH_NO_LOGIN`, and `PI_SHELL_PREFIX` use their `CLAUDE_*` aliases only when the canonical variable is unset.
+
 ---
 
 ## 8) UI/theme/session detection (auto-detected env)
 
 These are read as runtime signals; they are usually set by the terminal/OS rather than manually configured.
 
-| Variable                                                                                                           | Used for                                                  |
-| ------------------------------------------------------------------------------------------------------------------ | --------------------------------------------------------- |
-| `COLORTERM`, `TERM`, `WT_SESSION`                                                                                  | Color capability detection (theme color mode)             |
-| `COLORFGBG`                                                                                                        | Terminal background light/dark auto-detection             |
-| `TERM_PROGRAM`, `TERM_PROGRAM_VERSION`, `TERMINAL_EMULATOR`                                                        | Terminal identity in system prompt/context                |
-| `TMUX_PANE`, `CMUX_SURFACE_ID`, `KITTY_WINDOW_ID`, `TERM_SESSION_ID`, `WT_SESSION`                                 | Stable per-terminal session breadcrumb IDs                |
-| `SHELL`, `ComSpec`, `TERM_PROGRAM`, `TERM`                                                                         | System info diagnostics                                   |
-| `APPDATA`, `XDG_CONFIG_HOME`                                                                                       | lspmux config path resolution                             |
-| `HOME`                                                                                                             | Path shortening in MCP command UI                         |
+| Variable                                                                           | Used for                                      |
+| ---------------------------------------------------------------------------------- | --------------------------------------------- |
+| `COLORTERM`, `TERM`, `WT_SESSION`                                                  | Color capability detection (theme color mode) |
+| `COLORFGBG`                                                                        | Terminal background light/dark auto-detection |
+| `TERM_PROGRAM`, `TERM_PROGRAM_VERSION`, `TERMINAL_EMULATOR`                        | Terminal identity in system prompt/context    |
+| `TMUX_PANE`, `CMUX_SURFACE_ID`, `KITTY_WINDOW_ID`, `TERM_SESSION_ID`, `WT_SESSION` | Stable per-terminal session breadcrumb IDs    |
+| `SHELL`, `ComSpec`, `TERM_PROGRAM`, `TERM`                                         | System info diagnostics                       |
+| `APPDATA`, `XDG_CONFIG_HOME`                                                       | lspmux config path resolution                 |
+| `HOME`                                                                             | Path shortening in MCP command UI             |
+
+`COPILOT_HOME` overrides the GitHub Copilot config home (default `~/.copilot`), and `COPILOT_CUSTOM_INSTRUCTIONS_DIRS` supplies additional comma-separated instruction directories. `JS_DEBUG_DAP_SERVER` selects an existing JavaScript debug-adapter server; `XDG_DATA_HOME` also participates in bundled debugger discovery.
 
 ---
 
 ## 9) TUI runtime flags (shared package, affects coding-agent UX)
 
-| Variable                  | Behavior                                                                              |
-| ------------------------- | ------------------------------------------------------------------------------------- |
-| `PI_NOTIFICATIONS`        | `off` / `0` / `false` suppress desktop notifications                                  |
-| `PI_TUI_WRITE_LOG`        | If set, logs TUI writes to file                                                       |
-| `PI_HARDWARE_CURSOR`      | If `1`, enables hardware cursor mode                                                  |
-| `PI_NO_SYNC_OUTPUT`       | If set (any non-empty value), disables DEC 2026 synchronized-output wrappers while keeping TUI autowrap guards |
-| `PI_NO_DECCARA`           | If set (truthy), disables Kitty DECCARA rectangular-SGR background fills (forces padded-string rendering) |
-| `PI_DEBUG_REDRAW`         | If `1`, enables redraw debug logging                                                  |
-| `PI_FORCE_IMAGE_PROTOCOL` | Forces terminal image protocol detection (`kitty`, `iterm2`/`iterm`, `sixel`, `none`) |
-| `PI_TUI_RESIZE_IN_PLACE`  | `1`/`true` force in-place resize (no alt-screen borrow, no ED3 rewrap); `0`/`false` force the alt-screen fast path. Default-on for Warp, which re-reports its size on alt-screen toggles |
+| Variable                       | Behavior                                                                                                                                                                                                                                           |
+| ------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `PI_NOTIFICATIONS`             | `off` / `0` / `false` suppress desktop notifications                                                                                                                                                                                               |
+| `PI_TUI_WRITE_LOG`             | If set, logs TUI writes to file                                                                                                                                                                                                                    |
+| `PI_TUI_RAW_BACKSPACE_IS_CTRL` | If `1`, interprets raw `0x08` as Ctrl+Backspace instead of Backspace; use when SSH/container hops hide a Windows Terminal client                                                                                                                   |
+| `PI_HARDWARE_CURSOR`           | If `1`, enables hardware cursor mode                                                                                                                                                                                                               |
+| `PI_NO_SYNC_OUTPUT`            | If set (any non-empty value), disables DEC 2026 synchronized-output wrappers while keeping TUI autowrap guards                                                                                                                                     |
+| `PI_NO_DECCARA`                | If set (truthy), disables Kitty DECCARA rectangular-SGR background fills (forces padded-string rendering)                                                                                                                                          |
+| `PI_DEBUG_REDRAW`              | If `1`, enables redraw debug logging                                                                                                                                                                                                               |
+| `PI_FORCE_IMAGE_PROTOCOL`      | Forces terminal image protocol detection (`kitty`, `iterm2`/`iterm`, `sixel`, `none`). Setting `kitty` inside tmux also opts into Kitty Unicode placeholder placement unless `PI_KITTY_PLACEHOLDERS=0` or `PI_NO_KITTY_PLACEHOLDERS=1` disables it |
+| `PI_KITTY_PLACEHOLDERS`        | `1` forces Kitty Unicode placeholder placement on; `0` forces it off. Under tmux/screen, use `1` only after confirming the outer terminal supports Kitty `U=1` placeholders—otherwise U+10EEEE may render as literal PUA boxes                     |
+| `PI_NO_KITTY_PLACEHOLDERS`     | `1` hard-disables Kitty Unicode placeholder placement and takes precedence over `PI_KITTY_PLACEHOLDERS`                                                                                                                                            |
+| `PI_TUI_RESIZE_IN_PLACE`       | `1`/`true` force in-place resize (no alt-screen borrow, no ED3 rewrap); `0`/`false` force the alt-screen fast path. Default-on for Warp, which re-reports its size on alt-screen toggles                                                           |
+
+### Browser launch/proxy controls
+
+| Variable                               | Behavior                                                                                 |
+| -------------------------------------- | ---------------------------------------------------------------------------------------- |
+| `PUPPETEER_PROXY`                      | Adds Chromium's `--proxy-server` launch argument                                         |
+| `PUPPETEER_PROXY_BYPASS_LOOPBACK`      | Boolean-like flag adds `<-loopback>` to the bypass list so localhost also uses the proxy |
+| `PUPPETEER_PROXY_IGNORE_CERT_ERRORS`   | Boolean-like flag launches Chromium with certificate errors ignored                      |
+| `CMUX_WORKSPACE_ID`, `CMUX_SURFACE_ID` | Target cmux workspace/surface when the browser opens a split                             |
+| `CMUX_RELAY_ID`, `CMUX_RELAY_TOKEN`    | cmux relay identity/auth fallback                                                        |
 
 ---
 
@@ -411,6 +559,21 @@ These are read as runtime signals; they are usually set by the terminal/OS rathe
 | `PI_COMMIT_NO_FALLBACK`   | If `true`, disables fallback when agent returns no proposal         |
 | `PI_COMMIT_MAP_REDUCE`    | If `false`, disables map-reduce commit analysis path                |
 | `DEBUG`                   | If set, commit agent error stack traces are printed                 |
+
+---
+
+## 11) OpenTelemetry export
+
+OMP initializes OTLP export only when at least one signal has an endpoint. `OTEL_SDK_DISABLED=true` disables initialization.
+
+| Variable group                                                                                                  | Behavior                                                                                        |
+| --------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------- |
+| `OTEL_EXPORTER_OTLP_ENDPOINT`                                                                                   | Common endpoint fallback                                                                        |
+| `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`, `OTEL_EXPORTER_OTLP_LOGS_ENDPOINT`, `OTEL_EXPORTER_OTLP_METRICS_ENDPOINT` | Per-signal endpoint; wins over the common endpoint                                              |
+| `OTEL_TRACES_EXPORTER`, `OTEL_LOGS_EXPORTER`, `OTEL_METRICS_EXPORTER`                                           | A list containing `none` disables that signal                                                   |
+| `OTEL_EXPORTER_OTLP_PROTOCOL` and per-signal `..._PROTOCOL` variants                                            | Only `http/protobuf` is enabled by this runtime; another explicit protocol disables that signal |
+| `OTEL_SERVICE_NAME`, `OTEL_RESOURCE_ATTRIBUTES`                                                                 | OpenTelemetry resource metadata                                                                 |
+| `OTEL_LOG_LEVEL`                                                                                                | Minimum exported OMP log level                                                                  |
 
 ---
 

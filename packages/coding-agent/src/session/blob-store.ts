@@ -5,6 +5,9 @@ import { isEnoent, logger } from "@oh-my-pi/pi-utils";
 
 const BLOB_PREFIX = "blob:sha256:";
 
+/** Canonical blob hash shape: exactly 64 lowercase hex chars (a SHA-256 digest). */
+export const BLOB_HASH_RE = /^[a-f0-9]{64}$/;
+
 export interface BlobPutOptions {
 	/** Optional file extension for a sidecar hardlink/copy that OS openers can type-detect. */
 	extension?: string;
@@ -152,6 +155,17 @@ export class BlobStore {
 		}
 	}
 
+	/** Synchronous variant of {@link get}. */
+	getSync(hash: string): Buffer | null {
+		const blobPath = path.join(this.dir, hash);
+		try {
+			return fs.readFileSync(blobPath);
+		} catch (err) {
+			if (isEnoent(err)) return null;
+			throw err;
+		}
+	}
+
 	/** Check if a blob exists. */
 	async has(hash: string): Promise<boolean> {
 		try {
@@ -168,10 +182,23 @@ export function isBlobRef(data: string): boolean {
 	return data.startsWith(BLOB_PREFIX);
 }
 
-/** Extract the SHA-256 hash from a blob reference string. */
+/**
+ * Extract the SHA-256 hash from a blob reference string.
+ *
+ * Returns null when the string is not a blob ref, or when the suffix is not a
+ * canonical 64-char lowercase hex hash. Rejecting non-hash suffixes here is the
+ * single choke point that keeps every resolution path confined to the blob dir:
+ * `get`/`getSync` feed this value into `path.join(this.dir, hash)`, so an
+ * unvalidated `../` suffix would otherwise escape the store and read arbitrary files.
+ */
 export function parseBlobRef(data: string): string | null {
 	if (!data.startsWith(BLOB_PREFIX)) return null;
-	return data.slice(BLOB_PREFIX.length);
+	const hash = data.slice(BLOB_PREFIX.length);
+	if (!BLOB_HASH_RE.test(hash)) {
+		logger.warn("Rejected malformed blob reference", { suffix: hash });
+		return null;
+	}
+	return hash;
 }
 
 /** Identify provider transport image data URLs so persistence can externalize and restore them losslessly. */
@@ -250,6 +277,19 @@ export async function resolveImageData(blobStore: BlobStore, data: string): Prom
 	if (!buffer) {
 		logger.warn("Blob not found for image reference", { hash });
 		return data; // Return the ref as-is; downstream will see invalid base64 but won't crash
+	}
+	return buffer.toString("base64");
+}
+
+/** Synchronous variant of {@link resolveImageData}. */
+export function resolveImageDataSync(blobStore: BlobStore, data: string): string {
+	const hash = parseBlobRef(data);
+	if (!hash) return data;
+
+	const buffer = blobStore.getSync(hash);
+	if (!buffer) {
+		logger.warn("Blob not found for image reference", { hash });
+		return data;
 	}
 	return buffer.toString("base64");
 }

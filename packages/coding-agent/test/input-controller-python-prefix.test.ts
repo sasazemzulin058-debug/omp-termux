@@ -49,6 +49,7 @@ function createContext() {
 			isBashRunning: false,
 			isEvalRunning: false,
 			extensionRunner: undefined,
+			maybeStartTitleGeneration: vi.fn(),
 			prompt,
 			queuedMessageCount: 0,
 			getQueuedMessages: () => ({ steering: [], followUp: [] }),
@@ -102,6 +103,36 @@ describe("InputController Python prompt prefix", () => {
 		expect(submitted).toEqual([
 			{
 				text: "$HOME is home",
+				images: undefined,
+				imageLinks: undefined,
+				streamingBehavior: "steer",
+			},
+		]);
+	});
+
+	it("submits pasted shell-prompt transcripts with OMP chrome as a normal prompt", async () => {
+		const transcript =
+			"$ cd ~/project && sudo ./build-and-push.sh o5.7 2>&1 | tail -4\n" +
+			" |\n" +
+			" in: 282  out: 152  cache 344K  t: 3.3s  tok/s: 351.9/s\n" +
+			" is this command stuck in limbo";
+		const { ctx, editor, handlePythonCommand, onInputCallback, startPendingSubmission, submitted } = createContext();
+		const controller = new InputController(ctx);
+		controller.setupEditorSubmitHandler();
+
+		await editor.onSubmit?.(transcript);
+
+		expect(handlePythonCommand).not.toHaveBeenCalled();
+		expect(startPendingSubmission).toHaveBeenCalledWith({
+			text: transcript,
+			images: undefined,
+			imageLinks: undefined,
+			streamingBehavior: "steer",
+		});
+		expect(onInputCallback).toHaveBeenCalledTimes(1);
+		expect(submitted).toEqual([
+			{
+				text: transcript,
 				images: undefined,
 				imageLinks: undefined,
 				streamingBehavior: "steer",

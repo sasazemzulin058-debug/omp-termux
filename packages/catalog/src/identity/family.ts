@@ -9,10 +9,12 @@
 
 import {
 	bareModelId,
+	isAnthropicAdaptiveGenAtLeast,
 	isFableOrMythos,
 	parseAnthropicModel,
 	parseGlmModel,
 	parseKnownModel,
+	parseOpenAIModel,
 	semverGte,
 } from "./classify";
 
@@ -39,9 +41,26 @@ export const isKimiK26ModelId = memo((modelId: string): boolean => {
 	return /(^|\/)kimi-k2(?:\.6|p6)(?:[-:]|$)/i.test(modelId);
 });
 
-/** Claude ids in any namespace form (`claude-*`, `vendor/claude.x`). */
+/**
+ * Kimi K3 in any namespace form (`kimi-k3`, `kimi-k3.1`, `kimi-k3-turbo`,
+ * `moonshotai/kimi-k3`). K3 always reasons and drives thinking via OpenAI-style
+ * `reasoning_effort: "max"`, not the K2.x binary `thinking: { type }` block —
+ * see the moonshot discovery mapper and `buildOpenAICompat`.
+ */
+export const isKimiK3ModelId = memo((modelId: string): boolean => {
+	return /(^|\/)kimi-k3(?:\.\d+)?(?:[-.:_]|$)/i.test(modelId);
+});
+
+/**
+ * Claude ids in any namespace form: bare (`claude-*`), path-namespaced
+ * (`anthropic/claude.x`), or dot-prefixed (`us.anthropic.claude-…`,
+ * `global.anthropic.claude-…`, `au.anthropic.claude-…` — Bedrock cross-region
+ * inference profiles). Necessary because {@link parseAnthropicModel} only
+ * classifies kinds enumerated in its regex, so any dotted profile whose kind
+ * (e.g. `haiku`) is not enumerated would otherwise slip past this fallback.
+ */
 export const isClaudeModelId = memo((modelId: string): boolean => {
-	return /(^|\/)claude[-.]/i.test(modelId);
+	return /(^|[/.])claude[-.]/i.test(modelId);
 });
 
 /** `anthropic/`-namespaced ids (aggregator catalogs like OpenRouter). */
@@ -64,12 +83,40 @@ export const isDeepseekModelIdOrName = memo((value: string): boolean => {
 	return value.toLowerCase().includes("deepseek");
 });
 
+/**
+ * DeepSeek V4 Flash SKU in any host/namespace form (`deepseek-v4-flash`, dated
+ * `deepseek-v4-flash-0731`, `deepseek-ai/DeepSeek-V4-Flash`). Both V4 SKUs
+ * (Flash and Pro) accept the `low` reasoning_effort tier; this predicate keeps
+ * Flash distinguishable from Pro where a host quirk splits them (e.g.
+ * OpenRouter exposes `low` on Flash but only `high` on non-Flash V4).
+ * See https://api-docs.deepseek.com/api/create-chat-completion.
+ */
+export const isDeepseekV4FlashModelId = memo((modelId: string): boolean => {
+	return bareModelId(modelId).toLowerCase().includes("deepseek-v4-flash");
+});
+
 /** Xiaomi MiMo family by id or display name. */
 export const isMimoModelIdOrName = memo((value: string): boolean => {
 	return value.toLowerCase().includes("mimo");
 });
 
-const GROK_EFFORT_CAPABLE_PREFIXES = ["grok-3-mini", "grok-4.20-multi-agent", "grok-4.3"] as const;
+/** Gemini family ids in any namespace form (`gemini-*`, `google/gemini-*`, `openrouter/google/gemini-…`). */
+export const isGeminiModelId = memo((modelId: string): boolean => {
+	return /(^|\/)gemini[-.]?/i.test(modelId);
+});
+
+/** Grok family ids across namespace and delimiter forms (`grok-*`, `cursor-grok-*`, `xai/grok-*`). */
+export const isGrokModelId = memo((modelId: string): boolean => {
+	return /(?:^|[./_-])grok(?:[-.]|$)/i.test(modelId);
+});
+
+const GROK_EFFORT_CAPABLE_PREFIXES = [
+	"grok-3-mini",
+	"grok-4.20-multi-agent",
+	"grok-4.3",
+	"grok-4.5",
+	"grok-4.6",
+] as const;
 
 /**
  * Grok SKUs that expose the wire `reasoning.effort` dial. Other Grok reasoners
@@ -80,6 +127,27 @@ export const isGrokReasoningEffortCapable = memo((modelId: string): boolean => {
 	const bare = bareModelId(modelId).trim().toLowerCase();
 	if (!bare) return false;
 	return GROK_EFFORT_CAPABLE_PREFIXES.some(prefix => bare.startsWith(prefix));
+});
+
+/**
+ * `grok-4.20-multi-agent*` uses `reasoning.effort` to pick agent count
+ * (`xhigh` is the 16-agent mode). Other first-party Grok effort SKUs stay on
+ * `low|medium|high` unless {@link isGrokXHighEffortCapable} (currently
+ * `grok-4.6*` plus multi-agent).
+ * https://docs.x.ai/developers/model-capabilities/text/reasoning
+ */
+export const isGrokMultiAgentModelId = memo((modelId: string): boolean => {
+	return bareModelId(modelId).trim().toLowerCase().startsWith("grok-4.20-multi-agent");
+});
+
+/**
+ * First-party Grok SKUs whose Responses wire accepts `reasoning.effort: "xhigh"`.
+ * `grok-4.6*` documents xhigh as a reasoning depth; multi-agent uses it as
+ * 16-agent mode. `grok-4.5` / `grok-4.3` / `grok-3-mini` do not.
+ */
+export const isGrokXHighEffortCapable = memo((modelId: string): boolean => {
+	if (isGrokMultiAgentModelId(modelId)) return true;
+	return bareModelId(modelId).trim().toLowerCase().startsWith("grok-4.6");
 });
 
 /**
@@ -116,9 +184,68 @@ export const isOpenAIGptOssModelId = memo((modelId: string): boolean => {
 	return /(^|\/)gpt-oss[-:]/i.test(modelId);
 });
 
-/** OpenAI model ids (gpt-*, o1-*, o3-*, o4-*, or prefixed with openai/). */
+/** OpenAI model ids (gpt-*, chatgpt-*, o1/o3/o4 SKUs, codex-*, or openai/*). */
 export const isOpenAIModelId = memo((modelId: string): boolean => {
-	return /(^|\/)(gpt|o1|o3|o4)[-.]/i.test(modelId) || modelId.toLowerCase().includes("openai/");
+	return (
+		/(^|\/)(?:gpt|chatgpt|codex)[-.]/i.test(modelId) ||
+		/(^|\/)o[134](?:[-.]|$)/i.test(modelId) ||
+		modelId.toLowerCase().includes("openai/")
+	);
+});
+
+/** OpenAI models at or above the gpt-5.4 wire generation, keyed off the parsed version. */
+const isOpenAIWireGen54Plus = memo((modelId: string): boolean => {
+	const parsed = parseOpenAIModel(bareModelId(modelId));
+	if (!parsed) return false;
+	return semverGte(parsed.version, "5.4");
+});
+
+/**
+ * OpenAI Codex models that honor `reasoning.context: "all_turns"` (full
+ * cross-turn reasoning replay). The `reasoning.context` field itself exists for
+ * the whole gpt-5/o-series family, but the `all_turns` value is only accepted
+ * from gpt-5.4 onward; earlier ids (`gpt-5.1-codex`, `gpt-5.3-codex`, and
+ * `gpt-5.3-codex-spark`) reject it with
+ * `Unsupported value: 'all_turns' is not supported with this model`. Version
+ * floor (not an allowlist) so 5.6/6.x inherit support automatically. Callers
+ * fall back to omitting `context`, letting the server default to `current_turn`.
+ */
+export const supportsAllTurnsReasoningContext = isOpenAIWireGen54Plus;
+
+/**
+ * OpenAI Codex models that accept `reasoning.summary`. Shares the gpt-5.4 wire
+ * floor with {@link supportsAllTurnsReasoningContext}: earlier Codex ids
+ * (`gpt-5.1-codex`, `gpt-5.3-codex`, `gpt-5.3-codex-spark`) reject the field
+ * with `Unsupported parameter: 'reasoning.summary' is not supported with this
+ * model`. Callers omit `summary` for unsupported ids, letting the server skip
+ * the human-readable summary stream.
+ */
+export const supportsCodexReasoningSummary = isOpenAIWireGen54Plus;
+
+/** OpenAI proprietary reasoning families keyed off the parsed gpt version (gpt-5+). */
+const isOpenAIWireGen5Plus = memo((modelId: string): boolean => {
+	const parsed = parseOpenAIModel(bareModelId(modelId));
+	if (!parsed) return false;
+	return semverGte(parsed.version, "5");
+});
+
+/** o-series reasoning ids (`o1`, `o1-pro`, `o3`, `o3-mini`, `o4-mini`, `openai/o3`, …). */
+const O_SERIES_REASONING_RE = /(^|\/)o[134](?:[-.]|$)/i;
+
+/**
+ * OpenAI proprietary models whose serving path rejects explicit sampling
+ * parameters (`temperature`, `top_p`, `top_k`, …) with
+ * `400 Unsupported parameter: 'temperature' is not supported with this model`.
+ * Covers the o-series and the entire gpt-5+ generation — base, `mini`, `nano`,
+ * `codex*`, the `luna`/`sol`/`terra` SKUs, and the `-chat-latest` variants,
+ * since even the non-reasoning gpt-5 chat models reject sampling params (see
+ * litellm#13781). Holds regardless of which OpenAI-serving host proxies the
+ * model (official, Azure, GitHub Copilot). Version floor (not an allowlist) so
+ * 6.x inherits automatically. Issue #5606.
+ */
+export const isOpenAISamplingRestrictedModelId = memo((modelId: string): boolean => {
+	const bare = bareModelId(modelId);
+	return isOpenAIWireGen5Plus(modelId) || O_SERIES_REASONING_RE.test(bare);
 });
 
 /**
@@ -151,6 +278,25 @@ export const isGlm52ReasoningEffortModelId = memo((modelId: string): boolean => 
 	return semverGte(glm.version, "5.2");
 });
 
+/**
+ * GLM-5.3+ coding SKUs. Unlike GLM-5.2 (whose reasoning_effort dialect is
+ * host-specific), GLM-5.3+ exposes a uniform wire-exact `low`/`high`/`max`
+ * ladder on every host, and thinking can no longer be disabled —
+ * `thinking.type` must always be `enabled`. Matching the family keeps future
+ * bumps (`glm-5.4`, `glm-6`, …) covered while excluding the vision (`…v`)
+ * shape and the non-reasoning `-flash`/`-flashx`/`-preview` variants.
+ */
+export const isGlm53ReasoningEffortModelId = memo((modelId: string): boolean => {
+	const glm = parseGlmModel(bareModelId(modelId));
+	if (!glm || glm.vision) {
+		return false;
+	}
+	if (glm.variant !== "base" && glm.variant !== "air" && glm.variant !== "turbo") {
+		return false;
+	}
+	return semverGte(glm.version, "5.3");
+});
+
 /** GLM vision SKUs — the `v` that attaches to the version (`glm-4v`, `glm-4.5v`). */
 export const isGlmVisionModelId = memo((modelId: string): boolean => {
 	return parseGlmModel(bareModelId(modelId))?.vision === true;
@@ -171,12 +317,14 @@ export const modelFamilyToken = memo((modelId: string): string => {
 	const parsed = parseKnownModel(modelId);
 	if (parsed.family !== "unknown") return parsed.family;
 	if (isClaudeModelId(modelId) || isAnthropicNamespacedModelId(modelId)) return "anthropic";
+	if (isGeminiModelId(modelId)) return "gemini";
+	if (isGrokModelId(modelId)) return "grok";
+	if (isDeepseekModelIdOrName(modelId)) return "deepseek";
 	if (isOpenAIModelId(modelId)) return "openai";
 	if (isKimiModelId(modelId)) return "kimi";
 	if (isQwenModelId(modelId)) return "qwen";
 	if (isMinimaxM2FamilyModelId(modelId) || isMinimaxM3FamilyModelId(modelId)) return "minimax";
 	if (isOpenAIGptOssModelId(modelId)) return "gpt-oss";
-	if (isDeepseekModelIdOrName(modelId)) return "deepseek";
 	if (isMimoModelIdOrName(modelId)) return "mimo";
 	if (isGemmaModelId(modelId)) return "gemma";
 	if (parseGlmModel(bareModelId(modelId))) return "glm";
@@ -184,41 +332,51 @@ export const modelFamilyToken = memo((modelId: string): string => {
 });
 
 /**
- * Adaptive thinking `display` is supported starting with Claude Opus 4.7 and
- * the Claude Fable/Mythos 5 generation. Older adaptive-thinking models
- * (Opus 4.6, Sonnet 4.6+) reject the field. Classifier-based, so dotted and
- * dashed version forms both match while bare dated ids
+ * True for Claude generations that support extended thinking: Sonnet/Opus 3.7+,
+ * every 4.x/5+ Opus/Sonnet, and the Fable/Mythos generation. Pre-thinking
+ * models (Claude 3.5 and older) are excluded so no thinking effort dial is
+ * fabricated for a model that rejects thinking parameters. Classifier-based, so
+ * dotted and dashed version forms both match; ids the classifier does not parse
+ * (e.g. Haiku, bare dated ids) return false.
+ */
+export const anthropicModelSupportsThinking = memo((modelId: string): boolean => {
+	const parsed = parseAnthropicModel(bareModelId(modelId));
+	return parsed !== null && semverGte(parsed.version, "3.7");
+});
+
+/**
+ * Adaptive thinking `display` is supported starting with Claude Opus 4.7+,
+ * Sonnet 5+, and the Claude Fable/Mythos 5 generation. Older adaptive-thinking
+ * models (Opus 4.6, Sonnet 4.6) reject the field. Classifier-based, so dotted
+ * and dashed version forms both match while bare dated ids
  * (`claude-opus-4-20250514` = Opus 4.0) stay excluded.
  */
 export const supportsAdaptiveThinkingDisplay = memo((modelId: string): boolean => {
 	const parsed = parseAnthropicModel(bareModelId(modelId));
-	if (!parsed) return false;
-	if (isFableOrMythos(parsed.kind)) return semverGte(parsed.version, "5");
-	return parsed.kind === "opus" && semverGte(parsed.version, "4.7");
+	return parsed !== null && isAnthropicAdaptiveGenAtLeast(parsed, "4.7");
 });
 
 /**
- * Returns true for Anthropic models with Opus 4.7+/Fable/Mythos API restrictions:
+ * Returns true for Anthropic models with Opus 4.7+, Sonnet 5+, and Fable/Mythos 5+
+ * API restrictions:
  * - Sampling parameters (temperature/top_p/top_k) return 400 error
  * - Thinking content is omitted by default (needs display: "summarized")
  */
 export const hasOpus47ApiRestrictions = memo((modelId: string): boolean => {
 	const parsed = parseAnthropicModel(bareModelId(modelId));
-	if (!parsed) return false;
-	return (parsed.kind === "opus" && semverGte(parsed.version, "4.7")) || isFableOrMythos(parsed.kind);
+	return parsed !== null && isAnthropicAdaptiveGenAtLeast(parsed, "4.7");
 });
 
 /**
  * Mid-conversation `role: "system"` messages (system instructions appended at
  * non-first positions in the `messages` array) are supported starting with
- * Claude Opus 4.8 and the Claude Fable/Mythos 5 generation. Earlier Claude
- * models reject the role.
+ * Claude Opus 4.8+, Sonnet 5+, and the Claude Fable/Mythos 5 generation.
+ * Earlier Claude models reject the role.
  * @see https://platform.claude.com/docs/en/build-with-claude/mid-conversation-system-messages
  */
 export const supportsMidConversationSystemMessages = memo((modelId: string): boolean => {
 	const parsed = parseAnthropicModel(bareModelId(modelId));
-	if (!parsed) return false;
-	return (parsed.kind === "opus" && semverGte(parsed.version, "4.8")) || isFableOrMythos(parsed.kind);
+	return parsed !== null && isAnthropicAdaptiveGenAtLeast(parsed, "4.8");
 });
 
 export const isAnthropicFableOrMythosModel = memo((modelId: string): boolean => {

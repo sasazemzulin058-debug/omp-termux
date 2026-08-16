@@ -1,7 +1,9 @@
+import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import type { Message, UserMessage } from "@oh-my-pi/pi-ai";
 import { logger } from "@oh-my-pi/pi-utils";
+import { visitEntriesFromFileStream } from "../session/session-loader";
 import { SessionManager } from "../session/session-manager";
 
 /**
@@ -13,6 +15,77 @@ export const ADVISOR_TRANSCRIPT_STEM = "__advisor";
 export const ADVISOR_TRANSCRIPT_FILENAME = `${ADVISOR_TRANSCRIPT_STEM}.jsonl`;
 
 const JSONL_SUFFIX = ".jsonl";
+
+/**
+ * Transcript filename for an advisor: `__advisor.jsonl` for the legacy/default
+ * advisor (empty slug), `__advisor.<slug>.jsonl` for a named advisor. The `.`
+ * separator keeps named files out of the output manager's `-<n>` bump namespace.
+ */
+export function advisorTranscriptFilename(slug: string): string {
+	return slug ? `${ADVISOR_TRANSCRIPT_STEM}.${slug}${JSONL_SUFFIX}` : ADVISOR_TRANSCRIPT_FILENAME;
+}
+
+/** Whether a filename is any advisor transcript (`__advisor.jsonl` or `__advisor.<slug>.jsonl`). */
+export function isAdvisorTranscriptName(name: string): boolean {
+	return (
+		name === ADVISOR_TRANSCRIPT_FILENAME ||
+		(name.startsWith(`${ADVISOR_TRANSCRIPT_STEM}.`) && name.endsWith(JSONL_SUFFIX))
+	);
+}
+
+/**
+ * Sum the advisor spend already persisted next to a primary session transcript,
+ * keyed by advisor slug.
+ *
+ * The ledger a session keeps in memory only covers the current process, so a
+ * resumed session would report zero until the next advisor turn. The recorded
+ * transcripts are the durable copy of exactly the same finalized messages, so
+ * they are read back through the shared loader - no lock, no writer, and no
+ * second parser to keep in step with the session format.
+ *
+ * Only the session's own advisors count: subagent advisors write to
+ * `<session>/<SubId>/__advisor.jsonl`, and their spend belongs to the subagent,
+ * not to this roster. Hence the scan stays at the top level of the directory.
+ */
+export async function loadAdvisorTranscriptCosts(sessionFile: string | undefined): Promise<Map<string, number>> {
+	const costs = new Map<string, number>();
+	if (!sessionFile?.endsWith(JSONL_SUFFIX)) return costs;
+	const directory = sessionFile.slice(0, -JSONL_SUFFIX.length);
+	const dirents = await fs.readdir(directory, { withFileTypes: true }).catch(() => []);
+	for (const dirent of dirents) {
+		if (!dirent.isFile() || !isAdvisorTranscriptName(dirent.name)) continue;
+		const slug =
+			dirent.name === ADVISOR_TRANSCRIPT_FILENAME
+				? ""
+				: dirent.name.slice(`${ADVISOR_TRANSCRIPT_STEM}.`.length, -JSONL_SUFFIX.length);
+		let total = 0;
+		let validHeader: boolean | undefined;
+		try {
+			await visitEntriesFromFileStream(path.join(directory, dirent.name), entry => {
+				const isObject = typeof entry === "object" && entry !== null;
+				if (validHeader === undefined) {
+					validHeader = isObject && entry.type === "session" && typeof entry.id === "string";
+					return;
+				}
+				// A syntactically valid but non-object entry (e.g. a bare `null`
+				// line) must cost only itself, not crash entry.type access and
+				// discard everything accumulated for this transcript.
+				if (!validHeader || !isObject || entry.type !== "message") return;
+				const message = entry.message;
+				if (!message || typeof message !== "object" || message.role !== "assistant") return;
+				// One malformed usage block must cost that entry only, not the
+				// whole transcript's total.
+				const total_ = message.usage?.cost?.total;
+				if (typeof total_ === "number" && Number.isFinite(total_)) total += total_;
+			});
+		} catch (err) {
+			logger.debug("advisor transcript cost read failed", { file: dirent.name, err: String(err) });
+			continue;
+		}
+		if (total > 0) costs.set(slug, total);
+	}
+	return costs;
+}
 
 /**
  * Append-only persister for an advisor agent's transcript.
@@ -38,19 +111,25 @@ const JSONL_SUFFIX = ".jsonl";
 export class AdvisorTranscriptRecorder {
 	#manager: SessionManager | undefined;
 	#file: string | undefined;
+	#filename: string;
 	/** Serializes the async open/close against synchronous appends so records land in order. */
 	#queue: Promise<void>;
 
 	/**
+	 * @param filename Transcript filename within the session dir. Defaults to
+	 *   `__advisor.jsonl`; named advisors pass `__advisor.<slug>.jsonl` via
+	 *   {@link advisorTranscriptFilename}.
 	 * @param after Optional barrier the queue starts behind — used on the advisor
 	 *   on→off→on toggle so a fresh recorder's first `open` waits for the prior
-	 *   recorder's `close` and the two never hold the same `__advisor.jsonl` at once.
+	 *   recorder's `close` and the two never hold the same file at once.
 	 */
 	constructor(
 		private readonly resolveSessionFile: () => string | undefined,
 		private readonly resolveCwd: () => string,
+		filename: string = ADVISOR_TRANSCRIPT_FILENAME,
 		after?: Promise<unknown>,
 	) {
+		this.#filename = filename;
 		this.#queue = after
 			? after.then(
 					() => {},
@@ -83,7 +162,7 @@ export class AdvisorTranscriptRecorder {
 		}
 		const sessionFile = this.resolveSessionFile();
 		if (!sessionFile?.endsWith(JSONL_SUFFIX)) return;
-		const file = path.join(sessionFile.slice(0, -JSONL_SUFFIX.length), ADVISOR_TRANSCRIPT_FILENAME);
+		const file = path.join(sessionFile.slice(0, -JSONL_SUFFIX.length), this.#filename);
 		const cwd = this.resolveCwd();
 		this.#enqueue(async () => {
 			if (file !== this.#file) {

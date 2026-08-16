@@ -65,6 +65,67 @@ export type ToolResultBlockParam = {
 	cache_control?: CacheControlEphemeral | null;
 };
 
+/** Anthropic-executed server tool call replayed inside an assistant turn. */
+export type ServerToolUseBlockParam = {
+	type: "server_tool_use";
+	id: string;
+	name: string;
+	input?: Record<string, unknown> | null;
+	[key: string]: unknown;
+};
+
+/** Web-search server-tool call whose matching result is replayable by omp. */
+export type WebSearchServerToolUseBlockParam = ServerToolUseBlockParam & { name: "web_search" };
+
+/** Tool-search server-tool call whose matching result is replayable by omp. */
+export type ToolSearchServerToolUseBlockParam = ServerToolUseBlockParam & {
+	name: "tool_search_tool_regex" | "tool_search_tool_bm25";
+};
+
+/** Native web-search result replayed inside an assistant turn. */
+export type WebSearchToolResultBlockParam = {
+	type: "web_search_tool_result";
+	tool_use_id: string;
+	content: unknown;
+	[key: string]: unknown;
+};
+
+/** Native tool-search result replayed inside an assistant turn. */
+export type ToolSearchToolResultBlockParam = {
+	type: "tool_search_tool_result";
+	tool_use_id: string;
+	content: unknown;
+	[key: string]: unknown;
+};
+
+/** Anthropic server-tool history variants omp can replay atomically. */
+export type AnthropicServerToolHistoryBlockParam =
+	| WebSearchServerToolUseBlockParam
+	| WebSearchToolResultBlockParam
+	| ToolSearchServerToolUseBlockParam
+	| ToolSearchToolResultBlockParam;
+
+/** True when a block is complete Anthropic server-tool history omp can replay. */
+export function isAnthropicServerToolHistoryBlock(block: {
+	type: string;
+	name?: unknown;
+	id?: unknown;
+	tool_use_id?: unknown;
+	content?: unknown;
+}): block is AnthropicServerToolHistoryBlockParam {
+	if (block.type === "server_tool_use") {
+		const supportedName =
+			block.name === "web_search" ||
+			block.name === "tool_search_tool_regex" ||
+			block.name === "tool_search_tool_bm25";
+		return supportedName && typeof block.id === "string" && block.id.length > 0;
+	}
+	if (block.type === "web_search_tool_result" || block.type === "tool_search_tool_result") {
+		return typeof block.tool_use_id === "string" && block.tool_use_id.length > 0 && Object.hasOwn(block, "content");
+	}
+	return false;
+}
+
 export type ThinkingBlockParam = {
 	type: "thinking";
 	thinking: string;
@@ -76,13 +137,29 @@ export type RedactedThinkingBlockParam = {
 	data: string;
 };
 
+/**
+ * Server-side fallback beta boundary marker (server-side-fallback-2026-06-01).
+ * Emitted by the API mid-stream when a classifier block on the requested
+ * model is retried on a fallback model. Only the official Anthropic
+ * endpoint accepts this block on replay — cross-provider hops MUST strip it.
+ */
+export type FallbackBlockParam = {
+	type: "fallback";
+	from: { model: string };
+	to: { model: string };
+};
+
 export type ContentBlockParam =
 	| TextBlockParam
 	| ImageBlockParam
 	| ToolUseBlockParam
 	| ToolResultBlockParam
+	| ServerToolUseBlockParam
+	| WebSearchToolResultBlockParam
+	| ToolSearchToolResultBlockParam
 	| ThinkingBlockParam
-	| RedactedThinkingBlockParam;
+	| RedactedThinkingBlockParam
+	| FallbackBlockParam;
 
 /**
  * A single conversation turn.
@@ -151,6 +228,19 @@ export type OutputConfig = {
 	task_budget?: TokenTaskBudget | null;
 };
 
+/**
+ * Per-attempt override entry in `MessageCreateParams.fallbacks`
+ * (server-side-fallback-2026-06-01 beta). Every field except `model`
+ * mirrors a top-level control the beta allows re-specifying per attempt.
+ */
+export type FallbackParam = {
+	model: string;
+	max_tokens?: number;
+	thinking?: ThinkingConfigParam;
+	output_config?: OutputConfig;
+	speed?: "fast";
+};
+
 /** Claude Code context-management beta payload. */
 export type ContextManagement = {
 	edits: Array<{ type: "clear_thinking_20251015"; keep: "all" }>;
@@ -175,6 +265,12 @@ export type MessageCreateParams = {
 	speed?: "fast";
 	/** Claude Code context-management beta. */
 	context_management?: ContextManagement;
+	/**
+	 * Server-side fallback beta chain — up to three fallback models the API
+	 * retries when a classifier blocks the primary. Required companion beta
+	 * header: `server-side-fallback-2026-06-01`.
+	 */
+	fallbacks?: FallbackParam[];
 };
 
 export type MessageCreateParamsStreaming = MessageCreateParams & { stream: true };
@@ -201,6 +297,21 @@ export type ServerToolUsage = {
 	web_fetch_requests?: number | null;
 };
 
+/**
+ * Per-attempt token accounting inside a multi-run turn
+ * (server-side-fallback-2026-06-01). Populated whenever a fallback chain
+ * ran, including sticky-served turns with no `fallback` content block.
+ * A `fallback_message` entry is the definitive "served by fallback" signal.
+ */
+export type UsageIteration = {
+	type?: "message" | "fallback_message" | string;
+	model?: string | null;
+	input_tokens?: number | null;
+	output_tokens?: number | null;
+	cache_read_input_tokens?: number | null;
+	cache_creation_input_tokens?: number | null;
+};
+
 export type Usage = {
 	input_tokens?: number | null;
 	output_tokens?: number | null;
@@ -208,6 +319,7 @@ export type Usage = {
 	cache_creation_input_tokens?: number | null;
 	cache_creation?: CacheCreation | null;
 	server_tool_use?: ServerToolUsage | null;
+	iterations?: UsageIteration[] | null;
 };
 
 /** The `message` envelope carried by `message_start`. */
@@ -229,7 +341,11 @@ export type ResponseContentBlock =
 	| { type: "text"; text: string }
 	| { type: "thinking"; thinking: string; signature?: string }
 	| { type: "redacted_thinking"; data: string }
-	| { type: "tool_use"; id: string; name: string; input?: Record<string, unknown> | null };
+	| { type: "tool_use"; id: string; name: string; input?: Record<string, unknown> | null }
+	| ServerToolUseBlockParam
+	| WebSearchToolResultBlockParam
+	| ToolSearchToolResultBlockParam
+	| { type: "fallback"; from: { model: string }; to: { model: string } };
 
 export type ContentBlockDelta =
 	| { type: "text_delta"; text: string }

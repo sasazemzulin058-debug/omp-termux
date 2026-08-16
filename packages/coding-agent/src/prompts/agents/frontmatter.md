@@ -6,6 +6,8 @@ description: {{jsonStringify description}}
 {{/if}}{{#if model}}model: {{jsonStringify model}}
 {{/if}}{{#if thinkingLevel}}thinking-level: {{jsonStringify thinkingLevel}}
 {{/if}}{{#if blocking}}blocking: true
+{{/if}}{{#if prewalk}}prewalk: {{jsonStringify prewalk}}
+{{/if}}{{#if advisor}}advisor: {{jsonStringify advisor}}
 {{/if}}{{#if autoloadSkills}}autoloadSkills: {{jsonStringify autoloadSkills}}
 {{/if}}---
 {{body}}

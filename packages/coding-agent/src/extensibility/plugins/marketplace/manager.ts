@@ -11,6 +11,9 @@ import * as os from "node:os";
 import * as path from "node:path";
 
 import { isEnoent, logger, pathIsWithin } from "@oh-my-pi/pi-utils";
+import { expandTilde } from "../../../tools/path-utils";
+import { normalizePluginRuntimeConfig } from "../runtime-config";
+import type { PluginRuntimeConfig } from "../types";
 
 import { cachePlugin } from "./cache";
 import { classifySource, fetchMarketplace, parseMarketplaceCatalog, promoteCloneToCache } from "./fetcher";
@@ -37,6 +40,16 @@ import type {
 	MarketplaceRegistryEntry,
 } from "./types";
 import { buildPluginId, parsePluginId } from "./types";
+
+const RUNTIME_PACKAGE_NAME_RE = /^(?:@[a-z0-9][a-z0-9._~-]*\/)?[a-z0-9][a-z0-9._~-]*$/;
+const MAX_RUNTIME_PACKAGE_NAME_LENGTH = 214;
+
+function assertRuntimePackageName(name: string): string {
+	if (name.length > MAX_RUNTIME_PACKAGE_NAME_LENGTH || !RUNTIME_PACKAGE_NAME_RE.test(name)) {
+		throw new Error(`Invalid marketplace plugin package name: ${JSON.stringify(name)}`);
+	}
+	return name;
+}
 
 // ── Options ──────────────────────────────────────────────────────────────────
 
@@ -95,12 +108,11 @@ export class MarketplaceManager {
 		}
 
 		const sourceType = classifySource(source);
-		const normalizedSource =
-			sourceType === "local"
-				? path.resolve(source.startsWith("~/") ? path.join(os.homedir(), source.slice(2)) : source)
-				: source;
+		const normalizedSource = sourceType === "local" ? path.resolve(expandTilde(source)) : source;
 
-		const catalogPath = path.join(this.#opts.marketplacesCacheDir, catalog.name, "marketplace.json");
+		const catalogPath = path.resolve(
+			expandTilde(path.join(this.#opts.marketplacesCacheDir, catalog.name, "marketplace.json")),
+		);
 
 		// Persist the fetched catalog so subsequent reads don't require re-fetching.
 		await Bun.write(catalogPath, `${JSON.stringify(catalog, null, 2)}\n`);
@@ -162,11 +174,13 @@ export class MarketplaceManager {
 			await promoteCloneToCache(clonePath, this.#opts.marketplacesCacheDir, catalog.name);
 		}
 
-		// Overwrite cached catalog
-		await Bun.write(existing.catalogPath, `${JSON.stringify(catalog, null, 2)}\n`);
+		// Overwrite the cached catalog and migrate legacy home-relative registry entries.
+		const catalogPath = path.resolve(expandTilde(existing.catalogPath));
+		await Bun.write(catalogPath, `${JSON.stringify(catalog, null, 2)}\n`);
 
 		const updatedEntry: MarketplaceRegistryEntry = {
 			...existing,
+			catalogPath,
 			updatedAt: new Date().toISOString(),
 		};
 
@@ -291,12 +305,16 @@ export class MarketplaceManager {
 			version = await this.#resolvePluginVersion(pluginEntry, sourcePath);
 			cachePath = await cachePlugin(sourcePath, this.#opts.pluginsCacheDir, marketplace, name, version);
 			await this.#writeEmbeddedLspConfig(pluginEntry, cachePath);
+			await this.#writeEmbeddedDapConfig(pluginEntry, cachePath);
 		} finally {
 			// Clean up temp clone dirs created by resolvePluginSource; leave user-supplied local dirs alone
 			if (tempCloneRoot) {
 				await fs.rm(tempCloneRoot, { recursive: true, force: true }).catch(() => {});
 			}
 		}
+
+		const packageName = await this.#resolvePluginPackageName(cachePath, name);
+		const previousPackageNames = await this.#resolveInstalledPackageNames(existing ?? [], name);
 
 		// Only now clean up old entries — new cache succeeded, so it is safe to remove old ones.
 		if (existing && existing.length > 0) {
@@ -337,6 +355,13 @@ export class MarketplaceManager {
 		const newInstReg = addInstalledPlugin(freshInstReg, pluginId, installedEntry);
 		await writeInstalledPluginsRegistry(registryPath, newInstReg);
 
+		for (const previousPackageName of previousPackageNames) {
+			if (previousPackageName !== packageName) {
+				await this.#removeRuntimePlugin(scope, previousPackageName);
+			}
+		}
+		await this.#registerRuntimePlugin(scope, packageName, cachePath, version, wasDisabled ? false : undefined);
+
 		this.#clearCache();
 
 		logger.debug("Plugin installed", { pluginId, version, cachePath });
@@ -361,10 +386,31 @@ export class MarketplaceManager {
 		await Bun.write(targetPath, `${JSON.stringify({ servers: lspServers }, null, 2)}\n`);
 	}
 
+	async #writeEmbeddedDapConfig(entry: MarketplacePluginEntry, cachePath: string): Promise<void> {
+		const dapAdapters = entry.dapAdapters;
+		if (!dapAdapters) return;
+
+		if (typeof dapAdapters === "string") {
+			const sourcePath = path.resolve(cachePath, dapAdapters);
+			if (!pathIsWithin(cachePath, sourcePath)) {
+				throw new Error(`Plugin "${entry.name}" dapAdapters path escapes the plugin directory`);
+			}
+			const extension = path.extname(sourcePath).toLowerCase();
+			const targetFilename = extension === ".yaml" || extension === ".yml" ? `.dap${extension}` : ".dap.json";
+			const targetPath = path.join(cachePath, targetFilename);
+			const content = await Bun.file(sourcePath).text();
+			await Bun.write(targetPath, content);
+			return;
+		}
+
+		const targetPath = path.join(cachePath, ".dap.json");
+		await Bun.write(targetPath, `${JSON.stringify({ adapters: dapAdapters }, null, 2)}\n`);
+	}
+
 	/**
 	 * Resolve plugin version from multiple sources:
 	 * 1. Catalog entry version (if set)
-	 * 2. Plugin manifest (.claude-plugin/plugin.json or package.json)
+	 * 2. Plugin manifest (.claude-plugin/plugin.json, Agent Plugins root plugin.json, or package.json)
 	 * 3. Git SHA from source (truncated to 7 chars)
 	 * 4. Fallback "0.0.0"
 	 */
@@ -375,6 +421,7 @@ export class MarketplaceManager {
 		// 2. Plugin manifest
 		for (const manifestPath of [
 			path.join(sourcePath, ".claude-plugin", "plugin.json"),
+			path.join(sourcePath, "plugin.json"),
 			path.join(sourcePath, "package.json"),
 		]) {
 			try {
@@ -395,14 +442,14 @@ export class MarketplaceManager {
 		return "0.0.0";
 	}
 
-	async uninstallPlugin(pluginId: string, scope?: "user" | "project"): Promise<void> {
+	/** Validates and removes a marketplace plugin, or only validates when `dryRun` is set. */
+	async uninstallPlugin(pluginId: string, scope?: "user" | "project", options?: { dryRun?: boolean }): Promise<void> {
 		const parsed = parsePluginId(pluginId);
 		if (!parsed) {
 			throw new Error(`Invalid plugin ID format: "${pluginId}". Expected "name@marketplace".`);
 		}
 
 		const { userEntries, projectEntries, userReg, projectReg } = await this.#findInBothRegistries(pluginId);
-
 		const inUser = userEntries && userEntries.length > 0;
 		const inProject = projectEntries && projectEntries.length > 0;
 
@@ -434,6 +481,11 @@ export class MarketplaceManager {
 		const targetEntries = targetScope === "project" ? projectEntries! : userEntries!;
 		const targetReg = targetScope === "project" ? projectReg : userReg;
 		const registryPath = this.#registryPath(targetScope);
+		const packageNames = await this.#resolveInstalledPackageNames(targetEntries, parsed.name);
+
+		if (options?.dryRun) {
+			return;
+		}
 
 		const updatedReg = removeInstalledPlugin(targetReg, pluginId);
 		await writeInstalledPluginsRegistry(registryPath, updatedReg);
@@ -451,6 +503,10 @@ export class MarketplaceManager {
 			if (!referenced.has(entry.installPath)) {
 				await fs.rm(entry.installPath, { recursive: true, force: true });
 			}
+		}
+
+		for (const packageName of packageNames) {
+			await this.#removeRuntimePlugin(targetScope, packageName);
 		}
 
 		this.#clearCache();
@@ -538,6 +594,12 @@ export class MarketplaceManager {
 			},
 		};
 		await writeInstalledPluginsRegistry(registryPath, updated);
+
+		const fallbackName = parsePluginId(pluginId)?.name ?? pluginId;
+		const packageNames = await this.#resolveInstalledPackageNames(entries, fallbackName);
+		for (const packageName of packageNames) {
+			await this.#setRuntimePluginEnabled(targetScope, packageName, enabled);
+		}
 
 		this.#clearCache();
 
@@ -701,6 +763,107 @@ export class MarketplaceManager {
 
 	// ── Private helpers ───────────────────────────────────────────────────────
 
+	#runtimeRoot(scope: "user" | "project"): string {
+		return path.dirname(this.#registryPath(scope));
+	}
+
+	#nodeModulesPath(scope: "user" | "project"): string {
+		return path.join(this.#runtimeRoot(scope), "node_modules");
+	}
+
+	#runtimeLockPath(scope: "user" | "project"): string {
+		return path.join(this.#runtimeRoot(scope), "omp-plugins.lock.json");
+	}
+
+	async #loadRuntimeConfig(scope: "user" | "project"): Promise<PluginRuntimeConfig> {
+		try {
+			return normalizePluginRuntimeConfig(await Bun.file(this.#runtimeLockPath(scope)).json());
+		} catch (err) {
+			if (isEnoent(err)) return normalizePluginRuntimeConfig({});
+			logger.warn("Failed to load marketplace plugin runtime config", {
+				path: this.#runtimeLockPath(scope),
+				error: String(err),
+			});
+			return normalizePluginRuntimeConfig({});
+		}
+	}
+
+	async #writeRuntimeConfig(scope: "user" | "project", config: PluginRuntimeConfig): Promise<void> {
+		await Bun.write(this.#runtimeLockPath(scope), JSON.stringify(config, null, 2));
+	}
+
+	async #resolvePluginPackageName(installPath: string, fallbackName: string): Promise<string> {
+		try {
+			const pkg: { name?: unknown } = await Bun.file(path.join(installPath, "package.json")).json();
+			const name = typeof pkg.name === "string" && pkg.name.length > 0 ? pkg.name : fallbackName;
+			return assertRuntimePackageName(name);
+		} catch (err) {
+			if (isEnoent(err)) return assertRuntimePackageName(fallbackName);
+			throw err;
+		}
+	}
+
+	#runtimePackagePath(scope: "user" | "project", packageName: string): string {
+		const nodeModules = path.resolve(this.#nodeModulesPath(scope));
+		const linkPath = path.resolve(nodeModules, assertRuntimePackageName(packageName));
+		const relative = path.relative(nodeModules, linkPath);
+		if (relative === "" || relative.startsWith("..") || path.isAbsolute(relative)) {
+			throw new Error(`Marketplace plugin package path escapes node_modules: ${JSON.stringify(packageName)}`);
+		}
+		return linkPath;
+	}
+
+	async #resolveInstalledPackageNames(
+		entries: readonly InstalledPluginEntry[],
+		fallbackName: string,
+	): Promise<Set<string>> {
+		const packageNames = new Set<string>();
+		for (const entry of entries) {
+			packageNames.add(await this.#resolvePluginPackageName(entry.installPath, fallbackName));
+		}
+		return packageNames;
+	}
+
+	async #registerRuntimePlugin(
+		scope: "user" | "project",
+		packageName: string,
+		cachePath: string,
+		version: string,
+		enabled: boolean | undefined,
+	): Promise<void> {
+		const linkPath = this.#runtimePackagePath(scope, packageName);
+		await fs.mkdir(path.dirname(linkPath), { recursive: true });
+		await fs.rm(linkPath, { recursive: true, force: true });
+		await fs.symlink(cachePath, linkPath, process.platform === "win32" ? "junction" : "dir");
+
+		const config = await this.#loadRuntimeConfig(scope);
+		const previous = config.plugins[packageName];
+		config.plugins[packageName] = {
+			version,
+			enabledFeatures: previous?.enabledFeatures ?? null,
+			enabled: enabled ?? previous?.enabled ?? true,
+		};
+		await this.#writeRuntimeConfig(scope, config);
+	}
+
+	async #removeRuntimePlugin(scope: "user" | "project", packageName: string): Promise<void> {
+		await fs.rm(this.#runtimePackagePath(scope, packageName), { recursive: true, force: true });
+
+		const config = await this.#loadRuntimeConfig(scope);
+		delete config.plugins[packageName];
+		delete config.settings[packageName];
+		await this.#writeRuntimeConfig(scope, config);
+	}
+
+	async #setRuntimePluginEnabled(scope: "user" | "project", packageName: string, enabled: boolean): Promise<void> {
+		const config = await this.#loadRuntimeConfig(scope);
+		const previous = config.plugins[packageName];
+		if (!previous) return;
+
+		config.plugins[packageName] = { ...previous, enabled };
+		await this.#writeRuntimeConfig(scope, config);
+	}
+
 	#registryPath(scope: "user" | "project"): string {
 		if (scope === "project") {
 			if (!this.#opts.projectInstalledRegistryPath) {
@@ -732,14 +895,13 @@ export class MarketplaceManager {
 	}
 
 	async #readCatalog(entry: MarketplaceRegistryEntry): Promise<MarketplaceCatalog> {
+		const catalogPath = path.resolve(expandTilde(entry.catalogPath));
 		try {
-			const content = await Bun.file(entry.catalogPath).text();
-			return parseMarketplaceCatalog(content, entry.catalogPath);
+			const content = await Bun.file(catalogPath).text();
+			return parseMarketplaceCatalog(content, catalogPath);
 		} catch (err) {
 			if (isEnoent(err)) {
-				throw new Error(
-					`Marketplace catalog not found at ${entry.catalogPath}. Try: /marketplace update ${entry.name}`,
-				);
+				throw new Error(`Marketplace catalog not found at ${catalogPath}. Try: /marketplace update ${entry.name}`);
 			}
 			throw err;
 		}
@@ -757,14 +919,10 @@ export class MarketplaceManager {
 	 */
 	#resolveMarketplaceRoot(entry: MarketplaceRegistryEntry): string {
 		if (entry.sourceType === "local") {
-			// expandHome already happened in fetcher; resolve to ensure absolute.
-			const expanded = entry.sourceUri.startsWith("~/")
-				? path.join(os.homedir(), entry.sourceUri.slice(2))
-				: entry.sourceUri;
-			return path.resolve(expanded);
+			return path.resolve(expandTilde(entry.sourceUri));
 		}
 		// For git/github/url sources, the catalog lives at <cloneDir>/marketplace.json
 		// under marketplacesCacheDir/<name>/; parent = <marketplacesCacheDir>/<name>/
-		return path.dirname(entry.catalogPath);
+		return path.dirname(path.resolve(expandTilde(entry.catalogPath)));
 	}
 }

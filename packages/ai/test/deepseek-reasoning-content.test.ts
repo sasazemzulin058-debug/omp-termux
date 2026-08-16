@@ -1,7 +1,9 @@
 import { describe, expect, it } from "bun:test";
+import { renderDemotedThinking } from "@oh-my-pi/pi-ai/dialect";
 import { convertMessages } from "@oh-my-pi/pi-ai/providers/openai-completions";
 import type { AssistantMessage, Model, ModelSpec, ThinkingContent, ToolCall } from "@oh-my-pi/pi-ai/types";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
+import { Effort } from "@oh-my-pi/pi-catalog/effort";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 
 interface OpenAICompletionAssistantWireMessage {
@@ -65,52 +67,38 @@ function assistantToolCall(
 
 describe("DeepSeek reasoning_content tool-call replay", () => {
 	// ----------------------------------------------------------------
-	// Fix 1: effortMap for DeepSeek-family on any provider
+	// Fix 1: honest wire-exact ladders for DeepSeek-family on any provider —
+	// V4 Flash and Pro expose [low, high, max] (#7668, #8405).
 	// ----------------------------------------------------------------
-	describe("thinking effortMap (Fix 1)", () => {
-		it("maps unsupported lower DeepSeek efforts to high on opencode-go", () => {
+	describe("thinking ladder (Fix 1)", () => {
+		it("bakes the honest [low, high, max] flash ladder with no effortMap on opencode-go", () => {
 			const model = deepseekModel({
 				provider: "opencode-go",
 				baseUrl: "https://opencode.ai/zen/go/v1",
 				id: "deepseek-v4-flash",
 			});
-			expect(model.thinking?.effortMap).toMatchObject({
-				minimal: "high",
-				low: "high",
-				medium: "high",
-				high: "high",
-				xhigh: "max",
-			});
+			expect(model.thinking?.efforts).toEqual([Effort.Low, Effort.High, Effort.Max]);
+			expect(model.thinking?.effortMap).toBeUndefined();
 		});
 
-		it("maps unsupported lower DeepSeek efforts to high on NVIDIA", () => {
+		it("bakes the honest [low, high, max] flash ladder with no effortMap on NVIDIA", () => {
 			const model = deepseekModel({
 				provider: "nvidia",
 				baseUrl: "https://integrate.api.nvidia.com/v1",
 				id: "deepseek-ai/deepseek-v4-flash",
 			});
-			expect(model.thinking?.effortMap).toMatchObject({
-				minimal: "high",
-				low: "high",
-				medium: "high",
-				high: "high",
-				xhigh: "max",
-			});
+			expect(model.thinking?.efforts).toEqual([Effort.Low, Effort.High, Effort.Max]);
+			expect(model.thinking?.effortMap).toBeUndefined();
 		});
 
-		it("maps unsupported lower DeepSeek efforts to high on the official endpoint", () => {
+		it("bakes the honest [low, high, max] ladder with no effortMap on the official endpoint", () => {
 			const model = deepseekModel({
 				provider: "deepseek",
 				baseUrl: "https://api.deepseek.com/v1",
 				id: "deepseek-v4-pro",
 			});
-			expect(model.thinking?.effortMap).toMatchObject({
-				minimal: "high",
-				low: "high",
-				medium: "high",
-				high: "high",
-				xhigh: "max",
-			});
+			expect(model.thinking?.efforts).toEqual([Effort.Low, Effort.High, Effort.Max]);
+			expect(model.thinking?.effortMap).toBeUndefined();
 		});
 
 		it("does NOT map xhigh for non-DeepSeek models", () => {
@@ -326,6 +314,36 @@ describe("DeepSeek reasoning_content tool-call replay", () => {
 			expect(assistant?.rs_6f3a1b2c4d5e6f7a8b9c0d1e2f3a4b5c).toBeUndefined();
 			// Should have set reasoning_content from the thinking text via the openai path.
 			expect(assistant?.reasoning_content).toBe("some reasoning");
+		});
+		it("demotes cross-api foreign thinking while satisfying tool-call reasoning_content schema", () => {
+			const model = deepseekModel({
+				provider: "opencode-go",
+				baseUrl: "https://opencode.ai/zen/go/v1",
+				id: "deepseek-v4-flash",
+			});
+			const compat = model.compat;
+			const msg = assistantToolCall(model, [
+				{
+					type: "thinking",
+					thinking: "Need to preserve cross-api reasoning.",
+					thinkingSignature: "sig_from_anthropic",
+				},
+				{
+					type: "toolCall",
+					id: "toolu_cross_api",
+					name: "read",
+					arguments: { path: "README.md" },
+				},
+			]);
+			msg.api = "anthropic-messages";
+			msg.provider = "zai";
+			msg.model = "claude-compatible";
+
+			const messages = convertMessages(model, { messages: [msg] }, compat);
+			const assistant = findOpenAICompletionAssistantWireMessage(messages);
+			expect(assistant).toBeDefined();
+			expect(assistant?.reasoning_content).toBe("");
+			expect(assistant?.content).toBe(renderDemotedThinking(model.id, "Need to preserve cross-api reasoning."));
 		});
 		it("falls through to empty-string when thinking block has opaque signature and empty text", () => {
 			const model = deepseekModel({

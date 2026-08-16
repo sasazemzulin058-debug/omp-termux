@@ -40,6 +40,17 @@ function createChatSseResponse(): Response {
 function createResponsesSseResponse(id = "resp_reasoning_fallback"): Response {
 	const events = [
 		{
+			type: "response.output_item.added",
+			output_index: 0,
+			item: { type: "message", id: `${id}_msg`, role: "assistant", content: [] },
+		},
+		{ type: "response.output_text.delta", delta: "ok" },
+		{
+			type: "response.output_item.done",
+			output_index: 0,
+			item: { type: "message", id: `${id}_msg`, role: "assistant", content: [{ type: "output_text", text: "ok" }] },
+		},
+		{
 			type: "response.completed",
 			response: {
 				id,
@@ -95,6 +106,18 @@ function pipeDelimitedReasoningEffortResponse(): Response {
 		}),
 		{ status: 400, headers: { "content-type": "application/json" } },
 	);
+}
+
+/**
+ * cliproxy-style gateway rejection: the field is never named and the rejected
+ * value comes before the verdict (`level "none" not supported, valid levels: …`).
+ */
+function unsupportedLevelResponse(value: string): Response {
+	const message = `level "${value}" not supported, valid levels: low, medium, high, xhigh, max`;
+	return new Response(JSON.stringify({ error: { message, type: "invalid_request_error" } }), {
+		status: 400,
+		headers: { "content-type": "application/json" },
+	});
 }
 
 function summaryReasoningErrorResponse(): Response {
@@ -160,10 +183,10 @@ function createResponsesModel(): Model<"openai-responses"> {
 		maxTokens: 16_384,
 	});
 }
-function createMappedResponsesModel(): Model<"openai-responses"> {
+function createMaxLadderResponsesModel(): Model<"openai-responses"> {
 	return buildModel({
-		id: "mapped-responses-reasoner",
-		name: "Mapped Responses Reasoner",
+		id: "max-ladder-responses-reasoner",
+		name: "Max Ladder Responses Reasoner",
 		api: "openai-responses",
 		provider: "custom-responses",
 		baseUrl: "https://responses.example.test/v1",
@@ -174,8 +197,7 @@ function createMappedResponsesModel(): Model<"openai-responses"> {
 		},
 		thinking: {
 			mode: "effort",
-			efforts: [Effort.Low, Effort.Medium, Effort.High, Effort.XHigh],
-			effortMap: { [Effort.XHigh]: "max" },
+			efforts: [Effort.Low, Effort.Medium, Effort.High, Effort.XHigh, Effort.Max],
 		},
 		input: ["text"],
 		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
@@ -274,10 +296,10 @@ describe("OpenAI reasoning effort fallback retry", () => {
 			{ preconnect: fetch.preconnect },
 		);
 
-		const result = await streamOpenAIResponses(createMappedResponsesModel(), testContext, {
+		const result = await streamOpenAIResponses(createMaxLadderResponsesModel(), testContext, {
 			apiKey: "test-key",
 			fetch: fetchMock,
-			reasoning: "xhigh",
+			reasoning: "max",
 		}).result();
 
 		expect(result.stopReason).toBe("stop");
@@ -331,6 +353,28 @@ describe("OpenAI reasoning effort fallback retry", () => {
 
 		expect(result.stopReason).toBe("stop");
 		expect(bodies.map(body => (body.reasoning as { effort?: string } | undefined)?.effort)).toEqual(["xhigh", "max"]);
+	});
+
+	it("clamps a rejected reasoning-off request to the lowest level the gateway allows", async () => {
+		const bodies: Record<string, unknown>[] = [];
+		const fetchMock: FetchImpl = Object.assign(
+			async (_input: string | URL | Request, init?: RequestInit): Promise<Response> => {
+				const body = parseJsonBody(init);
+				bodies.push(body);
+				return bodies.length === 1 ? unsupportedLevelResponse("none") : createResponsesSseResponse();
+			},
+			{ preconnect: fetch.preconnect },
+		);
+
+		const result = await streamOpenAIResponses(createMaxLadderResponsesModel(), testContext, {
+			apiKey: "test-key",
+			fetch: fetchMock,
+			reasoning: "high",
+			forceReasoningOff: true,
+		}).result();
+
+		expect(result.stopReason).toBe("stop");
+		expect(bodies.map(body => (body.reasoning as { effort?: string } | undefined)?.effort)).toEqual(["none", "low"]);
 	});
 
 	it("does not retry unrelated reasoning parameter errors", async () => {

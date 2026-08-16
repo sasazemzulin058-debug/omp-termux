@@ -12,9 +12,11 @@ This document covers the current extension runtime in:
 
 For discovery paths and filesystem loading rules, see [`extension-loading.md`](./extension-loading.md).
 
+For packaged user-facing extension CLIs/features, see [`user-facing-packages.md`](./user-facing-packages.md).
+
 ## What an extension is
 
-An extension is a TS/JS module exporting a default factory:
+An extension is a TS/JS module exporting a default factory. Factories may initialize synchronously or return a promise:
 
 ```ts
 import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent";
@@ -68,7 +70,7 @@ Important constraint from `loader.ts`:
 import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent";
 
 export default function (pi: ExtensionAPI) {
-  const { z } = pi.zod;
+  const z = pi.zod;
 
   pi.setLabel("Safety + Utilities");
 
@@ -119,16 +121,20 @@ Core methods:
 - `getCommands`
 - `getSessionName`, `setSessionName`
 - `setModel`, `getThinkingLevel`, `setThinkingLevel`
+- `getServiceTiers`, `setServiceTier`
 - `registerProvider`
 - `events` (shared event bus)
+
+`getServiceTiers()` returns a detached snapshot of the session's live per-family tier map. `setServiceTier(family, tier)` changes one family for subsequent requests; pass `undefined` to clear that session override. OpenAI accepts `auto`, `default`, `flex`, `scale`, or `priority`; Anthropic accepts `priority`; Google accepts `flex` or `priority`. Changes made while a response is streaming do not alter that in-flight request.
 
 In interactive mode, `input` handlers run before the built-in first-message auto-title check. Extensions that call `await pi.setSessionName(...)` from `input` can set the persisted session name and prevent the default auto-generated title from running for that session.
 
 Also exposed:
 
 - `pi.logger`
-- `pi.typebox` (zod-backed compatibility shim for legacy TypeBox-style schemas)
-- `pi.zod` (injected `zod/v4` module — canonical for tool parameter schemas)
+- `pi.arktype` (the omptype `type(...)` schema builder)
+- `pi.zod` (Zod-compatible builder backed by omptype)
+- `pi.typebox` (legacy TypeBox-compatible shim)
 - `pi.pi` (package exports)
 
 ### Message delivery semantics
@@ -140,7 +146,7 @@ Also exposed:
 - `deliverAs: "nextTurn"` — stored and injected on the next user prompt
 - `triggerTurn: true` — starts a turn when idle (also honored with `deliverAs: "nextTurn"`: idle prompts immediately; while streaming the queued message schedules an internal continuation)
 
-`pi.sendUserMessage(content, { deliverAs })` always goes through prompt flow; while streaming it queues as steer/follow-up.
+`pi.sendUserMessage(content, { deliverAs })` always goes through prompt flow. Omit `deliverAs` to start a normal prompt when idle; while streaming, omitted `deliverAs` queues the message as a steer. Set `deliverAs: "followUp"` to wait until the current run finishes.
 
 ## 2) Handler context (`ExtensionContext`)
 
@@ -152,12 +158,38 @@ Handlers and tool `execute` receive `ctx` with:
 - `sessionManager` (read-only)
 - `modelRegistry`, `model`
 - `models` (read-only model query — see below)
+- `localProtocolOptions` (optional calling-session `local://` root mapping for external tool bridges)
 - `getContextUsage()`
+- `getAsyncJobSnapshot()` returns the current session's read-only async-job snapshot, or `null` when no session owns the context
 - `compact(...)`
 - `isIdle()`, `hasPendingMessages()`, `abort()`
 - `shutdown()`
 - `getSystemPrompt()`
 - `memory` (optional structured memory runtime — status/search/save across the configured backend)
+- `setInterval(fn, ms, ...args)` / `setTimeout(fn, ms, ...args)` / `clearTimer(timer)` — managed timers (see below)
+
+### Background work (`ctx.setInterval` / `ctx.setTimeout`)
+
+Extensions run **in-process with no isolation**. A raw `setInterval`/`setTimeout`/detached-promise callback that throws runs outside the handler-dispatch try/catch, surfaces as a process-level `uncaughtException`, and the global postmortem handler treats it as fatal — **the whole session is torn down**, not just the offending extension.
+
+Use `ctx.setInterval` / `ctx.setTimeout` for any periodic or deferred background work. They mirror the platform signatures but:
+
+- run the callback with the same isolation as handler dispatch — a synchronous throw or a rejected promise is logged and reported through the extension error channel, and the session keeps running;
+- return a handle you can pass to `ctx.clearTimer(handle)`;
+- are `unref`'d (never keep the process alive on their own) and are cleared automatically on `session_shutdown`.
+
+```ts
+pi.on("session_start", async (_event, ctx) => {
+  const timer = ctx.setInterval(() => {
+    // A throw here is contained — it will not crash the session.
+    ctx.ui.notify("tick", "info");
+  }, 60_000);
+  // Optional: clear it yourself; otherwise it is cleared on shutdown.
+  pi.on("session_shutdown", () => ctx.clearTimer(timer));
+});
+```
+
+If you use raw `setInterval`/`setTimeout` or detached promises instead, you own the isolation: wrap the callback body in your own `try/catch` (an unhandled throw will take down the session) and clear the timer on `session_shutdown`.
 
 ### Model selection (`ctx.models`)
 
@@ -165,7 +197,7 @@ Handlers and tool `execute` receive `ctx` with:
 
 - `list()` — authenticated models available this session.
 - `current()` — the live session model (read lazily, so it reflects `/model` switches).
-- `resolve(spec)` — a model string (`provider/id`, bare id) or role alias (`pi/slow`, a configured role) → `Model`, honoring the same settings-backed aliases and match preferences as `--model`. Returns `undefined` when nothing matches.
+- `resolve(spec)` — a model string (`provider/id`, bare id) or role alias (`@slow`, a configured role) → `Model`, honoring the same settings-backed aliases and match preferences as `--model`. Returns `undefined` when nothing matches.
 - `family(model)` — an opaque lineage token for "same family?" checks (Claude point releases share a token; Claude and GPT differ). Compare it; don't persist it (the vocabulary tracks new releases).
 
 ```ts
@@ -173,7 +205,7 @@ Handlers and tool `execute` receive `ctx` with:
 const current = ctx.models.current();
 const contrasting = ctx.models
   .list()
-  .find(m => current && ctx.models.family(m) !== ctx.models.family(current));
+  .find((m) => current && ctx.models.family(m) !== ctx.models.family(current));
 ```
 
 ## 3) Command context (`ExtensionCommandContext`)
@@ -219,11 +251,11 @@ Cancelable pre-events:
 - `agent_start` / `agent_end` — agent loop lifecycle notification; `agent_end` remains notification-only
 - `session_stop` — main-session stop hook, awaited before settle; may continue with `{ continue: true, additionalContext }` or `{ decision: "block", reason }`; capped at 8 consecutive continuations and never fires for task/subagent sessions
 - `turn_start` / `turn_end`
-- `message_start` / `message_update` / `message_end`
+- `message_start` / `message_update` / `message_end` — lifecycle notifications; `message_end` receives a detached message snapshot, so use `tool_result` or `context` when an extension needs to change provider context
 
 ### Tool lifecycle
 
-- `tool_call` (pre-exec, may block)
+- `tool_call` (pre-exec, may block, or revise the tool's execution `input`; for model-issued calls it fires at arg-prep time in the agent loop, so a revision is revalidated and seen by concurrency scheduling, execution events, the persisted assistant message, and the approval gate alike)
 - `tool_result` (post-exec, may patch content/details/isError)
 - `tool_execution_start` / `tool_execution_update` / `tool_execution_end` (observability)
 - `tool_approval_requested` / `tool_approval_resolved` (observability; emitted by `wrapper.ts` only when a tool requires approval and an approval handler is registered)
@@ -239,6 +271,25 @@ Cancelable pre-events:
 - `goal_updated`
 - `credential_disabled`
 
+### MCP notifications
+
+- `mcp_notification` — fired for every JSON-RPC notification received from a connected MCP server, AFTER the manager's own handling of known list/update methods (`notifications/tools/list_changed`, `notifications/resources/list_changed`, `notifications/resources/updated`, `notifications/prompts/list_changed`). Unknown or server-custom methods are also delivered. Payload: `{ server: string; method: string; params: unknown }`. Multiple extensions may subscribe; a handler that throws does not prevent other handlers from firing. Notifications received before any listener attaches are buffered (bounded FIFO, cap 100, drop-oldest) and drained into the first subscriber — so startup-time frames aren't lost even if the extension binds after MCP discovery.
+
+Bridging a push-capable MCP into a session steer:
+
+```ts
+pi.on("mcp_notification", (event) => {
+  if (event.server !== "peer-bus") return;
+  if (event.method !== "notifications/peer_message") return;
+  const params = event.params as { from: string; text: string };
+  pi.sendUserMessage(`[from ${params.from}] ${params.text}`, {
+    deliverAs: "steer",
+  });
+});
+```
+
+The runtime handles the JSON-RPC transport and its own list/update refresh first; the handler runs afterwards and can inject a mid-turn steer via `pi.sendMessage` / `pi.sendUserMessage`.
+
 ### User command interception
 
 - `user_bash` (override with `{ result }`)
@@ -251,7 +302,7 @@ Current runtime note: `ExtensionRunner.emitResourcesDiscover(...)` is implemente
 
 ## Tool authoring details
 
-`registerTool` uses `ToolDefinition` from `types.ts`.
+`registerTool` uses `ToolDefinition` from `types.ts`. Its `parameters` field accepts omptype schemas; the injected TypeBox compatibility shim remains available for legacy extensions.
 
 Current `execute` signature:
 
@@ -265,10 +316,30 @@ execute(
 ): Promise<AgentToolResult>
 ```
 
+### Delegating to a native built-in (`ctx.invokeTool`)
+
+A tool that re-registers a built-in name (e.g. wrapping `write` to add logging or a policy check) can
+run the original instead of reimplementing it. When your registered tool shadows a built-in, the `ctx`
+passed to `execute` carries:
+
+```ts
+ctx.invokeTool?<TDetails>(
+  params: Record<string, unknown>,
+  options?: { signal?: AbortSignal; onUpdate?: AgentToolUpdateCallback },
+): Promise<AgentToolResult<TDetails>>
+```
+
+It runs the **native** built-in of the same name as your tool (delegation is same-tool only, so it
+cannot reach an arbitrary target or escalate past the approval already granted for this call) and
+returns its result, including the native tool's own side effects and internal bookkeeping. It is
+present only when a native built-in of that name exists — `ctx.invokeTool` is `undefined` for a
+net-new tool that shadows no built-in. The native call is not re-gated, since it is the same tool you
+are already approved as, and delegation depth is guarded against accidental self-recursion.
+
 Template:
 
 ```ts
-const { z } = pi.zod;
+const z = pi.zod;
 
 pi.registerTool({
   name: "my_tool",
@@ -297,7 +368,7 @@ pi.registerTool({
 });
 ```
 
-`tool_call`/`tool_result` intercept all tools once the registry is wrapped in `sdk.ts`, including built-ins and extension/custom tools. `ToolDefinition` also supports optional `hidden`, `defaultInactive`, `deferrable`, `approval`, `mcpServerName`, `mcpToolName`, `renderCall`, and `renderResult` fields.
+`tool_call`/`tool_result` intercept all tools once the registry is wrapped in `sdk.ts`, including built-ins and extension/custom tools. `ToolDefinition` also supports optional `hidden`, `defaultInactive`, `loadMode` (`"discoverable"` by default, or `"essential"`), `deferrable`, `approval` (`"exec"` by default), `strict`, `mcpServerName`, `mcpToolName`, `renderCall`, and `renderResult` fields.
 
 ## UI integration points
 
@@ -309,6 +380,7 @@ Supported:
 
 - dialogs: `select`, `confirm`, `input`, `editor`
 - input editing: `setEditorText`, `getEditorText`, `pasteToEditor`, `editor`
+- autocomplete stacking: `addAutocompleteProvider(factory)` wraps the built-in editor provider (factories apply in registration order and re-apply on every slash-command refresh)
 - terminal title and working message (`setTitle`, `setWorkingMessage`)
 - notifications/status/editor text/terminal input/custom overlays
 - theme listing/loading by name (`setTheme` supports string names)
@@ -332,7 +404,7 @@ Unsupported/no-op in RPC implementation:
 
 - `onTerminalInput`
 - `custom`
-- `setFooter`, `setHeader`, `setEditorComponent`
+- `setFooter`, `setHeader`, `setEditorComponent`, `addAutocompleteProvider`
 - `setWorkingMessage`
 - theme switching/loading (`setTheme` returns failure)
 - tool expansion controls are inert
@@ -343,13 +415,13 @@ When no UI context is supplied to runner init, `ctx.hasUI` is `false` and method
 
 ### ACP mode
 
-ACP installs an elicitation-bridged UI context (`createAcpExtensionUiContext` in `acp-agent.ts`). `ctx.hasUI` is `true` while only `select`/`confirm`/`input` round-trip (as ACP elicitations; defaults are returned when the client lacks the `elicitation.form` capability). The non-elicitation surface (widgets, editor, theming, terminal input) is stubbed no-op.
+ACP installs an elicitation-bridged UI context (`createAcpExtensionUiContext` in `acp-agent.ts`). `ctx.hasUI` is `true` while `select`/`confirm`/`input`/`editor` round-trip (as ACP elicitations; defaults are returned when the client lacks the `elicitation.form` capability). The non-elicitation surface (widgets, theming, terminal input, autocomplete stacking) is stubbed no-op.
 
 ## Session and state patterns
 
 For durable extension state:
 
-1. Persist with `pi.appendEntry(customType, data)`.
+1. Persist with `pi.appendEntry("com.example.my-extension.state", data)`. The `customType` namespace is global: use a package- or reverse-domain-qualified value and avoid the core-reserved values in the [`custom` session-entry reference](./session.md#custom).
 2. Rebuild state from `ctx.sessionManager.getBranch()` on `session_start`, `session_branch`, `session_tree`.
 3. Keep tool result `details` structured when state should be visible/reconstructible from tool result history.
 
@@ -359,7 +431,10 @@ Example reconstruction pattern:
 pi.on("session_start", async (_event, ctx) => {
   let latest;
   for (const entry of ctx.sessionManager.getBranch()) {
-    if (entry.type === "custom" && entry.customType === "my-state") {
+    if (
+      entry.type === "custom" &&
+      entry.customType === "com.example.my-extension.state"
+    ) {
       latest = entry.data;
     }
   }
@@ -386,7 +461,9 @@ import { Container, Text } from "@oh-my-pi/pi-tui";
 
 pi.registerAssistantThinkingRenderer((context, theme) => {
   const container = new Container();
-  container.addChild(new Text(theme.fg("dim", `thinking chars: ${context.text.length}`), 1, 0));
+  container.addChild(
+    new Text(theme.fg("dim", `thinking chars: ${context.text.length}`), 1, 0),
+  );
   return container;
 });
 ```

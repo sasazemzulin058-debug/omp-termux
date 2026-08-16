@@ -3,18 +3,37 @@
  * Release script for pi-mono
  *
  * Usage:
- *   bun scripts/release.ts <version>   Full release (preflight, version, changelog, commit, push, watch)
- *   bun scripts/release.ts watch       Watch CI for current commit
+ *   bun scripts/release.ts <version|major|minor|patch>   Full release (preflight, version, changelog, commit, push, watch)
+ *   bun scripts/release.ts watch                         Watch CI for current commit
  *
- * Example: bun scripts/release.ts 3.10.0
+ * Example: bun scripts/release.ts minor
  */
-
 import { $, Glob } from "bun";
+import { compareVersions } from "../packages/utils/src/version.ts";
 import { runChangelogFixer } from "./fix-changelogs";
+import { generateNixBunDeps, resolveNixBunDepsGenerator } from "./gen-nix-bun";
 
 const changelogGlob = new Glob("packages/*/CHANGELOG.md");
 const packageJsonGlob = new Glob("packages/*/package.json");
 const cargoTomlGlob = new Glob("crates/*/Cargo.toml");
+/**
+ * Strict explicit-version guard: three numeric dot-segments with an optional
+ * leading `v` and NO prerelease suffix. Prereleases are rejected because the
+ * downstream publish (`scripts/ci-release-publish.ts`) runs `npm publish` with
+ * no `--tag`, which would promote a prerelease to the npm `latest` dist-tag —
+ * hitting every unqualified install and the `/latest` endpoint `omp update`
+ * reads. Bump keywords (major/minor/patch) are handled separately and must not
+ * be routed through this check.
+ *
+ * Returns the normalized bare version (leading `v` stripped) when accepted, or
+ * `null` when rejected. Callers must use the returned value for all writes so
+ * no downstream manifest (package.json, Cargo.toml, tag) ever sees a `v`
+ * prefix — Cargo rejects `version = "v17.2.8"`.
+ */
+export function validateExplicitVersion(version: string): string | null {
+	const match = /^v?((?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*))$/.exec(version);
+	return match ? match[1] : null;
+}
 
 function git(args: readonly string[]) {
 	return $`git -c core.fsmonitor=false -c core.untrackedCache=false -c fetch.pruneTags=false ${args}`;
@@ -41,11 +60,10 @@ async function watchCI(): Promise<boolean> {
 
 		// Check job-level status for in-progress runs (fail fast on first job failure)
 		const failedJobs: Array<{ workflow: string; job: string; jobId: number; conclusion: string }> = [];
-		const inProgressRuns = runs.filter((r) => r.status === "in_progress" || r.status === "queued");
+		const inProgressRuns = runs.filter(r => r.status === "in_progress" || r.status === "queued");
 
 		for (const run of inProgressRuns) {
-			const jobsOutput =
-				await $`gh run view ${run.databaseId} --json jobs`.quiet().nothrow().text();
+			const jobsOutput = await $`gh run view ${run.databaseId} --json jobs`.quiet().nothrow().text();
 			try {
 				const { jobs } = JSON.parse(jobsOutput) as {
 					jobs: Array<{ name: string; databaseId: number; status: string; conclusion: string | null }>;
@@ -81,9 +99,9 @@ async function watchCI(): Promise<boolean> {
 		}
 
 		// Check workflow-level status
-		const pending = runs.filter((r) => r.status !== "completed");
-		const failed = runs.filter((r) => r.status === "completed" && r.conclusion !== "success");
-		const passed = runs.filter((r) => r.status === "completed" && r.conclusion === "success");
+		const pending = runs.filter(r => r.status !== "completed");
+		const failed = runs.filter(r => r.status === "completed" && r.conclusion !== "success");
+		const passed = runs.filter(r => r.status === "completed" && r.conclusion === "success");
 
 		console.log(`  ${passed.length} passed, ${pending.length} pending, ${failed.length} failed`);
 
@@ -173,19 +191,38 @@ async function cmdWatch(): Promise<void> {
 function parseVersion(v: string): [number, number, number] {
 	const match = v.replace(/^v/, "").match(/^(\d+)\.(\d+)\.(\d+)/);
 	if (!match) throw new Error(`Invalid version: ${v}`);
-	return [parseInt(match[1]), parseInt(match[2]), parseInt(match[3])];
+	return [parseInt(match[1], 10), parseInt(match[2], 10), parseInt(match[3], 10)];
 }
 
-function compareVersions(a: string, b: string): number {
-	const [aMajor, aMinor, aPatch] = parseVersion(a);
-	const [bMajor, bMinor, bPatch] = parseVersion(b);
-	if (aMajor !== bMajor) return aMajor - bMajor;
-	if (aMinor !== bMinor) return aMinor - bMinor;
-	return aPatch - bPatch;
+function bumpVersion(current: string, bump: "major" | "minor" | "patch"): string {
+	const [major, minor, patch] = parseVersion(current);
+	switch (bump) {
+		case "major":
+			return `${major + 1}.0.0`;
+		case "minor":
+			return `${major}.${minor + 1}.0`;
+		case "patch":
+			return `${major}.${minor}.${patch + 1}`;
+	}
 }
 
-async function cmdRelease(version: string): Promise<void> {
+async function cmdRelease(versionOrBump: string): Promise<void> {
 	console.log("\n=== Release Script ===\n");
+	// Validate explicit versions before any compare: the shared compareVersions
+	// never throws, so without this guard garbage like "999.bad" would be
+	// accepted and written into every package.json / Cargo.toml / tag. The
+	// validator also normalizes a leading `v` to the bare version so every
+	// downstream write (manifests, Cargo.toml, tag) uses `17.2.8`, not `v17.2.8`.
+	if (versionOrBump !== "major" && versionOrBump !== "minor" && versionOrBump !== "patch") {
+		const normalized = validateExplicitVersion(versionOrBump);
+		if (normalized === null) {
+			console.error(
+				`Error: Invalid version "${versionOrBump}". Expected a semver like 17.2.8 or v17.2.8 (prereleases such as 17.2.8-rc.1 are not supported by this release path), or a bump keyword (major/minor/patch).`,
+			);
+			process.exit(1);
+		}
+		versionOrBump = normalized;
+	}
 
 	// 1. Pre-flight checks
 	console.log("Pre-flight checks...");
@@ -205,7 +242,16 @@ async function cmdRelease(version: string): Promise<void> {
 	}
 	console.log("  Working directory clean");
 
+	const nixBunDepsGenerator = resolveNixBunDepsGenerator();
+	console.log(`  Nix dependency generator: ${nixBunDepsGenerator.kind}`);
+
 	const latestTag = (await git(["describe", "--tags", "--abbrev=0", "--match", "v*"]).text()).trim();
+	let version = versionOrBump;
+	if (version === "major" || version === "minor" || version === "patch") {
+		version = bumpVersion(latestTag, version);
+		console.log(`Bumping ${versionOrBump} version from ${latestTag} -> ${version}`);
+	}
+
 	if (compareVersions(version, latestTag) <= 0) {
 		console.error(`Error: Version ${version} must be greater than latest tag ${latestTag}`);
 		process.exit(1);
@@ -240,10 +286,7 @@ async function cmdRelease(version: string): Promise<void> {
 	// Update @oh-my-pi/* catalog entries in root package.json
 	console.log("Updating root catalog versions...");
 	let rootPkgRaw = await Bun.file("package.json").text();
-	rootPkgRaw = rootPkgRaw.replace(
-		/("@oh-my-pi\/[^"]+":\s*)"[^"]+"/g,
-		`$1"${version}"`,
-	);
+	rootPkgRaw = rootPkgRaw.replace(/("@oh-my-pi\/[^"]+":\s*)"[^"]+"/g, `$1"${version}"`);
 	await Bun.write("package.json", rootPkgRaw);
 	console.log("  Updated root catalog @oh-my-pi/* entries");
 
@@ -302,6 +345,7 @@ async function cmdRelease(version: string): Promise<void> {
 	await $`rm -f bun.lock`;
 	await $`bun install`;
 	await $`cargo generate-lockfile`;
+	await generateNixBunDeps(nixBunDepsGenerator);
 	console.log();
 
 	// 5. Update changelogs
@@ -355,13 +399,7 @@ async function cmdRelease(version: string): Promise<void> {
 	const tagRef = `v${version}`;
 	const sha = (await git(["rev-parse", "HEAD"]).text()).trim();
 	await git(["tag", "-f", tagRef]);
-	await git([
-		"push",
-		"--atomic",
-		"origin",
-		"refs/heads/main:refs/heads/main",
-		`${sha}:refs/tags/${tagRef}`,
-	]);
+	await git(["push", "--atomic", "origin", "refs/heads/main:refs/heads/main", `${sha}:refs/tags/${tagRef}`]);
 	console.log();
 
 	// 9. Watch CI
@@ -390,23 +428,25 @@ async function cmdRelease(version: string): Promise<void> {
 // Main
 // =============================================================================
 
-const arg = process.argv[2];
+if (import.meta.main) {
+	const arg = process.argv[2];
 
-if (!arg) {
-	console.error("Usage:");
-	console.error("  bun scripts/release.ts <version>   Full release");
-	console.error("  bun scripts/release.ts watch       Watch CI for current commit");
-	process.exit(1);
-}
+	if (!arg) {
+		console.error("Usage:");
+		console.error("  bun scripts/release.ts <version|major|minor|patch>   Full release");
+		console.error("  bun scripts/release.ts watch                         Watch CI for current commit");
+		process.exit(1);
+	}
 
-if (arg === "watch") {
-	await cmdWatch();
-} else if (/^\d+\.\d+\.\d+/.test(arg)) {
-	await cmdRelease(arg);
-} else {
-	console.error(`Unknown command or invalid version: ${arg}`);
-	console.error("Usage:");
-	console.error("  bun scripts/release.ts <version>   Full release");
-	console.error("  bun scripts/release.ts watch       Watch CI for current commit");
-	process.exit(1);
+	if (arg === "watch") {
+		await cmdWatch();
+	} else if (arg === "major" || arg === "minor" || arg === "patch" || validateExplicitVersion(arg) !== null) {
+		await cmdRelease(arg);
+	} else {
+		console.error(`Unknown command or invalid version: ${arg}`);
+		console.error("Usage:");
+		console.error("  bun scripts/release.ts <version|major|minor|patch>   Full release");
+		console.error("  bun scripts/release.ts watch                         Watch CI for current commit");
+		process.exit(1);
+	}
 }

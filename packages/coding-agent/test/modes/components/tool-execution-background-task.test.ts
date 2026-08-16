@@ -10,7 +10,7 @@ function progressEntry(description: string): AgentProgress {
 	return {
 		index: 0,
 		id: "Anna",
-		agent: "explore",
+		agent: "scout",
 		agentSource: "bundled",
 		status: "running",
 		task: "investigate the auth flow",
@@ -49,7 +49,7 @@ function finalSnapshot(output: string): {
 	const result: SingleResult = {
 		index: 0,
 		id: "Anna",
-		agent: "explore",
+		agent: "scout",
 		agentSource: "bundled",
 		task: "investigate the auth flow",
 		exitCode: 0,
@@ -86,27 +86,30 @@ describe("ToolExecutionComponent detached task freeze", () => {
 		vi.restoreAllMocks();
 	});
 
-	function makeComponent(live: () => boolean) {
+	function makeComponent(live: () => boolean, uncommitted: () => boolean = () => true) {
 		const requestRender = vi.fn();
-		const ui = { requestRender } as unknown as TUI;
+		const requestComponentRender = vi.fn();
+		const ui = { requestRender, requestComponentRender } as unknown as TUI;
 		const component = new ToolExecutionComponent(
 			"task",
-			{ agent: "explore", id: "Anna", description: "scout auth", assignment: "investigate the auth flow" },
-			{ liveRegion: { isBlockInLiveRegion: () => live() } },
+			{ agent: "scout", id: "Anna", description: "scout auth", assignment: "investigate the auth flow" },
+			{ liveRegion: { isBlockInLiveRegion: () => live(), isBlockUncommitted: () => uncommitted() } },
 			undefined,
 			ui,
 		);
-		return { component, requestRender };
+		return { component, requestRender, requestComponentRender };
 	}
 
 	it("does not drive redraws while live and keeps progress bytes static", () => {
 		vi.useFakeTimers();
-		const { component, requestRender } = makeComponent(() => true);
+		const { component, requestRender, requestComponentRender } = makeComponent(() => true);
 
 		component.updateResult(asyncSnapshot("scouting the auth flow"), true);
 		requestRender.mockClear();
+		requestComponentRender.mockClear();
 		vi.advanceTimersByTime(500);
 		expect(requestRender).not.toHaveBeenCalled();
+		expect(requestComponentRender).not.toHaveBeenCalled();
 
 		vi.spyOn(Date, "now").mockReturnValue(1_000);
 		const frameA = component.render(100).join("\n");
@@ -114,6 +117,25 @@ describe("ToolExecutionComponent detached task freeze", () => {
 		const frameB = component.render(100).join("\n");
 		expect(frameB).toBe(frameA);
 		expect(stripVTControlCharacters(frameA)).toContain("scouting the auth flow");
+	});
+
+	it("reveals the latest hidden progress before freezing the card", () => {
+		const { component } = makeComponent(() => false);
+		component.setToolActivityVisible(false);
+
+		component.updateResult(asyncSnapshot("initial hidden progress"), true);
+		component.updateResult(asyncSnapshot("latest hidden progress"), true);
+		expect(component.render(100)).toEqual([]);
+
+		component.setToolActivityVisible(true);
+		const revealed = stripVTControlCharacters(component.render(100).join("\n"));
+		expect(revealed).toContain("latest hidden progress");
+		expect(revealed).not.toContain("initial hidden progress");
+
+		component.updateResult(asyncSnapshot("progress after entering history"), true);
+		const frozen = stripVTControlCharacters(component.render(100).join("\n"));
+		expect(frozen).toContain("latest hidden progress");
+		expect(frozen).not.toContain("progress after entering history");
 	});
 
 	it("drops partial snapshots after the freeze but still applies the final result", () => {

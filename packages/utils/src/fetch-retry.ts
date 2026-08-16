@@ -10,13 +10,17 @@ const RETRY_DELAY_FIELD_PATTERN = /"retryDelay":\s*"([0-9.]+)(ms|s)"/i;
 // "try again in 5 min" / "try again in ~158 min." / "try again in 2h" /
 // "try again in 90 minutes" / "try again in 1 hour"
 const TRY_AGAIN_PATTERN = /try again in\s+~?\s*([0-9.]+)\s*(ms|sec|s|minutes?|mins?|m|hours?|hrs?|h)\b/i;
+// "Your limit will reset in 13 minutes" / "reset in 13 minutes" / "will reset in 2h"
+const WILL_RESET_IN_PATTERN = /(?:will\s+)?reset in\s+~?\s*([0-9.]+)\s*(ms|sec|s|minutes?|mins?|m|hours?|hrs?|h)\b/i;
 
 /**
  * Server-suggested retry delay extraction. Merges the patterns historically used
  * by the OpenAI Codex and Google Gemini retry helpers.
  *
  * Header sources (checked in order):
+ *  - `retry-after-ms` (milliseconds)
  *  - `Retry-After` (numeric seconds, or HTTP date)
+ *  - `x-ratelimit-reset-ms` (delta ms, or Unix epoch ms/s for large values)
  *  - `x-ratelimit-reset` (Unix epoch seconds)
  *  - `x-ratelimit-reset-after` (seconds)
  *
@@ -31,12 +35,28 @@ const TRY_AGAIN_PATTERN = /try again in\s+~?\s*([0-9.]+)\s*(ms|sec|s|minutes?|mi
 export function extractRetryHint(source: Response | Headers | null | undefined, body?: string): number | undefined {
 	const headers = source instanceof Headers ? source : (source?.headers ?? undefined);
 	if (headers) {
+		const retryAfterMs = headers.get("retry-after-ms");
+		if (retryAfterMs) {
+			const ms = Number(retryAfterMs);
+			if (Number.isFinite(ms) && ms >= 0) return ms;
+		}
 		const retryAfter = headers.get("retry-after");
 		if (retryAfter) {
 			const seconds = Number(retryAfter);
 			if (Number.isFinite(seconds)) return Math.max(0, seconds * 1000);
 			const parsedDate = Date.parse(retryAfter);
 			if (!Number.isNaN(parsedDate)) return Math.max(0, parsedDate - Date.now());
+		}
+		const rateLimitResetMs = headers.get("x-ratelimit-reset-ms");
+		if (rateLimitResetMs) {
+			const value = Number(rateLimitResetMs);
+			if (Number.isFinite(value) && value > 0) {
+				// > 1e12 → epoch ms; > 1e9 → epoch s; otherwise a delta in ms.
+				const targetMs = value > 1e12 ? value : value > 1e9 ? value * 1000 : undefined;
+				if (targetMs === undefined) return value;
+				const delta = targetMs - Date.now();
+				if (delta > 0) return delta;
+			}
 		}
 		const rateLimitReset = headers.get("x-ratelimit-reset");
 		if (rateLimitReset) {
@@ -65,7 +85,11 @@ export function extractRetryHint(source: Response | Headers | null | undefined, 
 			if (totalMs > 0) return totalMs;
 		}
 	}
-	for (const pattern of [PLEASE_RETRY_PATTERN, RETRY_DELAY_FIELD_PATTERN, TRY_AGAIN_PATTERN]) {
+	// Account-reset hints ("will reset in …") take precedence over short
+	// retry hints ("please retry in 5s"): a body carrying both must honour the
+	// longer account window, not the shorter generic one. QUOTA_RESET_PATTERN
+	// ("reset after …") above already runs first and stays first.
+	for (const pattern of [WILL_RESET_IN_PATTERN, PLEASE_RETRY_PATTERN, RETRY_DELAY_FIELD_PATTERN, TRY_AGAIN_PATTERN]) {
 		const match = pattern.exec(body);
 		if (match?.[1]) {
 			const value = Number.parseFloat(match[1]);
@@ -130,6 +154,12 @@ export interface FetchWithRetryOptions extends RequestInit {
 	 */
 	fetch?: (input: string | URL | Request, init?: RequestInit) => Promise<Response>;
 	/**
+	 * Optional retry gate for HTTP responses whose status is retryable. Receives a
+	 * cloned body string so callers can fail fast on deterministic provider
+	 * failures that happen to use a 5xx status.
+	 */
+	shouldRetryResponse?: (response: Response, bodyText: string, attempt: number) => boolean | Promise<boolean>;
+	/**
 	 * Bun extension forwarded verbatim to the underlying `fetch` call. `false`
 	 * disables Bun's native ~300s pre-response timeout (callers that own a
 	 * configurable first-event/idle watchdog or an external `AbortSignal`
@@ -160,6 +190,7 @@ export async function fetchWithRetry(
 		maxDelayMs = DEFAULT_MAX_DELAY_MS,
 		defaultDelayMs,
 		prepareInit,
+		shouldRetryResponse,
 		fetch: fetchImpl = fetch,
 		timeout = false,
 		...baseInit
@@ -189,18 +220,21 @@ export async function fetchWithRetry(
 			if (signal?.aborted) throw new Error("Request was aborted");
 			const wrapped = wrapNetworkError(error);
 			if (attempt + 1 >= maxAttempts) throw wrapped;
-			await scheduler.wait(resolveDefaultDelay(defaultDelayMs, attempt, maxDelayMs), { signal });
+			await waitForRetry(resolveDefaultDelay(defaultDelayMs, attempt, maxDelayMs), signal);
 			continue;
 		}
 
 		if (!isRetryableStatus(response.status)) return response;
 		if (attempt + 1 >= maxAttempts) return response;
 
-		const hint = extractRetryHint(response, await response.clone().text());
+		const retryBody = await response.clone().text();
+		if (shouldRetryResponse && !(await shouldRetryResponse(response, retryBody, attempt))) return response;
+
+		const hint = extractRetryHint(response, retryBody);
 		if (hint !== undefined && hint > maxDelayMs) return response;
 
 		const delayMs = Math.min(hint ?? resolveDefaultDelay(defaultDelayMs, attempt, maxDelayMs), maxDelayMs);
-		await scheduler.wait(delayMs, { signal });
+		await waitForRetry(delayMs, signal);
 	}
 }
 
@@ -215,6 +249,15 @@ function mergeInit(base: RequestInit, overlay: RequestInit, timeout: number | fa
 		merged.headers = baseHeaders;
 	}
 	return merged;
+}
+
+async function waitForRetry(delayMs: number, signal: AbortSignal | undefined): Promise<void> {
+	try {
+		await scheduler.wait(delayMs, { signal });
+	} catch (error) {
+		if (signal?.aborted) throw new Error("Request was aborted");
+		throw error;
+	}
 }
 
 function wrapNetworkError(error: unknown): Error {

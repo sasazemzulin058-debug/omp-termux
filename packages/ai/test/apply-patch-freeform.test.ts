@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { type } from "@oh-my-pi/omptype";
 import {
 	buildTransformedCodexRequestBody,
 	convertOpenAICodexResponsesTools as convertCodexTools,
@@ -18,7 +19,6 @@ import {
 } from "@oh-my-pi/pi-ai/providers/openai-shared";
 import type { AssistantMessage, Model, ModelSpec, Tool, ToolResultMessage } from "@oh-my-pi/pi-ai/types";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
-import { type } from "arktype";
 
 const GRAMMAR = [
 	"// top-level comment",
@@ -176,7 +176,9 @@ describe("convertTools: freeform emission", () => {
 		}>;
 
 		const items = out.parameters.properties.operations.items;
-		expect(out.strict).toBeUndefined();
+		// Author-set `strict: false` MUST survive to the wire (#4336) — providers
+		// distinguish it from an omitted flag when generating optional-arg values.
+		expect(out.strict).toBe(false);
 		expect(items.oneOf).toBeUndefined();
 		expect(items.anyOf).toEqual(unionBranches);
 	});
@@ -307,8 +309,8 @@ describe("custom_tool_call stream receive", () => {
 		expect(block?.type).toBe("toolCall");
 		if (block?.type !== "toolCall") throw new Error("expected toolCall block");
 		expect(block.arguments).toEqual({ command: "x".repeat(300) });
-		expect("partialJson" in block).toBe(false);
-		expect("lastParseLen" in block).toBe(false);
+		expect((block as unknown as Record<string, unknown>).partialJson).toBeUndefined();
+		expect((block as unknown as Record<string, unknown>).lastParseLen).toBeUndefined();
 	});
 
 	test("persists final args on the block when finalized via output_item.done without an args.done event", async () => {
@@ -364,8 +366,8 @@ describe("custom_tool_call stream receive", () => {
 		expect(block?.type).toBe("toolCall");
 		if (block?.type !== "toolCall") throw new Error("expected toolCall block");
 		expect(block.arguments).toEqual({ path: "README.md" });
-		expect("partialJson" in block).toBe(false);
-		expect("lastParseLen" in block).toBe(false);
+		expect((block as unknown as Record<string, unknown>).partialJson).toBeUndefined();
+		expect((block as unknown as Record<string, unknown>).lastParseLen).toBeUndefined();
 	});
 
 	test("aggregates delta events into a ToolCall with input arg", async () => {
@@ -597,7 +599,7 @@ describe("dispatcher wire-name matching", () => {
 });
 
 describe("history replay: custom_tool_call round-trip", () => {
-	test("assistant tool-call block with customWireName replays as custom_tool_call", () => {
+	test("assistant tool-call block without replayed reasoning omits custom_tool_call item id", () => {
 		const assistantMsg: AssistantMessage = {
 			role: "assistant",
 			content: [
@@ -630,10 +632,193 @@ describe("history replay: custom_tool_call round-trip", () => {
 		expect(items).toHaveLength(1);
 		const item = items[0] as { type: string; id?: string; name?: string; input?: string };
 		expect(item.type).toBe("custom_tool_call");
-		expect(item.id).toBe("ctc_1");
+		expect(item.id).toBeUndefined();
 		expect(item.name).toBe("apply_patch");
 		expect(item.input).toBe("*** Begin Patch\n*** End Patch\n");
 		expect(customCallIds.has("call_1")).toBe(true);
+	});
+
+	test("assistant tool-call block with replayed reasoning keeps custom_tool_call item id", () => {
+		const assistantMsg: AssistantMessage = {
+			role: "assistant",
+			content: [
+				{
+					type: "thinking",
+					thinking: "",
+					thinkingSignature: JSON.stringify({ type: "reasoning", id: "rs_1", summary: [] }),
+				},
+				{
+					type: "toolCall",
+					id: "call_1|ctc_1",
+					name: "edit",
+					arguments: { input: "*** Begin Patch\n*** End Patch\n" },
+					customWireName: "apply_patch",
+				},
+			],
+			timestamp: Date.now(),
+			provider: "openai",
+			model: "gpt-5",
+			api: "openai-responses",
+			usage: {
+				input: 0,
+				output: 0,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 0,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			stopReason: "stop",
+		};
+		const knownCallIds = new Set<string>();
+		const customCallIds = new Set<string>();
+		const items = convertResponsesAssistantMessage(assistantMsg, makeModel(), 0, knownCallIds, true, customCallIds);
+
+		expect(items).toHaveLength(2);
+		expect(items[0]).toMatchObject({ type: "reasoning", id: "rs_1" });
+		expect(items[1]).toMatchObject({ type: "custom_tool_call", id: "ctc_1", call_id: "call_1" });
+		expect(customCallIds.has("call_1")).toBe(true);
+	});
+
+	test("assistant function_call block without replayed reasoning omits item id", () => {
+		const assistantMsg: AssistantMessage = {
+			role: "assistant",
+			content: [
+				{
+					type: "toolCall",
+					id: "call_1|fc_1",
+					name: "read",
+					arguments: { path: "README.md" },
+				},
+			],
+			timestamp: Date.now(),
+			provider: "openai",
+			model: "gpt-5",
+			api: "openai-responses",
+			usage: {
+				input: 0,
+				output: 0,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 0,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			stopReason: "stop",
+		};
+		const knownCallIds = new Set<string>();
+		const items = convertResponsesAssistantMessage(assistantMsg, makeModel(), 0, knownCallIds, true);
+
+		expect(items).toHaveLength(1);
+		expect(items[0]).toMatchObject({ type: "function_call", call_id: "call_1", name: "read" });
+		expect(JSON.parse(JSON.stringify(items[0]))).not.toHaveProperty("id");
+		expect(knownCallIds.has("call_1")).toBe(true);
+	});
+
+	test("assistant function_call block with replayed reasoning keeps item id", () => {
+		const assistantMsg: AssistantMessage = {
+			role: "assistant",
+			content: [
+				{
+					type: "thinking",
+					thinking: "",
+					thinkingSignature: JSON.stringify({ type: "reasoning", id: "rs_1", summary: [] }),
+				},
+				{
+					type: "toolCall",
+					id: "call_1|fc_1",
+					name: "read",
+					arguments: { path: "README.md" },
+				},
+			],
+			timestamp: Date.now(),
+			provider: "openai",
+			model: "gpt-5",
+			api: "openai-responses",
+			usage: {
+				input: 0,
+				output: 0,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 0,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			stopReason: "stop",
+		};
+		const knownCallIds = new Set<string>();
+		const items = convertResponsesAssistantMessage(assistantMsg, makeModel(), 0, knownCallIds, true);
+
+		expect(items).toHaveLength(2);
+		expect(items[0]).toMatchObject({ type: "reasoning", id: "rs_1" });
+		expect(items[1]).toMatchObject({ type: "function_call", id: "fc_1", call_id: "call_1" });
+		expect(knownCallIds.has("call_1")).toBe(true);
+	});
+
+	test("assistant message block without replayed reasoning omits msg item id", () => {
+		const assistantMsg: AssistantMessage = {
+			role: "assistant",
+			content: [
+				{
+					type: "text",
+					text: "done",
+					textSignature: JSON.stringify({ v: 1, id: "msg_1" }),
+				},
+			],
+			timestamp: Date.now(),
+			provider: "openai",
+			model: "gpt-5",
+			api: "openai-responses",
+			usage: {
+				input: 0,
+				output: 0,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 0,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			stopReason: "stop",
+		};
+		const knownCallIds = new Set<string>();
+		const items = convertResponsesAssistantMessage(assistantMsg, makeModel(), 0, knownCallIds, true);
+
+		expect(items).toHaveLength(1);
+		expect(items[0]).toMatchObject({ type: "message", role: "assistant", status: "completed" });
+		expect(JSON.parse(JSON.stringify(items[0]))).not.toHaveProperty("id");
+	});
+
+	test("assistant message block with replayed reasoning keeps msg item id", () => {
+		const assistantMsg: AssistantMessage = {
+			role: "assistant",
+			content: [
+				{
+					type: "thinking",
+					thinking: "",
+					thinkingSignature: JSON.stringify({ type: "reasoning", id: "rs_1", summary: [] }),
+				},
+				{
+					type: "text",
+					text: "done",
+					textSignature: JSON.stringify({ v: 1, id: "msg_1" }),
+				},
+			],
+			timestamp: Date.now(),
+			provider: "openai",
+			model: "gpt-5",
+			api: "openai-responses",
+			usage: {
+				input: 0,
+				output: 0,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 0,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			stopReason: "stop",
+		};
+		const knownCallIds = new Set<string>();
+		const items = convertResponsesAssistantMessage(assistantMsg, makeModel(), 0, knownCallIds, true);
+
+		expect(items).toHaveLength(2);
+		expect(items[0]).toMatchObject({ type: "reasoning", id: "rs_1" });
+		expect(items[1]).toMatchObject({ type: "message", id: "msg_1", role: "assistant", status: "completed" });
 	});
 
 	test("custom tool call omits item id when replayed across same-provider model switch", () => {

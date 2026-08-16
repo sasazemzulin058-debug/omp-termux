@@ -59,7 +59,7 @@ export interface Provider<T> {
 /**
  * Options for loading a capability.
  */
-export interface LoadOptions {
+export interface LoadOptions<T = unknown> {
 	/** Only use these providers (by ID). Default: all registered */
 	providers?: string[];
 	/** Exclude these providers (by ID). Default: none */
@@ -72,6 +72,22 @@ export interface LoadOptions {
 	includeDisabled?: boolean;
 	/** Explicit disabled extension IDs to apply instead of settings. */
 	disabledExtensions?: string[];
+	/**
+	 * Drop items before deduplication as if they never existed (e.g. scope
+	 * exclusions). A dropped item neither survives nor claims its dedupe key,
+	 * so it cannot shadow anything. Receives the item with its attached
+	 * `_source`.
+	 */
+	filter?(item: T & { _source: SourceMeta }): boolean;
+	/**
+	 * Exclude items from the results while letting them claim their dedupe key.
+	 * A suppressed higher-priority item still shadows same-key lower-priority
+	 * items (a disabled project server keeps the same-named user server off),
+	 * but never equivalence-shadows a differently-keyed survivor — so a
+	 * suppressed alias cannot starve an enabled equivalent connection.
+	 * Return `true` to suppress. Receives the item with its attached `_source`.
+	 */
+	suppress?(item: T & { _source: SourceMeta }): boolean;
 }
 
 /**
@@ -121,6 +137,9 @@ export interface Capability<T> {
 	 * Return undefined to never deduplicate (all items kept).
 	 */
 	key(item: T): string | undefined;
+
+	/** Treat items with different keys as aliases; the first equivalent item wins. */
+	equivalent?(left: T, right: T): boolean;
 
 	/**
 	 * Optional validation. Return error message if invalid, undefined if valid.

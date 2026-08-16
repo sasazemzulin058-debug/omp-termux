@@ -1,7 +1,7 @@
+import { type } from "@oh-my-pi/omptype";
 import type { AgentTool, AgentToolContext, AgentToolResult, AgentToolUpdateCallback } from "@oh-my-pi/pi-agent-core";
 import type { ImageContent, ToolExample } from "@oh-my-pi/pi-ai";
 import { prompt } from "@oh-my-pi/pi-utils";
-import { type } from "arktype";
 import { jsBackend, juliaBackend, pythonBackend, rubyBackend } from "../eval";
 import type { ExecutorBackend, ExecutorBackendResult } from "../eval/backend";
 import { EVAL_TIMEOUT_PAUSE_OP, EVAL_TIMEOUT_RESUME_OP } from "../eval/bridge-timeout";
@@ -10,6 +10,7 @@ import { defaultEvalSessionId } from "../eval/session-id";
 import type { EvalCellResult, EvalDisplayOutput, EvalLanguage, EvalStatusEvent, EvalToolDetails } from "../eval/types";
 import evalDescription from "../prompts/tools/eval.md" with { type: "text" };
 import { DEFAULT_MAX_BYTES, OutputSink, type OutputSummary, TailBuffer } from "../session/streaming-output";
+import { resolveSpawnPolicy } from "../task/spawn-policy";
 import { webpExclusionForModel } from "../utils/image-loading";
 import { formatDimensionNote, resizeImage } from "../utils/image-resize";
 import type { ToolSession } from ".";
@@ -84,7 +85,7 @@ function enabledEvalLanguages(backends: EvalBackendsAllowance): EvalLanguageToke
 
 const evalCellCommonFields = {
 	"title?": type("string").describe('short label shown in transcript (e.g. "imports", "load config")'),
-	"timeout?": type("number").describe("timeout for this eval call in seconds"),
+	"timeout?": type("number").describe("timeout for this eval call in seconds; 0 disables the cell timeout"),
 	"reset?": type("boolean").describe("wipe this language's kernel before running. Other languages are untouched."),
 };
 
@@ -164,13 +165,10 @@ export interface EvalToolDescriptionOptions {
 	rb?: boolean;
 	jl?: boolean;
 	/**
-	 * Whether `agent()` is allowed in this session. Driven by the parent's
-	 * spawn policy (`getSessionSpawns`). Defaults to `true` for backward
-	 * compatibility — when the session forbids spawning, the prelude doc
-	 * omits the `agent()` entry so the model does not promise itself a
-	 * helper that will only ever throw "spawns disabled".
+	 * Parent spawn policy (`getSessionSpawns`). `true`/omitted means unrestricted,
+	 * `false`/`""` hides `agent()`, and a comma list drives the advertised default.
 	 */
-	spawns?: boolean;
+	spawns?: boolean | string | null;
 }
 
 export function getEvalToolDescription(options: EvalToolDescriptionOptions = {}): string {
@@ -178,8 +176,16 @@ export function getEvalToolDescription(options: EvalToolDescriptionOptions = {})
 	const js = options.js ?? true;
 	const rb = options.rb ?? false;
 	const jl = options.jl ?? false;
-	const spawns = options.spawns ?? true;
-	return prompt.render(evalDescription, { py, js, rb, jl, spawns });
+	const spawnPolicy = resolveSpawnPolicy(options.spawns ?? true);
+	return prompt.render(evalDescription, {
+		py,
+		js,
+		rb,
+		jl,
+		spawns: spawnPolicy.enabled,
+		spawnDefaultAgent: spawnPolicy.defaultAgent,
+		spawnAllowedAgentsText: spawnPolicy.allowedPromptText,
+	});
 }
 
 export interface EvalToolOptions {
@@ -209,10 +215,6 @@ function detailsNotice(cells: ResolvedEvalCell[]): string | undefined {
 		...new Set(cells.map(cell => cell.resolved.notice).filter((notice): notice is string => Boolean(notice))),
 	];
 	return notices.length > 0 ? notices.join(" ") : undefined;
-}
-
-function timeoutSecondsFromMs(timeoutMs: number): number {
-	return clampTimeout("eval", timeoutMs / 1000);
 }
 
 async function resolveBackend(session: ToolSession, language: EvalLanguage): Promise<ResolvedBackend> {
@@ -294,13 +296,12 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 		if (!this.session) return getEvalToolDescription();
 		const backends = resolveEvalBackends(this.session);
 		const sessionSpawns = this.session.getSessionSpawns?.() ?? "*";
-		const spawnsAllowed = sessionSpawns !== "" && sessionSpawns !== null;
 		return getEvalToolDescription({
 			py: backends.python,
 			js: backends.js,
 			rb: backends.ruby,
 			jl: backends.julia,
-			spawns: spawnsAllowed,
+			spawns: sessionSpawns,
 		});
 	}
 	/** All reuse-chain examples; the `examples` getter filters by enabled languages. */
@@ -533,11 +534,19 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 					// ordinary tool calls all count against the budget. The watchdog drives
 					// `combinedSignal`; we pass no wall-clock deadline downstream so the
 					// backends never arm a competing fixed timer.
-					const idleTimeoutMs = timeoutSecondsFromMs(cell.timeoutMs) * 1000;
-					const idle = new IdleTimeout(idleTimeoutMs);
-					const combinedSignal = signal
-						? AbortSignal.any([signal, idle.signal, sessionAbortController.signal])
-						: AbortSignal.any([idle.signal, sessionAbortController.signal]);
+					const idleTimeoutMs =
+						cell.timeoutMs === 0
+							? undefined
+							: clampTimeout("eval", cell.timeoutMs / 1000, session.settings.get("tools.maxTimeout")) * 1000;
+					const idle = idleTimeoutMs === undefined ? undefined : new IdleTimeout(idleTimeoutMs);
+					const combinedSignal =
+						signal && idle
+							? AbortSignal.any([signal, idle.signal, sessionAbortController.signal])
+							: signal
+								? AbortSignal.any([signal, sessionAbortController.signal])
+								: idle
+									? AbortSignal.any([idle.signal, sessionAbortController.signal])
+									: sessionAbortController.signal;
 
 					const cellResult = cellResults[i];
 					cellResult.status = "running";
@@ -565,11 +574,11 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 							},
 							onStatus: event => {
 								if (event.op === EVAL_TIMEOUT_PAUSE_OP) {
-									idle.pause();
+									idle?.pause();
 									return;
 								}
 								if (event.op === EVAL_TIMEOUT_RESUME_OP) {
-									idle.resume();
+									idle?.resume();
 									return;
 								}
 								cellResult.statusEvents ??= [];
@@ -578,7 +587,7 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 							},
 						});
 					} finally {
-						idle.dispose();
+						idle?.dispose();
 						activeLiveCell = undefined;
 					}
 					const durationMs = Date.now() - startTime;
@@ -758,5 +767,8 @@ async function summarizeFinal(
 		outputLines,
 		outputBytes,
 		artifactId: rawSummary.artifactId,
+		columnDroppedBytes: rawSummary.columnDroppedBytes,
+		columnTruncatedLines: rawSummary.columnTruncatedLines,
+		columnMax: rawSummary.columnMax,
 	};
 }

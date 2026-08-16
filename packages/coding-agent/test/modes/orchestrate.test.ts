@@ -2,7 +2,7 @@ import { beforeAll, describe, expect, it } from "bun:test";
 import {
 	containsOrchestrate,
 	highlightOrchestrate,
-	ORCHESTRATE_NOTICE,
+	renderOrchestrateNotice,
 } from "@oh-my-pi/pi-coding-agent/modes/orchestrate";
 import { initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
 import { containsUltrathink, highlightUltrathink } from "@oh-my-pi/pi-coding-agent/modes/ultrathink";
@@ -22,7 +22,13 @@ describe("orchestrate keyword detection", () => {
 		expect(containsOrchestrate("do it now\norchestrate")).toBe(true);
 	});
 
-	it("ignores casing, inflections, punctuation-adjacent, and path-embedded forms", () => {
+	it("matches the lowercase word beside prose punctuation and quotes", () => {
+		for (const text of ["do it. orchestrate.", "please orchestrate, then report", 'say "orchestrate" now']) {
+			expect(containsOrchestrate(text)).toBe(true);
+		}
+	});
+
+	it("ignores casing, inflections, and path-embedded forms", () => {
 		expect(containsOrchestrate("Orchestrate")).toBe(false);
 		expect(containsOrchestrate("ORCHESTRATE")).toBe(false);
 		expect(containsOrchestrate("orchestrated the build")).toBe(false);
@@ -30,9 +36,8 @@ describe("orchestrate keyword detection", () => {
 		expect(containsOrchestrate("a clean orchestration")).toBe(false);
 		expect(containsOrchestrate("it orchestrates well")).toBe(false);
 		expect(containsOrchestrate("reorchestrate everything")).toBe(false);
-		// The reported bug: a path/extension is not whitespace, so the word never triggers.
+		// A path/extension must not trigger even though sentence punctuation does.
 		expect(containsOrchestrate("packages/coding-agent/src/modes/orchestrate.ts")).toBe(false);
-		expect(containsOrchestrate("do it. orchestrate.")).toBe(false);
 		expect(containsOrchestrate("nothing to see here")).toBe(false);
 	});
 
@@ -53,9 +58,16 @@ describe("orchestrate keyword highlighting", () => {
 		expect(Bun.stripANSI(decorated)).toBe("please orchestrate this");
 	});
 
+	it("decorates punctuation-adjacent prose while preserving visible text", () => {
+		const input = 'please "orchestrate," then continue';
+		const decorated = highlightOrchestrate(input);
+		expect(decorated).not.toBe(input);
+		expect(Bun.stripANSI(decorated)).toBe(input);
+	});
+
 	it("leaves text without the standalone keyword untouched", () => {
 		expect(highlightOrchestrate("nothing here")).toBe("nothing here");
-		// Probe hits the substring but the whitespace boundary fails — no decoration.
+		// Probe hits the substring but token/path boundaries fail — no decoration.
 		expect(highlightOrchestrate("orchestrated builds")).toBe("orchestrated builds");
 		expect(highlightOrchestrate("Orchestrate this")).toBe("Orchestrate this");
 		// The reported bug: a filename must not be painted.
@@ -73,11 +85,37 @@ describe("orchestrate keyword highlighting", () => {
 
 describe("orchestrate notice", () => {
 	it("is a self-contained system notice carrying the orchestration contract", () => {
-		expect(ORCHESTRATE_NOTICE.startsWith("<system-notice>")).toBe(true);
-		expect(ORCHESTRATE_NOTICE.endsWith("</system-notice>")).toBe(true);
-		expect(ORCHESTRATE_NOTICE).toContain("orchestrator");
+		const notice = renderOrchestrateNotice({
+			tools: ["read", "task", "edit", "write", "lsp", "bash", "todo"],
+		});
+		expect(notice.startsWith("<system-notice>")).toBe(true);
+		expect(notice.endsWith("</system-notice>")).toBe(true);
+		expect(notice).toContain("orchestrator");
 		// The contract must not retain the slash-command input placeholder.
-		expect(ORCHESTRATE_NOTICE).not.toContain("$@");
+		expect(notice).not.toContain("$@");
+	});
+
+	it("omits tool-budget mentions for tools absent from the session", () => {
+		const notice = renderOrchestrateNotice({ tools: ["read"] });
+		expect(notice).not.toContain("`task` for dispatch");
+		expect(notice).not.toContain("`edit`");
+		expect(notice).not.toContain("`write`");
+		expect(notice).not.toContain("`lsp diagnostics`");
+		expect(notice).not.toContain("via `bash`");
+		expect(notice).not.toContain("`todo` for tracking");
+	});
+
+	it("does not name edit when only write is available", () => {
+		const writeOnly = renderOrchestrateNotice({ tools: ["read", "write"] });
+		expect(writeOnly).toContain("with `write`");
+		expect(writeOnly).not.toContain("`edit`/`write`");
+		expect(writeOnly).not.toContain("with `edit`");
+	});
+
+	it("does not name write when only edit is available", () => {
+		const editOnly = renderOrchestrateNotice({ tools: ["read", "edit"] });
+		expect(editOnly).toContain("with `edit`");
+		expect(editOnly).not.toContain("`edit`/`write`");
 	});
 });
 

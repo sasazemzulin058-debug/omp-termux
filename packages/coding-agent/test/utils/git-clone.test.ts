@@ -3,8 +3,8 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import * as url from "node:url";
-
 import * as git from "@oh-my-pi/pi-coding-agent/utils/git";
+import { removeWithRetries } from "@oh-my-pi/pi-utils";
 
 // Regression coverage for #1589: `git.clone({ sha })` used to hardcode
 // `--depth 1`, producing a shallow clone whose object store never contained
@@ -16,13 +16,21 @@ const GIT_ENV = {
 	GIT_AUTHOR_EMAIL: "t@example.com",
 	GIT_COMMITTER_NAME: "t",
 	GIT_COMMITTER_EMAIL: "t@example.com",
+	GIT_CONFIG_GLOBAL: "/dev/null",
+	GIT_CONFIG_SYSTEM: "/dev/null",
 } as const;
 
 function gitRun(cwd: string, args: string[]): string {
+	const env: Record<string, string | undefined> = { ...process.env, ...GIT_ENV };
+	delete env.GIT_DIR;
+	delete env.GIT_WORK_TREE;
+	delete env.GIT_INDEX_FILE;
+	delete env.GIT_OBJECT_DIRECTORY;
+	delete env.GIT_ALTERNATE_OBJECT_DIRECTORIES;
 	const result = Bun.spawnSync({
 		cmd: ["git", ...args],
 		cwd,
-		env: { ...process.env, ...GIT_ENV },
+		env,
 		stdout: "pipe",
 		stderr: "pipe",
 	});
@@ -56,7 +64,7 @@ describe("git.clone with options.sha", () => {
 	});
 
 	afterAll(async () => {
-		await fs.rm(tmpRoot, { recursive: true, force: true });
+		await removeWithRetries(tmpRoot);
 	});
 
 	test("checks out a non-tip SHA (regression for #1589)", async () => {

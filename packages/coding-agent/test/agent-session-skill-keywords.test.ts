@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import * as path from "node:path";
-import { Agent } from "@oh-my-pi/pi-agent-core";
-import type { TextContent } from "@oh-my-pi/pi-ai";
+import { type } from "@oh-my-pi/omptype";
+import { Agent, type AgentTool } from "@oh-my-pi/pi-agent-core";
 import { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
@@ -22,6 +22,24 @@ type ObservedSkillTurn = {
 	texts: string[];
 };
 
+// Workflowz requires active `task` and `eval` tools; keep both active so
+// keyword steering exercises the notice path.
+const mockTaskTool: AgentTool = {
+	name: "task",
+	label: "Task",
+	description: "Mock task tool",
+	parameters: type({}),
+	execute: async () => ({ content: [{ type: "text" as const, text: "ok" }] }),
+};
+
+const mockEvalTool: AgentTool = {
+	name: "eval",
+	label: "Eval",
+	description: "Mock eval tool",
+	parameters: type({}),
+	execute: async () => ({ content: [{ type: "text" as const, text: "ok" }] }),
+};
+
 describe("AgentSession skill prompt keyword steering", () => {
 	let tempDir: TempDir;
 	let authStorage: AuthStorage | undefined;
@@ -32,9 +50,9 @@ describe("AgentSession skill prompt keyword steering", () => {
 		tempDir = TempDir.createSync("@pi-agent-session-skill-keywords-");
 		observedTurns.length = 0;
 
-		authStorage = await AuthStorage.create(path.join(tempDir.path(), "testauth.db"));
+		authStorage = await AuthStorage.create(":memory:");
 		authStorage.setRuntimeApiKey("anthropic", "test-key");
-		const modelRegistry = new ModelRegistry(authStorage, path.join(tempDir.path(), "models.yml"));
+		const modelRegistry = new ModelRegistry(authStorage);
 		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
 		if (!model) throw new Error("Expected claude-sonnet-4-5 model to exist");
 
@@ -43,7 +61,7 @@ describe("AgentSession skill prompt keyword steering", () => {
 			initialState: {
 				model,
 				systemPrompt: ["Test"],
-				tools: [],
+				tools: [mockTaskTool, mockEvalTool],
 				messages: [],
 			},
 			convertToLlm,
@@ -53,10 +71,11 @@ describe("AgentSession skill prompt keyword steering", () => {
 						const content = message.content;
 						if (typeof content === "string") return content;
 						if (!Array.isArray(content)) return "";
-						return content
-							.filter((block): block is TextContent => block.type === "text")
-							.map(block => block.text)
-							.join("\n");
+						const text: string[] = [];
+						for (const block of content) {
+							if (block.type === "text") text.push(block.text);
+						}
+						return text.join("\n");
 					}),
 				});
 				const stream = new AssistantMessageEventStream();

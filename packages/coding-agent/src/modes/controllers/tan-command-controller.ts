@@ -3,12 +3,14 @@ import * as path from "node:path";
 import type { AssistantMessage } from "@oh-my-pi/pi-ai";
 import { prompt, Snowflake } from "@oh-my-pi/pi-utils";
 import backgroundTanDispatchPrompt from "../../prompts/system/background-tan-dispatch.md" with { type: "text" };
+import tanContextSwitchPrompt from "../../prompts/system/tan-context-switch.md" with { type: "text" };
 import { AgentRegistry, MAIN_AGENT_ID } from "../../registry/agent-registry";
 import * as sdk from "../../sdk";
 import type { AgentSession } from "../../session/agent-session";
 import { BACKGROUND_TAN_DISPATCH_MESSAGE_TYPE } from "../../session/messages";
 import { SessionManager } from "../../session/session-manager";
 import { createMCPProxyTools, createSubagentSettings } from "../../task/executor";
+import { USER_TODO_EDIT_CUSTOM_TYPE } from "../../tools/todo";
 import type { InteractiveModeContext } from "../types";
 
 const TAN_LABEL_PREVIEW_LENGTH = 80;
@@ -66,6 +68,11 @@ export class TanCommandController {
 		}
 
 		const parentSessionId = session.sessionId;
+		// Providers route on `promptCacheKey ?? sessionId`, so the parent's live
+		// requests may cache under a pinned key that differs from its session id
+		// (the parent being itself a fork/tan). Mirror exactly what the parent
+		// populated the cache under — same rule as advisor and handoff calls.
+		const parentPromptCacheKey = session.agent.promptCacheKey ?? parentSessionId;
 		const thinkingLevel = session.configuredThinkingLevel();
 		const systemPrompt = [...session.systemPrompt];
 		const toolNames = session.getActiveToolNames();
@@ -73,6 +80,19 @@ export class TanCommandController {
 		const ownerId = session.getAgentId() ?? MAIN_AGENT_ID;
 		const mcpManager = this.ctx.mcpManager;
 		const cwd = this.ctx.sessionManager.getCwd();
+		const parentArtifactsDir = this.ctx.sessionManager.getArtifactsDir();
+		// Snapshot the parent session's local:// mapping when dispatching. The
+		// interactive SessionManager is mutable and may switch transcripts while
+		// this background tan is still running. Use the session-manager id (not
+		// `session.sessionId`, which can diverge after `/fresh` or a provider
+		// session override) so the tan resolves the same local root the parent's
+		// large-paste writes and `local://` reads use — notably the Windows
+		// short-root fallback keys `%TEMP%/omp-local/<id>` off this id.
+		const parentLocalSessionId = this.ctx.sessionManager.getSessionId();
+		const localProtocolOptions = {
+			getArtifactsDir: () => parentArtifactsDir,
+			getSessionId: () => parentLocalSessionId,
+		};
 		// Nest the clone inside the parent's artifact directory (like a subagent
 		// session) rather than as a top-level sibling, so it shares the parent's
 		// artifacts in place — no copy needed.
@@ -91,6 +111,7 @@ export class TanCommandController {
 		let jobId = "";
 		try {
 			const cloneManager = await SessionManager.forkFrom(parentFile, cwd, sessionDir, undefined, {
+				copyArtifacts: false,
 				suppressBreadcrumb: true,
 				sessionFile: cloneFile,
 			});
@@ -111,7 +132,7 @@ export class TanCommandController {
 							systemPrompt,
 							toolNames,
 							providerSessionId: `${parentSessionId}:tan:${Snowflake.next()}`,
-							providerPromptCacheKey: parentSessionId,
+							providerPromptCacheKey: parentPromptCacheKey,
 							modelRegistry,
 							authStorage: modelRegistry.authStorage,
 							settings,
@@ -125,21 +146,54 @@ export class TanCommandController {
 							parentAgentId: ownerId,
 							agentRegistry,
 							disableExtensionDiscovery: true,
+							localProtocolOptions,
 						});
 						clone = created.session;
+						clone.sessionManager?.appendSessionInit?.({
+							systemPrompt: clone.systemPrompt ? clone.systemPrompt.join("\n\n") : systemPrompt.join("\n\n"),
+							task: trimmedWork,
+							tools: clone.getActiveToolNames ? clone.getActiveToolNames() : toolNames,
+						});
 						const abortClone = () => {
 							void clone?.abort();
 						};
 						signal.addEventListener("abort", abortClone, { once: true });
+						// The fork inherits the parent's todo list via session entries;
+						// its reminders would drag the tan back onto the parent's task.
+						// Clear runtime state and persist an empty edit so reloads agree.
+						clone.setTodoPhases([]);
+						cloneManager.appendCustomEntry(USER_TODO_EDIT_CUSTOM_TYPE, { phases: [] });
+						const injectContextSwitch = () => {
+							clone?.agent.appendMessage({
+								role: "developer",
+								content: tanContextSwitchPrompt,
+								attribution: "agent",
+								timestamp: Date.now(),
+							});
+						};
+						// Compaction summarizes the fork notice away with the rest of the
+						// history, after which the clone re-adopts the parent's task as its
+						// own (the summary blends both). Re-inject after every successful
+						// compaction so the fork boundary survives summarization.
+						const unsubscribeCompaction = clone.subscribe(event => {
+							if (event.type === "auto_compaction_end" && event.result && !event.aborted) {
+								injectContextSwitch();
+							}
+						});
 						try {
 							if (signal.aborted) {
 								abortClone();
 								throw new Error("Aborted before execution");
 							}
+							// Inject a context-switch developer message so the clone knows
+							// it is a tangential fork — its parent owns the prior conversation;
+							// this agent must focus exclusively on the user's request.
+							injectContextSwitch();
 							await clone.prompt(trimmedWork, { attribution: "user" });
 							await clone.waitForIdle();
 							return extractAssistantText(clone.getLastAssistantMessage()) || "(no output)";
 						} finally {
+							unsubscribeCompaction();
 							signal.removeEventListener("abort", abortClone);
 						}
 					} finally {
@@ -160,7 +214,7 @@ export class TanCommandController {
 						}
 					}
 				},
-				{ ownerId },
+				{ ownerId, agentId: cloneId },
 			);
 		} catch (error) {
 			if (cloneFile) await removeCloneSession(cloneFile);

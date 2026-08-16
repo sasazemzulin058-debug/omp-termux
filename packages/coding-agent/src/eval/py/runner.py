@@ -26,18 +26,21 @@ when installed.
 
 from __future__ import annotations
 
-import asyncio
 import ast
-import contextvars
+import asyncio
 import base64
 import builtins
+import codecs
+import contextvars
 import inspect
 import io
 import json
+import locale
 import os
 import re
 import runpy
 import shlex
+import shutil
 import signal
 import subprocess
 import sys
@@ -45,7 +48,7 @@ import threading
 import time
 import traceback
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 # ---------------------------------------------------------------------------
 # Frame writer
@@ -189,10 +192,14 @@ class _RunnerState:
         self.capture_rid: str | None = None
 
 
-_CURRENT_RID: contextvars.ContextVar[str | None] = contextvars.ContextVar("omp_current_rid", default=None)
-_CURRENT_DISPLAYED_MATPLOTLIB_FIGURE_IDS: contextvars.ContextVar[set[int] | None] = contextvars.ContextVar(
-    "omp_displayed_matplotlib_figure_ids",
-    default=None,
+_CURRENT_RID: contextvars.ContextVar[str | None] = contextvars.ContextVar(
+    "omp_current_rid", default=None
+)
+_CURRENT_DISPLAYED_MATPLOTLIB_FIGURE_IDS: contextvars.ContextVar[set[int] | None] = (
+    contextvars.ContextVar(
+        "omp_displayed_matplotlib_figure_ids",
+        default=None,
+    )
 )
 
 
@@ -231,7 +238,9 @@ def _drain_captured_stdout() -> None:
 def _start_capture_drain() -> None:
     if _CAPTURE_READ_FD is None:
         return
-    thread = threading.Thread(target=_drain_captured_stdout, name="omp-fd1-capture", daemon=True)
+    thread = threading.Thread(
+        target=_drain_captured_stdout, name="omp-fd1-capture", daemon=True
+    )
     thread.start()
 
 
@@ -240,7 +249,9 @@ def _start_capture_drain() -> None:
 # ---------------------------------------------------------------------------
 
 
-_MAGIC_LINE_RE = re.compile(r"^(?P<indent>[ \t]*)(?P<name>[A-Za-z_][A-Za-z_0-9]*)(?:[ \t]+(?P<args>.*))?$")
+_MAGIC_LINE_RE = re.compile(
+    r"^(?P<indent>[ \t]*)(?P<name>[A-Za-z_][A-Za-z_0-9]*)(?:[ \t]+(?P<args>.*))?$"
+)
 _ASSIGN_LINE_RE = re.compile(
     r"^(?P<indent>[ \t]*)(?P<lhs>[A-Za-z_][A-Za-z_0-9.\[\], ]*?)\s*=\s*(?P<rhs>.+)$"
 )
@@ -335,7 +346,9 @@ def transform_cell(source: str) -> str:
             rhs = m.group("rhs").strip()
             if rhs.startswith("!"):
                 cmd = rhs[1:].strip()
-                out.append(f"{m.group('indent')}{m.group('lhs').rstrip()} = __omp_shell({_quote_arg(cmd)})")
+                out.append(
+                    f"{m.group('indent')}{m.group('lhs').rstrip()} = __omp_shell({_quote_arg(cmd)})"
+                )
                 i += 1
                 continue
             if rhs.startswith("%") and not rhs.startswith("%%"):
@@ -381,7 +394,9 @@ def line_magic(name: str) -> Callable[[Callable[[str], Any]], Callable[[str], An
     return decorator
 
 
-def cell_magic(name: str) -> Callable[[Callable[[str, str], Any]], Callable[[str, str], Any]]:
+def cell_magic(
+    name: str,
+) -> Callable[[Callable[[str, str], Any]], Callable[[str, str], Any]]:
     def decorator(fn: Callable[[str, str], Any]) -> Callable[[str, str], Any]:
         _CELL_MAGICS[name] = fn
         return fn
@@ -397,27 +412,191 @@ def _emit_status(op: str, **data: Any) -> None:
     _emit({"type": "display", "id": rid, "bundle": bundle})
 
 
+_SHELL_READ_CHUNK_BYTES = 8192
+_SHELL_OUTPUT_MAX_BYTES = 1024 * 1024
+_SHELL_OUTPUT_MAX_LINES = 3000
+_SHELL_RESULT_CAPTURE_BYTES = _SHELL_OUTPUT_MAX_BYTES
+_PIP_LINE_SCAN_CHARS = 64 * 1024
+_SHELL_TRUNCATION_NOTICE = (
+    f"[output truncated: shell helper exceeded {_SHELL_OUTPUT_MAX_BYTES} bytes "
+    f"or {_SHELL_OUTPUT_MAX_LINES} lines; remaining output discarded]\n"
+)
+
+
+def _process_output_encoding() -> str:
+    return locale.getpreferredencoding(False) or "utf-8"
+
+
+def _process_output_decoder(encoding: str) -> codecs.IncrementalDecoder:
+    return codecs.getincrementaldecoder(encoding)(errors="strict")
+
+
+def _take_prefix_by_lines(text: str, max_lines: int) -> str:
+    if max_lines <= 0:
+        return ""
+    cursor = 0
+    for _ in range(max_lines):
+        newline = text.find("\n", cursor)
+        if newline < 0:
+            return text
+        cursor = newline + 1
+    return text[:cursor]
+
+
+def _take_prefix_by_encoded_bytes(text: str, max_bytes: int, encoding: str) -> str:
+    if max_bytes <= 0:
+        return ""
+    if len(text.encode(encoding, errors="strict")) <= max_bytes:
+        return text
+    lo = 0
+    hi = len(text)
+    while lo < hi:
+        mid = (lo + hi + 1) // 2
+        if len(text[:mid].encode(encoding, errors="strict")) <= max_bytes:
+            lo = mid
+        else:
+            hi = mid - 1
+    return text[:lo]
+
+
+class _ShellOutputLimiter:
+    def __init__(self, *, max_bytes: int, max_lines: int, encoding: str) -> None:
+        self._remaining_bytes = max_bytes
+        self._remaining_lines = max_lines
+        self._encoding = encoding
+        self._truncated = False
+        self._at_line_start = True
+
+    def write(self, text: str) -> None:
+        if not text or self._truncated:
+            return
+        limited = _take_prefix_by_lines(text, self._remaining_lines)
+        truncated = limited != text
+        byte_limited = _take_prefix_by_encoded_bytes(
+            limited, self._remaining_bytes, self._encoding
+        )
+        truncated = truncated or byte_limited != limited
+        if byte_limited:
+            sys.stdout.write(byte_limited)
+            sys.stdout.flush()
+            self._remaining_bytes -= len(
+                byte_limited.encode(self._encoding, errors="strict")
+            )
+            self._remaining_lines -= byte_limited.count("\n")
+            self._at_line_start = byte_limited.endswith("\n")
+        if truncated:
+            self._emit_truncation_notice()
+
+    def _emit_truncation_notice(self) -> None:
+        if self._truncated:
+            return
+        prefix = "" if self._at_line_start else "\n"
+        sys.stdout.write(prefix + _SHELL_TRUNCATION_NOTICE)
+        sys.stdout.flush()
+        self._truncated = True
+
+
+def _stream_process_output(
+    proc: subprocess.Popen, on_text: Callable[[str], None] | None = None
+) -> None:
+    assert proc.stdout is not None
+    encoding = _process_output_encoding()
+    decoder = _process_output_decoder(encoding)
+    limiter = _ShellOutputLimiter(
+        max_bytes=_SHELL_OUTPUT_MAX_BYTES,
+        max_lines=_SHELL_OUTPUT_MAX_LINES,
+        encoding=encoding,
+    )
+    while True:
+        chunk = os.read(proc.stdout.fileno(), _SHELL_READ_CHUNK_BYTES)
+        if not chunk:
+            break
+        text = decoder.decode(chunk)
+        if text:
+            limiter.write(text)
+            if on_text is not None:
+                on_text(text)
+    tail = decoder.decode(b"", final=True)
+    if tail:
+        limiter.write(tail)
+        if on_text is not None:
+            on_text(tail)
+
+
+class _BoundedTextCapture:
+    def __init__(self, max_bytes: int, max_lines: int, encoding: str) -> None:
+        self._remaining_bytes = max_bytes
+        self._remaining_lines = max_lines
+        self._encoding = encoding
+        self._parts: list[str] = []
+
+    def add(self, text: str) -> None:
+        if self._remaining_bytes <= 0 or self._remaining_lines <= 0:
+            return
+        line_limited = _take_prefix_by_lines(text, self._remaining_lines)
+        part = _take_prefix_by_encoded_bytes(
+            line_limited, self._remaining_bytes, self._encoding
+        )
+        if not part:
+            return
+        self._parts.append(part)
+        self._remaining_bytes -= len(part.encode(self._encoding, errors="strict"))
+        self._remaining_lines -= part.count("\n")
+
+    def text(self) -> str:
+        return "".join(self._parts)
+
+
+class _BoundedLineScanner:
+    def __init__(self, max_chars: int, on_line: Callable[[str], None]) -> None:
+        self._max_chars = max_chars
+        self._on_line = on_line
+        self._partial = ""
+
+    def add(self, text: str) -> None:
+        data = self._partial + text
+        lines = data.splitlines(keepends=True)
+        if not lines:
+            return
+        if lines[-1].endswith(("\n", "\r")):
+            self._partial = ""
+        else:
+            self._partial = lines.pop()
+        for line in lines:
+            self._on_line(line)
+        if len(self._partial) > self._max_chars:
+            self._partial = self._partial[-self._max_chars :]
+
+    def finish(self) -> None:
+        if self._partial:
+            self._on_line(self._partial)
+            self._partial = ""
+
+
 @line_magic("pip")
 def _magic_pip(args: str) -> None:
     argv = shlex.split(args) if args else ["--help"]
     cmd = [sys.executable, "-m", "pip", *argv]
+    # stdin=DEVNULL: see _run_shell_body.
     proc = subprocess.Popen(
         cmd,
+        stdin=subprocess.DEVNULL,
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
-        text=True,
-        bufsize=1,
     )
     installed_packages: list[str] = []
-    assert proc.stdout is not None
-    for raw_line in proc.stdout:
-        sys.stdout.write(raw_line)
+
+    def scan_pip_line(raw_line: str) -> None:
         m = re.search(r"Successfully installed\s+(.+)$", raw_line)
         if m:
             for token in m.group(1).split():
                 # Token is name-version; drop the version suffix.
                 pkg = token.rsplit("-", 1)[0]
                 installed_packages.append(pkg.replace("_", "-"))
+
+    scanner = _BoundedLineScanner(_PIP_LINE_SCAN_CHARS, scan_pip_line)
+    _stream_process_output(proc, scanner.add)
+    scanner.finish()
     proc.wait()
     if installed_packages:
         import importlib
@@ -428,7 +607,9 @@ def _magic_pip(args: str) -> None:
             head = mod_name.split(".", 1)[0].lower()
             if head in prefixes:
                 sys.modules.pop(mod_name, None)
-    _emit_status("pip", args=args, installed=installed_packages, exit_code=proc.returncode)
+    _emit_status(
+        "pip", args=args, installed=installed_packages, exit_code=proc.returncode
+    )
 
 
 @line_magic("cd")
@@ -503,7 +684,9 @@ def _magic_who(_args: str) -> list[str]:
     names = sorted(
         name
         for name, value in _STATE.user_ns.items()
-        if not name.startswith("_") and not callable(value) or hasattr(value, "__class__")
+        if not name.startswith("_")
+        and not callable(value)
+        or hasattr(value, "__class__")
     )
     return [n for n in names if not n.startswith("__")]
 
@@ -522,7 +705,9 @@ def _magic_whos(_args: str) -> list[tuple[str, str]]:
 @line_magic("reset")
 def _magic_reset(_args: str) -> None:
     _STATE.user_ns.clear()
-    _STATE.user_ns.update({"__name__": "__main__", "__doc__": None, "__builtins__": builtins})
+    _STATE.user_ns.update(
+        {"__name__": "__main__", "__doc__": None, "__builtins__": builtins}
+    )
     _install_builtins(_STATE.user_ns)
     _emit_status("reset")
 
@@ -531,7 +716,9 @@ def _magic_reset(_args: str) -> None:
 def _magic_load(args: str) -> None:
     path = Path(os.path.expanduser(args.strip()))
     source = path.read_text(encoding="utf-8")
-    _emit({"type": "display", "id": _CURRENT_RID.get(), "bundle": {"text/plain": source}})
+    _emit(
+        {"type": "display", "id": _CURRENT_RID.get(), "bundle": {"text/plain": source}}
+    )
     _exec_source(source, _STATE.user_ns)
 
 
@@ -553,9 +740,38 @@ def _magic_run(args: str) -> None:
         _STATE.user_ns[name] = value
 
 
+def _resolve_bash() -> str:
+    if os.name != "nt":
+        return "/bin/bash"
+    # Prefer Git Bash over WSL's System32 bash.exe, which runs inside a
+    # separate Linux environment and does not share the Windows filesystem
+    # layout or PATH.
+    for env_var, suffix in (
+        ("ProgramFiles", r"Git\bin\bash.exe"),
+        ("ProgramFiles(x86)", r"Git\bin\bash.exe"),
+        ("LOCALAPPDATA", r"Programs\Git\bin\bash.exe"),
+    ):
+        root = os.environ.get(env_var)
+        if root:
+            candidate = os.path.join(root, suffix)
+            if os.path.isfile(candidate):
+                return candidate
+    found = shutil.which("bash")
+    if found and "system32" not in found.lower():
+        return found
+    # WSL's System32 bash.exe runs in a separate Linux environment, so
+    # silently falling back to it would execute the cell somewhere the user
+    # did not intend; fail loudly instead.
+    raise RuntimeError(
+        "%%bash requires a POSIX bash, but none was found. "
+        "Install Git for Windows or add a non-WSL bash to PATH."
+    )
+
+
 @cell_magic("bash")
 def _magic_cell_bash(args: str, body: str) -> int:
-    return _run_shell_body(body, shell_arg="/bin/bash")
+    return _run_shell_body(body, shell_arg=_resolve_bash())
+
 
 @cell_magic("capture")
 def _magic_cell_capture(args: str, body: str) -> str:
@@ -595,16 +811,16 @@ def _magic_cell_writefile(args: str, body: str) -> str:
 
 
 def _run_shell_body(body: str, *, shell_arg: str) -> int:
+    # stdin=DEVNULL: children must not inherit the runner's stdin, which is
+    # the host's NDJSON control channel (a reading child would steal frames,
+    # and inheriting the pipe deadlocks nested interpreters on Windows).
     proc = subprocess.Popen(
         [shell_arg, "-c", body],
+        stdin=subprocess.DEVNULL,
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
-        text=True,
-        bufsize=1,
     )
-    assert proc.stdout is not None
-    for raw_line in proc.stdout:
-        sys.stdout.write(raw_line)
+    _stream_process_output(proc)
     proc.wait()
     return proc.returncode
 
@@ -640,16 +856,20 @@ class _ShellResult(list):
 
 
 def __omp_shell(cmd: str) -> _ShellResult:
-    proc = subprocess.run(
+    # stdin=DEVNULL: see _run_shell_body.
+    proc = subprocess.Popen(
         cmd,
         shell=True,
+        stdin=subprocess.DEVNULL,
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
-        text=True,
     )
-    if proc.stdout:
-        sys.stdout.write(proc.stdout)
-    lines = [line for line in (proc.stdout or "").splitlines()]
+    capture = _BoundedTextCapture(
+        _SHELL_RESULT_CAPTURE_BYTES, _SHELL_OUTPUT_MAX_LINES, _process_output_encoding()
+    )
+    _stream_process_output(proc, capture.add)
+    proc.wait()
+    lines = [line for line in capture.text().splitlines()]
     return _ShellResult(lines, proc.returncode)
 
 
@@ -676,7 +896,9 @@ def _is_matplotlib_figure(value: Any) -> bool:
         return True
 
     value_type = type(value)
-    return value_type.__module__ == "matplotlib.figure" and value_type.__name__ == "Figure"
+    return (
+        value_type.__module__ == "matplotlib.figure" and value_type.__name__ == "Figure"
+    )
 
 
 def _matplotlib_figure_png(value: Any) -> str | None:
@@ -717,7 +939,6 @@ def _mime_bundle(value: Any) -> dict:
     matplotlib_png = _matplotlib_figure_png(value)
     if matplotlib_png is not None:
         bundle["image/png"] = matplotlib_png
-
 
     mimebundle = getattr(value, "_repr_mimebundle_", None)
     if callable(mimebundle):
@@ -839,7 +1060,9 @@ def _await_sync(coro) -> Any:
     except RuntimeError:
         running_loop = None
     if running_loop is not None and running_loop.is_running():
-        raise RuntimeError("top-level await is not supported from synchronous magic execution")
+        raise RuntimeError(
+            "top-level await is not supported from synchronous magic execution"
+        )
     return asyncio.run(coro)
 
 
@@ -852,7 +1075,6 @@ def _run_compiled_sync(code, ns: dict, *, want_value: bool) -> Any:
         return eval(code, ns)
     exec(code, ns)
     return None
-
 
 
 async def _run_compiled_async(code, ns: dict, *, want_value: bool) -> Any:
@@ -872,7 +1094,7 @@ async def _run_compiled_async(code, ns: dict, *, want_value: bool) -> Any:
 
 
 def _compile_source(source: str) -> tuple[Any, Any | None, bool]:
-    module = ast.parse(source, mode="exec")
+    module = ast.parse(source, "<cell>", "exec")
     if not module.body:
         return None, None, False
 
@@ -976,6 +1198,7 @@ def _apply_request_runtime(req: dict) -> None:
             elif value is None:
                 os.environ.pop(key, None)
 
+
 def _start_parent_watchdog() -> None:
     """Self-terminate when the host process dies.
 
@@ -1031,23 +1254,27 @@ async def _handle_request_async(req: dict) -> None:
             transformed = transform_cell(req.get("code", ""))
         except SyntaxError as exc:
             _emit_error(rid, exc)
-            _emit({
-                "type": "done",
-                "id": rid,
-                "status": "error",
-                "executionCount": execution_count,
-                "cancelled": False,
-            })
+            _emit(
+                {
+                    "type": "done",
+                    "id": rid,
+                    "status": "error",
+                    "executionCount": execution_count,
+                    "cancelled": False,
+                }
+            )
             return
         except BaseException as exc:  # noqa: BLE001 - runtime setup errors must settle the request
             _emit_error(rid, exc)
-            _emit({
-                "type": "done",
-                "id": rid,
-                "status": "error",
-                "executionCount": execution_count,
-                "cancelled": False,
-            })
+            _emit(
+                {
+                    "type": "done",
+                    "id": rid,
+                    "status": "error",
+                    "executionCount": execution_count,
+                    "cancelled": False,
+                }
+            )
             return
 
         _begin_exec_sigint()
@@ -1071,13 +1298,15 @@ async def _handle_request_async(req: dict) -> None:
                 pass
 
         _flush_stream_proxies(rid)
-        _emit({
-            "type": "done",
-            "id": rid,
-            "status": status,
-            "executionCount": execution_count,
-            "cancelled": cancelled,
-        })
+        _emit(
+            {
+                "type": "done",
+                "id": rid,
+                "status": status,
+                "executionCount": execution_count,
+                "cancelled": cancelled,
+            }
+        )
     finally:
         if _STATE.capture_rid == rid:
             _STATE.capture_rid = None
@@ -1087,14 +1316,30 @@ async def _handle_request_async(req: dict) -> None:
 
 
 def _emit_error(rid: str, exc: BaseException) -> None:
-    tb_lines = traceback.format_exception(type(exc), exc, exc.__traceback__)
-    _emit({
-        "type": "error",
-        "id": rid,
-        "ename": type(exc).__name__,
-        "evalue": str(exc),
-        "traceback": [line.rstrip("\n") for line in tb_lines],
-    })
+    if isinstance(exc, SyntaxError) and exc.filename == "<cell>":
+        # Syntax error in the cell source itself: every stack frame is runner
+        # machinery, so emit only the caret display, like a REPL.
+        tb_lines = traceback.format_exception_only(type(exc), exc)
+    else:
+        # Drop the leading runner-internal frames (_handle_request_async ->
+        # _exec_source_async -> _run_compiled_*) so tracebacks start at user
+        # code. If the exception never reached user code it is a runner bug;
+        # keep the full traceback because those frames are the diagnosis.
+        tb = exc.__traceback__
+        while tb is not None and tb.tb_frame.f_code.co_filename == __file__:
+            tb = tb.tb_next
+        tb_lines = traceback.format_exception(
+            type(exc), exc, tb if tb is not None else exc.__traceback__
+        )
+    _emit(
+        {
+            "type": "error",
+            "id": rid,
+            "ename": type(exc).__name__,
+            "evalue": str(exc),
+            "traceback": [line.rstrip("\n") for line in tb_lines],
+        }
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1110,13 +1355,15 @@ def _read_stdin(loop: asyncio.AbstractEventLoop, queue: asyncio.Queue, stdin) ->
         try:
             req = json.loads(line)
         except json.JSONDecodeError as exc:
-            _emit({
-                "type": "error",
-                "id": "",
-                "ename": "ProtocolError",
-                "evalue": f"Invalid JSON request: {exc}",
-                "traceback": [],
-            })
+            _emit(
+                {
+                    "type": "error",
+                    "id": "",
+                    "ename": "ProtocolError",
+                    "evalue": f"Invalid JSON request: {exc}",
+                    "traceback": [],
+                }
+            )
             continue
         loop.call_soon_threadsafe(queue.put_nowait, req)
     loop.call_soon_threadsafe(queue.put_nowait, {"type": "exit"})
@@ -1136,10 +1383,16 @@ async def _main_async() -> None:
     loop = asyncio.get_running_loop()
     _STATE.loop = loop
     queue: asyncio.Queue = asyncio.Queue()
-    reader = threading.Thread(target=_read_stdin, args=(loop, queue, stdin), name="omp-stdin-reader", daemon=True)
+    reader = threading.Thread(
+        target=_read_stdin,
+        args=(loop, queue, stdin),
+        name="omp-stdin-reader",
+        daemon=True,
+    )
     reader.start()
 
     tasks: set[asyncio.Task] = set()
+
     def _task_done(task: asyncio.Task) -> None:
         tasks.discard(task)
         try:
@@ -1148,6 +1401,7 @@ async def _main_async() -> None:
             return
         if exc is not None:
             _emit_error("", exc)
+
     try:
         while True:
             req = await queue.get()

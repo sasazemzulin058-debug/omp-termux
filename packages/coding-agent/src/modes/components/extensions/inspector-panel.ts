@@ -4,7 +4,7 @@
  * Shows name, description, origin, status, and kind-specific preview.
  */
 import * as os from "node:os";
-import { isZodSchema, zodToWireSchema } from "@oh-my-pi/pi-ai/utils/schema";
+import { arkToWireSchema, isArkSchema } from "@oh-my-pi/pi-ai/utils/schema";
 import { type Component, truncateToWidth, wrapTextWithAnsi } from "@oh-my-pi/pi-tui";
 import { theme } from "../../../modes/theme/theme";
 import { shortenPath } from "../../../tools/render-utils";
@@ -168,16 +168,21 @@ export class InspectorPanel implements Component {
 		lines.push(theme.fg("dim", theme.boxRound.horizontal.repeat(Math.min(width - 2, 40))));
 
 		try {
-			const tool = raw as any;
-			const wire = (s: unknown): any => (isZodSchema(s) ? zodToWireSchema(s) : s);
-			const paramSchema = wire(tool?.parameters);
-			const inputSchema = wire(tool?.inputSchema);
+			const tool = raw as { parameters?: unknown; inputSchema?: unknown };
+			const wire = (schema: unknown): unknown => (isArkSchema(schema) ? arkToWireSchema(schema) : schema);
+			const paramSchema = wire(tool.parameters) as Record<string, unknown> | undefined;
+			const inputSchema = wire(tool.inputSchema) as Record<string, unknown> | undefined;
 			const params = paramSchema?.properties || inputSchema?.properties || {};
 
 			if (Object.keys(params).length === 0) {
 				lines.push(theme.fg("dim", "  (no arguments)"));
 			} else {
-				const required = new Set(paramSchema?.required || inputSchema?.required || []);
+				const requiredValue = paramSchema?.required ?? inputSchema?.required;
+				const required = new Set(
+					Array.isArray(requiredValue)
+						? requiredValue.filter((value): value is string => typeof value === "string")
+						: [],
+				);
 
 				for (const [name, spec] of Object.entries(params)) {
 					const param = spec as any;

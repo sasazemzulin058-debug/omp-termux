@@ -1,4 +1,5 @@
 import { getAntigravityUserAgent } from "@oh-my-pi/pi-catalog/wire/gemini-headers";
+import * as AIError from "../error";
 import type {
 	CredentialRankingContext,
 	CredentialRankingStrategy,
@@ -11,6 +12,7 @@ import type {
 	UsageStatus,
 	UsageWindow,
 } from "../usage";
+import { DAY_MS, parseIsoTimestamp, WEEK_MS } from "./shared";
 
 // (Refresh is the sole responsibility of AuthStorage; no provider-direct refresh here.)
 
@@ -28,7 +30,13 @@ interface AntigravityModelInfo {
 	displayName?: string;
 	quotaInfo?: AntigravityQuotaInfo | AntigravityQuotaInfo[];
 	quotaInfos?: AntigravityQuotaInfo[];
+	dailyQuotaInfo?: AntigravityQuotaInfo | AntigravityQuotaInfo[];
+	dailyQuotaInfos?: AntigravityQuotaInfo[];
+	weeklyQuotaInfo?: AntigravityQuotaInfo | AntigravityQuotaInfo[];
+	weeklyQuotaInfos?: AntigravityQuotaInfo[];
 	quotaInfoByTier?: Record<string, AntigravityQuotaInfo | AntigravityQuotaInfo[]>;
+	quotaInfoByWindow?: Record<string, AntigravityQuotaInfo | AntigravityQuotaInfo[]>;
+	quotaInfosByWindow?: Record<string, AntigravityQuotaInfo | AntigravityQuotaInfo[]>;
 	apiProvider?: string;
 	modelProvider?: string;
 }
@@ -39,6 +47,82 @@ interface AntigravityUsageResponse {
 
 const DEFAULT_ENDPOINT = "https://daily-cloudcode-pa.googleapis.com";
 const FETCH_AVAILABLE_MODELS_PATH = "/v1internal:fetchAvailableModels";
+
+interface AntigravityWindowDescriptor {
+	id: string;
+	label: string;
+	durationMs?: number;
+}
+
+function classifyWindow(id: string | undefined, label: string | undefined): AntigravityWindowDescriptor | undefined {
+	const source = `${id ?? ""} ${label ?? ""}`.toLowerCase();
+	if (source.includes("week") || source.includes("7d") || /7[\s_-]*day/.test(source)) {
+		return { id: "weekly", label: "Weekly", durationMs: WEEK_MS };
+	}
+	if (source.includes("day") || source.includes("daily") || source.includes("24h")) {
+		return { id: "daily", label: "Daily", durationMs: DAY_MS };
+	}
+	if (id || label) return { id: id ?? label ?? "default", label: label ?? id ?? "Default" };
+	return undefined;
+}
+
+function inferWindowFromReset(resetAt: number | undefined, nowMs: number): AntigravityWindowDescriptor {
+	if (resetAt !== undefined && resetAt - nowMs > DAY_MS) {
+		return { id: "weekly", label: "Weekly", durationMs: WEEK_MS };
+	}
+	return { id: "daily", label: "Daily", durationMs: DAY_MS };
+}
+
+function quotaInferenceKey(info: AntigravityQuotaInfo): string {
+	return [info.modelProvider ?? "", info.apiProvider ?? "", info.tier ?? ""].join("|");
+}
+
+function inferWindowDescriptors(
+	quotaInfos: AntigravityQuotaInfo[],
+	nowMs: number,
+): WeakMap<AntigravityQuotaInfo, AntigravityWindowDescriptor> {
+	const descriptors = new WeakMap<AntigravityQuotaInfo, AntigravityWindowDescriptor>();
+	const groups = new Map<string, { info: AntigravityQuotaInfo; resetAt: number | undefined }[]>();
+
+	for (const info of quotaInfos) {
+		const explicitDescriptor = classifyWindow(info.windowId, info.windowLabel);
+		if (explicitDescriptor) {
+			descriptors.set(info, explicitDescriptor);
+			continue;
+		}
+		const group = groups.get(quotaInferenceKey(info)) ?? [];
+		group.push({ info, resetAt: parseIsoTimestamp(info.resetTime) });
+		groups.set(quotaInferenceKey(info), group);
+	}
+
+	for (const group of groups.values()) {
+		const resetTimes = [...new Set(group.map(entry => entry.resetAt).filter(resetAt => resetAt !== undefined))].sort(
+			(a, b) => a - b,
+		);
+		const latestReset = resetTimes.length > 1 ? resetTimes.at(-1) : undefined;
+		for (const entry of group) {
+			const descriptor =
+				latestReset !== undefined && entry.resetAt === latestReset
+					? { id: "weekly", label: "Weekly", durationMs: WEEK_MS }
+					: inferWindowFromReset(entry.resetAt, nowMs);
+			descriptors.set(entry.info, descriptor);
+		}
+	}
+
+	return descriptors;
+}
+
+function withWindowDescriptor(
+	info: AntigravityQuotaInfo,
+	descriptor: AntigravityWindowDescriptor | undefined,
+): AntigravityQuotaInfo {
+	if (!descriptor) return info;
+	return {
+		...info,
+		windowId: info.windowId ?? descriptor.id,
+		windowLabel: info.windowLabel ?? descriptor.label,
+	};
+}
 
 function clampFraction(value: number | undefined): number | undefined {
 	if (value === undefined || !Number.isFinite(value)) return undefined;
@@ -54,14 +138,18 @@ function getUsageStatus(remainingFraction: number | undefined): UsageStatus | un
 	return "ok";
 }
 
-function parseWindow(info: AntigravityQuotaInfo): UsageWindow | undefined {
-	if (!info.resetTime) return undefined;
-	const resetAt = Date.parse(info.resetTime);
-	if (!Number.isFinite(resetAt)) return undefined;
+function parseWindow(
+	info: AntigravityQuotaInfo,
+	descriptor: AntigravityWindowDescriptor | undefined,
+): UsageWindow | undefined {
+	const resetAt = parseIsoTimestamp(info.resetTime);
+	const hasResetAt = resetAt !== undefined;
+	if (!descriptor && !hasResetAt) return undefined;
 	return {
-		id: info.windowId ?? "default",
-		label: info.windowLabel ?? "Default",
-		resetsAt: resetAt,
+		id: descriptor?.id ?? info.windowId ?? "default",
+		label: info.windowLabel ?? descriptor?.label ?? "Default",
+		...(descriptor?.durationMs !== undefined ? { durationMs: descriptor.durationMs } : {}),
+		...(hasResetAt ? { resetsAt: resetAt } : {}),
 	};
 }
 
@@ -105,30 +193,43 @@ function normalizeQuotaInfos(info: AntigravityModelInfo): AntigravityQuotaInfo[]
 		...(info.apiProvider ? { apiProvider: info.apiProvider } : {}),
 		...(info.modelProvider ? { modelProvider: info.modelProvider } : {}),
 	};
-	const addInfo = (value: AntigravityQuotaInfo, tier?: string) => {
-		results.push({ ...source, ...value, ...(tier ? { tier } : {}) });
+	const addInfo = (value: AntigravityQuotaInfo, tier?: string, windowDescriptor?: AntigravityWindowDescriptor) => {
+		results.push({ ...source, ...withWindowDescriptor(value, windowDescriptor), ...(tier ? { tier } : {}) });
 	};
-	const addArray = (values?: AntigravityQuotaInfo[]) => {
-		if (!values) return;
-		for (const value of values) addInfo(value);
+	const addValue = (
+		value: AntigravityQuotaInfo | AntigravityQuotaInfo[] | undefined,
+		tier?: string,
+		windowDescriptor?: AntigravityWindowDescriptor,
+	) => {
+		if (!value) return;
+		if (Array.isArray(value)) {
+			for (const entry of value) addInfo(entry, tier, windowDescriptor);
+			return;
+		}
+		addInfo(value, tier, windowDescriptor);
 	};
 
-	if (Array.isArray(info.quotaInfo)) {
-		addArray(info.quotaInfo);
-	} else if (info.quotaInfo) {
-		addInfo(info.quotaInfo);
-	}
-	addArray(info.quotaInfos);
+	addValue(info.quotaInfo);
+	addValue(info.quotaInfos);
+	addValue(info.dailyQuotaInfo, undefined, classifyWindow("daily", "Daily"));
+	addValue(info.dailyQuotaInfos, undefined, classifyWindow("daily", "Daily"));
+	addValue(info.weeklyQuotaInfo, undefined, classifyWindow("weekly", "Weekly"));
+	addValue(info.weeklyQuotaInfos, undefined, classifyWindow("weekly", "Weekly"));
 
 	if (info.quotaInfoByTier) {
 		for (const [tier, value] of Object.entries(info.quotaInfoByTier)) {
-			if (Array.isArray(value)) {
-				for (const entry of value) addInfo(entry, tier);
-			} else if (value) {
-				addInfo(value, tier);
-			}
+			addValue(value, tier);
 		}
 	}
+
+	const addWindowMap = (values?: Record<string, AntigravityQuotaInfo | AntigravityQuotaInfo[]>) => {
+		if (!values) return;
+		for (const [windowId, value] of Object.entries(values)) {
+			addValue(value, undefined, classifyWindow(windowId, undefined));
+		}
+	};
+	addWindowMap(info.quotaInfoByWindow);
+	addWindowMap(info.quotaInfosByWindow);
 
 	return results;
 }
@@ -181,7 +282,7 @@ async function fetchAntigravityUsage(params: UsageFetchParams, ctx: UsageFetchCo
 				break;
 			}
 
-			if (response.status === 429 || (response.status >= 500 && response.status < 600)) {
+			if (AIError.isTransientStatus(response.status)) {
 				continue;
 			}
 			break;
@@ -221,18 +322,20 @@ async function fetchAntigravityUsage(params: UsageFetchParams, ctx: UsageFetchCo
 
 	for (const [_modelId, modelInfo] of Object.entries(data.models ?? {})) {
 		const quotaInfos = normalizeQuotaInfos(modelInfo);
+		const inferredDescriptors = inferWindowDescriptors(quotaInfos, nowMs);
 		for (const quotaInfo of quotaInfos) {
 			const amount = buildAmount(quotaInfo);
-			const window = parseWindow(quotaInfo);
+			const window = parseWindow(quotaInfo, inferredDescriptors.get(quotaInfo));
 			if (window?.resetsAt) {
 				earliestReset = earliestReset ? Math.min(earliestReset, window.resetsAt) : window.resetsAt;
 			}
 			const tierKey = (quotaInfo.tier ?? "default").toLowerCase();
 			const counterName = formatCounterName(quotaInfo);
 			const counterKey = counterName?.toLowerCase() ?? "default";
-			// Use quotaInfo.windowId even when parseWindow returns undefined
-			// (no resetTime) — separate windows must not collapse to "default".
-			const windowId = quotaInfo.windowId ?? window?.id ?? "default";
+			// Use the parsed window id when available so provider enum names like
+			// WINDOW_WEEKLY normalize into the same visible `/usage` group as
+			// weeklyQuotaInfo entries.
+			const windowId = window?.id ?? quotaInfo.windowId ?? "default";
 			const key = `${counterKey}|${tierKey}|${windowId}`;
 			const existing = deduped.get(key);
 			if (!existing) {
@@ -323,8 +426,6 @@ export const antigravityUsageProvider: UsageProvider = {
 	supports: params => params.provider === "google-antigravity",
 };
 
-const ONE_DAY_MS = 24 * 60 * 60 * 1000;
-
 function getAntigravityCounterKeyForModel(context: CredentialRankingContext | undefined): string | undefined {
 	const modelId = context?.modelId?.toLowerCase();
 	if (!modelId) return undefined;
@@ -360,17 +461,16 @@ function rankAntigravityLimits(report: UsageReport, context: CredentialRankingCo
 }
 
 /**
- * Antigravity quotas reset daily and are returned per backend counter
- * (Anthropic / Google / OpenAI) without a fixed "primary vs secondary"
- * split. `fetchAntigravityUsage` already sorts `limits` ascending by
- * `remainingFraction`; after model-family scoping, the most-pressured
- * relevant counter is index 0.
+ * Antigravity quotas are returned per backend counter (Anthropic / Google /
+ * OpenAI) and can include both daily and weekly windows. `fetchAntigravityUsage`
+ * sorts `limits` ascending by `remainingFraction`; after model-family scoping,
+ * the most-pressured relevant counter/window is index 0.
  *
  * Leave `secondary` unset: AuthStorage compares secondary metrics before
- * primary metrics, which is correct for providers with explicit long-window
- * limits but wrong here. Ranking Antigravity by the bottleneck counter first
- * avoids preferring an account at 95% Gemini / 0% Claude over one at
- * 80% Gemini / 70% Claude.
+ * primary metrics, which is correct for providers with a fixed short/long
+ * split but wrong here. Ranking Antigravity by the bottleneck counter first
+ * avoids preferring an account at 95% Gemini daily / 0% Claude weekly over one
+ * with healthier Gemini headroom.
  */
 export const antigravityRankingStrategy: CredentialRankingStrategy = {
 	findWindowLimits(report, context) {
@@ -383,8 +483,8 @@ export const antigravityRankingStrategy: CredentialRankingStrategy = {
 		const counterKey = getAntigravityCounterKeyForModel(context);
 		return `counter:${counterKey ?? "unknown"}`;
 	},
-	// Antigravity windows omit `durationMs`; the endpoint is
-	// `daily-cloudcode-pa.googleapis.com`, so fall back to 24h when computing
-	// drain rate.
-	windowDefaults: { primaryMs: ONE_DAY_MS, secondaryMs: ONE_DAY_MS },
+	// Antigravity windows carry `durationMs` when the response identifies them
+	// as daily/weekly. Fall back to daily for legacy unlabelled quotaInfo
+	// entries from `daily-cloudcode-pa.googleapis.com`.
+	windowDefaults: { primaryMs: DAY_MS, secondaryMs: DAY_MS },
 };

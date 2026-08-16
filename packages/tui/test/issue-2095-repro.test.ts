@@ -122,6 +122,51 @@ describe("issue #2095: ConPTY post-full-paint settle prevents viewport drift", (
 		}
 	});
 
+	it("resumes direct writes after an idle ConPTY settle window expires (#6024)", async () => {
+		setPlatform("linux");
+		Bun.env.WSL_DISTRO_NAME = "Ubuntu";
+		const term = new VirtualTerminal(80, 24, 4096);
+		let now = 0;
+		const immediate: (() => void)[] = [];
+		const scheduler: RenderScheduler = {
+			now: () => now,
+			scheduleImmediate: callback => {
+				immediate.push(callback);
+			},
+			scheduleRender: (): RenderTimer => ({ cancel(): void {} }),
+		};
+		const tui = new TUI(term, undefined, { renderScheduler: scheduler });
+		const status = {
+			line: "spin-0",
+			renders: 0,
+			invalidate(): void {},
+			render(): string[] {
+				this.renders++;
+				return [this.line];
+			},
+		};
+		tui.addChild(new TallContent(200));
+		tui.addChild(status);
+
+		try {
+			tui.start();
+			while (immediate.length > 0) immediate.shift()?.();
+			await term.flush();
+			tui.requestRender(true, { clearScrollback: true });
+			while (immediate.length > 0) immediate.shift()?.();
+			await term.flush();
+			now = 151;
+			const rendersAfterSettle = status.renders;
+
+			status.line = "spin-1";
+			tui.requestDirectWrite(status);
+
+			expect(status.renders).toBe(rendersAfterSettle + 1);
+		} finally {
+			tui.stop();
+		}
+	});
+
 	it("does not arm the settle on a clean (non-ConPTY) linux host", async () => {
 		setPlatform("linux");
 		const term = new VirtualTerminal(80, 24, 4096);

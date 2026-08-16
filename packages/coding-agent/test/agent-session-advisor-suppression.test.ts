@@ -17,8 +17,10 @@
  *     (which converts to `developer`) would send an invalid provider tail, so the
  *     follow-up stays queued for the next explicit resume rather than auto-running.
  */
-import { afterEach, beforeEach, describe, expect, it } from "bun:test";
-import { Agent, type AgentMessage } from "@oh-my-pi/pi-agent-core";
+import { afterAll, afterEach, beforeAll, describe, expect, it } from "bun:test";
+import { type } from "@oh-my-pi/omptype";
+import { Agent, type AgentMessage, type AgentTool } from "@oh-my-pi/pi-agent-core";
+import type { ToolCall } from "@oh-my-pi/pi-ai";
 import { createMockModel, type MockModel, type MockResponse } from "@oh-my-pi/pi-ai/providers/mock";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
@@ -29,6 +31,17 @@ import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { USER_INTERRUPT_LABEL } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { Snowflake, TempDir } from "@oh-my-pi/pi-utils";
+
+interface MockYieldDetails {
+	status: "success";
+	data?: unknown;
+	type?: string | string[];
+}
+
+const mockYieldParameters = type({
+	result: "unknown",
+	"type?": "unknown",
+});
 
 const ADVISOR_TYPE = "advisor";
 
@@ -41,12 +54,25 @@ interface ParkedHarness {
 	streamStarted: Promise<void>;
 }
 
+interface CompletedAdvisorHarness {
+	session: AgentSession;
+	sessionManager: SessionManager;
+	mock: MockModel;
+	advisorMock: MockModel;
+}
+
+interface AdvisorTestExtensionRunner {
+	hasHandlers(eventType: string): boolean;
+	emitBeforeAgentStart(): Promise<undefined>;
+	emit(event: { type: string; message?: AgentMessage }): Promise<void>;
+}
+
 describe("AgentSession advisor auto-resume suppression", () => {
 	let tempDir: TempDir;
 	let session: AgentSession;
 	const authStorages: AuthStorage[] = [];
 
-	beforeEach(() => {
+	beforeAll(() => {
 		tempDir = TempDir.createSync("@pi-advisor-suppress-");
 	});
 
@@ -56,9 +82,11 @@ describe("AgentSession advisor auto-resume suppression", () => {
 			await session?.dispose();
 		} finally {
 			for (const authStorage of authStorages.splice(0)) authStorage.close();
-			await Bun.sleep(0);
-			await tempDir?.remove();
 		}
+	});
+
+	afterAll(async () => {
+		await tempDir?.remove();
 	});
 
 	/**
@@ -86,12 +114,111 @@ describe("AgentSession advisor auto-resume suppression", () => {
 		});
 		const sessionManager = SessionManager.inMemory();
 		const settings = Settings.isolated({ "compaction.enabled": false });
-		const authStorage = await AuthStorage.create(tempDir.join(`auth-${Snowflake.next()}.db`));
+		const authStorage = await AuthStorage.create(":memory:");
 		authStorages.push(authStorage);
 		authStorage.setRuntimeApiKey("anthropic", "test-key");
 		const modelRegistry = new ModelRegistry(authStorage, tempDir.join("models.yml"));
 		session = new AgentSession({ agent, sessionManager, settings, modelRegistry });
 		return { session, sessionManager, mock, streamStarted: started.promise };
+	}
+
+	function readYieldResultData(result: unknown): unknown {
+		if (!result || typeof result !== "object" || !("data" in result)) return undefined;
+		return result.data;
+	}
+
+	function isYieldType(value: unknown): value is string | string[] {
+		return (
+			typeof value === "string" ||
+			(Array.isArray(value) && value.length > 0 && value.every(item => typeof item === "string"))
+		);
+	}
+
+	function createMockYieldTool(): AgentTool<typeof mockYieldParameters, MockYieldDetails> {
+		return {
+			name: "yield",
+			label: "Yield",
+			description: "Mock yield tool",
+			parameters: mockYieldParameters,
+			execute: async (_toolCallId, params) => {
+				const details: MockYieldDetails = { status: "success", data: readYieldResultData(params.result) };
+				if (isYieldType(params.type)) details.type = params.type;
+				return {
+					content: [{ type: "text", text: "Result submitted." }],
+					details,
+				};
+			},
+		};
+	}
+
+	function createYieldMockResponse(args: { result: { data: unknown }; type?: string | string[] }): MockResponse {
+		const toolCall: ToolCall = {
+			type: "toolCall",
+			id: `call_yield_${Snowflake.next()}`,
+			name: "yield",
+			arguments: args,
+		};
+		return {
+			content: [toolCall],
+			stopReason: "toolUse",
+			usage: {
+				input: 1,
+				output: 1,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 2,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+		};
+	}
+
+	async function createCompletedAdvisorSession(
+		severity: "concern" | "blocker" = "concern",
+		extensionRunner?: AdvisorTestExtensionRunner,
+	): Promise<CompletedAdvisorHarness> {
+		const model = getBundledModel("anthropic", "claude-sonnet-4-5")!;
+		const mock = createMockModel({
+			responses: [
+				{ content: ["EXACT VERDICT"], stopReason: "stop" },
+				{ content: ["CHANGED VERDICT"], stopReason: "stop" },
+			],
+		});
+		const advisorMock = createMockModel({
+			responses: [
+				{
+					content: [
+						{
+							type: "toolCall",
+							name: "advise",
+							arguments: { note: "Fixture verdict confirmed", severity },
+						},
+					],
+				},
+				{ content: [], stopReason: "stop" },
+			],
+		});
+		const agent = new Agent({
+			getApiKey: () => "test-key",
+			initialState: { model, systemPrompt: ["Test"], tools: [] },
+			streamFn: mock.stream,
+		});
+		const sessionManager = SessionManager.inMemory();
+		const settings = Settings.isolated({ "compaction.enabled": false, "retry.enabled": false });
+		settings.setModelRole("advisor", "anthropic/claude-sonnet-4-5");
+		const authStorage = await AuthStorage.create(":memory:");
+		authStorages.push(authStorage);
+		authStorage.setRuntimeApiKey("anthropic", "test-key");
+		const modelRegistry = new ModelRegistry(authStorage, tempDir.join("models.yml"));
+		session = new AgentSession({
+			agent,
+			sessionManager,
+			settings,
+			modelRegistry,
+			advisorTools: [],
+			advisorStreamFn: advisorMock.stream,
+			extensionRunner: extensionRunner as never,
+		});
+		return { session, sessionManager, mock, advisorMock };
 	}
 
 	function advisorCard(content: string) {
@@ -131,6 +258,156 @@ describe("AgentSession advisor auto-resume suppression", () => {
 		};
 		return persisted;
 	}
+
+	it("preserves a late advisor concern after a terminal answer without waking the primary", async () => {
+		const { session, sessionManager, mock, advisorMock } = await createCompletedAdvisorSession();
+		const persisted = capturePersistedAdvice(sessionManager);
+
+		await session.prompt("read five fixture files and answer with exactly one line");
+		await session.waitForIdle();
+		expect(mock.calls.length).toBe(1);
+
+		expect(session.setAdvisorEnabled(true)).toBe(true);
+		const advisor = session.getAdvisorAgent();
+		if (!advisor) throw new Error("Expected advisor agent to be live");
+
+		await advisor.prompt("inspect the completed turn");
+		await session.waitForIdle();
+
+		const advisorCards = session.agent.state.messages.filter(isAdvisorCard);
+		expect(advisorCards).toHaveLength(1);
+		expect(persisted.at(-1)).toContain("Fixture verdict confirmed");
+		expect(advisorMock.calls.length).toBeGreaterThanOrEqual(1);
+		expect(mock.calls.length).toBe(1);
+	});
+
+	it("waits for preserved advisor card hooks and persistence before reporting catch-up", async () => {
+		const hookStarted = Promise.withResolvers<void>();
+		const releaseHook = Promise.withResolvers<void>();
+		const extensionRunner: AdvisorTestExtensionRunner = {
+			hasHandlers: eventType => eventType === "message_end",
+			emitBeforeAgentStart: async () => undefined,
+			emit: async event => {
+				if (event.type !== "message_end" || !event.message || !isAdvisorCard(event.message)) return;
+				hookStarted.resolve();
+				await releaseHook.promise;
+			},
+		};
+		const { session, sessionManager, mock } = await createCompletedAdvisorSession("concern", extensionRunner);
+		const persisted = capturePersistedAdvice(sessionManager);
+
+		expect(session.setAdvisorEnabled(true)).toBe(true);
+		await session.prompt("answer with exactly one line");
+		await hookStarted.promise;
+
+		expect(await session.waitForAdvisorCatchup(0)).toBe(false);
+		expect(persisted).toEqual([]);
+
+		let catchupSettled = false;
+		const catchup = session.waitForAdvisorCatchup(1000).then(caughtUp => {
+			catchupSettled = true;
+			return caughtUp;
+		});
+		await Promise.resolve();
+		expect(catchupSettled).toBe(false);
+		expect(persisted).toEqual([]);
+
+		releaseHook.resolve();
+		expect(await catchup).toBe(true);
+		expect(persisted.at(-1)).toContain("Fixture verdict confirmed");
+		expect(mock.calls).toHaveLength(1);
+	});
+
+	it("waits for preserved advisor card start hooks before reporting catch-up", async () => {
+		const hookStarted = Promise.withResolvers<void>();
+		const releaseHook = Promise.withResolvers<void>();
+		const extensionRunner: AdvisorTestExtensionRunner = {
+			hasHandlers: eventType => eventType === "message_start",
+			emitBeforeAgentStart: async () => undefined,
+			emit: async event => {
+				if (event.type !== "message_start" || !event.message || !isAdvisorCard(event.message)) return;
+				hookStarted.resolve();
+				await releaseHook.promise;
+			},
+		};
+		const { session, mock } = await createCompletedAdvisorSession("concern", extensionRunner);
+
+		expect(session.setAdvisorEnabled(true)).toBe(true);
+		await session.prompt("answer with exactly one line");
+		await hookStarted.promise;
+
+		let catchupSettled = false;
+		const catchup = session.waitForAdvisorCatchup(1000).then(caughtUp => {
+			catchupSettled = true;
+			return caughtUp;
+		});
+		await Promise.resolve();
+		expect(catchupSettled).toBe(false);
+
+		releaseHook.resolve();
+		expect(await catchup).toBe(true);
+		expect(mock.calls).toHaveLength(1);
+	});
+
+	it("steers a late advisor blocker after a terminal answer so the primary corrects it", async () => {
+		const { session, mock } = await createCompletedAdvisorSession("blocker");
+
+		await session.prompt("read five fixture files and answer with exactly one line");
+		await session.waitForIdle();
+		expect(mock.calls.length).toBe(1);
+
+		expect(session.setAdvisorEnabled(true)).toBe(true);
+		const advisor = session.getAdvisorAgent();
+		if (!advisor) throw new Error("Expected advisor agent to be live");
+
+		await advisor.prompt("inspect the completed turn");
+		await session.waitForIdle();
+
+		expect(mock.calls.length).toBe(2);
+	});
+
+	it("preserves another late advisor concern after an existing advisor card", async () => {
+		const { session, mock } = await createCompletedAdvisorSession();
+
+		await session.prompt("answer with exactly one line");
+		await session.waitForIdle();
+		session.agent.state.messages.push({
+			role: "custom",
+			...advisorCard("first late concern"),
+			timestamp: Date.now(),
+		});
+		expect(session.setAdvisorEnabled(true)).toBe(true);
+		const advisor = session.getAdvisorAgent();
+		if (!advisor) throw new Error("Expected advisor agent to be live");
+
+		await advisor.prompt("inspect the completed turn");
+		await session.waitForIdle();
+
+		expect(session.agent.state.messages.filter(isAdvisorCard)).toHaveLength(2);
+		expect(mock.calls.length).toBe(1);
+	});
+
+	it("preserves late advice after terminal text with provider metadata blocks", async () => {
+		const { session, mock } = await createCompletedAdvisorSession();
+
+		await session.prompt("answer with exactly one line");
+		await session.waitForIdle();
+		const answer = session.agent.state.messages.at(-1);
+		if (answer?.role !== "assistant") throw new Error("Expected terminal assistant answer");
+		answer.content.push(
+			{ type: "redactedThinking", data: "opaque provider reasoning" },
+			{ type: "fallback", from: { model: "first" }, to: { model: "second" } },
+		);
+		expect(session.setAdvisorEnabled(true)).toBe(true);
+		const advisor = session.getAdvisorAgent();
+		if (!advisor) throw new Error("Expected advisor agent to be live");
+
+		await advisor.prompt("inspect the completed turn");
+		await session.waitForIdle();
+
+		expect(session.agent.state.messages.filter(isAdvisorCard)).toHaveLength(1);
+		expect(mock.calls.length).toBe(1);
+	});
 
 	it("preserves an advisor concern steered before the user interrupt, without auto-resuming", async () => {
 		const { session, sessionManager, mock, streamStarted } = await createParkedSession();
@@ -323,6 +600,41 @@ describe("AgentSession advisor auto-resume suppression", () => {
 		);
 		expect(sawIrc).toBe(true);
 		expect(mock.calls.length).toBe(2);
+	});
+
+	it("stops an idle IRC wake after a terminal yield", async () => {
+		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
+		if (!model) throw new Error("Expected claude-sonnet-4-5 model to exist");
+		let providerCalls = 0;
+		const mock = createMockModel({
+			handler: () => {
+				providerCalls++;
+				if (providerCalls > 1) {
+					throw new Error("terminal yield must not start a second provider call");
+				}
+				return createYieldMockResponse({ result: { data: { ok: true } } });
+			},
+		});
+		const agent = new Agent({
+			getApiKey: () => "test-key",
+			initialState: { model, systemPrompt: ["Test"], tools: [createMockYieldTool()] },
+			streamFn: mock.stream,
+		});
+		const sessionManager = SessionManager.inMemory();
+		const settings = Settings.isolated({ "compaction.enabled": false });
+		const authStorage = await AuthStorage.create(":memory:");
+		authStorages.push(authStorage);
+		authStorage.setRuntimeApiKey("anthropic", "test-key");
+		const modelRegistry = new ModelRegistry(authStorage, tempDir.join("models.yml"));
+		session = new AgentSession({ agent, sessionManager, settings, modelRegistry });
+		const msg: IrcMessage = { id: "m-yield", from: "peer", to: "me", body: "status?", ts: Date.now() };
+
+		const outcome = await session.deliverIrcMessage(msg);
+		await session.waitForIdle();
+
+		expect(outcome).toBe("woken");
+		expect(providerCalls).toBe(1);
+		expect(mock.calls.length).toBe(1);
 	});
 
 	it("flushes an accepted IRC aside on dispose instead of dropping it", async () => {

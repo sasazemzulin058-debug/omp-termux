@@ -72,6 +72,7 @@ export class TimeoutError extends AbortError {
 export interface WaitOptions {
 	allowNonZero?: boolean;
 	allowAbort?: boolean;
+	/** `full` requires upfront capture; `exec` enables it, while direct `spawn` callers pass `stderr: "full"`. */
 	stderr?: "full" | "buffer";
 }
 
@@ -97,7 +98,7 @@ export interface ExecResult {
 export class ChildProcess<In extends InMask = InMask> {
 	#nothrow = false;
 	#stderrTail = "";
-	#stderrChunks: Uint8Array[] = [];
+	#stderrChunks?: Uint8Array[];
 	#exitReason?: Exception;
 	#exitReasonPending?: Exception;
 	#stderrDone: Promise<void>;
@@ -107,8 +108,10 @@ export class ChildProcess<In extends InMask = InMask> {
 	constructor(
 		readonly proc: PipedSubprocess<In>,
 		readonly exposeStderr: boolean,
+		retainFullStderr = exposeStderr,
 	) {
-		// Eagerly drain stderr into a truncated tail string + raw chunks.
+		if (retainFullStderr) this.#stderrChunks = [];
+		// Eagerly drain stderr into a truncated tail, retaining raw chunks only for explicit full capture.
 		const dec = new TextDecoder();
 		const trim = () => {
 			if (this.#stderrTail.length > NonZeroExitError.MAX_TRACE)
@@ -123,7 +126,7 @@ export class ChildProcess<In extends InMask = InMask> {
 		this.#stderrDone = (async () => {
 			try {
 				for await (const chunk of stderrStream) {
-					this.#stderrChunks.push(chunk);
+					this.#stderrChunks?.push(chunk);
 					this.#stderrTail += dec.decode(chunk, { stream: true });
 					trim();
 				}
@@ -214,11 +217,11 @@ export class ChildProcess<In extends InMask = InMask> {
 		return this;
 	}
 
-	kill(reason?: Exception) {
+	kill(reason?: Exception, gracefulMs?: number) {
 		if (reason && !this.#exitReasonPending) this.#exitReasonPending = reason;
 		if (!this.proc.killed)
 			void Process.fromPid(this.proc.pid)
-				?.terminate()
+				?.terminate(gracefulMs === undefined ? undefined : { gracefulMs })
 				?.catch(e => void e);
 	}
 
@@ -247,18 +250,27 @@ export class ChildProcess<In extends InMask = InMask> {
 	}
 
 	async bytes(): Promise<Uint8Array> {
-		return new Response(this.stdout).bytes();
+		// Bun's `Response(stream).bytes()` returns the raw `ArrayBuffer` once the
+		// stream emits more than one chunk (subprocess stdout chunks past ~128 KB).
+		// Normalize at the contract boundary so every caller — SSH read,
+		// `decodeUtf8Text`, callers slicing with `.subarray` — sees a `Uint8Array`.
+		const body = (await new Response(this.stdout).bytes()) as Uint8Array | ArrayBuffer;
+		return body instanceof Uint8Array ? body : new Uint8Array(body);
 	}
 
 	// ── Wait ─────────────────────────────────────────────────────────────
 
 	async wait(opts?: WaitOptions): Promise<ExecResult> {
 		const { allowNonZero = false, allowAbort = false, stderr: stderrMode = "buffer" } = opts ?? {};
+		const stderrChunks = this.#stderrChunks;
+		if (stderrMode === "full" && !stderrChunks) {
+			throw new Error('Full stderr capture must be requested when spawning the process (pass stderr: "full")');
+		}
 
 		const stdoutP = new Response(this.stdout).text();
 		const stderrP =
-			stderrMode === "full"
-				? this.#stderrDone.then(() => new TextDecoder().decode(Buffer.concat(this.#stderrChunks)))
+			stderrMode === "full" && stderrChunks
+				? this.#stderrDone.then(() => new TextDecoder().decode(Buffer.concat(stderrChunks)))
 				: this.#stderrDone.then(() => this.#stderrTail);
 
 		const [stdout, stderr] = await Promise.all([stdoutP, stderrP]);
@@ -297,6 +309,7 @@ export class ChildProcess<In extends InMask = InMask> {
 
 	attachTimeout(ms: number): void {
 		if (ms <= 0 || this.proc.killed) return;
+		this.#exited.catch(() => {});
 		Promise.race([
 			Bun.sleep(ms).then(() => true),
 			this.proc.exited.then(
@@ -323,11 +336,15 @@ type ChildSpawnOptions<In extends InMask = InMask> = Omit<
 > & {
 	signal?: AbortSignal;
 	detached?: boolean;
+	/** Expose and retain complete stderr for a later `wait({ stderr: "full" })`. */
 	stderr?: "full" | null;
 };
 
-/** Spawn a child process with piped stdout/stderr. */
-export function spawn<In extends InMask = InMask>(cmd: string[], opts?: ChildSpawnOptions<In>): ChildProcess<In> {
+function spawnInternal<In extends InMask = InMask>(
+	cmd: string[],
+	opts: ChildSpawnOptions<In> | undefined,
+	retainFullStderr: boolean,
+): ChildProcess<In> {
 	const { timeout = -1, signal, stderr, ...rest } = opts ?? {};
 	const child = Bun.spawn(cmd, {
 		stdin: "ignore",
@@ -336,10 +353,15 @@ export function spawn<In extends InMask = InMask>(cmd: string[], opts?: ChildSpa
 		windowsHide: true,
 		...rest,
 	});
-	const cp = new ChildProcess(child, stderr === "full");
+	const cp = new ChildProcess(child, stderr === "full", retainFullStderr);
 	if (signal) cp.attachSignal(signal);
 	if (timeout > 0) cp.attachTimeout(timeout);
 	return cp;
+}
+
+/** Spawn a child process with piped stdout/stderr. */
+export function spawn<In extends InMask = InMask>(cmd: string[], opts?: ChildSpawnOptions<In>): ChildProcess<In> {
+	return spawnInternal(cmd, opts, opts?.stderr === "full");
 }
 
 /** Options for exec. */
@@ -352,7 +374,7 @@ export async function exec(cmd: string[], opts?: ExecOptions): Promise<ExecResul
 	const { input, stderr, allowAbort, allowNonZero, ...spawnOpts } = opts ?? {};
 	const stdin = typeof input === "string" ? Buffer.from(input) : input;
 	const resolved: ChildSpawnOptions = stdin === undefined ? spawnOpts : { ...spawnOpts, stdin };
-	using child = spawn(cmd, resolved);
+	using child = spawnInternal(cmd, resolved, stderr === "full");
 	return await child.wait({ stderr, allowAbort, allowNonZero });
 }
 

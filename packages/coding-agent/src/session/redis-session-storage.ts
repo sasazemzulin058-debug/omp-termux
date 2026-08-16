@@ -4,6 +4,7 @@ import {
 	type SessionStorageBackend,
 	type SessionStorageIndexEntry,
 } from "./indexed-session-storage";
+import type { SessionTitleUpdate } from "./session-title-slot";
 
 /**
  * Minimal subset of the `bun:redis` `RedisClient` surface used by
@@ -12,6 +13,7 @@ import {
  * without dragging the entire Bun typings into this module.
  */
 export interface RedisSessionStorageClient {
+	send(command: string, args: string[]): Promise<unknown>;
 	get(key: string): Promise<string | null>;
 	getrange(key: string, start: number, end: number): Promise<string>;
 	strlen(key: string): Promise<number>;
@@ -43,6 +45,48 @@ export interface RedisSessionStorageOptions {
 
 const DEFAULT_PREFIX = "omp:sessions:";
 const DEFAULT_SCAN_COUNT = 500;
+
+const WRITE_FULL_SCRIPT = `-- OMP_WRITE_FULL
+redis.call("SET", KEYS[1], ARGV[1])
+redis.call("HSET", KEYS[2], ARGV[2], ARGV[3])
+if ARGV[4] == "1" then
+	redis.call("HSET", KEYS[3], ARGV[2], ARGV[5])
+else
+	redis.call("HDEL", KEYS[3], ARGV[2])
+end
+return 1`;
+
+const APPEND_SCRIPT = `-- OMP_APPEND
+local size = redis.call("APPEND", KEYS[1], ARGV[1])
+redis.call("HSET", KEYS[2], ARGV[2], ARGV[3])
+return size`;
+
+const UPDATE_TITLE_SCRIPT = `-- OMP_UPDATE_TITLE
+redis.call("HSET", KEYS[1], ARGV[1], ARGV[2])
+redis.call("HSET", KEYS[2], ARGV[1], ARGV[3])
+return 1`;
+
+function encodeTitleMeta(title: SessionTitleUpdate): string {
+	return JSON.stringify(title);
+}
+
+function decodeTitleMeta(raw: string | undefined): SessionTitleUpdate | undefined {
+	if (!raw) return undefined;
+	try {
+		const parsed = JSON.parse(raw) as unknown;
+		if (typeof parsed !== "object" || parsed === null) return undefined;
+		const record = parsed as Record<string, unknown>;
+		if (typeof record.updatedAt !== "string") return undefined;
+		const source = record.source === "auto" || record.source === "user" ? record.source : undefined;
+		return {
+			title: typeof record.title === "string" ? record.title : undefined,
+			source,
+			updatedAt: record.updatedAt,
+		};
+	} catch {
+		return undefined;
+	}
+}
 
 /**
  * Redis-backed implementation of {@link SessionStorage}. Each session JSONL
@@ -83,8 +127,9 @@ class RedisSessionStorageBackend implements SessionStorageBackend {
 	async loadIndex(): Promise<SessionStorageIndexEntry[]> {
 		const filePrefix = this.#fileKey("");
 		const metaRaw = await this.#client.hgetall(this.#metaKey());
+		const titleRaw = await this.#client.hgetall(this.#titleMetaKey());
 		const meta: Record<string, string> = metaRaw ?? {};
-
+		const titles: Record<string, string> = titleRaw ?? {};
 		const seen = new Set<string>();
 		let cursor = "0";
 		do {
@@ -106,10 +151,14 @@ class RedisSessionStorageBackend implements SessionStorageBackend {
 				const size = await this.#client.strlen(key);
 				const rawMtime = meta[path];
 				const parsedMtime = rawMtime === undefined ? Number.NaN : Number(rawMtime);
+				const title = decodeTitleMeta(titles[path]);
 				return {
 					path,
 					size,
 					mtimeMs: Number.isFinite(parsedMtime) ? parsedMtime : fallbackMtimeMs,
+					title: title?.title,
+					titleSource: title?.source,
+					titleUpdatedAt: title?.updatedAt,
 				};
 			}),
 		);
@@ -126,14 +175,43 @@ class RedisSessionStorageBackend implements SessionStorageBackend {
 		return Promise.all([head, tail]);
 	}
 
-	async writeFull(path: string, content: string, mtimeMs: number): Promise<void> {
-		await this.#client.set(this.#fileKey(path), content);
-		await this.#client.hset(this.#metaKey(), path, String(mtimeMs));
+	async writeFull(path: string, content: string, mtimeMs: number, title?: SessionTitleUpdate): Promise<void> {
+		await this.#client.send("EVAL", [
+			WRITE_FULL_SCRIPT,
+			"3",
+			this.#fileKey(path),
+			this.#metaKey(),
+			this.#titleMetaKey(),
+			content,
+			path,
+			String(mtimeMs),
+			title ? "1" : "0",
+			title ? encodeTitleMeta(title) : "",
+		]);
 	}
 
 	async append(path: string, line: string, mtimeMs: number): Promise<void> {
-		await this.#client.append(this.#fileKey(path), line);
-		await this.#client.hset(this.#metaKey(), path, String(mtimeMs));
+		await this.#client.send("EVAL", [
+			APPEND_SCRIPT,
+			"2",
+			this.#fileKey(path),
+			this.#metaKey(),
+			line,
+			path,
+			String(mtimeMs),
+		]);
+	}
+
+	async updateSessionTitle(path: string, title: SessionTitleUpdate, mtimeMs: number): Promise<void> {
+		await this.#client.send("EVAL", [
+			UPDATE_TITLE_SCRIPT,
+			"2",
+			this.#metaKey(),
+			this.#titleMetaKey(),
+			path,
+			String(mtimeMs),
+			encodeTitleMeta(title),
+		]);
 	}
 
 	async truncate(path: string, mtimeMs: number): Promise<void> {
@@ -144,13 +222,18 @@ class RedisSessionStorageBackend implements SessionStorageBackend {
 		if (paths.length === 0) return;
 		await this.#client.del(...paths.map(path => this.#fileKey(path)));
 		await this.#client.hdel(this.#metaKey(), ...paths);
+		await this.#client.hdel(this.#titleMetaKey(), ...paths);
 	}
 
 	async move(src: string, dst: string, mtimeMs: number): Promise<void> {
 		await this.#client.rename(this.#fileKey(src), this.#fileKey(dst));
 		try {
+			const titleMeta = await this.#client.hgetall(this.#titleMetaKey());
 			await this.#client.hdel(this.#metaKey(), src);
 			await this.#client.hset(this.#metaKey(), dst, String(mtimeMs));
+			await this.#client.hdel(this.#titleMetaKey(), src);
+			const title = titleMeta[src];
+			if (title !== undefined) await this.#client.hset(this.#titleMetaKey(), dst, title);
 		} catch (err) {
 			logger.warn("Redis session storage meta rename failed", {
 				src,
@@ -166,5 +249,9 @@ class RedisSessionStorageBackend implements SessionStorageBackend {
 
 	#metaKey(): string {
 		return `${this.#prefix}meta`;
+	}
+
+	#titleMetaKey(): string {
+		return `${this.#prefix}title`;
 	}
 }

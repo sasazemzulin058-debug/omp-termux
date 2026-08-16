@@ -1,21 +1,34 @@
 /**
  * Check for and install updates.
  */
+
 import { Command, Flags } from "@oh-my-pi/pi-utils/cli";
-import { runUpdateCommand } from "../cli/update-cli";
+import { updateHelp as commandHelp } from "../cli/command-help";
+import * as pluginCli from "../cli/plugin-cli";
+import * as updateCli from "../cli/update-cli";
 import { initTheme } from "../modes/theme/theme";
 
 export default class Update extends Command {
-	static description = "Check for and install updates";
-
+	static description = commandHelp.description;
 	static flags = {
 		force: Flags.boolean({ char: "f", description: "Force update", default: false }),
 		check: Flags.boolean({ char: "c", description: "Check for updates without installing", default: false }),
+		plugins: Flags.boolean({ char: "l", description: "Update installed plugins", default: false }),
 	};
+
+	static examples = [
+		"omp update",
+		"omp update --check",
+		"# If GitHub rate-limits release metadata, set GITHUB_TOKEN or GH_TOKEN\n  GITHUB_TOKEN=... omp update",
+	];
 
 	async run(): Promise<void> {
 		const { flags } = await this.parse(Update);
 		await initTheme();
-		await runUpdateCommand({ force: flags.force, check: flags.check });
+		if (flags.plugins) {
+			await pluginCli.runPluginCommand({ action: "upgrade", args: [], flags: {} });
+		} else {
+			await updateCli.runUpdateCommand({ force: flags.force, check: flags.check });
+		}
 	}
 }

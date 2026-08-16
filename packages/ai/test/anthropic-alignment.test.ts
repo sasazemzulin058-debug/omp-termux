@@ -3,25 +3,24 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import * as tls from "node:tls";
+import { type as arkType } from "@oh-my-pi/omptype";
 import { Effort } from "@oh-my-pi/pi-ai";
 import {
 	applyClaudeToolPrefix,
 	buildAnthropicClientOptions,
 	buildAnthropicHeaders,
-	buildAnthropicSystemBlocks,
-	claudeAgentSdkVersion,
 	claudeCodeSystemInstruction,
-	claudeCodeVersion,
 	claudeToolPrefix,
 	deriveClaudeDeviceId,
 	generateClaudeCloakingUserId,
 	isClaudeCloakingUserId,
 	mapStainlessArch,
-	mapStainlessOs,
 	streamAnthropic,
 	stripClaudeToolPrefix,
 } from "@oh-my-pi/pi-ai/providers/anthropic";
-import { getEnvApiKey } from "@oh-my-pi/pi-ai/stream";
+import type { MessageCreateParams } from "@oh-my-pi/pi-ai/providers/anthropic-wire";
+import { claudeCodeVersion } from "@oh-my-pi/pi-ai/providers/claude-code-fingerprint";
+import { getEnvApiKey, streamSimple } from "@oh-my-pi/pi-ai/stream";
 import type {
 	AssistantMessage,
 	Context,
@@ -32,7 +31,7 @@ import type {
 	Tool,
 } from "@oh-my-pi/pi-ai/types";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
-import { type as arkType } from "arktype";
+import { removeSyncWithRetries } from "@oh-my-pi/pi-utils";
 import { withEnv } from "./helpers";
 
 const ANTHROPIC_MODEL_SPEC: ModelSpec<"anthropic-messages"> = {
@@ -114,6 +113,21 @@ function captureAnthropicPayload(
 	return promise;
 }
 
+function captureSimpleAnthropicPayload(
+	model: Model<"anthropic-messages">,
+	context: Context,
+	reasoning: Effort,
+): Promise<unknown> {
+	const { promise, resolve } = Promise.withResolvers<unknown>();
+	streamSimple(model, context, {
+		apiKey: "sk-ant-oat-test",
+		signal: createAbortedSignal(),
+		reasoning,
+		onPayload: payload => resolve(payload),
+	});
+	return promise;
+}
+
 function expectClaudeMetadataUserId(userId: string | undefined, expectedSessionId?: string): void {
 	expect(typeof userId).toBe("string");
 	const parsed = JSON.parse(userId ?? "{}") as {
@@ -139,13 +153,7 @@ function expectClaudeMetadataUserId(userId: string | undefined, expectedSessionI
 }
 
 describe("Anthropic request fingerprint alignment", () => {
-	it("maps Stainless OS and arch values from explicit inputs", () => {
-		expect(mapStainlessOs("darwin")).toBe("MacOS");
-		expect(mapStainlessOs("windows")).toBe("Windows");
-		expect(mapStainlessOs("linux")).toBe("Linux");
-		expect(mapStainlessOs("freebsd")).toBe("FreeBSD");
-		expect(mapStainlessOs("solaris")).toBe("Other::solaris");
-
+	it("maps Stainless arch values from explicit inputs", () => {
 		expect(mapStainlessArch("x64")).toBe("x64");
 		expect(mapStainlessArch("amd64")).toBe("x64");
 		expect(mapStainlessArch("arm64")).toBe("arm64");
@@ -154,18 +162,7 @@ describe("Anthropic request fingerprint alignment", () => {
 		expect(mapStainlessArch("sparc64")).toBe("other::sparc64");
 	});
 
-	it("uses runtime Stainless OS and arch mappings in Anthropic headers", () => {
-		const headers = buildAnthropicHeaders({
-			apiKey: "sk-ant-oat-test",
-			isOAuth: true,
-			stream: true,
-		});
-
-		expect(headers["X-Stainless-OS"]).toBe(mapStainlessOs(process.platform));
-		expect(headers["X-Stainless-Arch"]).toBe(mapStainlessArch(process.arch));
-	});
-
-	it("matches Claude Code OAuth header defaults", () => {
+	it("matches Cowork OAuth header defaults", () => {
 		const sessionId = "167ec5b4-e711-4169-879f-84fa52679d9c";
 		const headers = buildAnthropicHeaders({
 			apiKey: "sk-ant-oat-test",
@@ -175,14 +172,43 @@ describe("Anthropic request fingerprint alignment", () => {
 		});
 
 		expect(headers.Accept).toBe("application/json");
-		expect(headers["User-Agent"]).toBe(
-			`claude-cli/${claudeCodeVersion} (external, local-agent, agent-sdk/${claudeAgentSdkVersion})`,
-		);
+		expect(headers["User-Agent"]).toBe(`claude-cli/${claudeCodeVersion} (external, claude-desktop)`);
 		expect(headers["X-Claude-Code-Session-Id"]).toBe(sessionId);
+		expect(headers["X-Stainless-Arch"]).toBe(mapStainlessArch(process.arch));
+		expect(headers["X-Stainless-OS"]).toBe("Linux");
+		expect(headers["X-Stainless-Runtime-Version"]).toBe("v26.3.0");
+		expect(headers["X-Stainless-Timeout"]).toBe("600");
+		expect(headers["anthropic-client-platform"]).toBeUndefined();
+		expect(headers["anthropic-client-version"]).toBeUndefined();
+		expect(Object.keys(headers)).toEqual([
+			"Accept",
+			"Content-Type",
+			"User-Agent",
+			"X-Claude-Code-Session-Id",
+			"X-Stainless-Arch",
+			"X-Stainless-Lang",
+			"X-Stainless-OS",
+			"X-Stainless-Package-Version",
+			"X-Stainless-Retry-Count",
+			"X-Stainless-Runtime",
+			"X-Stainless-Runtime-Version",
+			"X-Stainless-Timeout",
+			"anthropic-beta",
+			"anthropic-dangerous-direct-browser-access",
+			"anthropic-version",
+			"Authorization",
+			"x-app",
+			"x-client-request-id",
+			"Connection",
+			"Accept-Encoding",
+		]);
+		expect(headers["anthropic-beta"]).toBe(
+			"claude-code-20250219,interleaved-thinking-2025-05-14,thinking-token-count-2026-05-13,context-management-2025-06-27,prompt-caching-scope-2026-01-05,mid-conversation-system-2026-04-07,advanced-tool-use-2025-11-20,effort-2025-11-24,fallback-credit-2026-06-01",
+		);
 		expect(headers["x-client-request-id"]).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/);
 	});
 
-	it("sends redact-thinking beta only when thinking display is omitted", () => {
+	it("omits the legacy redact-thinking beta from Cowork requests", () => {
 		const baseArgs = {
 			model: ANTHROPIC_MODEL,
 			apiKey: "sk-ant-oat-test",
@@ -196,7 +222,7 @@ describe("Anthropic request fingerprint alignment", () => {
 		expect(visible.defaultHeaders["anthropic-beta"]).not.toContain("redact-thinking-2026-02-12");
 
 		const hidden = buildAnthropicClientOptions({ ...baseArgs, thinkingDisplay: "omitted" });
-		expect(hidden.defaultHeaders["anthropic-beta"]).toContain("redact-thinking-2026-02-12");
+		expect(hidden.defaultHeaders["anthropic-beta"]).not.toContain("redact-thinking-2026-02-12");
 
 		const hiddenUtility = buildAnthropicClientOptions({
 			...baseArgs,
@@ -204,41 +230,35 @@ describe("Anthropic request fingerprint alignment", () => {
 			thinkingEnabled: false,
 			thinkingDisplay: "omitted",
 		});
-		expect(hiddenUtility.defaultHeaders["anthropic-beta"]).toContain("redact-thinking-2026-02-12");
+		expect(hiddenUtility.defaultHeaders["anthropic-beta"]).not.toContain("redact-thinking-2026-02-12");
 	});
 
-	it("matches CC system-block layout: billing and instruction uncached, single breakpoint on the last context block", () => {
-		// We mimic Claude Code's billing+instruction system layout but do NOT emit
-		// the `scope: "global"` field that CC attaches to its middle breakpoint —
-		// `prompt-caching-scope-2026-01-05` only works against canonical
-		// `api.anthropic.com`, and third-party Anthropic-compatible proxies
-		// (z.ai, openrouter, …) reject the unknown field outright.
-		const blocks = buildAnthropicSystemBlocks(["Stay concise."], {
-			includeClaudeCodeInstruction: true,
-			extraInstructions: ["Use citations when possible"],
-			cacheControl: { type: "ephemeral" },
+	it("never advertises context-1m on OAuth requests for million-token models (#7238)", () => {
+		// OAuth subscription credentials have no long-context credit balance, so
+		// advertising `context-1m-2025-08-07` hard-429s beta-gated 1M models
+		// ("Usage credits are required for long context requests") regardless of
+		// prompt size, breaking every subagent on Claude Pro/Max.
+		const longContextModel = buildModel({
+			...ANTHROPIC_MODEL_SPEC,
+			id: "claude-opus-5",
+			name: "Claude Opus 5",
+			contextWindow: 1_000_000,
+		});
+		const options = buildAnthropicClientOptions({
+			model: longContextModel,
+			apiKey: "sk-ant-oat-test",
+			stream: true,
+			hasTools: true,
+			thinkingEnabled: true,
 		});
 
-		expect(blocks).toHaveLength(4);
-		expect(blocks?.[0].text).toStartWith("x-anthropic-billing-header:");
-		expect(blocks?.[0].cache_control).toBeUndefined();
-		expect(blocks?.[1].text).toBe(claudeCodeSystemInstruction);
-		expect(blocks?.[1].cache_control).toBeUndefined();
-		// Only the LAST system block carries the cache breakpoint: a single trailing
-		// `cache_control` caches the entire system prefix as one entry, conserving the
-		// 4-breakpoint budget (`enforceCacheControlLimit`) for message-level caching.
-		expect(blocks?.[2]).toEqual({
-			type: "text",
-			text: "Use citations when possible",
-		});
-		expect(blocks?.[3]).toEqual({
-			type: "text",
-			text: "Stay concise.",
-			cache_control: { type: "ephemeral" },
-		});
+		expect(options.defaultHeaders["anthropic-beta"]).toBe(
+			"claude-code-20250219,interleaved-thinking-2025-05-14,thinking-token-count-2026-05-13,context-management-2025-06-27,prompt-caching-scope-2026-01-05,mid-conversation-system-2026-04-07,advanced-tool-use-2025-11-20,effort-2025-11-24,fallback-credit-2026-06-01",
+		);
+		expect(options.defaultHeaders["anthropic-beta"]).not.toContain("context-1m-2025-08-07");
 	});
 
-	it("caches Claude Code context and the last user block in OAuth request payloads", async () => {
+	it("places a short breakpoint only on the trailing message in a one-message OAuth request", async () => {
 		const payload = (await captureAnthropicPayload(ANTHROPIC_MODEL, {
 			systemPrompt: ["Stay concise."],
 			messages: [{ role: "user", content: "Hi", timestamp: Date.now() }],
@@ -251,12 +271,30 @@ describe("Anthropic request fingerprint alignment", () => {
 		expect(payload.system?.[0]?.cache_control).toBeUndefined();
 		expect(payload.system?.[1]?.text).toBe(claudeCodeSystemInstruction);
 		expect(payload.system?.[1]?.cache_control).toBeUndefined();
-		expect(payload.system?.[2]?.cache_control).toEqual({ type: "ephemeral", ttl: "1h" });
+		expect(payload.system?.[2]?.cache_control).toBeUndefined();
 		const content = payload.messages?.[0]?.content;
 		expect(Array.isArray(content)).toBe(true);
 		expect(Array.isArray(content) ? content[0]?.cache_control : undefined).toEqual({
 			type: "ephemeral",
-			ttl: "1h",
+		});
+	});
+
+	it("never caches OAuth cloak blocks when no caller system prompt exists", async () => {
+		const payload = (await captureAnthropicPayload(ANTHROPIC_MODEL, {
+			messages: [{ role: "user", content: "Hi", timestamp: Date.now() }],
+		})) as {
+			system?: Array<{ text?: string; cache_control?: unknown }>;
+			messages?: Array<{ content?: Array<{ cache_control?: unknown }> | string }>;
+		};
+
+		expect(payload.system).toHaveLength(2);
+		expect(payload.system?.[0]?.text).toStartWith("x-anthropic-billing-header:");
+		expect(payload.system?.[0]?.cache_control).toBeUndefined();
+		expect(payload.system?.[1]?.text).toBe(claudeCodeSystemInstruction);
+		expect(payload.system?.[1]?.cache_control).toBeUndefined();
+		const content = payload.messages?.[0]?.content;
+		expect(Array.isArray(content) ? content[0]?.cache_control : undefined).toEqual({
+			type: "ephemeral",
 		});
 	});
 
@@ -292,15 +330,23 @@ describe("Anthropic request fingerprint alignment", () => {
 					timestamp: Date.now(),
 				},
 			],
-		})) as { messages?: Array<{ content?: Array<{ type?: string; cache_control?: unknown }> | string }> };
+		})) as {
+			system?: Array<{ cache_control?: unknown }>;
+			messages?: Array<{ content?: Array<{ type?: string; cache_control?: unknown }> | string }>;
+		};
 
+		expect(payload.system?.some(block => block.cache_control != null)).toBe(false);
 		const messages = payload.messages ?? [];
-		const lastContent = messages[messages.length - 1]?.content;
-		expect(Array.isArray(lastContent)).toBe(true);
-		expect(Array.isArray(lastContent) ? lastContent[0]?.type : undefined).toBe("tool_result");
-		expect(Array.isArray(lastContent) ? lastContent[0]?.cache_control : undefined).toEqual({
+		expect(messages[0]?.content).toBe("Use the tool");
+		const assistantContent = messages.at(-2)?.content;
+		expect(Array.isArray(assistantContent) ? assistantContent.at(-1)?.type : undefined).toBe("tool_use");
+		expect(Array.isArray(assistantContent) ? assistantContent.at(-1)?.cache_control : undefined).toEqual({
 			type: "ephemeral",
-			ttl: "1h",
+		});
+		const lastContent = messages.at(-1)?.content;
+		expect(Array.isArray(lastContent) ? lastContent.at(-1)?.type : undefined).toBe("tool_result");
+		expect(Array.isArray(lastContent) ? lastContent.at(-1)?.cache_control : undefined).toEqual({
+			type: "ephemeral",
 		});
 	});
 
@@ -362,16 +408,64 @@ describe("Anthropic request fingerprint alignment", () => {
 			{ isOAuth: false },
 		)) as { messages?: Array<{ role: string; content: string | Array<{ type: string; cache_control?: unknown }> }> };
 
-		// The thinking-only assistant turn sits inside the trailing two-message
-		// cache window (the Continue. pad is appended after it) but must not get
-		// a breakpoint — Anthropic rejects cache_control on thinking blocks.
+		// The thinking-only assistant cannot accept cache_control, so the
+		// preceding real user turn gets the fallback breakpoint. The synthetic
+		// trailing Continue. pad must never consume it.
 		const assistant = payload.messages?.find(message => message.role === "assistant");
-		expect(Array.isArray(assistant?.content)).toBe(true);
-		for (const block of assistant?.content as Array<{ type: string; cache_control?: unknown }>) {
+		const assistantContent = assistant?.content;
+		expect(Array.isArray(assistantContent)).toBe(true);
+		for (const block of (assistantContent ?? []) as Array<{ type: string; cache_control?: unknown }>) {
 			expect(block.cache_control).toBeUndefined();
 		}
+		const user = payload.messages?.[0];
+		const userContent = user?.content;
+		expect(Array.isArray(userContent)).toBe(true);
+		expect(Array.isArray(userContent) ? userContent[0]?.cache_control : undefined).toBeDefined();
 		const last = payload.messages?.at(-1);
-		expect((last?.content as Array<{ cache_control?: unknown }>)[0]?.cache_control).toBeDefined();
+		expect(last?.content).toBe("Continue.");
+	});
+
+	it("caches the last two real messages and ignores a synthetic Continue pad", async () => {
+		const assistant: AssistantMessage = {
+			role: "assistant",
+			content: [{ type: "text", text: "real assistant answer" }],
+			api: "anthropic-messages",
+			provider: "anthropic",
+			model: ANTHROPIC_MODEL.id,
+			usage: {
+				input: 0,
+				output: 0,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 0,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			stopReason: "stop",
+			timestamp: Date.now(),
+		};
+		const payload = (await captureAnthropicPayload(
+			ANTHROPIC_MODEL,
+			{
+				systemPrompt: ["stable system", "volatile project footer", "active repo context"],
+				messages: [{ role: "user", content: "question", timestamp: Date.now() }, assistant],
+			},
+			{ isOAuth: false },
+		)) as {
+			system?: Array<{ cache_control?: unknown }>;
+			messages?: Array<{ role: string; content: string | Array<{ cache_control?: unknown }> }>;
+		};
+
+		expect(payload.system?.some(block => block.cache_control != null)).toBe(false);
+		const userContent = payload.messages?.[0]?.content;
+		expect(Array.isArray(userContent) ? userContent[0]?.cache_control : undefined).toEqual({
+			type: "ephemeral",
+		});
+		const assistantContent = payload.messages?.find(message => message.role === "assistant")?.content;
+		expect(Array.isArray(assistantContent) ? assistantContent[0]?.cache_control : undefined).toEqual({
+			type: "ephemeral",
+		});
+		const pad = payload.messages?.at(-1);
+		expect(pad?.content).toBe("Continue.");
 	});
 
 	it("adds effort and mid-conversation betas to API-key requests that use those features", async () => {
@@ -404,6 +498,204 @@ describe("Anthropic request fingerprint alignment", () => {
 		// both fields need their betas on API-key requests too.
 		expect(capturedBeta).toContain("effort-2025-11-24");
 		expect(capturedBeta).toContain("mid-conversation-system-2026-04-07");
+	});
+
+	it("adds the effort beta when a direct forced tool choice creates an adaptive effort pin", async () => {
+		let capturedBeta: string | undefined;
+		let capturedBody: { output_config?: { effort?: string }; tool_choice?: { type?: string } } | undefined;
+		const fetchMock = (async (_input: string | URL | Request, init?: RequestInit) => {
+			capturedBeta = (init?.headers as Record<string, string> | undefined)?.["anthropic-beta"];
+			capturedBody = JSON.parse(String(init?.body ?? "{}")) as {
+				output_config?: { effort?: string };
+				tool_choice?: { type?: string };
+			};
+			return new Response(
+				JSON.stringify({ type: "error", error: { type: "invalid_request_error", message: "captured" } }),
+				{ status: 400, headers: { "Content-Type": "application/json" } },
+			);
+		}) as typeof fetch;
+		const adaptiveModel: Model<"anthropic-messages"> = buildModel({
+			...ANTHROPIC_MODEL_SPEC,
+			id: "claude-opus-4-8-20260528",
+			name: "Claude Opus 4.8",
+			thinking: {
+				mode: "anthropic-adaptive",
+				efforts: [Effort.Minimal, Effort.Low, Effort.Medium, Effort.High, Effort.XHigh],
+			},
+		});
+
+		await streamAnthropic(
+			adaptiveModel,
+			{
+				systemPrompt: ["Stay concise."],
+				messages: [{ role: "user", content: "Use the tool", timestamp: Date.now() }],
+				tools: [
+					{
+						name: "lookup",
+						description: "Lookup a value",
+						parameters: { type: "object", properties: {}, additionalProperties: false },
+					},
+				],
+			},
+			{ apiKey: "sk-ant-api-test", toolChoice: "any", fetch: fetchMock },
+		).result();
+
+		expect(capturedBody?.tool_choice).toEqual({ type: "any" });
+		expect(capturedBody?.output_config).toEqual({ effort: "low" });
+		expect(capturedBeta).toContain("effort-2025-11-24");
+	});
+
+	it("attaches the effort beta per-request for injected clients on forced tool choice", async () => {
+		// Injected SDK clients bypass client-level `anthropic-beta` construction, so
+		// the forced-tool effort pin's required beta must ride the per-request headers
+		// instead of being dropped (#6590 review) — otherwise Anthropic 400s the
+		// otherwise valid forced-tool request.
+		const adaptiveModel: Model<"anthropic-messages"> = buildModel({
+			...ANTHROPIC_MODEL_SPEC,
+			id: "claude-opus-4-8-20260528",
+			name: "Claude Opus 4.8",
+			thinking: {
+				mode: "anthropic-adaptive",
+				efforts: [Effort.Minimal, Effort.Low, Effort.Medium, Effort.High, Effort.XHigh],
+			},
+		});
+		let capturedParams: MessageCreateParams | undefined;
+		let capturedOptions: { headers?: Record<string, string> } | undefined;
+		await streamAnthropic(
+			adaptiveModel,
+			{
+				systemPrompt: ["Stay concise."],
+				messages: [{ role: "user", content: "Use the tool", timestamp: Date.now() }],
+				tools: [
+					{
+						name: "lookup",
+						description: "Lookup a value",
+						parameters: { type: "object", properties: {}, additionalProperties: false },
+					},
+				],
+			},
+			{
+				apiKey: "sk-ant-api-test",
+				toolChoice: "any",
+				client: {
+					messages: {
+						create: (params, requestOptions) => {
+							capturedParams = params;
+							capturedOptions = requestOptions as { headers?: Record<string, string> } | undefined;
+							throw new Error("stop-after-capture");
+						},
+					},
+				},
+			},
+		)
+			.result()
+			.catch(() => undefined);
+
+		expect(capturedParams?.tool_choice).toEqual({ type: "any" });
+		expect(capturedParams?.thinking).toBeUndefined();
+		expect(capturedParams?.output_config).toEqual({ effort: "low" });
+		expect(capturedOptions?.headers?.["anthropic-beta"] ?? "").toContain("effort-2025-11-24");
+	});
+
+	it("adds the extended-cache-ttl beta only when 1h caching is requested", async () => {
+		const captureBeta = () => {
+			let captured: string | undefined;
+			const fetchMock = (async (_input: string | URL | Request, init?: RequestInit) => {
+				captured = (init?.headers as Record<string, string> | undefined)?.["anthropic-beta"];
+				return new Response(
+					JSON.stringify({ type: "error", error: { type: "invalid_request_error", message: "captured" } }),
+					{ status: 400, headers: { "Content-Type": "application/json" } },
+				);
+			}) as typeof fetch;
+			return { fetchMock, beta: () => captured ?? "" };
+		};
+		const cacheContext: Context = {
+			systemPrompt: ["Stay concise."],
+			messages: [{ role: "user", content: "Hi", timestamp: Date.now() }],
+		};
+
+		const short = captureBeta();
+		await streamAnthropic(ANTHROPIC_MODEL, cacheContext, {
+			apiKey: "sk-ant-api-test",
+			fetch: short.fetchMock,
+		}).result();
+		expect(short.beta()).not.toContain("extended-cache-ttl-2025-04-11");
+
+		const long = captureBeta();
+		await streamAnthropic(ANTHROPIC_MODEL, cacheContext, {
+			apiKey: "sk-ant-api-test",
+			cacheRetention: "long",
+			fetch: long.fetchMock,
+		}).result();
+		expect(long.beta()).toContain("extended-cache-ttl-2025-04-11");
+
+		const proxy = captureBeta();
+		await streamAnthropic(UMANS_ANTHROPIC_MODEL, cacheContext, {
+			apiKey: "sk-umans-test",
+			cacheRetention: "long",
+			fetch: proxy.fetchMock,
+		}).result();
+		expect(proxy.beta()).not.toContain("extended-cache-ttl-2025-04-11");
+	});
+
+	it("gates the effort beta and field off google-vertex requests (#5614)", async () => {
+		let capturedBeta: string | undefined;
+		let capturedBody:
+			| {
+					output_config?: { effort?: unknown };
+					fallbacks?: Array<{
+						model: string;
+						max_tokens?: number;
+						output_config?: { effort?: unknown };
+					}>;
+			  }
+			| undefined;
+		const fetchMock = (async (_input: string | URL | Request, init?: RequestInit) => {
+			capturedBeta = (init?.headers as Record<string, string> | undefined)?.["anthropic-beta"];
+			capturedBody = JSON.parse(String(init?.body ?? "{}"));
+			return new Response(
+				JSON.stringify({ type: "error", error: { type: "invalid_request_error", message: "captured" } }),
+				{ status: 400, headers: { "Content-Type": "application/json" } },
+			);
+		}) as typeof fetch;
+		// Claude on Vertex uses api "anthropic-messages" and the rawPredict adapter,
+		// which rejects any `anthropic-beta` HTTP header value it doesn't understand.
+		// The effort beta must ride the body (`anthropic_beta`) instead — since this
+		// path can't deliver it there, primary and fallback effort fields are dropped.
+		const vertexModel: Model<"anthropic-messages"> = buildModel({
+			...ANTHROPIC_MODEL_SPEC,
+			id: "claude-haiku-4-5@20260101",
+			name: "Claude Haiku via Vertex",
+			provider: "google-vertex",
+			baseUrl:
+				"https://us-east5-aiplatform.googleapis.com/v1/projects/p/locations/us-east5/publishers/anthropic/models/claude-haiku-4-5:rawPredict",
+			thinking: {
+				mode: "anthropic-adaptive",
+				efforts: [Effort.Minimal, Effort.Low, Effort.Medium, Effort.High, Effort.XHigh],
+			},
+		});
+
+		await streamAnthropic(
+			vertexModel,
+			{ systemPrompt: ["Stay concise."], messages: [{ role: "user", content: "Hi", timestamp: Date.now() }] },
+			{
+				apiKey: "vertex-adc",
+				thinkingEnabled: true,
+				effort: "high",
+				fetch: fetchMock,
+				fallbacks: [
+					{
+						model: "claude-sonnet-4-6@20260101",
+						max_tokens: 4_096,
+						output_config: { effort: "high" },
+					},
+				],
+			},
+		).result();
+
+		expect(capturedBeta ?? "").not.toContain("effort-2025-11-24");
+		expect(capturedBody?.output_config?.effort).toBeUndefined();
+		expect(capturedBody?.fallbacks).toEqual([{ model: "claude-sonnet-4-6@20260101", max_tokens: 4_096 }]);
 	});
 
 	it("adds the context-management beta to API-key thinking requests", async () => {
@@ -471,7 +763,7 @@ describe("Anthropic request fingerprint alignment", () => {
 		expect(extractSuffix(billingWithDev)).toBe(extractSuffix(billingUserOnly));
 	});
 
-	it("places the automatic Anthropic cache breakpoint on the last ordered system prompt", async () => {
+	it("leaves system blocks uncached on API-key requests", async () => {
 		const payload = (await captureAnthropicPayload(
 			ANTHROPIC_MODEL,
 			{
@@ -483,7 +775,7 @@ describe("Anthropic request fingerprint alignment", () => {
 
 		expect(payload.system).toEqual([
 			{ type: "text", text: "stable system" },
-			{ type: "text", text: "stable durable context", cache_control: { type: "ephemeral" } },
+			{ type: "text", text: "stable durable context" },
 		]);
 	});
 
@@ -496,6 +788,131 @@ describe("Anthropic request fingerprint alignment", () => {
 
 		expect(headers.Authorization).toBe("Bearer sk-ant-api-test");
 		expect(headers["X-Api-Key"]).toBeUndefined();
+	});
+
+	it("honors caller-supplied Authorization on non-official Anthropic endpoints (#3391)", () => {
+		const headers = buildAnthropicHeaders({
+			apiKey: "sk-ant-api-test",
+			baseUrl: "https://proxy.example.com/anthropic",
+			stream: true,
+			modelHeaders: { Authorization: "secret-proxy-key" },
+		});
+
+		expect(headers.Authorization).toBe("secret-proxy-key");
+		expect(headers["X-Api-Key"]).toBeUndefined();
+	});
+
+	it("honors lowercase `authorization` from caller without duplicating the header key", () => {
+		const headers = buildAnthropicHeaders({
+			apiKey: "sk-ant-api-test",
+			baseUrl: "https://proxy.example.com/anthropic",
+			stream: true,
+			modelHeaders: { authorization: "secret-proxy-key" },
+		});
+
+		const authKeys = Object.keys(headers).filter(key => key.toLowerCase() === "authorization");
+		expect(authKeys).toHaveLength(1);
+		expect(headers[authKeys[0]]).toBe("secret-proxy-key");
+	});
+
+	it("honors caller-supplied X-Api-Key on official Anthropic endpoints", () => {
+		const headers = buildAnthropicHeaders({
+			apiKey: "sk-ant-api-test",
+			baseUrl: "https://api.anthropic.com",
+			stream: true,
+			modelHeaders: { "X-Api-Key": "custom-api-key" },
+		});
+
+		expect(headers["X-Api-Key"]).toBe("custom-api-key");
+		expect(headers.Authorization).toBeUndefined();
+	});
+
+	it("honors caller-supplied Authorization alongside X-Api-Key on official endpoints", () => {
+		const headers = buildAnthropicHeaders({
+			apiKey: "sk-ant-api-test",
+			baseUrl: "https://api.anthropic.com",
+			stream: true,
+			modelHeaders: { Authorization: "Token tok-abc" },
+		});
+
+		// Official endpoint keeps X-Api-Key as the primary credential but also
+		// forwards the caller's custom Authorization so a fronting proxy/gateway
+		// can read it.
+		expect(headers.Authorization).toBe("Token tok-abc");
+		expect(headers["X-Api-Key"]).toBe("sk-ant-api-test");
+	});
+
+	it("forces OAuth bearer auth and ignores caller-supplied Authorization under OAuth", () => {
+		const headers = buildAnthropicHeaders({
+			apiKey: "sk-ant-oat-test",
+			isOAuth: true,
+			stream: true,
+			modelHeaders: { Authorization: "should-not-leak" },
+		});
+
+		expect(headers.Authorization).toBe("Bearer sk-ant-oat-test");
+	});
+
+	it("honors opted-in OAuth fingerprint headers on non-official endpoints (#5888)", () => {
+		const options = buildAnthropicClientOptions({
+			model: buildModel({
+				...ANTHROPIC_MODEL_SPEC,
+				provider: "custom-anthropic",
+				baseUrl: "https://proxy.example.com/anthropic",
+				headers: {
+					"anthropic-beta": "custom-beta-token",
+					"x-app": "custom-app-token",
+					"X-Stainless-Runtime-Version": "custom-runtime-token",
+					Authorization: "should-not-leak",
+				},
+				compat: { allowAnthropicHeaderOverrides: true },
+			}),
+			apiKey: "sk-ant-oat-test",
+			stream: true,
+		});
+
+		expect(options.defaultHeaders["anthropic-beta"]).toBe("custom-beta-token");
+		expect(options.defaultHeaders["x-app"]).toBe("custom-app-token");
+		expect(options.defaultHeaders["X-Stainless-Runtime-Version"]).toBe("custom-runtime-token");
+		expect(options.defaultHeaders.Authorization).toBe("Bearer sk-ant-oat-test");
+	});
+
+	it("keeps OAuth fingerprint defaults on official endpoints despite the compat opt-in", () => {
+		const headers = buildAnthropicHeaders({
+			apiKey: "sk-ant-oat-test",
+			baseUrl: "https://api.anthropic.com",
+			isOAuth: true,
+			allowAnthropicHeaderOverrides: true,
+			modelHeaders: {
+				"anthropic-beta": "custom-beta-token",
+				"x-app": "custom-app-token",
+				"X-Stainless-Runtime-Version": "custom-runtime-token",
+			},
+		});
+
+		expect(headers["anthropic-beta"]).not.toBe("custom-beta-token");
+		expect(headers["x-app"]).toBe("cli");
+		expect(headers["X-Stainless-Runtime-Version"]).toBe("v26.3.0");
+	});
+
+	it("suppresses the client-level X-Api-Key when model.headers carries a custom Authorization (#3391)", () => {
+		const options = buildAnthropicClientOptions({
+			model: buildModel({
+				...ANTHROPIC_MODEL_SPEC,
+				id: "proxy-claude",
+				name: "Proxy Claude",
+				baseUrl: "https://proxy.example.com/anthropic",
+				headers: { Authorization: "secret-proxy-key" },
+			}),
+			apiKey: "sk-ant-api-test",
+			stream: true,
+		});
+
+		// `apiKey: null` keeps the lower-level client from adding an `X-Api-Key`
+		// header alongside the caller-supplied custom Authorization.
+		expect(options.apiKey).toBeNull();
+		expect(options.defaultHeaders.Authorization).toBe("secret-proxy-key");
+		expect(options.defaultHeaders["X-Api-Key"]).toBeUndefined();
 	});
 
 	it("keeps Umans Anthropic-compatible requests on X-Api-Key auth", () => {
@@ -528,7 +945,7 @@ describe("Anthropic request fingerprint alignment", () => {
 		});
 	});
 
-	it("forwards only prefix-matching Claude Code User-Agent values", () => {
+	it("forwards only prefix-matching Cowork User-Agent values", () => {
 		const forwardedHeaders = buildAnthropicHeaders({
 			apiKey: "sk-ant-oat-test",
 			isOAuth: true,
@@ -552,9 +969,7 @@ describe("Anthropic request fingerprint alignment", () => {
 			stream: true,
 			modelHeaders: { "User-Agent": "curl/8.7.1" },
 		});
-		expect(normalizedHeaders["User-Agent"]).toBe(
-			`claude-cli/${claudeCodeVersion} (external, local-agent, agent-sdk/${claudeAgentSdkVersion})`,
-		);
+		expect(normalizedHeaders["User-Agent"]).toBe(`claude-cli/${claudeCodeVersion} (external, claude-desktop)`);
 
 		const embeddedClaudeCliHeaders = buildAnthropicHeaders({
 			apiKey: "sk-ant-oat-test",
@@ -562,9 +977,7 @@ describe("Anthropic request fingerprint alignment", () => {
 			stream: true,
 			modelHeaders: { "User-Agent": "my-client claude-cli/2.1.63" },
 		});
-		expect(embeddedClaudeCliHeaders["User-Agent"]).toBe(
-			`claude-cli/${claudeCodeVersion} (external, local-agent, agent-sdk/${claudeAgentSdkVersion})`,
-		);
+		expect(embeddedClaudeCliHeaders["User-Agent"]).toBe(`claude-cli/${claudeCodeVersion} (external, claude-desktop)`);
 	});
 
 	it("forwards model-supplied User-Agent on API-key requests", () => {
@@ -1465,6 +1878,93 @@ describe("Anthropic request fingerprint alignment", () => {
 		expect(modern.defaultHeaders["anthropic-beta"] ?? "").not.toContain("interleaved-thinking-2025-05-14");
 	});
 
+	it("uses the effective route for adaptive interleaved-thinking beta headers", () => {
+		const adaptiveProxySpec: ModelSpec<"anthropic-messages"> = {
+			...ANTHROPIC_MODEL_SPEC,
+			id: "claude-opus-4-8",
+			name: "Claude Opus 4.8",
+			provider: "custom-anthropic",
+			baseUrl: "https://proxy.example.com/anthropic",
+			thinking: {
+				mode: "anthropic-adaptive",
+				efforts: [Effort.Minimal, Effort.Low, Effort.Medium, Effort.High, Effort.XHigh],
+				supportsDisplay: true,
+			},
+		};
+		const signingProxyUrl = "https://gateway.ai.cloudflare.com/v1/account/gateway/anthropic";
+		const signingProxy = buildAnthropicClientOptions({
+			model: buildModel({ ...adaptiveProxySpec, baseUrl: signingProxyUrl }),
+			apiKey: "sk-proxy-test",
+			interleavedThinking: true,
+		});
+		const canonicalModel = buildModel({
+			...adaptiveProxySpec,
+			provider: "anthropic",
+			baseUrl: "https://api.anthropic.com",
+		});
+		const reroutedSigningProxy = buildAnthropicClientOptions({
+			// Runtime provider overrides replace baseUrl without rebuilding the
+			// canonical model's official-endpoint compat.
+			model: { ...canonicalModel, baseUrl: signingProxyUrl },
+			apiKey: "sk-proxy-test",
+			interleavedThinking: true,
+		});
+		const nonSigningProxy = buildAnthropicClientOptions({
+			model: buildModel(adaptiveProxySpec),
+			apiKey: "sk-proxy-test",
+			interleavedThinking: true,
+		});
+		// Vertex rawPredict is signing regardless of provider id, but only
+		// accepts betas in the JSON body (`anthropic_beta`) (#5614).
+		const vertexRawPredict = buildAnthropicClientOptions({
+			model: buildModel({
+				...adaptiveProxySpec,
+				provider: "custom-vertex",
+				baseUrl:
+					"https://us-east5-aiplatform.googleapis.com/v1/projects/p/locations/us-east5/publishers/anthropic/models/claude-opus-4-8:rawPredict",
+			}),
+			apiKey: "vertex-adc",
+			interleavedThinking: true,
+		});
+		// A custom provider on a Copilot host is signing, but the proxy rejects
+		// Anthropic betas outright and this path bypasses the provider branch.
+		const copilotUrlProxy = buildAnthropicClientOptions({
+			model: buildModel({
+				...adaptiveProxySpec,
+				provider: "custom-copilot",
+				baseUrl: "https://api.githubcopilot.com",
+			}),
+			apiKey: "ghu_test",
+			interleavedThinking: true,
+		});
+		// Issue #6717's reported configuration: an opaque proxy the URL list
+		// can't recognize, explicitly marked signing via spec compat override.
+		const flaggedOpaqueProxy = buildAnthropicClientOptions({
+			model: buildModel({ ...adaptiveProxySpec, compat: { signingEndpoint: true } }),
+			apiKey: "sk-proxy-test",
+			interleavedThinking: true,
+		});
+		// ZenMux's provider id classifies signing even on a customized mirror
+		// URL (see packages/catalog/test/anthropic-zenmux-signing-compat.test.ts).
+		const zenmuxMirror = buildAnthropicClientOptions({
+			model: buildModel({
+				...adaptiveProxySpec,
+				provider: "zenmux",
+				baseUrl: "https://mirror.example.net/api/anthropic",
+			}),
+			apiKey: "sk-proxy-test",
+			interleavedThinking: true,
+		});
+
+		expect(signingProxy.defaultHeaders["anthropic-beta"]).toContain("interleaved-thinking-2025-05-14");
+		expect(reroutedSigningProxy.defaultHeaders["anthropic-beta"]).toContain("interleaved-thinking-2025-05-14");
+		expect(nonSigningProxy.defaultHeaders["anthropic-beta"] ?? "").not.toContain("interleaved-thinking-2025-05-14");
+		expect(vertexRawPredict.defaultHeaders["anthropic-beta"] ?? "").not.toContain("interleaved-thinking-2025-05-14");
+		expect(copilotUrlProxy.defaultHeaders["anthropic-beta"] ?? "").not.toContain("interleaved-thinking-2025-05-14");
+		expect(flaggedOpaqueProxy.defaultHeaders["anthropic-beta"]).toContain("interleaved-thinking-2025-05-14");
+		expect(zenmuxMirror.defaultHeaders["anthropic-beta"]).toContain("interleaved-thinking-2025-05-14");
+	});
+
 	it("adds legacy fine-grained tool-streaming beta only for tool requests on incompatible models", () => {
 		const incompatibleModel: Model<"anthropic-messages"> = buildModel({
 			...ANTHROPIC_MODEL_SPEC,
@@ -1544,7 +2044,7 @@ describe("Anthropic request fingerprint alignment", () => {
 		expect(options.defaultHeaders["X-Api-Key"]).toBeUndefined();
 	});
 
-	it("applies Claude Code TLS profile for direct Anthropic transport", () => {
+	it("applies Cowork's TLS profile for direct Anthropic transport", () => {
 		const options = buildAnthropicClientOptions({
 			model: ANTHROPIC_MODEL,
 			apiKey: "sk-ant-oat-test",
@@ -1565,7 +2065,6 @@ describe("Anthropic request fingerprint alignment", () => {
 				  }
 				| undefined
 		)?.tls;
-		expect(tlsOptions).toBeDefined();
 		expect(tlsOptions?.rejectUnauthorized).toBe(true);
 		expect(tlsOptions?.serverName).toBe("api.anthropic.com");
 		expect(tlsOptions?.ciphers).toBe(tls.DEFAULT_CIPHERS);
@@ -1578,13 +2077,14 @@ describe("Anthropic request fingerprint alignment", () => {
 				FOUNDRY_BASE_URL: "https://foundry.example.com/anthropic/",
 				ANTHROPIC_CUSTOM_HEADERS: "user-id: alice, x-route: engineering",
 			},
-			() => {
+			async () => {
 				const options = buildAnthropicClientOptions({
 					model: ANTHROPIC_MODEL,
 					apiKey: "foundry-token",
 					extraBetas: [],
 					stream: true,
 					interleavedThinking: false,
+					hasTools: true,
 					dynamicHeaders: {},
 				});
 
@@ -1593,6 +2093,24 @@ describe("Anthropic request fingerprint alignment", () => {
 				expect(options.defaultHeaders["X-Api-Key"]).toBeUndefined();
 				expect(options.defaultHeaders["user-id"]).toBe("alice");
 				expect(options.defaultHeaders["x-route"]).toBe("engineering");
+				expect(options.defaultHeaders["anthropic-beta"] ?? "").not.toContain(
+					"fine-grained-tool-streaming-2025-05-14",
+				);
+
+				const payload = await captureAnthropicPayload(ANTHROPIC_MODEL, {
+					systemPrompt: ["Stay concise."],
+					messages: [{ role: "user", content: "Hi", timestamp: 0 }],
+					tools: [
+						{
+							name: "ping",
+							description: "ping",
+							parameters: { type: "object", properties: {}, additionalProperties: false },
+						},
+					],
+				});
+				expect(payload).toMatchObject({
+					tools: [expect.not.objectContaining({ eager_input_streaming: expect.anything() })],
+				});
 			},
 		);
 	});
@@ -1643,6 +2161,59 @@ describe("Anthropic request fingerprint alignment", () => {
 				});
 
 				expect(options.defaultHeaders["X-Gateway-Key"]).toBeUndefined();
+			},
+		);
+	});
+
+	it("routes chat through ANTHROPIC_BASE_URL for the stock Anthropic provider (#7874)", async () => {
+		await withEnv(
+			{
+				CLAUDE_CODE_USE_FOUNDRY: undefined,
+				FOUNDRY_BASE_URL: undefined,
+				ANTHROPIC_BASE_URL: "https://my-gateway.example.com",
+				ANTHROPIC_CUSTOM_HEADERS: "x-api-key: gateway-key",
+			},
+			() => {
+				const options = buildAnthropicClientOptions({
+					model: ANTHROPIC_MODEL,
+					apiKey: "sk-ant-api-gateway-key",
+					extraBetas: [],
+					stream: true,
+					interleavedThinking: false,
+					dynamicHeaders: {},
+				});
+
+				// Chat no longer leaks a gateway-scoped key to api.anthropic.com.
+				expect(options.baseURL).toBe("https://my-gateway.example.com");
+				// A non-official gateway forwards ANTHROPIC_CUSTOM_HEADERS, so gateways
+				// that require x-api-key work without enabling Foundry mode.
+				expect(options.defaultHeaders["X-Api-Key"]).toBe("gateway-key");
+			},
+		);
+	});
+
+	it("keeps an explicit non-official model.baseUrl ahead of ANTHROPIC_BASE_URL (#7874)", async () => {
+		const configuredModel: Model<"anthropic-messages"> = buildModel({
+			...ANTHROPIC_MODEL_SPEC,
+			baseUrl: "https://configured.example.com",
+		});
+		await withEnv(
+			{
+				CLAUDE_CODE_USE_FOUNDRY: undefined,
+				FOUNDRY_BASE_URL: undefined,
+				ANTHROPIC_BASE_URL: "https://my-gateway.example.com",
+			},
+			() => {
+				const options = buildAnthropicClientOptions({
+					model: configuredModel,
+					apiKey: "sk-ant-api-test",
+					extraBetas: [],
+					stream: true,
+					interleavedThinking: false,
+					dynamicHeaders: {},
+				});
+
+				expect(options.baseURL).toBe("https://configured.example.com");
 			},
 		);
 	});
@@ -1699,7 +2270,7 @@ describe("Anthropic request fingerprint alignment", () => {
 				},
 			);
 		} finally {
-			fs.rmSync(tmpDir, { recursive: true, force: true });
+			removeSyncWithRetries(tmpDir);
 		}
 	});
 
@@ -1840,16 +2411,17 @@ describe("Anthropic request fingerprint alignment", () => {
 	});
 
 	it("drops sampling params and keeps summarized adaptive thinking for OAuth Opus 4.7+", async () => {
+		const opus47 = buildModel({
+			...ANTHROPIC_MODEL_SPEC,
+			id: "claude-opus-4-7",
+			name: "Claude Opus 4.7",
+			thinking: {
+				mode: "anthropic-adaptive",
+				efforts: [Effort.Low, Effort.Medium, Effort.High, Effort.XHigh, Effort.Max],
+			},
+		});
 		const payload = (await captureAnthropicPayload(
-			buildModel({
-				...ANTHROPIC_MODEL_SPEC,
-				id: "claude-opus-4-7",
-				name: "Claude Opus 4.7",
-				thinking: {
-					mode: "anthropic-adaptive",
-					efforts: [Effort.Minimal, Effort.Low, Effort.Medium, Effort.High, Effort.XHigh],
-				},
-			}),
+			opus47,
 			{
 				systemPrompt: ["Stay concise."],
 				messages: [{ role: "user", content: "Hi", timestamp: Date.now() }],
@@ -1877,18 +2449,10 @@ describe("Anthropic request fingerprint alignment", () => {
 		expect(payload.context_management).toEqual({
 			edits: [{ type: "clear_thinking_20251015", keep: "all" }],
 		});
-		expect(payload.output_config).toEqual({ effort: "xhigh" });
+		expect(payload.output_config).toEqual({ effort: "high" });
 
-		const maxPayload = (await captureAnthropicPayload(
-			buildModel({
-				...ANTHROPIC_MODEL_SPEC,
-				id: "claude-opus-4-7",
-				name: "Claude Opus 4.7",
-				thinking: {
-					mode: "anthropic-adaptive",
-					efforts: [Effort.Minimal, Effort.Low, Effort.Medium, Effort.High, Effort.XHigh],
-				},
-			}),
+		const xhighPayload = (await captureAnthropicPayload(
+			opus47,
 			{
 				systemPrompt: ["Stay concise."],
 				messages: [{ role: "user", content: "Hi", timestamp: Date.now() }],
@@ -1901,8 +2465,110 @@ describe("Anthropic request fingerprint alignment", () => {
 			thinking?: { type?: string; display?: string };
 			output_config?: { effort?: string };
 		};
+		expect(xhighPayload.thinking).toEqual({ type: "adaptive", display: "summarized" });
+		expect(xhighPayload.output_config).toEqual({ effort: "xhigh" });
+
+		const maxPayload = (await captureAnthropicPayload(
+			opus47,
+			{
+				systemPrompt: ["Stay concise."],
+				messages: [{ role: "user", content: "Hi", timestamp: Date.now() }],
+			},
+			{
+				thinkingEnabled: true,
+				reasoning: Effort.Max,
+			},
+		)) as {
+			thinking?: { type?: string; display?: string };
+			output_config?: { effort?: string };
+		};
 		expect(maxPayload.thinking).toEqual({ type: "adaptive", display: "summarized" });
 		expect(maxPayload.output_config).toEqual({ effort: "max" });
+	});
+
+	it("maps simple-stream budget-effort reasoning to Anthropic output_config effort", async () => {
+		const payload = (await captureSimpleAnthropicPayload(
+			buildModel({
+				...ANTHROPIC_MODEL_SPEC,
+				id: "umans-glm-5.2",
+				name: "Umans GLM 5.2",
+				provider: "umans",
+				baseUrl: "https://api.code.umans.ai",
+				thinking: {
+					mode: "anthropic-budget-effort",
+					efforts: [Effort.High, Effort.Max],
+				},
+			}),
+			{
+				systemPrompt: ["Stay concise."],
+				messages: [{ role: "user", content: "Hi", timestamp: Date.now() }],
+			},
+			Effort.Max,
+		)) as {
+			thinking?: { type?: string; budget_tokens?: number };
+			output_config?: { effort?: string };
+		};
+
+		expect(payload.thinking?.type).toBe("enabled");
+		expect(payload.thinking?.budget_tokens).toBeGreaterThan(0);
+		expect(payload.output_config).toEqual({ effort: "max" });
+	});
+
+	it("omits output_config.effort on direct Anthropic Sonnet/Haiku 4.5 budget thinking (#3497)", async () => {
+		// Anthropic's first-party Messages API rejects `output_config.effort` on
+		// Claude Sonnet 4.5 and Haiku 4.5 with HTTP 400 "This model does not
+		// support the effort parameter." These SKUs must serialize as plain
+		// budget-token thinking while still honoring the requested effort tier
+		// via `thinking.budget_tokens`. Opus 4.5 supports the field and keeps
+		// emitting it — covered in the next test.
+		const payload = (await captureAnthropicPayload(
+			ANTHROPIC_MODEL,
+			{
+				systemPrompt: ["Stay concise."],
+				messages: [{ role: "user", content: "Hi", timestamp: Date.now() }],
+			},
+			{
+				isOAuth: false,
+				thinkingEnabled: true,
+				reasoning: Effort.Medium,
+			},
+		)) as {
+			thinking?: { type?: string; budget_tokens?: number; display?: string };
+			output_config?: { effort?: string };
+		};
+
+		expect(payload.thinking?.type).toBe("enabled");
+		expect(payload.thinking?.budget_tokens).toBeGreaterThan(0);
+		expect(payload.output_config).toBeUndefined();
+	});
+
+	it("emits output_config.effort on direct Anthropic Opus 4.5 budget thinking (#3497)", async () => {
+		// Opus 4.5 supports `output_config.effort` alongside `thinking.budget_tokens`.
+		// The catalog flips Opus 4.5 specifically back to `anthropic-budget-effort`
+		// while Sonnet 4.5 / Haiku 4.5 stay on plain `budget`.
+		const payload = (await captureAnthropicPayload(
+			buildModel({
+				...ANTHROPIC_MODEL_SPEC,
+				id: "claude-opus-4-5",
+				name: "Claude Opus 4.5",
+			}),
+			{
+				systemPrompt: ["Stay concise."],
+				messages: [{ role: "user", content: "Hi", timestamp: Date.now() }],
+			},
+			{
+				isOAuth: false,
+				thinkingEnabled: true,
+				reasoning: Effort.Medium,
+			},
+		)) as {
+			thinking?: { type?: string; budget_tokens?: number; display?: string };
+			output_config?: { effort?: string };
+		};
+
+		expect(payload.thinking?.type).toBe("enabled");
+		expect(payload.thinking?.budget_tokens).toBeGreaterThan(0);
+		expect(payload.output_config).toEqual({ effort: "medium" });
 	});
 
 	it("keeps summarized adaptive thinking and context management for API-key Opus 4.7+ requests", async () => {
@@ -1913,7 +2579,7 @@ describe("Anthropic request fingerprint alignment", () => {
 				name: "Claude Opus 4.7",
 				thinking: {
 					mode: "anthropic-adaptive",
-					efforts: [Effort.Minimal, Effort.Low, Effort.Medium, Effort.High, Effort.XHigh],
+					efforts: [Effort.Low, Effort.Medium, Effort.High, Effort.XHigh, Effort.Max],
 				},
 			}),
 			{
@@ -1935,7 +2601,7 @@ describe("Anthropic request fingerprint alignment", () => {
 		expect(payload.context_management).toEqual({
 			edits: [{ type: "clear_thinking_20251015", keep: "all" }],
 		});
-		expect(payload.output_config).toEqual({ effort: "xhigh" });
+		expect(payload.output_config).toEqual({ effort: "high" });
 	});
 
 	it("sends task budgets through Anthropic output_config without dropping adaptive effort", async () => {
@@ -1946,7 +2612,7 @@ describe("Anthropic request fingerprint alignment", () => {
 				name: "Claude Opus 4.7",
 				thinking: {
 					mode: "anthropic-adaptive",
-					efforts: [Effort.Minimal, Effort.Low, Effort.Medium, Effort.High, Effort.XHigh],
+					efforts: [Effort.Low, Effort.Medium, Effort.High, Effort.XHigh, Effort.Max],
 				},
 			}),
 			{
@@ -1966,12 +2632,12 @@ describe("Anthropic request fingerprint alignment", () => {
 		};
 
 		expect(payload.output_config).toEqual({
-			effort: "xhigh",
+			effort: "high",
 			task_budget: { type: "tokens", total: 64_000, remaining: 48_000 },
 		});
 	});
 
-	it("preserves task budget when forced tool choice disables thinking", async () => {
+	it("pins low effort (not a bare omission) when forced tool choice disables adaptive-only thinking", async () => {
 		const payload = (await captureAnthropicPayload(
 			buildModel({
 				...ANTHROPIC_MODEL_SPEC,
@@ -1979,7 +2645,7 @@ describe("Anthropic request fingerprint alignment", () => {
 				name: "Claude Opus 4.7",
 				thinking: {
 					mode: "anthropic-adaptive",
-					efforts: [Effort.Minimal, Effort.Low, Effort.Medium, Effort.High, Effort.XHigh],
+					efforts: [Effort.Low, Effort.Medium, Effort.High, Effort.XHigh, Effort.Max],
 				},
 			}),
 			{
@@ -2007,10 +2673,98 @@ describe("Anthropic request fingerprint alignment", () => {
 			};
 		};
 
+		// Adaptive-only Opus 4.7 rejects `thinking.type: "disabled"`, and a bare
+		// omission defaults to adaptive thinking ON — so the forced-tool turn must
+		// pin the lowest effort to actually suppress reasoning (#6589), while the
+		// caller's task budget still rides along on output_config.
 		expect(payload.thinking).toBeUndefined();
 		expect(payload.output_config).toEqual({
+			effort: "low",
 			task_budget: { type: "tokens", total: 64_000 },
 		});
+	});
+
+	for (const flag of ["disableReasoning", "forceReasoningOff"] as const) {
+		it(`disables Fable adaptive thinking when the public stream sets ${flag}`, async () => {
+			const { promise, resolve } = Promise.withResolvers<unknown>();
+			streamSimple(
+				buildModel({
+					...ANTHROPIC_MODEL_SPEC,
+					id: "claude-fable-5",
+					name: "Claude Fable 5",
+					thinking: {
+						mode: "anthropic-adaptive",
+						efforts: [Effort.Low, Effort.Medium, Effort.High, Effort.XHigh, Effort.Max],
+					},
+				}),
+				{
+					systemPrompt: ["Stay concise."],
+					messages: [{ role: "user", content: "Hi", timestamp: Date.now() }],
+					tools: [
+						{
+							name: "think",
+							description: "Private scratchpad; not shown to user.",
+							strict: true,
+							parameters: {
+								type: "object",
+								properties: { thoughts: { type: "string" } },
+								required: ["thoughts"],
+								additionalProperties: false,
+							} as TJsonSchema,
+						},
+					],
+				},
+				{
+					apiKey: "sk-ant-oat-test",
+					signal: createAbortedSignal(),
+					reasoning: Effort.High,
+					[flag]: true,
+					onPayload: payload => resolve(payload),
+				},
+			);
+			const payload = (await promise) as {
+				thinking?: unknown;
+				output_config?: { effort?: string };
+				tools?: Array<{
+					eager_input_streaming?: boolean;
+					input_schema?: { properties?: Record<string, unknown>; required?: string[] };
+				}>;
+			};
+
+			expect(payload.thinking).toBeUndefined();
+			expect(payload.output_config).toEqual({ effort: "low" });
+			expect(payload.tools?.[0]?.eager_input_streaming).toBe(true);
+			expect(payload.tools?.[0]?.input_schema?.properties).toHaveProperty("thoughts");
+			expect(payload.tools?.[0]?.input_schema?.required).toEqual(["thoughts"]);
+		});
+	}
+
+	it("deletes thinking without an effort pin for non-adaptive reasoning models on forced tool choice", async () => {
+		// Budget-thinking models (Sonnet 4.5) turn thinking off by simple omission,
+		// so the forced-tool guard must NOT leak an adaptive effort:"low" pin onto
+		// them (that pin is exclusive to adaptive-only families — #6589).
+		const payload = (await captureAnthropicPayload(
+			ANTHROPIC_MODEL,
+			{
+				systemPrompt: ["Stay concise."],
+				messages: [{ role: "user", content: "Use the tool", timestamp: Date.now() }],
+				tools: [
+					{
+						name: "lookup",
+						description: "Lookup a value",
+						parameters: { type: "object", properties: {}, additionalProperties: false },
+					},
+				],
+			},
+			{
+				thinkingEnabled: true,
+				reasoning: Effort.High,
+				toolChoice: { type: "tool", name: "lookup" },
+			},
+		)) as { thinking?: unknown; output_config?: unknown };
+
+		expect(payload.thinking).toBeUndefined();
+		expect(payload.output_config).toBeUndefined();
 	});
 
 	it("downgrades forced tool choice for Claude Fable/Mythos without deleting adaptive thinking", async () => {
@@ -2024,7 +2778,7 @@ describe("Anthropic request fingerprint alignment", () => {
 					maxTokens: 128_000,
 					thinking: {
 						mode: "anthropic-adaptive",
-						efforts: [Effort.Minimal, Effort.Low, Effort.Medium, Effort.High, Effort.XHigh],
+						efforts: [Effort.Low, Effort.Medium, Effort.High, Effort.XHigh, Effort.Max],
 					},
 				}),
 				{
@@ -2051,7 +2805,7 @@ describe("Anthropic request fingerprint alignment", () => {
 
 			expect(payload.tool_choice).toEqual({ type: "auto" });
 			expect(payload.thinking).toEqual({ type: "adaptive", display: "summarized" });
-			expect(payload.output_config).toEqual({ effort: "xhigh" });
+			expect(payload.output_config).toEqual({ effort: "high" });
 		}
 	});
 

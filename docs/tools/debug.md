@@ -16,6 +16,7 @@
   - `packages/coding-agent/src/debug/log-viewer.ts` — recent-log TUI viewer
   - `packages/coding-agent/src/debug/raw-sse.ts` — raw SSE TUI viewer
   - `packages/coding-agent/src/debug/raw-sse-buffer.ts` — bounded SSE capture buffer
+  - `packages/coding-agent/src/debug/remote-debugger.ts` — one-shot JavaScriptCore remote inspector socket
   - `packages/coding-agent/src/debug/profiler.ts` — CPU/heap profiling helpers
   - `packages/coding-agent/src/debug/report-bundle.ts` — `.tar.gz` report bundling, log source, cache cleanup
   - `packages/coding-agent/src/debug/system-info.ts` — system snapshot collection and env redaction
@@ -33,7 +34,7 @@
 | `cwd` | `string` | No | Launch/attach working directory. Defaults to session cwd. |
 | `file` | `string` | No | Source file path for source breakpoints. |
 | `line` | `number` | No | Source line for source breakpoints. |
-| `function` | `string` | No | Function breakpoint name. Mutually exclusive with `file`+`line` in breakpoint actions. |
+| `function` | `string` | No | Function breakpoint name. When supplied, breakpoint actions take the function path and ignore `file`/`line`; the schema does not reject both forms together. |
 | `name` | `string` | No | Data breakpoint info target name. Required for `data_breakpoint_info`. |
 | `condition` | `string` | No | Conditional expression for source/function/instruction/data breakpoints. |
 | `hit_condition` | `string` | No | Hit-count condition for instruction/data breakpoints. |
@@ -61,7 +62,7 @@
 | `allow_partial` | `boolean` | No | `write_memory` partial-write allowance. |
 | `start_module` | `number` | No | Modules pagination start index for `modules`. |
 | `module_count` | `number` | No | Modules pagination count for `modules`. |
-| `timeout` | `number` | No | Per-request timeout in seconds. Default `30`, clamped to `5..300`. |
+| `timeout` | `number` | No | Per-request seconds, default `30`; `clampTimeout("debug", ...)` applies the positive `tools.maxTimeout` cap first, then the tool's `5..300` range (so the 5-second floor still wins over a lower global cap). |
 
 ### Action-specific requirements
 - `launch`: `program`
@@ -80,7 +81,7 @@
 - `custom_request`: `command`
 
 ### Interactive selector values
-`packages/coding-agent/src/debug/index.ts` also exposes a fixed UI-only selector with values `open-artifacts`, `performance`, `work`, `dump`, `memory`, `logs`, `system`, `terminal`, `protocols`, `raw-sse`, `transcript`, `clear-cache`. These are not model-callable through `debugSchema`; they are local TUI menu routes.
+`packages/coding-agent/src/debug/index.ts` also exposes a fixed UI-only selector with values `open-artifacts`, `performance`, `work`, `dump`, `memory`, `logs`, `system`, `terminal`, `protocols`, `raw-sse`, `remote-debugger`, `transcript`, `clear-cache`. These are not model-callable through `debugSchema`; they are local TUI menu routes.
 
 ## Outputs
 The agent tool returns a standard `toolResult()` payload from `packages/coding-agent/src/tools/debug.ts`:
@@ -108,10 +109,10 @@ The agent tool returns a standard `toolResult()` payload from `packages/coding-a
   - `sessions`: `sessions`
 
 Streaming/UI behavior:
-- The tool renderer merges call and result (`mergeCallAndResult: true`) and renders inline.
-- `debug.ts` itself does not emit progress updates through `_onUpdate`; result delivery is single-shot.
+- The discoverable tool's renderer merges call and result (`mergeCallAndResult: true`), renders inline, and enables animated partial-result presentation while arguments/results are still being assembled.
+- `debug.ts` itself does not emit progress updates through `_onUpdate`; execution result delivery is single-shot.
 - Approval is action-sensitive: read-only actions (`output`, `threads`, `stack_trace`, `scopes`, `variables`, `disassemble`, `read_memory`, `loaded_sources`, `modules`, `sessions`) request read approval; all other actions request exec approval.
-- The interactive selector is UI-driven instead of model-driven. It swaps TUI components, appends status lines to the chat pane, opens files in external viewers, or writes archives/temp files.
+- The interactive selector is UI-driven instead of model-driven. It swaps TUI components, appends status lines to the chat pane, opens files in external viewers, writes archives/temp files, or starts the process-wide JavaScriptCore inspector socket.
 
 Side-channel artifacts outside the model tool result:
 - `createReportBundle()` writes `omp-report-<timestamp>.tar.gz` under the reports dir and returns the filesystem path to the UI handler.
@@ -119,22 +120,23 @@ Side-channel artifacts outside the model tool result:
 - `RawSseViewerComponent` and `DebugLogViewerComponent` can copy captured text to the clipboard.
 
 ## Flow
-1. Tool registration is conditional: `DebugTool.createIf()` in `packages/coding-agent/src/tools/debug.ts` returns `null` unless `session.settings.get("debug.enabled")` is true. `packages/coding-agent/src/tools/index.ts` wires the factory and rechecks the same setting in tool filtering.
-2. `DebugTool.execute()` clamps `params.timeout` through `clampTimeout("debug", params.timeout)` and composes the caller `AbortSignal` with `AbortSignal.timeout(...)`.
-3. `launch` and `attach` resolve cwd/program paths, select an adapter in `packages/coding-agent/src/dap/config.ts`, then delegate to `dapSessionManager.launch()` / `.attach()`.
-4. `DapSessionManager.launch()` / `.attach()` enforce the single-session rule with `#ensureLaunchSlot()`, spawn the adapter through `DapClient.spawn()`, register listeners, send `initialize`, cache capabilities, start listening for an initial stop event before sending `launch`/`attach`, then complete the `initialized` → `configurationDone` handshake in `#completeConfigurationHandshake()`.
-5. `DapClient.spawn()` starts the adapter detached with `NON_INTERACTIVE_ENV`. Most adapters use stdio; socket-mode adapters (`dlv`) use `#spawnSocketUnix()` on Linux or `#spawnSocketClientAddr()` on macOS/other.
+
+1. Tool registration is conditional: `DebugTool.createIf()` in `packages/coding-agent/src/tools/debug.ts` returns `null` unless `session.settings.get("debug.enabled")` is true (default `true`). `packages/coding-agent/src/tools/index.ts` wires the factory and rechecks the same setting in tool filtering.
+2. `DebugTool.execute()` clamps `params.timeout` through `clampTimeout("debug", params.timeout)`, applying the optional positive `tools.maxTimeout` cap before the tool's 5-second floor and 300-second ceiling, and composes the caller `AbortSignal` with `AbortSignal.timeout(...)`.
+3. `launch` resolves cwd/program paths, classifies the target as file/directory/missing, rejects directories unless the chosen adapter sets `acceptsDirectoryProgram`, and delegates to `dapSessionManager.launch()`. `attach` requires `pid` or `port`, resolves cwd, selects an adapter, and delegates to `.attach()`.
+4. `DapSessionManager.launch()` / `.attach()` enforce one root session, spawn the adapter through `DapClient.spawn()`, register listeners, send `initialize`, cache capabilities, subscribe for tree-wide stop events, send `launch`/`attach`, then complete the `initialized` → `configurationDone` handshake.
+5. `DapClient.spawn()` starts adapters detached with `NON_INTERACTIVE_ENV`. `stdio` uses the adapter pipes; `socket` uses a Unix socket on Linux or an adapter callback to a local TCP listener elsewhere; `tcp` substitutes `${port}` in adapter args, starts its local server, then connects. Child sessions reuse a root `tcp` server through `DapClient.connect()`.
 6. `#registerSession()` in `packages/coding-agent/src/dap/session.ts` installs reverse-request handlers:
    - `runInTerminal`: spawns the requested debuggee command detached via `ptree.spawn()` and returns `{ processId }`
-   - `startDebugging`: logs the child-session request and returns `{}`; it does not create nested sessions
-   - events: `output`, `initialized`, `stopped`, `continued`, `exited`, `terminated` update cached session state
-7. Operational actions (`set_breakpoint`, `evaluate`, `threads`, `read_memory`, `custom_request`, and similar) call `dapSessionManager` methods. Most flow through `#sendRequestWithConfig()`, which first sends `configurationDone` when required, then sends the DAP request, then updates `lastUsedAt`.
-8. Breakpoint actions maintain local cached breakpoint sets in `DapSessionManager` and remap adapter responses back onto those cached records.
-9. `continue` and the three step actions clear cached stop state, subscribe for `stopped`/`terminated`/`exited` before sending the DAP request, then `#awaitStopOutcome()` either returns the new stopped location or reports that the program is still running after timeout.
+   - `startDebugging`: connects a child DAP client to the root TCP server, forwards the requested `launch`/`attach` configuration, binds root breakpoints before `configurationDone`, and recursively installs the same handlers
+   - events: `output`, `initialized`, `stopped`, `continued`, `exited`, and `terminated` update cached session state; stopped children become the active target
+7. Operational actions (`set_breakpoint`, `evaluate`, `threads`, `read_memory`, `custom_request`, and similar) call `dapSessionManager` methods. Most flow through `#sendRequestWithConfig()`, which first sends `configurationDone` when required, then sends the DAP request and refreshes the active session plus its ancestors.
+8. Breakpoint actions synchronize desired breakpoint sets across the live root/child tree. New children receive those sets before their `configurationDone` request.
+9. `continue` and the three step actions clear cached stop state, subscribe for a stop/termination event anywhere in the session tree before sending the DAP request, then `#awaitStopOutcome()` returns the active child’s stopped location or reports that the target remains running after timeout.
 10. `pause` sends DAP `pause`, waits for a stopped event if needed, and reuses cached stop state if the program was already stopped.
-11. `stack_trace`, `scopes`, `variables`, and `evaluate` default to the current stopped thread/frame when the caller omits ids and cached state is available.
-12. `output` reads the in-memory output ring from `DapSessionManager.getOutput()`. `terminate` sends `terminate` when supported, always attempts `disconnect`, marks the session terminated, and disposes the client.
-13. `sessions` reads the manager’s current map and formats all summaries. Although the manager stores a map, only one active session can exist because new launch/attach calls are blocked until the active one is terminated or cleaned up.
+11. `stack_trace`, `scopes`, `variables`, and `evaluate` default to the current stopped child/thread/frame when the caller omits ids and cached state is available.
+12. `output` reads the in-memory output ring from the active `DapSession`. `terminate` walks from the root through every child, sends best-effort `terminate`/`disconnect`, and disposes the complete tree even when an adapter times out.
+13. `sessions` reads the manager’s current map and formats root and child summaries. Only one root tree can exist; recursive adapter-requested children are tracked with `parentSessionId` / `childSessionIds`.
 14. The interactive selector in `packages/coding-agent/src/debug/index.ts` builds a `SelectList` of fixed values and dispatches each to a handler:
    - `performance`: `startCpuProfile()`, wait for Enter/Escape, stop profiling, read a 30-second work profile with `getWorkProfile(30)`, then bundle via `createReportBundle()`
    - `work`: read `getWorkProfile(30)`, write a temp SVG, open it externally
@@ -142,6 +144,7 @@ Side-channel artifacts outside the model tool result:
    - `memory`: force GC, call `Bun.generateHeapSnapshot("v8")`, then bundle
    - `logs`: build a `DebugLogSource` and mount `DebugLogViewerComponent`
    - `raw-sse`: resolve a `RawSseDebugBuffer` from the session and mount `RawSseViewerComponent`
+   - `remote-debugger`: reuse or start a loopback JavaScriptCore `RemoteInspectorServer` socket and display its host/port; the Bun API is process-wide and has no stop operation
    - `system`: call `collectSystemInfo()` and render `formatSystemInfo()` into the chat pane
    - `terminal`: `collectTerminalState()` + `formatTerminalState()` rendered into the chat pane
    - `protocols`: fires a test desktop notification (unless suppressed), then mounts `ProtocolProbeComponent` with a sample image
@@ -151,13 +154,53 @@ Side-channel artifacts outside the model tool result:
 
 ## Modes / Variants
 - **Availability gate**
-  - Tool hidden when `debug.enabled` is false.
+  - Tool hidden when `debug.enabled` is false; the setting defaults to `true`. The tool uses discoverable loading and exclusive concurrency.
 - **Adapter selection**
+  - Built-in adapter ids are `gdb`, `lldb-dap`, `codelldb`, `debugpy`, `dlv`, `js-debug-adapter`, `netcoredbg`, `kotlin-debug-adapter`, `rdbg`, `php-debug-adapter`, `bash-debug-adapter`, `dart-debug-adapter`, `flutter-debug-adapter`, and `elixir-ls-debugger`. Auto-selection only considers adapters whose configured command resolves; an explicitly selected configured-but-unavailable adapter produces an adapter-specific installation/configuration error.
   - `launch`: explicit `adapter` wins; otherwise `selectLaunchAdapter()` ranks available adapters by extension match, root-marker match, then native-debugger preference (`gdb`, `lldb-dap`) for extensionless binaries.
   - `attach`: explicit `adapter` wins; otherwise remote `port` prefers `debugpy`, then native debuggers, then first available adapter.
+- **Custom adapter config**
+  - Debug adapters can be added or overridden with `dap.json`, `.dap.json`, `dap.yaml`, `.dap.yaml`, `dap.yml`, or `.dap.yml`.
+  - Search order mirrors LSP config: project root, project config dirs (`.omp/`, `.claude/`, `.codex/`, `.gemini/`), user config dirs (`~/.omp/agent/`, `~/.claude/`, `~/.codex/`, `~/.gemini/`), plugin roots, then home-root fallback. Files are merged from lowest to highest priority.
+  - Config shape may be either `{ "adapters": { ... } }` or a top-level adapter map.
+  - Adapter fields:
+    - `command`: executable name or path. Required.
+    - `args`: adapter argv.
+    - `languages`: display/filter metadata.
+    - `fileTypes`: lowercase file extensions used for launch auto-selection.
+    - `rootMarkers`: files/directories used to rank adapters for a project.
+    - `launchDefaults`: default DAP launch arguments merged before the selected program/cwd/args.
+    - `attachDefaults`: default DAP attach arguments merged before pid/port/host/cwd.
+    - `connectMode`: `"stdio"` (default), `"socket"` (Delve-style platform-dependent socket/callback), or `"tcp"` (spawn a local DAP server with `${port}` substituted into `args`).
+    - `acceptsDirectoryProgram`: set `true` for adapters such as `dlv` that can launch a package/project directory.
+
+Example `.omp/dap.json`:
+
+```json
+{
+  "adapters": {
+    "custom-jvm": {
+      "command": "kotlin-debug-adapter",
+      "args": ["--stdio"],
+      "languages": ["java", "kotlin"],
+      "fileTypes": [".java", ".kt", ".kts"],
+      "rootMarkers": ["pom.xml", "build.gradle", "build.gradle.kts"],
+      "launchDefaults": {
+        "request": "launch",
+        "projectRoot": "."
+      },
+      "attachDefaults": {
+        "request": "attach",
+        "host": "127.0.0.1"
+      }
+    }
+  }
+}
+```
 - **Transport**
-  - stdio adapters: direct `stdin`/`stdout` framing.
-  - socket adapters: Unix domain socket on Linux; TCP callback on macOS/other.
+  - `stdio`: direct adapter `stdin`/`stdout` framing.
+  - `socket`: Unix domain socket on Linux; adapter callback to a local TCP listener on macOS/other.
+  - `tcp`: reserve a loopback port, substitute it for `${port}` in adapter args, wait for the adapter to listen, then connect. This is used by the resolved JavaScript/TypeScript adapter and is required for recursive `startDebugging` child sessions.
 - **DAP agent-tool actions**
   - `launch` — spawn adapter, initialize session, maybe stop on entry; returns formatted session snapshot and `details.adapter`.
   - `attach` — connect to a live process or remote port; same output shape as `launch`.
@@ -185,6 +228,7 @@ Side-channel artifacts outside the model tool result:
 - **Interactive selector routes (UI-only)**
   - `logs` — loads today’s log tail and optional older daily log files into `DebugLogViewerComponent`; supports copy, range selection, pid filtering, load-older.
   - `raw-sse` — live view over the session’s `RawSseDebugBuffer`; supports tail-follow, scrolling, copy-all.
+  - `remote-debugger` — starts or reuses the process-wide JavaScriptCore WebKit inspector on `127.0.0.1` and an automatically reserved port; it is experimental, cannot be stopped/rebound, and requires a compatible Safari/WebKit inspector client.
   - `performance` — CPU profile + 30-second work profile + report bundle.
   - `memory` — heap snapshot + report bundle.
   - `dump` — report bundle without profiler artifacts.
@@ -203,8 +247,8 @@ Side-channel artifacts outside the model tool result:
   - Artifact-cache cleanup removes session artifact directories older than the cutoff.
   - `resolveRawSseDebugBuffer()` reuses an explicit `rawSseDebugBuffer` property on the owner when present, otherwise caches a buffer under a private `Symbol("debug.rawSseBuffer")` key (silently skipped when the owner is non-extensible).
 - Network
-  - Socket-mode adapters bind/connect local sockets.
-  - Remote attach may connect through the adapter to a remote debug port.
+  - Socket/TCP-mode adapters bind or connect local sockets; remote attach may connect through the adapter to a remote debug port.
+  - The UI-only `remote-debugger` route opens a process-wide JavaScriptCore inspector on a randomly reserved `127.0.0.1` TCP port. It probes the socket for readiness and has no stop operation.
 - Subprocesses / native bindings
   - Spawns debugger adapters (`gdb`, `lldb-dap`, `python -m debugpy.adapter`, `dlv`, and others from `defaults.json`) detached.
   - Reverse DAP `runInTerminal` requests spawn the debuggee detached via `ptree.spawn()`.
@@ -216,6 +260,7 @@ Side-channel artifacts outside the model tool result:
   - `DapSessionManager` keeps session summaries, breakpoints, threads, stack frames, stop location, output capture, capabilities, and last-used timestamps in memory.
   - Active-session id is global to the singleton `dapSessionManager`.
   - `RawSseDebugBuffer` stores recent SSE events per owner/session.
+  - `remote-debugger.ts` caches the live inspector endpoint and coalesces concurrent starts; the underlying Bun inspector is one-way for the process.
   - The tool is `exclusive`; concurrent debug tool calls are blocked by the scheduler.
 - User-visible prompts / interactive UI
   - Debug selector shows confirmation before cache deletion.
@@ -238,7 +283,7 @@ Side-channel artifacts outside the model tool result:
 - Raw SSE buffer caps in `packages/coding-agent/src/debug/raw-sse-buffer.ts`:
   - `MAX_RAW_SSE_EVENTS = 1_000`
   - `MAX_RAW_SSE_CHARS = 512_000`
-  - `MAX_RAW_SSE_EVENT_CHARS = 64_000` per event, with `: omp-debug-truncated ...` marker appended on trim
+  - `MAX_RAW_SSE_EVENT_CHARS = 64_000` per event; over-budget events first get `tools` schemas compacted (name kept, schema/description elided), then a head+tail trim that keeps the first and last portions with a `: omp-debug-elided chars=...` comment in the middle and a final `: omp-debug-truncated originalChars=...` marker
 - Log viewer window in `packages/coding-agent/src/debug/log-viewer.ts`:
   - `INITIAL_LOG_CHUNK = 50`
   - `LOAD_OLDER_CHUNK = 50`
@@ -261,6 +306,7 @@ Side-channel artifacts outside the model tool result:
   - `memory_reference is required for read_memory`
   - `count is required for read_memory`
   - `data is required for write_memory`
+  - `launch program resolves to a directory: <path>...` when the selected adapter does not set `acceptsDirectoryProgram`
   - `command is required for custom_request`
 - Adapter selection failure throws `No debugger adapter available. Installed adapters: ...`.
 - Capability-gated actions throw from `requireCapability(...)`, e.g. `Current adapter does not support memory reads`.
@@ -275,19 +321,31 @@ Side-channel artifacts outside the model tool result:
 - `continue` / `step_*` are intentionally non-fatal when the target stays running past the timeout: they return `details.timedOut = true` and `state: "running"` instead of throwing.
 - `terminate` suppresses adapter errors while sending `terminate`/`disconnect`; it still disposes the client and returns the last summary when possible.
 - Interactive selector handlers report UI errors instead of throwing:
-  - profiler start/stop, report bundling, log reading, system-info collection, cache clearing, and artifact opening use `ctx.showError(...)` / `ctx.showWarning(...)`
+  - profiler start/stop, report bundling, log reading, system-info collection, cache clearing, artifact opening, and remote-inspector startup use `ctx.showError(...)` / `ctx.showWarning(...)`
   - empty logs and empty artifact caches are warnings/status messages, not failures
   - copy failures in log/raw-SSE viewers become status/error text in the UI
 - Report-bundle helpers are intentionally best-effort for many file reads: missing session files, missing artifact dirs, unreadable artifact files, missing log dirs, inaccessible cache dirs, and missing subagent files are skipped silently.
 - `collectSystemInfo()` is best-effort for CPU probing; failure there falls back to `Unknown CPU`.
+- Remote-inspector startup refuses a port already in use and fails if the selected loopback socket does not become reachable within its probe deadline. The UI reports this as `Failed to start remote debugger: ...`.
 
 ## Notes
-- `packages/coding-agent/src/prompts/tools/debug.md` tells the model only one active session is supported; that is not advisory, it is enforced in code.
-- `configurationDone` is sent automatically both during launch/attach handshake and lazily before later requests if the adapter required it and the initial handshake did not complete.
-- `startDebugging` reverse requests are acknowledged but not implemented; child debug sessions are not spawned.
-- `output` exposes the merged `output` event stream only; the tool does not distinguish stdout, stderr, and console categories.
-- Session summaries expose `needsConfigurationDone`; this is derived from adapter capabilities and whether `configurationDone` has been sent.
-- Source breakpoint file paths are normalized with `path.resolve()` before caching and sending to the adapter.
+- `packages/coding-agent/src/prompts/tools/debug.md` tells the model only one active root session is supported. Adapter-requested child sessions belong to that root tree.
+- The default JavaScript/TypeScript adapter runs vscode-js-debug's `dapDebugServer.js` over TCP. Install it one of these ways; the first and last are auto-discovered by `resolveJsDebugServerPath()` in `packages/coding-agent/src/dap/config.ts`. (Don't try `npm i -g js-debug-adapter` — it 404s; `js-debug-adapter` is the omp adapter id, not an npm package.)
+  - Release tarball, extracted so `dapDebugServer.js` lands at `~/.local/opt/js-debug/src/dapDebugServer.js`:
+    ```sh
+    curl -sL -o js-debug-dap.tar.gz \
+      https://github.com/microsoft/vscode-js-debug/releases/download/v1.117.0/js-debug-dap-v1.117.0.tar.gz
+    mkdir -p ~/.local/opt && tar -xzf js-debug-dap.tar.gz -C ~/.local/opt
+    ```
+    Replace `v1.117.0` with the latest tag from the [releases page](https://github.com/microsoft/vscode-js-debug/releases).
+  - Any other location via `JS_DEBUG_DAP_SERVER=<path-to-dapDebugServer.js>`.
+  - Neovim users with Mason: `:MasonInstall js-debug-adapter` → discovered at `~/.local/share/nvim/mason/packages/js-debug-adapter/js-debug/src/dapDebugServer.js`.
+- The adapter runs under `node` if on `PATH`, otherwise under the omp host (Bun); `resolveDefaultJsDebugAdapter()` falls back to `process.execPath`, so a Bun-only setup is supported.
+- `configurationDone` is sent automatically during root and child launch/attach handshakes and lazily before later requests if the initial handshake did not complete.
+- `startDebugging` reverse requests create recursive child sessions on the same TCP server; a stopped child becomes the target for thread-level actions.
+- `output` exposes the active session’s merged `output` event stream only; the tool does not distinguish stdout, stderr, and console categories.
+- Session summaries expose `needsConfigurationDone`, `parentSessionId`, and `childSessionIds`.
+- Source breakpoint file paths are normalized with `path.resolve()` before caching and synchronizing across the tree.
 - `evaluate` defaults to `repl`, so the tool can forward raw debugger commands when the adapter supports them.
 - `disassemble` resolves its target from `memory_reference` first, then the current stopped session's `instructionPointerReference`; it throws if neither is present.
 - `RawSseDebugBuffer.recordEvent()` increments `totalEvents` before bounded retention. A snapshot can therefore show fewer retained records than total observed events.
@@ -296,3 +354,4 @@ Side-channel artifacts outside the model tool result:
 - `clearArtifactCache()` deletes directories by directory mtime, not per-file age.
 - `addDirectoryToArchive()` reads artifact files as text with `Bun.file(...).text()`. Binary artifact contents are not preserved byte-for-byte in the report bundle.
 - The tool renderer truncates displayed output for the TUI preview, but the underlying text result still contains the full returned string.
+- The UI-only JavaScriptCore remote debugger is idempotent after startup and cannot be stopped because `bun:jsc` returns no handle. It binds only to `127.0.0.1`; a loopback readiness probe determines success because Bun may throw a spurious bind error on macOS even when the socket came up.

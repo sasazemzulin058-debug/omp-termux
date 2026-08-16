@@ -7,13 +7,16 @@ import type { OAuthController } from "../src/registry/oauth/types";
 
 describe("alibaba-coding-plan endpoint selection", () => {
 	let validateSpy: Mock<typeof apiKeyValidation.validateOpenAICompatibleApiKey>;
+	let validateModelsSpy: Mock<typeof apiKeyValidation.validateApiKeyAgainstModelsEndpoint>;
 
 	beforeEach(() => {
 		validateSpy = spyOn(apiKeyValidation, "validateOpenAICompatibleApiKey").mockResolvedValue(undefined);
+		validateModelsSpy = spyOn(apiKeyValidation, "validateApiKeyAgainstModelsEndpoint").mockResolvedValue(undefined);
 	});
 
 	afterEach(() => {
 		validateSpy.mockRestore();
+		validateModelsSpy.mockRestore();
 	});
 
 	it("option 1 uses international endpoint and auth URL", async () => {
@@ -66,8 +69,10 @@ describe("alibaba-coding-plan endpoint selection", () => {
 		expect(result.access).toBe("sk-cn-key");
 		expect(result.refresh).toBe("sk-cn-key");
 		expect(result.enterpriseUrl).toBe("https://coding.dashscope.aliyuncs.com/v1");
-		expect(capturedAuth?.url).toBe("https://dashscope.console.aliyun.com/");
-		expect(capturedAuth?.instructions).toContain("China mainland");
+		expect(capturedAuth?.url).toBe("https://bailian.console.aliyun.com/?tab=model#/api-key");
+		expect(capturedAuth?.instructions).toBe(
+			"Copy your API key from the Alibaba Cloud Bailian console (China mainland)",
+		);
 
 		expect(validateSpy).toHaveBeenCalledWith({
 			provider: "Alibaba Coding Plan",
@@ -79,6 +84,7 @@ describe("alibaba-coding-plan endpoint selection", () => {
 	});
 
 	it("option 3 prompts for custom URL and uses it", async () => {
+		validateSpy.mockRejectedValue(new Error("404 model_not_found"));
 		let capturedAuth: { url: string; instructions?: string } | undefined;
 		const options: OAuthController = {
 			onAuth: info => {
@@ -100,11 +106,10 @@ describe("alibaba-coding-plan endpoint selection", () => {
 		expect(result.enterpriseUrl).toBe("https://my-proxy.com/v1");
 		expect(capturedAuth?.url).toBe("https://modelstudio.console.alibabacloud.com/");
 
-		expect(validateSpy).toHaveBeenCalledWith({
+		expect(validateModelsSpy).toHaveBeenCalledWith({
 			provider: "Alibaba Coding Plan",
 			apiKey: "sk-custom-key",
-			baseUrl: "https://my-proxy.com/v1",
-			model: "qwen3.5-plus",
+			modelsUrl: "https://my-proxy.com/v1/models",
 			signal: undefined,
 		});
 	});

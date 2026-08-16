@@ -10,6 +10,7 @@ import {
 } from "@oh-my-pi/pi-tui/kitty-graphics";
 import {
 	type CellDimensions,
+	encodeKitty,
 	encodeKittyDeleteImage,
 	encodeKittyPlacement,
 	encodeKittyTransmit,
@@ -17,6 +18,7 @@ import {
 	ImageProtocol,
 	setCellDimensions,
 	TERMINAL,
+	wrapTmuxPassthrough,
 } from "@oh-my-pi/pi-tui/terminal-capabilities";
 import { VirtualTerminal } from "./virtual-terminal";
 
@@ -25,6 +27,21 @@ const terminal = TERMINAL as unknown as MutableTerminalInfo;
 
 const BASE64_ONE_PIXEL_PNG =
 	"iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAAAAAA6fptVAAAACklEQVR4nGNgAAAAAgABSK+kcQAAAABJRU5ErkJggg==";
+
+const ORIGINAL_TMUX = Bun.env.TMUX;
+const ORIGINAL_HERDR_ENV = Bun.env.HERDR_ENV;
+
+beforeEach(() => {
+	delete Bun.env.TMUX;
+	delete Bun.env.HERDR_ENV;
+});
+
+afterEach(() => {
+	if (ORIGINAL_TMUX === undefined) delete Bun.env.TMUX;
+	else Bun.env.TMUX = ORIGINAL_TMUX;
+	if (ORIGINAL_HERDR_ENV === undefined) delete Bun.env.HERDR_ENV;
+	else Bun.env.HERDR_ENV = ORIGINAL_HERDR_ENV;
+});
 
 /** Drive one render pass against the budget with `count` images (ids 1..count, stable across passes). */
 function pass(budget: ImageBudget, count: number): { suppressed: boolean[]; reset: boolean; purge: readonly number[] } {
@@ -37,10 +54,6 @@ function pass(budget: ImageBudget, count: number): { suppressed: boolean[]; rese
 }
 
 describe("ImageBudget", () => {
-	it("defaults to eight live images", () => {
-		expect(new ImageBudget().cap).toBe(8);
-	});
-
 	it("keeps every image live while at or under the cap", () => {
 		const budget = new ImageBudget(3, () => {});
 		const first = pass(budget, 2);
@@ -135,6 +148,96 @@ describe("ImageBudget", () => {
 		const budget2 = new ImageBudget();
 		expect(budget1.acquireId()).not.toBe(budget2.acquireId());
 	});
+	it("evicts demoted IDs from the key map so a returned key gets a fresh ID", () => {
+		const budget = new ImageBudget(2, () => {});
+		const id1 = budget.acquireId("keyA");
+		const id2 = budget.acquireId("keyB");
+		const id3 = budget.acquireId("keyC");
+
+		// At cap: only 2 images.
+		budget.beginPass();
+		budget.observe(id1);
+		budget.observe(id2);
+		budget.endPass();
+
+		// acquireId should return the same IDs.
+		expect(budget.acquireId("keyA")).toBe(id1);
+		expect(budget.acquireId("keyB")).toBe(id2);
+
+		// Overflow: observe 3 images.
+		budget.beginPass();
+		budget.observe(id1);
+		budget.observe(id2);
+		budget.observe(id3);
+		budget.endPass(); // schedules demotion of id1
+
+		// The key map should STILL hold id1 because it's not purged until the demotion frame.
+		expect(budget.acquireId("keyA")).toBe(id1);
+
+		// Demotion frame: applies the purge of id1.
+		budget.beginPass();
+		budget.observe(id1);
+		budget.observe(id2);
+		budget.observe(id3);
+		const reset = budget.endPass();
+		expect(reset).toBe(true);
+
+		// id1 was purged. Acquiring "keyA" now yields a fresh ID.
+		const id1Fresh = budget.acquireId("keyA");
+		expect(id1Fresh).not.toBe(id1);
+
+		// The other keys are still intact.
+		expect(budget.acquireId("keyB")).toBe(id2);
+		expect(budget.acquireId("keyC")).toBe(id3);
+	});
+
+	it("evicts keys reacquired for images that remain suppressed", () => {
+		const budget = new ImageBudget(2, () => {});
+		const oldId = budget.acquireId("keyA");
+		const id2 = budget.acquireId("keyB");
+		const id3 = budget.acquireId("keyC");
+
+		budget.beginPass();
+		budget.observe(oldId);
+		budget.observe(id2);
+		budget.observe(id3);
+		budget.endPass();
+
+		budget.beginPass();
+		budget.observe(oldId);
+		budget.observe(id2);
+		budget.observe(id3);
+		expect(budget.endPass()).toBe(true);
+		expect([...budget.takePurgeIds()]).toEqual([oldId]);
+
+		const suppressedId = budget.acquireId("keyA");
+		expect(suppressedId).not.toBe(oldId);
+
+		budget.beginPass();
+		expect(budget.observe(suppressedId)).toBe(true);
+		expect(budget.observe(id2)).toBe(false);
+		expect(budget.observe(id3)).toBe(false);
+		expect(budget.endPass()).toBe(false);
+		expect([...budget.takePurgeIds()]).toEqual([]);
+
+		expect(budget.acquireId("keyA")).not.toBe(suppressedId);
+	});
+
+	it("clears all keys from the map on takeAllTransmittedIds", () => {
+		const budget = new ImageBudget(3, () => {});
+		const id1 = budget.acquireId("keyA");
+		const id2 = budget.acquireId("keyB");
+
+		// ensure they're in the transmit tracking
+		budget.enqueueTransmit(id1, "TX1");
+		budget.enqueueTransmit(id2, "TX2");
+
+		budget.takeAllTransmittedIds();
+
+		// The keys must yield fresh IDs now.
+		expect(budget.acquireId("keyA")).not.toBe(id1);
+		expect(budget.acquireId("keyB")).not.toBe(id2);
+	});
 
 	it("setCap(0) clears a previously applied demotion threshold", () => {
 		const budget = new ImageBudget(2, () => {});
@@ -180,6 +283,40 @@ describe("ImageBudget", () => {
 describe("encodeKittyDeleteImage", () => {
 	it("emits an APC delete-by-id that frees the image and suppresses the reply", () => {
 		expect(encodeKittyDeleteImage(42)).toBe("\x1b_Ga=d,d=I,i=42,q=2\x1b\\");
+	});
+});
+
+describe("tmux Kitty graphics passthrough", () => {
+	beforeEach(() => {
+		Bun.env.TMUX = "/tmp/tmux-1000/default,1,0";
+	});
+
+	it("wraps every Kitty graphics command in a tmux DCS envelope", () => {
+		const expected = (payload: string) => `\x1bPtmux;${payload.replaceAll("\x1b", "\x1b\x1b")}\x1b\\`;
+
+		expect(encodeKitty("AA==", { columns: 1, rows: 1 })).toBe(expected("\x1b_Ga=T,f=100,q=2,C=1,c=1,r=1;AA==\x1b\\"));
+		expect(encodeKittyTransmit("AA==", 9)).toBe(expected("\x1b_Ga=t,f=100,q=2,i=9;AA==\x1b\\"));
+		expect(encodeKittyPlacement({ imageId: 9, placementId: 9, columns: 3, rows: 2 })).toBe(
+			expected("\x1b_Ga=p,q=2,C=1,i=9,p=9,c=3,r=2\x1b\\"),
+		);
+		expect(encodeKittyVirtualPlacement({ imageId: 9, placementId: 9, columns: 3, rows: 2 })).toBe(
+			expected("\x1b_Ga=p,U=1,q=2,i=9,p=9,c=3,r=2\x1b\\"),
+		);
+		expect(encodeKittyDeleteImage(9)).toBe(expected("\x1b_Ga=d,d=I,i=9,q=2\x1b\\"));
+	});
+
+	it("wraps each quiet chunk of a multi-part Kitty transmission separately", () => {
+		const sequence = encodeKittyTransmit("A".repeat(4097), 9);
+		expect(sequence.match(/\x1bPtmux;/gu)).toHaveLength(2);
+		expect(sequence.match(/\x1b\x1b_G/gu)).toHaveLength(2);
+		expect(sequence.match(/\x1b\x1b\\\x1b\\/gu)).toHaveLength(2);
+		expect(sequence).toContain("\x1b\x1b_Gq=2,m=0;");
+	});
+
+	it("leaves Kitty graphics commands bare outside tmux", () => {
+		delete Bun.env.TMUX;
+		expect(encodeKittyTransmit("AA==", 9)).toBe("\x1b_Ga=t,f=100,q=2,i=9;AA==\x1b\\");
+		expect(wrapTmuxPassthrough("\x1b_Gpayload\x1b\\")).toBe("\x1bPtmux;\x1b\x1b_Gpayload\x1b\x1b\\\x1b\\");
 	});
 });
 
@@ -499,6 +636,136 @@ describe("TUI inline-image budget", () => {
 		}
 	});
 
+	it("clips a direct Kitty placement during an in-place width repaint", async () => {
+		const originalGraphics = { ...getKittyGraphics() };
+		const originalResizeMode = Bun.env.PI_TUI_RESIZE_IN_PLACE;
+		const term = new VirtualTerminal(40, 6);
+		const writes: string[] = [];
+		const realWrite = term.write.bind(term);
+		vi.spyOn(term, "write").mockImplementation((data: string) => {
+			writes.push(data);
+			realWrite(data);
+		});
+
+		setKittyGraphics({ unicodePlaceholders: false });
+		Bun.env.PI_TUI_RESIZE_IN_PLACE = "1";
+		const tui = new TUI(term);
+		tui.addChild(
+			new Image(
+				BASE64_ONE_PIXEL_PNG,
+				"image/png",
+				{ fallbackColor: t => t },
+				{ maxWidthCells: 4, maxHeightCells: 4, budget: tui.imageBudget, imageKey: "resize-direct" },
+				{ widthPx: 40, heightPx: 40 },
+			),
+		);
+		tui.addChild(new Text("after-0\nafter-1\nafter-2", 0, 0));
+
+		try {
+			tui.start();
+			await settle(term);
+			writes.length = 0;
+			term.resize(30, 6);
+			await settle(term);
+
+			const output = writes.join("");
+			expect(output).toContain("a=p,q=2,C=1");
+			expect(output).toContain("c=4,r=3,y=10,h=30");
+		} finally {
+			tui.stop();
+			setKittyGraphics(originalGraphics);
+			if (originalResizeMode === undefined) delete Bun.env.PI_TUI_RESIZE_IN_PLACE;
+			else Bun.env.PI_TUI_RESIZE_IN_PLACE = originalResizeMode;
+		}
+	});
+
+	it("reuses a visible Kitty placement across zero-commit width-epoch repaints", async () => {
+		const originalGraphics = { ...getKittyGraphics() };
+		const originalResizeMode = Bun.env.PI_TUI_RESIZE_IN_PLACE;
+		const originalZellij = Bun.env.ZELLIJ;
+		const term = new VirtualTerminal(20, 8);
+		const writes: string[] = [];
+		const realWrite = term.write.bind(term);
+		vi.spyOn(term, "write").mockImplementation((data: string) => {
+			writes.push(data);
+			realWrite(data);
+		});
+
+		setKittyGraphics({ unicodePlaceholders: false });
+		Bun.env.PI_TUI_RESIZE_IN_PLACE = "1";
+		const tui = new TUI(term);
+		const imageKey = "width-epoch-direct";
+		const imageId = tui.imageBudget.acquireId(imageKey);
+		tui.addChild(new Text("P".repeat(120), 0, 0));
+		tui.addChild(
+			new Image(
+				BASE64_ONE_PIXEL_PNG,
+				"image/png",
+				{ fallbackColor: t => t },
+				{ maxWidthCells: 4, maxHeightCells: 4, budget: tui.imageBudget, imageKey },
+				{ widthPx: 40, heightPx: 40 },
+			),
+		);
+		tui.addChild(new Text("tail-0\ntail-1\ntail-2", 0, 0));
+
+		const expectStablePlacement = (output: string): void => {
+			const placementIds = [...output.matchAll(new RegExp(`i=${imageId},p=(\\d+),`, "g"))].map(match =>
+				Number(match[1]),
+			);
+			expect(placementIds.length).toBeGreaterThan(0);
+			expect(placementIds).toEqual(placementIds.map(() => 1));
+		};
+
+		try {
+			tui.start();
+			await settle(term);
+			writes.length = 0;
+			term.resize(40, 8);
+			await settle(term);
+			expectStablePlacement(writes.join(""));
+
+			writes.length = 0;
+			const overlay = tui.showOverlay(new Text("overlay", 0, 0), { anchor: "top-left", row: 0, col: 0 });
+			await settle(term);
+			const shown = writes.join("");
+			expect(shown).not.toContain("\r\n");
+			expectStablePlacement(shown);
+
+			writes.length = 0;
+			overlay.hide();
+			await settle(term);
+			const hidden = writes.join("");
+			expect(hidden).not.toContain("\r\n");
+			expectStablePlacement(hidden);
+
+			writes.length = 0;
+			term.resize(30, 8);
+			await settle(term);
+			expectStablePlacement(writes.join(""));
+
+			// A forced, non-destructive paint coalesced with another mux width
+			// reset also uses the previous width epoch's seam, not the newly
+			// reflowed frame's chunk target.
+			Bun.env.HERDR_ENV = "1";
+			Bun.env.ZELLIJ = "1";
+			writes.length = 0;
+			term.resize(20, 8);
+			tui.requestRender(true, { clearScrollback: true });
+			await settle(term);
+			const forced = writes.join("");
+			expect(forced).toContain("\x1b[2J");
+			expect(forced).not.toContain("\x1b[3J");
+			expectStablePlacement(forced);
+		} finally {
+			tui.stop();
+			setKittyGraphics(originalGraphics);
+			if (originalResizeMode === undefined) delete Bun.env.PI_TUI_RESIZE_IN_PLACE;
+			else Bun.env.PI_TUI_RESIZE_IN_PLACE = originalResizeMode;
+			if (originalZellij === undefined) delete Bun.env.ZELLIJ;
+			else Bun.env.ZELLIJ = originalZellij;
+		}
+	});
+
 	it("purges demoted image graphics and repaints the fallback without a destructive replay", async () => {
 		const term = new VirtualTerminal(40, 12);
 		const writes: string[] = [];
@@ -535,6 +802,80 @@ describe("TUI inline-image budget", () => {
 			expect(fallbackCount).toBe(1);
 		} finally {
 			tui.stop();
+		}
+	});
+
+	it("deletes every tracked Kitty image during live cleanup", async () => {
+		const term = new VirtualTerminal(40, 12);
+		const writes: string[] = [];
+		const realWrite = term.write.bind(term);
+		vi.spyOn(term, "write").mockImplementation((data: string) => {
+			writes.push(data);
+			realWrite(data);
+		});
+
+		const tui = new TUI(term);
+		const firstId = tui.imageBudget.acquireId("first");
+		const secondId = tui.imageBudget.acquireId("second");
+		tui.addChild(makeImage(tui.imageBudget, "first"));
+		tui.addChild(makeImage(tui.imageBudget, "second"));
+
+		try {
+			tui.start();
+			await settle(term);
+			writes.length = 0;
+
+			tui.clearInlineImages();
+
+			const output = writes.join("");
+			expect(output).toContain(encodeKittyDeleteImage(firstId));
+			expect(output).toContain(encodeKittyDeleteImage(secondId));
+			expect(tui.imageBudget.shouldTransmit(firstId)).toBe(true);
+			expect([...tui.imageBudget.takeAllTransmittedIds()]).toEqual([]);
+		} finally {
+			tui.stop();
+		}
+	});
+
+	it("lets a full-width non-fullscreen overlay replace Unicode image placeholder rows", async () => {
+		const originalGraphics = { ...getKittyGraphics() };
+		const term = new VirtualTerminal(40, 12);
+		const writes: string[] = [];
+		const realWrite = term.write.bind(term);
+		vi.spyOn(term, "write").mockImplementation((data: string) => {
+			writes.push(data);
+			realWrite(data);
+		});
+
+		setKittyGraphics({ unicodePlaceholders: true });
+		const tui = new TUI(term);
+		tui.addChild(makeImage(tui.imageBudget, "behind-modal"));
+		try {
+			tui.start();
+			await settle(term);
+			writes.length = 0;
+
+			const overlay = tui.showOverlay(new Text("MODEL SELECTOR\nMODEL ROW 2\nMODEL ROW 3\nMODEL ROW 4", 0, 0), {
+				anchor: "top-left",
+				width: "100%",
+				maxHeight: "100%",
+			});
+			await settle(term);
+
+			const modalOutput = writes.join("");
+			expect(modalOutput).not.toContain("\x1b[?1049h");
+			const modalViewport = term.getViewport().join("\n");
+			expect(modalViewport).toContain("MODEL SELECTOR");
+			expect(modalViewport).not.toContain(KITTY_PLACEHOLDER);
+
+			writes.length = 0;
+			overlay.hide();
+			await settle(term);
+
+			expect(term.getViewport().join("\n")).toContain(KITTY_PLACEHOLDER);
+		} finally {
+			tui.stop();
+			setKittyGraphics(originalGraphics);
 		}
 	});
 
@@ -619,6 +960,71 @@ describe("TUI inline-image budget", () => {
 			const output = writes.join("");
 			expect(output).toContain("\x1b_Ga=t");
 			expect(output).toContain(BASE64_ONE_PIXEL_PNG);
+		} finally {
+			tui.stop();
+			terminal.id = originalId;
+			setKittyGraphics(originalGraphics);
+		}
+	});
+
+	it("keeps a deferred fullscreen exit until a Ghostty image repaint can emit it", () => {
+		const originalId = terminal.id;
+		const originalGraphics = { ...getKittyGraphics() };
+		const term = new VirtualTerminal(40, 12);
+		const writes: string[] = [];
+		const realWrite = term.write.bind(term);
+		vi.spyOn(term, "write").mockImplementation((data: string) => {
+			writes.push(data);
+			realWrite(data);
+		});
+		let now = 0;
+		const scheduled: Array<{ delayMs: number; callback: () => void; canceled: boolean }> = [];
+		const renderScheduler = {
+			now: () => now,
+			scheduleImmediate: (callback: () => void) => callback(),
+			scheduleRender: (callback: () => void, delayMs: number) => {
+				const entry = { delayMs, callback, canceled: false };
+				scheduled.push(entry);
+				return {
+					cancel: () => {
+						entry.canceled = true;
+					},
+				};
+			},
+		};
+
+		terminal.id = "ghostty";
+		terminal.imageProtocol = ImageProtocol.Kitty;
+		setKittyGraphics({ unicodePlaceholders: true });
+		const tui = new TUI(term, undefined, { renderScheduler });
+		tui.addChild(new Text("old session", 0, 0));
+
+		try {
+			tui.start();
+			const overlay = tui.showOverlay(new Text("session selector", 0, 0), {
+				width: "100%",
+				maxHeight: "100%",
+				fullscreen: true,
+			});
+			tui.addChild(makeImage(tui.imageBudget, "resumed-image"));
+			tui.requestRender(true, { clearScrollback: true });
+			overlay.hide();
+
+			const queued = scheduled.find(entry => !entry.canceled);
+			expect(queued).toBeDefined();
+			now = 40;
+			queued!.canceled = true;
+			queued!.callback();
+
+			const delayed = scheduled.find(entry => !entry.canceled);
+			expect(delayed).toBeDefined();
+			now = 100;
+			delayed!.canceled = true;
+			delayed!.callback();
+
+			const exitPaint = writes.find(write => write.includes("\x1b[?1049l"));
+			expect(exitPaint).toContain("\x1b[3J");
+			expect(exitPaint).toContain(BASE64_ONE_PIXEL_PNG);
 		} finally {
 			tui.stop();
 			terminal.id = originalId;

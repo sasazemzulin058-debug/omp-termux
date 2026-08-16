@@ -1,14 +1,14 @@
 import { describe, expect, it } from "bun:test";
+import { type } from "@oh-my-pi/omptype";
 import type { Tool, ToolCall } from "@oh-my-pi/pi-ai/types";
 import { validateToolArguments } from "@oh-my-pi/pi-ai/utils/validation";
-import { z } from "zod/v4";
 
 describe("Tool argument coercion", () => {
 	it("coerces numeric strings when schema expects number", () => {
 		const tool: Tool = {
 			name: "t1",
 			description: "",
-			parameters: z.object({ timeout: z.number() }),
+			parameters: type({ timeout: type("number") }),
 		};
 
 		const toolCall: ToolCall = {
@@ -20,14 +20,13 @@ describe("Tool argument coercion", () => {
 
 		const result = validateToolArguments(tool, toolCall) as { timeout: number };
 		expect(result.timeout).toBe(300);
-		expect(typeof result.timeout).toBe("number");
 	});
 
 	it("preserves string values when schema expects string", () => {
 		const tool: Tool = {
 			name: "t2",
 			description: "",
-			parameters: z.object({ label: z.string() }),
+			parameters: type({ label: type("string") }),
 		};
 
 		const toolCall: ToolCall = {
@@ -39,14 +38,13 @@ describe("Tool argument coercion", () => {
 
 		const result = validateToolArguments(tool, toolCall) as { label: string };
 		expect(result.label).toBe("300");
-		expect(typeof result.label).toBe("string");
 	});
 
 	it("stringifies object values when schema expects string", () => {
 		const tool: Tool = {
 			name: "object-string",
 			description: "",
-			parameters: z.object({ payload: z.string() }),
+			parameters: type({ payload: type("string") }),
 		};
 
 		const result = validateToolArguments(tool, {
@@ -63,7 +61,7 @@ describe("Tool argument coercion", () => {
 		const tool: Tool = {
 			name: "array-string",
 			description: "",
-			parameters: z.object({ payload: z.string() }),
+			parameters: type({ payload: type("string") }),
 		};
 
 		const result = validateToolArguments(tool, {
@@ -80,7 +78,7 @@ describe("Tool argument coercion", () => {
 		const tool: Tool = {
 			name: "numeric-booleans",
 			description: "",
-			parameters: z.object({ enabled: z.boolean(), disabled: z.boolean() }),
+			parameters: type({ enabled: type("boolean"), disabled: type("boolean") }),
 		};
 
 		const result = validateToolArguments(tool, {
@@ -97,7 +95,7 @@ describe("Tool argument coercion", () => {
 		const tool: Tool = {
 			name: "boolean-numbers",
 			description: "",
-			parameters: z.object({ enabled: z.number(), disabled: z.number().int() }),
+			parameters: type({ enabled: type("number"), disabled: type("number.integer") }),
 		};
 
 		const result = validateToolArguments(tool, {
@@ -114,7 +112,7 @@ describe("Tool argument coercion", () => {
 		const tool: Tool = {
 			name: "invalid-numeric-boolean",
 			description: "",
-			parameters: z.object({ enabled: z.boolean() }),
+			parameters: type({ enabled: type("boolean") }),
 		};
 
 		expect(() =>
@@ -131,7 +129,7 @@ describe("Tool argument coercion", () => {
 		const tool: Tool = {
 			name: "raw-debug",
 			description: "",
-			parameters: z.object({ input: z.string() }),
+			parameters: type({ input: type("string") }),
 		};
 		const rawBlock = '<|start|>assistant<|channel|>commentary to=functions.edit <|message|>{"input":"x"}}<|call|>';
 
@@ -159,15 +157,15 @@ describe("Tool argument coercion", () => {
 		const tool: Tool = {
 			name: "string-booleans",
 			description: "",
-			parameters: z.object({
-				t: z.boolean(),
-				f: z.boolean(),
-				one: z.boolean(),
-				zero: z.boolean(),
-				yes: z.boolean(),
-				no: z.boolean(),
-				on: z.boolean(),
-				off: z.boolean(),
+			parameters: type({
+				t: type("boolean"),
+				f: type("boolean"),
+				one: type("boolean"),
+				zero: type("boolean"),
+				yes: type("boolean"),
+				no: type("boolean"),
+				on: type("boolean"),
+				off: type("boolean"),
 			}),
 		};
 
@@ -203,7 +201,7 @@ describe("Tool argument coercion", () => {
 		const tool: Tool = {
 			name: "t3",
 			description: "",
-			parameters: z.object({ items: z.array(z.number()) }),
+			parameters: type({ items: type("number").array() }),
 		};
 
 		const toolCall: ToolCall = {
@@ -221,7 +219,7 @@ describe("Tool argument coercion", () => {
 		const tool: Tool = {
 			name: "t3b",
 			description: "",
-			parameters: z.object({ paths: z.array(z.string()) }),
+			parameters: type({ paths: type("string").array() }),
 		};
 
 		const toolCall: ToolCall = {
@@ -239,7 +237,7 @@ describe("Tool argument coercion", () => {
 		const tool: Tool = {
 			name: "glob_paths",
 			description: "",
-			parameters: z.object({ paths: z.array(z.string()) }),
+			parameters: type({ paths: type("string").array() }),
 		};
 
 		const bracketResult = validateToolArguments(tool, {
@@ -270,14 +268,14 @@ describe("Tool argument coercion", () => {
 		const tool: Tool = {
 			name: "todo_like",
 			description: "",
-			parameters: z.object({
-				ops: z.array(
-					z.object({
-						op: z.literal("init"),
-						list: z.array(
-							z.object({
-								phase: z.string(),
-								items: z.array(z.string()),
+			parameters: type({
+				ops: type.array(
+					type({
+						op: type.unit("init"),
+						list: type.array(
+							type({
+								phase: type("string"),
+								items: type("string").array(),
 							}),
 						),
 					}),
@@ -306,14 +304,14 @@ describe("Tool argument coercion", () => {
 		const tool: Tool = {
 			name: "todo_like_json_array",
 			description: "",
-			parameters: z.object({
-				ops: z.array(
-					z.object({
-						op: z.literal("init"),
-						list: z.array(
-							z.object({
-								phase: z.string(),
-								items: z.array(z.string()),
+			parameters: type({
+				ops: type.array(
+					type({
+						op: type.unit("init"),
+						list: type.array(
+							type({
+								phase: type("string"),
+								items: type("string").array(),
 							}),
 						),
 					}),
@@ -339,14 +337,14 @@ describe("Tool argument coercion", () => {
 		const tool: Tool = {
 			name: "todo_like_double_json_array",
 			description: "",
-			parameters: z.object({
-				ops: z.array(
-					z.object({
-						op: z.literal("init"),
-						list: z.array(
-							z.object({
-								phase: z.string(),
-								items: z.array(z.string()),
+			parameters: type({
+				ops: type.array(
+					type({
+						op: type.unit("init"),
+						list: type.array(
+							type({
+								phase: type("string"),
+								items: type("string").array(),
 							}),
 						),
 					}),
@@ -373,14 +371,14 @@ describe("Tool argument coercion", () => {
 		const tool: Tool = {
 			name: "todo_like_json_object",
 			description: "",
-			parameters: z.object({
-				ops: z.array(
-					z.object({
-						op: z.literal("init"),
-						list: z.array(
-							z.object({
-								phase: z.string(),
-								items: z.array(z.string()),
+			parameters: type({
+				ops: type.array(
+					type({
+						op: type.unit("init"),
+						list: type.array(
+							type({
+								phase: type("string"),
+								items: type("string").array(),
 							}),
 						),
 					}),
@@ -406,14 +404,14 @@ describe("Tool argument coercion", () => {
 		const tool: Tool = {
 			name: "todo_like_malformed_json_array",
 			description: "",
-			parameters: z.object({
-				ops: z.array(
-					z.object({
-						op: z.literal("init"),
-						list: z.array(
-							z.object({
-								phase: z.string(),
-								items: z.array(z.string()),
+			parameters: type({
+				ops: type.array(
+					type({
+						op: type.unit("init"),
+						list: type.array(
+							type({
+								phase: type("string"),
+								items: type("string").array(),
 							}),
 						),
 					}),
@@ -436,7 +434,7 @@ describe("Tool argument coercion", () => {
 			else throw error;
 		}
 
-		expect(thrown?.message).toContain("ops: Invalid input: expected array, received string");
+		expect(thrown?.message).toContain("ops must be an array");
 		expect(thrown?.message).not.toContain("ops/0");
 		expect(thrown?.message).not.toContain('"normalized"');
 	});
@@ -445,7 +443,7 @@ describe("Tool argument coercion", () => {
 		const tool: Tool = {
 			name: "numeric_list",
 			description: "",
-			parameters: z.object({ values: z.array(z.number()) }),
+			parameters: type({ values: type("number").array() }),
 		};
 
 		const result = validateToolArguments(tool, {
@@ -459,11 +457,11 @@ describe("Tool argument coercion", () => {
 	});
 
 	it("does not wrap singleton values for array expectations from failed union branches", () => {
-		const entry = z.object({ id: z.number() });
+		const entry = type({ id: type("number") });
 		const tool: Tool = {
 			name: "union_shape",
 			description: "",
-			parameters: z.union([z.array(entry), entry]),
+			parameters: type.union([type.array(entry), entry]),
 		};
 
 		const result = validateToolArguments(tool, {
@@ -526,9 +524,9 @@ describe("Tool argument coercion", () => {
 		const tool: Tool = {
 			name: "tagged_union",
 			description: "",
-			parameters: z.union([
-				z.object({ type: z.literal("indices"), indices: z.array(z.number()) }),
-				z.object({ type: z.literal("all") }),
+			parameters: type.union([
+				type({ type: type.unit("indices"), indices: type("number").array() }),
+				type({ type: type.unit("all") }),
 			]),
 		};
 
@@ -581,7 +579,7 @@ describe("Tool argument coercion", () => {
 		const tool: Tool = {
 			name: "t4",
 			description: "",
-			parameters: z.object({ payload: z.object({ a: z.number() }) }),
+			parameters: type({ payload: type({ a: type("number") }) }),
 		};
 
 		const toolCall: ToolCall = {
@@ -599,7 +597,7 @@ describe("Tool argument coercion", () => {
 		const tool: Tool = {
 			name: "t4b",
 			description: "",
-			parameters: z.object({ command: z.string() }),
+			parameters: type({ command: type("string") }),
 		};
 
 		const result = validateToolArguments(tool, {
@@ -616,7 +614,7 @@ describe("Tool argument coercion", () => {
 		const tool: Tool = {
 			name: "t4c",
 			description: "",
-			parameters: z.object({ env: z.record(z.string(), z.string()) }),
+			parameters: type({ env: type.record(type("string"), type("string")) }),
 		};
 
 		const result = validateToolArguments(tool, {
@@ -682,7 +680,7 @@ describe("Tool argument coercion", () => {
 		const tool: Tool = {
 			name: "t5",
 			description: "",
-			parameters: z.object({ payload: z.object({ items: z.array(z.number()) }) }),
+			parameters: type({ payload: type({ items: type("number").array() }) }),
 		};
 
 		const toolCall: ToolCall = {
@@ -700,11 +698,11 @@ describe("Tool argument coercion", () => {
 		const tool: Tool = {
 			name: "t9",
 			description: "",
-			parameters: z.object({
-				a: z.string(),
-				b: z.array(
-					z.object({
-						k: z.string(),
+			parameters: type({
+				a: type("string"),
+				b: type.array(
+					type({
+						k: type("string"),
 					}),
 				),
 			}),
@@ -726,11 +724,11 @@ describe("Tool argument coercion", () => {
 		const tool: Tool = {
 			name: "t10",
 			description: "",
-			parameters: z.object({
-				a: z.string(),
-				b: z.array(
-					z.object({
-						k: z.string(),
+			parameters: type({
+				a: type("string"),
+				b: type.array(
+					type({
+						k: type("string"),
 					}),
 				),
 			}),
@@ -752,12 +750,12 @@ describe("Tool argument coercion", () => {
 		const tool: Tool = {
 			name: "t7",
 			description: "",
-			parameters: z.object({
-				path: z.string(),
-				edits: z.array(
-					z.object({
-						target: z.string(),
-						new_content: z.string(),
+			parameters: type({
+				path: type("string"),
+				edits: type.array(
+					type({
+						target: type("string"),
+						new_content: type("string"),
 					}),
 				),
 			}),
@@ -780,19 +778,19 @@ describe("Tool argument coercion", () => {
 	});
 
 	it("coerces quoted edit arrays before stripping optional null fields", () => {
-		const textSchema = z.union([z.array(z.string()), z.string()]);
+		const textSchema = type.union([type("string").array(), type("string")]);
 		const tool: Tool = {
 			name: "atom-like-edit",
 			description: "",
-			parameters: z.object({
-				path: z.string(),
-				edits: z.array(
-					z.object({
-						loc: z.string(),
+			parameters: type({
+				path: type("string"),
+				edits: type.array(
+					type({
+						loc: type("string"),
 						set: textSchema.optional(),
 						pre: textSchema.optional(),
 						post: textSchema.optional(),
-						sub: z.tuple([z.string(), z.string()]).optional(),
+						sub: type.tuple([type("string"), type("string")]).optional(),
 					}),
 				),
 			}),
@@ -815,14 +813,14 @@ describe("Tool argument coercion", () => {
 		const tool: Tool = {
 			name: "t16",
 			description: "",
-			parameters: z.object({
-				path: z.string(),
-				edits: z.array(
-					z.object({
-						op: z.string(),
-						pos: z.string(),
-						end: z.string(),
-						lines: z.array(z.string()),
+			parameters: type({
+				path: type("string"),
+				edits: type.array(
+					type({
+						op: type("string"),
+						pos: type("string"),
+						end: type("string"),
+						lines: type("string").array(),
 					}),
 				),
 			}),
@@ -852,12 +850,12 @@ describe("Tool argument coercion", () => {
 		const tool: Tool = {
 			name: "t8",
 			description: "",
-			parameters: z.object({
-				path: z.string(),
-				edits: z.array(
-					z.object({
-						target: z.string(),
-						new_content: z.string(),
+			parameters: type({
+				path: type("string"),
+				edits: type.array(
+					type({
+						target: type("string"),
+						new_content: type("string"),
 					}),
 				),
 			}),
@@ -881,9 +879,9 @@ describe("Tool argument coercion", () => {
 		const tool: Tool = {
 			name: "t11",
 			description: "",
-			parameters: z.object({
-				requiredText: z.string(),
-				optionalCount: z.number().optional(),
+			parameters: type({
+				requiredText: type("string"),
+				optionalCount: type("number").optional(),
 			}),
 		};
 
@@ -928,10 +926,10 @@ describe("Tool argument coercion", () => {
 		const tool: Tool = {
 			name: "empty-string-tool",
 			description: "",
-			parameters: z.object({
-				requiredText: z.string(),
-				optionalText: z.string().optional(),
-				optionalEnum: z.enum(["", "clear"]).optional(),
+			parameters: type({
+				requiredText: type("string"),
+				optionalText: type("string").optional(),
+				optionalEnum: type.enumeration(["", "clear"]).optional(),
 			}),
 		};
 
@@ -949,12 +947,12 @@ describe("Tool argument coercion", () => {
 		const tool: Tool = {
 			name: "t12",
 			description: "",
-			parameters: z.object({
-				edits: z.array(
-					z.object({
-						target: z.string(),
-						pos: z.string().optional(),
-						end: z.string().optional(),
+			parameters: type({
+				edits: type.array(
+					type({
+						target: type("string"),
+						pos: type("string").optional(),
+						end: type("string").optional(),
 					}),
 				),
 			}),
@@ -972,26 +970,26 @@ describe("Tool argument coercion", () => {
 	});
 
 	it("drops null while preserving valid empty-string optional properties in anyOf object branches", () => {
-		const opSchema = z.union([
-			z.object({
-				op: z.literal("add_task"),
-				phase: z.string(),
-				content: z.string(),
+		const opSchema = type.union([
+			type({
+				op: type.unit("add_task"),
+				phase: type("string"),
+				content: type("string"),
 			}),
-			z.object({
-				op: z.literal("update"),
-				id: z.string(),
-				status: z.string().optional(),
-				content: z.string().optional(),
-				notes: z.string().optional(),
+			type({
+				op: type.unit("update"),
+				id: type("string"),
+				status: type("string").optional(),
+				content: type("string").optional(),
+				notes: type("string").optional(),
 			}),
 		]);
 
 		const tool: Tool = {
 			name: "t13",
 			description: "",
-			parameters: z.object({
-				ops: z.array(opSchema),
+			parameters: type({
+				ops: type.array(opSchema),
 			}),
 		};
 
@@ -1029,7 +1027,7 @@ describe("Tool argument coercion", () => {
 		const tool: Tool = {
 			name: "t6",
 			description: "",
-			parameters: z.object({ timeout: z.number() }),
+			parameters: type({ timeout: type("number") }),
 		};
 
 		const toolCall: ToolCall = {
@@ -1047,7 +1045,7 @@ describe("Tool argument coercion", () => {
 		const tool: Tool = {
 			name: "t14",
 			description: "",
-			parameters: z.object({ tick_size: z.number().optional() }),
+			parameters: type({ tick_size: type("number").optional() }),
 		};
 		const toolCall: ToolCall = {
 			type: "toolCall",
@@ -1057,14 +1055,13 @@ describe("Tool argument coercion", () => {
 		};
 		const result = validateToolArguments(tool, toolCall);
 		expect(result.tick_size).toBe(1);
-		expect(typeof result.tick_size).toBe("number");
 	});
 
 	it("leaves Optional<number> as undefined when absent", () => {
 		const tool: Tool = {
 			name: "t15",
 			description: "",
-			parameters: z.object({ tick_size: z.number().optional() }),
+			parameters: type({ tick_size: type("number").optional() }),
 		};
 		const toolCall: ToolCall = {
 			type: "toolCall",
@@ -1075,13 +1072,14 @@ describe("Tool argument coercion", () => {
 		const result = validateToolArguments(tool, toolCall);
 		expect(result.tick_size).toBeUndefined();
 	});
+
 	it("strips string 'null' on optional boolean field", () => {
 		const tool: Tool = {
 			name: "edit-tool",
 			description: "",
-			parameters: z.object({
-				path: z.string(),
-				delete: z.boolean().optional(),
+			parameters: type({
+				path: type("string"),
+				delete: type("boolean").optional(),
 			}),
 		};
 
@@ -1100,9 +1098,9 @@ describe("Tool argument coercion", () => {
 		const tool: Tool = {
 			name: "edit-tool",
 			description: "",
-			parameters: z.object({
-				path: z.string(),
-				move: z.string().optional(),
+			parameters: type({
+				path: type("string"),
+				move: type("string").optional(),
 			}),
 		};
 
@@ -1121,8 +1119,8 @@ describe("Tool argument coercion", () => {
 		const tool: Tool = {
 			name: "required-tool",
 			description: "",
-			parameters: z.object({
-				path: z.string(),
+			parameters: type({
+				path: type("string"),
 			}),
 		};
 
@@ -1143,10 +1141,10 @@ describe("Tool argument coercion", () => {
 		const tool: Tool = {
 			name: "multi-optional",
 			description: "",
-			parameters: z.object({
-				required: z.string(),
-				optBool: z.boolean().optional(),
-				optString: z.string().optional(),
+			parameters: type({
+				required: type("string"),
+				optBool: type("boolean").optional(),
+				optString: type("string").optional(),
 			}),
 		};
 
@@ -1165,12 +1163,12 @@ describe("Tool argument coercion", () => {
 		const tool: Tool = {
 			name: "heal-1",
 			description: "",
-			parameters: z.object({
-				path: z.string(),
-				edits: z.array(
-					z.object({
-						target: z.string(),
-						content: z.string(),
+			parameters: type({
+				path: type("string"),
+				edits: type.array(
+					type({
+						target: type("string"),
+						content: type("string"),
 					}),
 				),
 			}),
@@ -1195,12 +1193,12 @@ describe("Tool argument coercion", () => {
 		const tool: Tool = {
 			name: "heal-2",
 			description: "",
-			parameters: z.object({
-				path: z.string(),
-				edits: z.array(
-					z.object({
-						target: z.string(),
-						content: z.string(),
+			parameters: type({
+				path: type("string"),
+				edits: type.array(
+					type({
+						target: type("string"),
+						content: type("string"),
 					}),
 				),
 			}),
@@ -1225,8 +1223,8 @@ describe("Tool argument coercion", () => {
 		const tool: Tool = {
 			name: "heal-esc-1",
 			description: "",
-			parameters: z.object({
-				edits: z.array(z.object({ target: z.string(), content: z.string() })),
+			parameters: type({
+				edits: type.array(type({ target: type("string"), content: type("string") })),
 			}),
 		};
 
@@ -1248,8 +1246,8 @@ describe("Tool argument coercion", () => {
 		const tool: Tool = {
 			name: "heal-trail-1",
 			description: "",
-			parameters: z.object({
-				edits: z.array(z.object({ target: z.string(), op: z.string() })),
+			parameters: type({
+				edits: type.array(type({ target: type("string"), op: type("string") })),
 			}),
 		};
 
@@ -1271,8 +1269,8 @@ describe("Tool argument coercion", () => {
 		const tool: Tool = {
 			name: "heal-3",
 			description: "",
-			parameters: z.object({
-				edits: z.array(z.object({ target: z.string() })),
+			parameters: type({
+				edits: type.array(type({ target: type("string") })),
 			}),
 		};
 
@@ -1292,14 +1290,14 @@ describe("Tool argument coercion", () => {
 		const tool: Tool = {
 			name: "todo_like",
 			description: "",
-			parameters: z.object({
-				phases: z.array(
-					z.object({
-						name: z.string(),
-						tasks: z.array(
-							z.object({
-								content: z.string(),
-								details: z.string().optional(),
+			parameters: type({
+				phases: type.array(
+					type({
+						name: type("string"),
+						tasks: type.array(
+							type({
+								content: type("string"),
+								details: type("string").optional(),
 							}),
 						),
 					}),
@@ -1311,7 +1309,6 @@ describe("Tool argument coercion", () => {
 		// which `JSON.parse` rejects unless the control char is escaped.
 		const stringifiedPhases =
 			'[{"name":"Investigation","tasks":[{"content":"Locate code","details":"line one\nline two"}]}]';
-		expect(stringifiedPhases.includes("\n")).toBe(true);
 
 		const toolCall: ToolCall = {
 			type: "toolCall",
@@ -1334,9 +1331,11 @@ describe("Tool argument coercion", () => {
 		const tool: Tool = {
 			name: "t-defaulted-null",
 			description: "",
-			parameters: z.object({
-				note: z.union([z.string(), z.null()]),
-				tags: z.array(z.string()).default([]),
+			parameters: type({
+				note: type.union([type("string"), type.unit(null)]),
+				tags: type("string")
+					.array()
+					.default(() => []),
 			}),
 		};
 
@@ -1355,8 +1354,10 @@ describe("Tool argument coercion", () => {
 		const tool: Tool = {
 			name: "t-defaulted-isolation",
 			description: "",
-			parameters: z.object({
-				tags: z.array(z.string()).default([]),
+			parameters: type({
+				tags: type("string")
+					.array()
+					.default(() => []),
 			}),
 		};
 
@@ -1382,10 +1383,10 @@ describe("Tool argument coercion", () => {
 		const tool: Tool = {
 			name: "t-optional-nulls",
 			description: "",
-			parameters: z.object({
-				path: z.string(),
-				offset: z.number().optional(),
-				limit: z.number().optional(),
+			parameters: type({
+				path: type("string"),
+				offset: type("number").optional(),
+				limit: type("number").optional(),
 			}),
 		};
 
@@ -1404,9 +1405,11 @@ describe("Tool argument coercion", () => {
 		const tool: Tool = {
 			name: "t-root-json-null",
 			description: "",
-			parameters: z.object({
-				note: z.union([z.string(), z.null()]),
-				tags: z.array(z.string()).default([]),
+			parameters: type({
+				note: type.union([type("string"), type.unit(null)]),
+				tags: type("string")
+					.array()
+					.default(() => []),
 			}),
 		};
 
@@ -1428,10 +1431,10 @@ describe("Tool argument coercion", () => {
 		const tool: Tool = {
 			name: "t-nested-json",
 			description: "",
-			parameters: z.object({
-				payload: z.object({
-					flags: z.array(z.boolean()),
-					meta: z.object({ count: z.number() }),
+			parameters: type({
+				payload: type({
+					flags: type("boolean").array(),
+					meta: type({ count: type("number") }),
 				}),
 			}),
 		};
@@ -1457,15 +1460,14 @@ describe("Tool argument coercion", () => {
 		});
 	});
 
-	it("tolerates extra keys on .strict() Zod object schemas (loose-recursive)", () => {
+	it("tolerates extra keys on a rejecting object schema", () => {
 		const tool: Tool = {
 			name: "t-strict-root",
 			description: "",
-			parameters: z
-				.object({
-					op: z.string(),
-				})
-				.strict(),
+			parameters: type({
+				"+": "reject",
+				op: type("string"),
+			}),
 		};
 
 		const toolCall: ToolCall = {
@@ -1483,19 +1485,17 @@ describe("Tool argument coercion", () => {
 		expect(result.timeout).toBeUndefined();
 	});
 
-	it("tolerates extra keys on nested .strict() Zod object schemas", () => {
+	it("tolerates extra keys on nested rejecting object schemas", () => {
 		const tool: Tool = {
 			name: "t-strict-nested",
 			description: "",
-			parameters: z
-				.object({
-					config: z
-						.object({
-							host: z.string(),
-						})
-						.strict(),
-				})
-				.strict(),
+			parameters: type({
+				"+": "reject",
+				config: type({
+					"+": "reject",
+					host: type("string"),
+				}),
+			}),
 		};
 
 		const toolCall: ToolCall = {
@@ -1545,9 +1545,9 @@ describe("Tool argument coercion", () => {
 		const unionTool: Tool = {
 			name: "search",
 			description: "",
-			parameters: z.object({
-				pattern: z.string(),
-				paths: z.union([z.string(), z.array(z.string()).min(1)]),
+			parameters: type({
+				pattern: type("string"),
+				paths: type.union([type("string"), type("string").array().atLeastLength(1)]),
 			}),
 		};
 
@@ -1626,7 +1626,7 @@ describe("Tool argument coercion", () => {
 			const stringOnly: Tool = {
 				name: "string_only",
 				description: "",
-				parameters: z.object({ value: z.string() }),
+				parameters: type({ value: type("string") }),
 			};
 			const result = validateToolArguments(stringOnly, {
 				type: "toolCall",
@@ -1660,9 +1660,9 @@ describe("Tool argument coercion", () => {
 			const nestedTool: Tool = {
 				name: "nested_search",
 				description: "",
-				parameters: z.object({
-					payload: z.object({
-						paths: z.union([z.string(), z.array(z.string()).min(1)]),
+				parameters: type({
+					payload: type({
+						paths: type.union([type("string"), type("string").array().atLeastLength(1)]),
 					}),
 				}),
 			};
@@ -1684,11 +1684,11 @@ describe("Tool argument coercion", () => {
 		const opsTool: Tool = {
 			name: "todo",
 			description: "",
-			parameters: z.object({
-				ops: z.array(
-					z.object({
-						op: z.string(),
-						task: z.string().optional(),
+			parameters: type({
+				ops: type.array(
+					type({
+						op: type("string"),
+						task: type("string").optional(),
 					}),
 				),
 			}),
@@ -1716,7 +1716,7 @@ describe("Tool argument coercion", () => {
 			const tool: Tool = {
 				name: "rooted",
 				description: "",
-				parameters: z.object({ label: z.string() }),
+				parameters: type({ label: type("string") }),
 			};
 			const result = validateToolArguments(tool, {
 				type: "toolCall",
@@ -1731,7 +1731,7 @@ describe("Tool argument coercion", () => {
 			const tool: Tool = {
 				name: "deep",
 				description: "",
-				parameters: z.object({ label: z.string() }),
+				parameters: type({ label: type("string") }),
 			};
 			const result = validateToolArguments(tool, {
 				type: "toolCall",
@@ -1747,7 +1747,7 @@ describe("Tool argument coercion", () => {
 			const tool: Tool = {
 				name: "clobber",
 				description: "",
-				parameters: z.object({ value: z.string() }),
+				parameters: type({ value: type("string") }),
 			};
 			const result = validateToolArguments(tool, {
 				type: "toolCall",
@@ -1762,8 +1762,8 @@ describe("Tool argument coercion", () => {
 			const tool: Tool = {
 				name: "wrap",
 				description: "",
-				parameters: z.object({
-					payload: z.object({ op: z.string() }),
+				parameters: type({
+					payload: type({ op: type("string") }),
 				}),
 			};
 			const result = validateToolArguments(tool, {
@@ -1794,8 +1794,8 @@ describe("Tool argument coercion", () => {
 			const tool: Tool = {
 				name: "union",
 				description: "",
-				parameters: z.object({
-					items: z.union([z.string(), z.array(z.object({ op: z.string() }))]),
+				parameters: type({
+					items: type.union([type("string"), type.array(type({ op: type("string") }))]),
 				}),
 			};
 			const result = validateToolArguments(tool, {
@@ -1812,7 +1812,7 @@ describe("Tool argument coercion", () => {
 			const tool: Tool = {
 				name: "plain",
 				description: "",
-				parameters: z.object({ op: z.string(), count: z.number() }),
+				parameters: type({ op: type("string"), count: type("number") }),
 			};
 			const result = validateToolArguments(tool, {
 				type: "toolCall",
@@ -1822,5 +1822,145 @@ describe("Tool argument coercion", () => {
 			}) as { op: string; count: number };
 			expect(result).toEqual({ op: "done", count: 2 });
 		});
+	});
+
+	describe("single-string-field coercion", () => {
+		it("remaps a different string field to the single required string field when target is absent", () => {
+			const tool: Tool = {
+				name: "single-arg",
+				description: "",
+				parameters: type({ input: type("string") }),
+			};
+			const result = validateToolArguments(tool, {
+				type: "toolCall",
+				id: "c1",
+				name: "single-arg",
+				arguments: { _input: "hello payload" },
+			}) as { input: string };
+			expect(result).toEqual({ input: "hello payload" });
+		});
+
+		it("leaves arguments alone when the target field is present but has the wrong type", () => {
+			const tool: Tool = {
+				name: "single-arg",
+				description: "",
+				parameters: type({ input: type("string") }),
+			};
+			const result = validateToolArguments(tool, {
+				type: "toolCall",
+				id: "c2",
+				name: "single-arg",
+				arguments: { input: 123, _input: "hello" },
+			}) as { input: string };
+			expect(result.input).toBe("123");
+		});
+
+		it("does not remap when the schema has multiple fields", () => {
+			const tool: Tool = {
+				name: "multi-arg",
+				description: "",
+				parameters: type({ input: type("string"), path: type("string") }),
+			};
+			expect(() =>
+				validateToolArguments(tool, {
+					type: "toolCall",
+					id: "c3",
+					name: "multi-arg",
+					arguments: { other: "hello", path: "file.ts" },
+				}),
+			).toThrow();
+		});
+
+		it("does not remap when there is no string candidate", () => {
+			const tool: Tool = {
+				name: "single-arg",
+				description: "",
+				parameters: type({ input: type("string") }),
+			};
+			expect(() =>
+				validateToolArguments(tool, {
+					type: "toolCall",
+					id: "c4",
+					name: "single-arg",
+					arguments: { other: 123 },
+				}),
+			).toThrow();
+		});
+	});
+});
+
+describe("In-band arg spill healing", () => {
+	const todoTool: Tool = {
+		name: "todo",
+		description: "",
+		parameters: type({
+			op: type.enumeration(["append", "done", "drop", "init", "rm", "start", "view"]),
+			task: type("string").optional(),
+			phase: type("string").optional(),
+		}),
+	};
+
+	function run(tool: Tool, args: Record<string, unknown>): Record<string, unknown> {
+		return validateToolArguments(tool, {
+			type: "toolCall",
+			id: "call-spill",
+			name: tool.name,
+			arguments: args,
+		}) as Record<string, unknown>;
+	}
+
+	it("heals the wrong-closer spill delivered via native tool calling", () => {
+		// Exact payload observed in the wild: the model closed the value with
+		// </arg_key>, so the provider parser swallowed the next pair into `op`.
+		const result = run(todoTool, {
+			op: "done</arg_key>\n<arg_key>task</arg_key>\n<arg_value>Unify history column property",
+		});
+		expect(result).toEqual({ op: "done", task: "Unify history column property" });
+	});
+
+	it("heals a missing closer before the next inlined pair", () => {
+		const result = run(todoTool, {
+			op: "done\n<arg_key>task</arg_key>\n<arg_value>Unify history column property</arg_value>",
+		});
+		expect(result).toEqual({ op: "done", task: "Unify history column property" });
+	});
+
+	it("strips a stray wrong closer with a trailing </tool_call>", () => {
+		const result = run(todoTool, { op: "view</arg_key>\n</tool_call>" });
+		expect(result).toEqual({ op: "view" });
+	});
+
+	it("coerces recovered pair values against the schema", () => {
+		const tool: Tool = {
+			name: "spill-coerce",
+			description: "",
+			parameters: type({
+				op: type.enumeration(["read"]),
+				count: type("number").optional(),
+			}),
+		};
+		const result = run(tool, {
+			op: "read</arg_key>\n<arg_key>count</arg_key>\n<arg_value>3",
+		});
+		expect(result).toEqual({ op: "read", count: 3 });
+	});
+
+	it("never overwrites an existing argument with a spilled pair", () => {
+		const result = run(todoTool, {
+			op: "done</arg_key>\n<arg_key>task</arg_key>\n<arg_value>spilled",
+			task: "original",
+		});
+		expect(result).toEqual({ op: "done", task: "original" });
+	});
+
+	it("leaves valid calls with tag-like string content untouched", () => {
+		const tool: Tool = {
+			name: "spill-content",
+			description: "",
+			parameters: type({ content: type("string") }),
+		};
+		const content = "docs: emit </arg_key>\n<arg_key>path</arg_key>\n<arg_value>src/a.ts</arg_value> pairs";
+		const result = run(tool, { content });
+		expect(result).toEqual({ content });
 	});
 });

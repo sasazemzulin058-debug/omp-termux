@@ -3,10 +3,11 @@
 This document summarizes the experiments behind the optional **local** tiny-model paths for
 session-title generation (`providers.tinyModel`), Mnemopi memory extraction/consolidation
 (`providers.memoryModel`), and the `auto` thinking-level difficulty classifier
-(`providers.autoThinkingModel`, which reuses the memory-model registry). It is a factual engineering
+(`providers.autoThinkingModel`, which uses the memory-model registry). It is a factual engineering
 record for maintainers: what we measured, which recipes won, and which models we shipped. All three
 settings default to `online`, so existing users incur no downloads or on-device inference cost unless
-they opt in.
+they opt in. On the online path, the configured `tiny` role is preferred and the task-specific online
+fallback is used when that role is unset.
 
 ## Runtime / environment findings
 
@@ -75,7 +76,7 @@ they opt in.
 | flan-t5-small | Rejected — just echoes the input    |
 
 **Shipped local options**: `lfm2-350m`, `qwen3-0.6b`, `gemma-270m`, `qwen2.5-0.5b`, `lfm2-700m`.
-**Default**: `online` (pi/smol).
+**Default setting**: `online`. The default local download for `omp tiny-models` is `lfm2-700m`.
 
 ## Task 2: Mnemopi memory (`providers.memoryModel`)
 
@@ -121,20 +122,23 @@ chit-chat → NONE example is the best mitigation.
 - **LFM2-1.2B** — solid and fastest to load. Weaknesses: `Label: value` noise, small-talk + buried
   leaks, a fluffy single-memory summary.
 
-### Recommendation
+### Recommendation and current availability
 
-Extraction favors **precision** (do not pollute long-term memory) → **Qwen3-1.7B is the best single
-pick** (its consolidation is good enough). If running a second model for consolidation, **gemma-3-1b**
-wins that task.
+The experiments favored **Qwen3-1.7B** for extraction precision, but the shipped ONNX export cannot
+currently run under `onnxruntime-node`: its RotaryEmbedding cache updates are unsupported. The
+runtime rejects this choice before loading the model rather than failing during inference.
 
-**Shipped local options**: `qwen3-1.7b` (recommended), `gemma-3-1b`, `qwen2.5-1.5b`, `lfm2-1.2b`.
-**Default**: `online` (the configured smol model).
+Of the runnable options, the registry marks `lfm2-1.2b` as the recommended local memory model.
+`gemma-3-1b` favors consolidation quality, while `qwen2.5-1.5b` favors fine-grained extraction.
+
+**Configured local options**: `llama3.2:3b`, `qwen3-1.7b` (currently disabled as described above),
+`gemma-3-1b`, `qwen2.5-1.5b`, `lfm2-1.2b`.
+**Default setting**: `online`.
 
 ### Known Mnemopi parser bugs (surfaced by these experiments)
 
 - `String(item)` produces `[object Object]` on object array items.
 - The line-fallback drops items `<=10` chars, so a correct short fact like `Name: Can` is discarded.
-
 
 ## Integration notes
 

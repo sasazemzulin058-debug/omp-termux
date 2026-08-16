@@ -8,7 +8,7 @@ use std::{
 	collections::HashMap,
 	io::{Read, Write},
 	str,
-	sync::{Arc, Mutex, mpsc},
+	sync::Arc,
 	time::{Duration, Instant},
 };
 
@@ -17,6 +17,7 @@ use napi::{
 	threadsafe_function::{ThreadsafeFunction, ThreadsafeFunctionCallMode},
 };
 use napi_derive::napi;
+use parking_lot::Mutex;
 use portable_pty::{Child, CommandBuilder, PtySize, native_pty_system};
 
 use crate::{ps, task};
@@ -43,6 +44,27 @@ pub struct PtyStartOptions<'env> {
 	pub shell:      Option<String>,
 }
 
+/// Options for running an executable and argument vector in a PTY session.
+#[napi(object)]
+pub struct PtyArgvStartOptions<'env> {
+	/// Executable name or path.
+	pub application: String,
+	/// Arguments passed directly to the executable.
+	pub args:        Vec<String>,
+	/// Working directory for command execution.
+	pub cwd:         Option<String>,
+	/// Environment variables for this command.
+	pub env:         Option<HashMap<String, String>>,
+	/// Timeout in milliseconds before cancelling.
+	pub timeout_ms:  Option<u32>,
+	/// Abort signal for cancelling the operation.
+	pub signal:      Option<Unknown<'env>>,
+	/// PTY column count.
+	pub cols:        Option<u16>,
+	/// PTY row count.
+	pub rows:        Option<u16>,
+}
+
 /// Result of a PTY command run.
 #[napi(object)]
 pub struct PtyRunResult {
@@ -55,13 +77,18 @@ pub struct PtyRunResult {
 }
 
 #[derive(Clone)]
+enum PtyCommand {
+	Shell { command: String, shell: Option<String> },
+	Argv { application: String, args: Vec<String> },
+}
+
+#[derive(Clone)]
 struct PtyRunConfig {
-	command: String,
+	command: PtyCommand,
 	cwd:     Option<String>,
 	env:     Option<HashMap<String, String>>,
 	cols:    u16,
 	rows:    u16,
-	shell:   Option<String>,
 }
 
 enum ReaderEvent {
@@ -83,7 +110,7 @@ const POST_EXIT_DRAIN_TIMEOUT: Duration = Duration::from_millis(300);
 const FINAL_READER_DRAIN_TIMEOUT: Duration = Duration::from_millis(50);
 
 struct PtySessionCore {
-	control_tx: mpsc::Sender<ControlMessage>,
+	control_tx: flume::Sender<ControlMessage>,
 }
 
 /// Stateful PTY session for interactive stdin/stdout passthrough.
@@ -105,7 +132,8 @@ impl PtySession {
 		Self { core: Arc::new(Mutex::new(None)) }
 	}
 
-	/// Start a PTY command and stream output chunks via callback.
+	/// Start a shell command, stream output chunks, and report the spawned child
+	/// PID.
 	#[napi]
 	pub fn start<'env>(
 		&self,
@@ -113,46 +141,39 @@ impl PtySession {
 		options: PtyStartOptions<'env>,
 		#[napi(ts_arg_type = "((error: Error | null, chunk: string) => void) | undefined | null")]
 		on_chunk: Option<ThreadsafeFunction<String>>,
+		#[napi(ts_arg_type = "((error: Error | null, pid: number) => void) | undefined | null")]
+		on_start: Option<ThreadsafeFunction<u32>>,
 	) -> Result<PromiseRaw<'env, PtyRunResult>> {
 		let run_config = PtyRunConfig {
-			command: options.command,
+			command: PtyCommand::Shell { command: options.command, shell: options.shell },
 			cwd:     options.cwd,
 			env:     options.env,
 			cols:    options.cols.unwrap_or(120).clamp(20, 400),
 			rows:    options.rows.unwrap_or(40).clamp(5, 200),
-			shell:   options.shell,
 		};
-		let ct = task::CancelToken::new(options.timeout_ms, options.signal);
-		let core = Arc::clone(&self.core);
+		self.start_config(env, run_config, options.timeout_ms, options.signal, on_chunk, on_start)
+	}
 
-		// Register control channel synchronously so write()/kill() work immediately.
-		let (control_tx, control_rx) = mpsc::channel::<ControlMessage>();
-		{
-			let mut guard = core
-				.lock()
-				.map_err(|_| Error::from_reason("PTY session lock poisoned"))?;
-			if guard.is_some() {
-				return Err(Error::from_reason("PTY session already running"));
-			}
-			*guard = Some(PtySessionCore { control_tx });
-		}
-		task::future(env, "pty.start", async move {
-			let run_result =
-				tokio::task::spawn_blocking(move || run_pty_sync(run_config, on_chunk, control_rx, ct))
-					.await;
-
-			// Always clear core regardless of result
-			let mut guard = core
-				.lock()
-				.map_err(|_| Error::from_reason("PTY session lock poisoned"))?;
-			*guard = None;
-			drop(guard);
-
-			match run_result {
-				Ok(inner) => inner,
-				Err(err) => Err(Error::from_reason(format!("PTY execution task failed: {err}"))),
-			}
-		})
+	/// Start an executable with separate arguments, stream output chunks, and
+	/// report the spawned child PID.
+	#[napi]
+	pub fn start_argv<'env>(
+		&self,
+		env: &'env Env,
+		options: PtyArgvStartOptions<'env>,
+		#[napi(ts_arg_type = "((error: Error | null, chunk: string) => void) | undefined | null")]
+		on_chunk: Option<ThreadsafeFunction<String>>,
+		#[napi(ts_arg_type = "((error: Error | null, pid: number) => void) | undefined | null")]
+		on_start: Option<ThreadsafeFunction<u32>>,
+	) -> Result<PromiseRaw<'env, PtyRunResult>> {
+		let run_config = PtyRunConfig {
+			command: PtyCommand::Argv { application: options.application, args: options.args },
+			cwd:     options.cwd,
+			env:     options.env,
+			cols:    options.cols.unwrap_or(120).clamp(20, 400),
+			rows:    options.rows.unwrap_or(40).clamp(5, 200),
+		};
+		self.start_config(env, run_config, options.timeout_ms, options.signal, on_chunk, on_start)
 	}
 
 	/// Write raw input bytes to PTY stdin.
@@ -178,11 +199,46 @@ impl PtySession {
 }
 
 impl PtySession {
+	fn start_config<'env>(
+		&self,
+		env: &'env Env,
+		run_config: PtyRunConfig,
+		timeout_ms: Option<u32>,
+		signal: Option<Unknown<'env>>,
+		on_chunk: Option<ThreadsafeFunction<String>>,
+		on_start: Option<ThreadsafeFunction<u32>>,
+	) -> Result<PromiseRaw<'env, PtyRunResult>> {
+		let ct = task::CancelToken::new(timeout_ms, signal);
+		let core = Arc::clone(&self.core);
+
+		// Register control channel synchronously so write()/kill() work immediately.
+		let (control_tx, control_rx) = flume::unbounded::<ControlMessage>();
+		{
+			let mut guard = core.lock();
+			if guard.is_some() {
+				return Err(Error::from_reason("PTY session already running"));
+			}
+			*guard = Some(PtySessionCore { control_tx });
+		}
+		task::future(env, "pty.start", async move {
+			let run_result = tokio::task::spawn_blocking(move || {
+				run_pty_sync(run_config, on_chunk, on_start, control_rx, ct)
+			})
+			.await;
+
+			let mut guard = core.lock();
+			*guard = None;
+			drop(guard);
+
+			match run_result {
+				Ok(inner) => inner,
+				Err(err) => Err(Error::from_reason(format!("PTY execution task failed: {err}"))),
+			}
+		})
+	}
+
 	fn send_control(&self, message: ControlMessage) -> Result<()> {
-		let guard = self
-			.core
-			.lock()
-			.map_err(|_| Error::from_reason("PTY session lock poisoned"))?;
+		let guard = self.core.lock();
 		let core = guard
 			.as_ref()
 			.ok_or_else(|| Error::from_reason("PTY session is not running"))?;
@@ -213,7 +269,8 @@ fn terminate_pty_processes(
 fn run_pty_sync(
 	config: PtyRunConfig,
 	on_chunk: Option<ThreadsafeFunction<String>>,
-	control_rx: mpsc::Receiver<ControlMessage>,
+	on_start: Option<ThreadsafeFunction<u32>>,
+	control_rx: flume::Receiver<ControlMessage>,
 	ct: task::CancelToken,
 ) -> Result<PtyRunResult> {
 	let pty_system = native_pty_system();
@@ -225,7 +282,7 @@ fn run_pty_sync(
 		// Windows ConPTY openpty() can hang indefinitely when the console
 		// subsystem isn't properly initialized. Use a short startup timeout
 		// so the Promise rejects instead of hanging forever.
-		let (tx, rx) = mpsc::channel();
+		let (tx, rx) = flume::unbounded();
 		std::thread::spawn(move || {
 			let result = pty_system.openpty(PtySize {
 				rows:         config.rows,
@@ -255,19 +312,29 @@ fn run_pty_sync(
 			.map_err(|err| Error::from_reason(format!("Failed to open PTY: {err}")))?
 	};
 
-	let shell = config.shell.as_deref().unwrap_or("sh");
-	let mut cmd = CommandBuilder::new(shell);
-	// Use shell-appropriate command execution flags
-	let lower = shell.to_lowercase();
-	if lower.ends_with("cmd.exe") || lower.ends_with("cmd") {
-		cmd.arg("/c");
-	} else if lower.contains("powershell") || lower.contains("pwsh") {
-		cmd.arg("-Command");
-	} else {
-		// sh/bash/zsh/fish etc.
-		cmd.arg("-lc");
-	}
-	cmd.arg(&config.command);
+	let mut cmd = match config.command {
+		PtyCommand::Shell { command, shell } => {
+			let shell = shell.as_deref().unwrap_or("sh");
+			let mut cmd = CommandBuilder::new(shell);
+			let lower = shell.to_lowercase();
+			if lower.ends_with("cmd.exe") || lower.ends_with("cmd") {
+				cmd.arg("/c");
+			} else if lower.contains("powershell") || lower.contains("pwsh") {
+				cmd.arg("-Command");
+			} else {
+				cmd.arg("-lc");
+			}
+			cmd.arg(command);
+			cmd
+		},
+		PtyCommand::Argv { application, args } => {
+			let mut cmd = CommandBuilder::new(application);
+			for arg in args {
+				cmd.arg(arg);
+			}
+			cmd
+		},
+	};
 	if let Some(cwd) = config.cwd.as_ref() {
 		cmd.cwd(cwd);
 	}
@@ -284,6 +351,11 @@ fn run_pty_sync(
 		.spawn_command(cmd)
 		.map_err(|err| Error::from_reason(format!("Failed to spawn PTY command: {err}")))?;
 	drop(pair.slave);
+	let child_process_id = child.process_id();
+	let child_pid = child_process_id.and_then(|value| i32::try_from(value).ok());
+	if let Some(callback) = on_start.as_ref() {
+		callback.call(Ok(child_process_id.unwrap_or(0)), ThreadsafeFunctionCallMode::NonBlocking);
+	}
 	ct.heartbeat()
 		.map_err(|err| Error::from_reason(format!("PTY setup cancelled before reader: {err}")))?;
 
@@ -303,7 +375,7 @@ fn run_pty_sync(
 		.try_clone_reader()
 		.map_err(|err| Error::from_reason(format!("Failed to create PTY reader: {err}")))?;
 
-	let (reader_tx, reader_rx) = mpsc::channel::<ReaderEvent>();
+	let (reader_tx, reader_rx) = flume::unbounded::<ReaderEvent>();
 	let reader_thread = std::thread::spawn(move || {
 		const REPLACEMENT: &str = "\u{FFFD}";
 		const BUF: usize = 65536;
@@ -364,9 +436,6 @@ fn run_pty_sync(
 		let _ = reader_tx.send(ReaderEvent::Done);
 	});
 
-	let child_pid = child
-		.process_id()
-		.and_then(|value| i32::try_from(value).ok());
 	#[cfg(unix)]
 	let process_group_id = master.process_group_leader().filter(|pgid| *pgid > 0);
 	#[cfg(not(unix))]
@@ -404,8 +473,7 @@ fn run_pty_sync(
 						reader_drain_deadline = Some(Instant::now() + POST_CANCEL_DRAIN_TIMEOUT);
 					}
 				},
-				Err(mpsc::TryRecvError::Empty) => break,
-				Err(mpsc::TryRecvError::Disconnected) => break,
+				Err(flume::TryRecvError::Empty | flume::TryRecvError::Disconnected) => break,
 			}
 		}
 
@@ -416,8 +484,8 @@ fn run_pty_sync(
 					reader_done = true;
 					break;
 				},
-				Err(mpsc::TryRecvError::Empty) => break,
-				Err(mpsc::TryRecvError::Disconnected) => {
+				Err(flume::TryRecvError::Empty) => break,
+				Err(flume::TryRecvError::Disconnected) => {
 					reader_done = true;
 					break;
 				},
@@ -448,8 +516,8 @@ fn run_pty_sync(
 			match reader_rx.recv_timeout(wait_duration) {
 				Ok(ReaderEvent::Chunk(chunk)) => emit_chunk(&chunk, on_chunk.as_ref()),
 				Ok(ReaderEvent::Done) => reader_done = true,
-				Err(mpsc::RecvTimeoutError::Timeout) => {},
-				Err(mpsc::RecvTimeoutError::Disconnected) => {
+				Err(flume::RecvTimeoutError::Timeout) => {},
+				Err(flume::RecvTimeoutError::Disconnected) => {
 					reader_done = true;
 					if exit_code.is_none() {
 						std::thread::sleep(wait_duration);
@@ -519,8 +587,8 @@ fn run_pty_sync(
 					reader_done = true;
 					break;
 				},
-				Err(mpsc::RecvTimeoutError::Timeout) => {},
-				Err(mpsc::RecvTimeoutError::Disconnected) => {
+				Err(flume::RecvTimeoutError::Timeout) => {},
+				Err(flume::RecvTimeoutError::Disconnected) => {
 					reader_done = true;
 					break;
 				},
@@ -537,7 +605,7 @@ fn run_pty_sync(
 	// but the main thread never blocks.
 	#[cfg(windows)]
 	{
-		let (drop_tx, drop_rx) = mpsc::channel::<()>();
+		let (drop_tx, drop_rx) = flume::unbounded::<()>();
 		std::thread::spawn(move || {
 			drop(master);
 			let _ = drop_tx.send(());

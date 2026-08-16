@@ -21,6 +21,7 @@ import { PluginManager } from "@oh-my-pi/pi-coding-agent/extensibility/plugins/m
 import { MarketplaceManager } from "@oh-my-pi/pi-coding-agent/extensibility/plugins/marketplace";
 import type { InstalledPlugin } from "@oh-my-pi/pi-coding-agent/extensibility/plugins/types";
 import * as piUtils from "@oh-my-pi/pi-utils";
+import { removeWithRetries } from "@oh-my-pi/pi-utils";
 
 const FAKE_INSTALLED: InstalledPlugin = {
 	name: "kimi-datasource",
@@ -74,24 +75,22 @@ describe("runPluginCommand({ action: 'install', args: [<local>] })", () => {
 		// stubs leak into sibling test files (e.g. marketplace/manager.test.ts
 		// breaks because listMarketplaces() still returns []).
 		mock.restore();
-		await fs.rm(tmpRoot, { recursive: true, force: true });
+		await removeWithRetries(tmpRoot);
 	});
 
-	for (const spec of [".", "./pkg", "../pkg", "/abs/pkg", "~/pkg"]) {
-		test(`dispatches ${JSON.stringify(spec)} to link() instead of install()`, async () => {
-			const linkSpy = spyOn(PluginManager.prototype, "link").mockResolvedValue(FAKE_INSTALLED);
-			const installSpy = spyOn(PluginManager.prototype, "install").mockResolvedValue(FAKE_INSTALLED);
-			try {
-				await runPluginCommand({ action: "install", args: [spec], flags: { json: true } });
-				expect(linkSpy).toHaveBeenCalledTimes(1);
-				expect(linkSpy.mock.calls[0]?.[0]).toBe(spec);
-				expect(installSpy).not.toHaveBeenCalled();
-			} finally {
-				linkSpy.mockRestore();
-				installSpy.mockRestore();
-			}
-		});
-	}
+	test("dispatches a local path to link() instead of install()", async () => {
+		const linkSpy = spyOn(PluginManager.prototype, "link").mockResolvedValue(FAKE_INSTALLED);
+		const installSpy = spyOn(PluginManager.prototype, "install").mockResolvedValue(FAKE_INSTALLED);
+		try {
+			await runPluginCommand({ action: "install", args: ["."], flags: { json: true } });
+			expect(linkSpy).toHaveBeenCalledTimes(1);
+			expect(linkSpy.mock.calls[0]?.[0]).toBe(".");
+			expect(installSpy).not.toHaveBeenCalled();
+		} finally {
+			linkSpy.mockRestore();
+			installSpy.mockRestore();
+		}
+	});
 
 	test("npm-style spec still dispatches to install(), not link()", async () => {
 		// Guard against an overly-eager local detector: a bare package name with

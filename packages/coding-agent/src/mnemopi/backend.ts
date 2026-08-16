@@ -1,6 +1,6 @@
 import { rm } from "node:fs/promises";
 import * as path from "node:path";
-import { type ApiKeyResolver, completeSimple } from "@oh-my-pi/pi-ai";
+import { type ApiKeyResolver, completeSimple, retryTransientCompletion } from "@oh-my-pi/pi-ai";
 import { hostMatchesUrl } from "@oh-my-pi/pi-catalog/hosts";
 import type { Mnemopi } from "@oh-my-pi/pi-mnemopi";
 import type * as MnemopiDiagnoseNs from "@oh-my-pi/pi-mnemopi/diagnose";
@@ -62,6 +62,20 @@ const STATIC_INSTRUCTIONS = [
 	"",
 ].join("\n");
 
+async function installMnemopiState(session: AgentSession, config: MnemopiBackendConfig): Promise<MnemopiSessionState> {
+	const state = new MnemopiSessionState({ sessionId: session.sessionId, config, session });
+	const previous = setMnemopiSessionState(session, state);
+	await previous?.dispose();
+	try {
+		state.attachSessionListeners();
+		return state;
+	} catch (error) {
+		setMnemopiSessionState(session, undefined);
+		await state.dispose({ consolidate: false });
+		throw error;
+	}
+}
+
 export const mnemopiBackend: MemoryBackend = {
 	id: "mnemopi",
 
@@ -90,10 +104,7 @@ export const mnemopiBackend: MemoryBackend = {
 		try {
 			const config = await loadMnemopiConfigWithProviders(settings, agentDir, modelRegistry, sessionId);
 			await Promise.all([loadMnemopi(), loadMnemopiCore()]);
-			const state = new MnemopiSessionState({ sessionId, config, session });
-			const previous = setMnemopiSessionState(session, state);
-			await previous?.dispose();
-			state.attachSessionListeners();
+			await installMnemopiState(session, config);
 		} catch (error) {
 			logger.warn("Mnemopi: backend startup failed; memory backend inert.", { error: String(error) });
 		}
@@ -129,12 +140,19 @@ export const mnemopiBackend: MemoryBackend = {
 		requireMnemopiCore().resetMemoryForTests();
 		await Bun.sleep(0);
 		await removeDbFiles(getMnemopiScopedDbPaths(config));
+		if (!session?.sessionId || previous?.aliasOf || session.settings.get("memory.backend") !== "mnemopi") return;
+		try {
+			await Promise.all([loadMnemopi(), loadMnemopiCore()]);
+			await installMnemopiState(session, config);
+		} catch (error) {
+			logger.warn("Mnemopi: clear rehydrate failed; memory backend inert.", { error: String(error) });
+		}
 	},
 
 	async enqueue(agentDir, _cwd, session): Promise<void> {
 		try {
 			let state = getMnemopiSessionState(session);
-			if (!state && session) {
+			if (!state && session?.sessionId) {
 				const config = await loadMnemopiConfigWithProviders(
 					session.settings,
 					agentDir,
@@ -142,10 +160,9 @@ export const mnemopiBackend: MemoryBackend = {
 					session.sessionId,
 				);
 				await Promise.all([loadMnemopi(), loadMnemopiCore()]);
-				state = new MnemopiSessionState({ sessionId: session.sessionId, config, session });
-				setMnemopiSessionState(session, state);
+				state = await installMnemopiState(session, config);
 			}
-			await state?.consolidate();
+			await state?.consolidate({ full: true });
 		} catch (error) {
 			logger.warn("Mnemopi: enqueue failed.", { error: String(error) });
 		}
@@ -511,10 +528,10 @@ async function resolveMnemopiProviderOptions(
 	}
 
 	try {
-		const resolved = resolveRoleSelection(["smol"], settings, modelRegistry.getAvailable(), modelRegistry);
+		const resolved = resolveRoleSelection(["tiny", "smol"], settings, modelRegistry.getAvailable());
 		const model = resolved?.model;
 		if (!model) {
-			logger.warn("Mnemopi: llmMode=smol but no smol model resolved; continuing without LLM.");
+			logger.warn("Mnemopi: llmMode=smol but no tiny/smol model resolved; continuing without LLM.");
 			return base;
 		}
 		return {
@@ -528,16 +545,18 @@ async function resolveMnemopiProviderOptions(
 					});
 					return null;
 				}
-				const message = await completeSimple(
-					model,
-					{
-						messages: [{ role: "user", content: prompt, timestamp: Date.now() }],
-					},
-					{
-						apiKey: modelRegistry.resolver(model, sessionId),
-						maxTokens: opts?.maxTokens,
-						temperature: opts?.temperature,
-					},
+				const message = await retryTransientCompletion(() =>
+					completeSimple(
+						model,
+						{
+							messages: [{ role: "user", content: prompt, timestamp: Date.now() }],
+						},
+						{
+							apiKey: modelRegistry.resolver(model, sessionId),
+							maxTokens: opts?.maxTokens,
+							temperature: opts?.temperature,
+						},
+					),
 				);
 				return message.content
 					.filter(

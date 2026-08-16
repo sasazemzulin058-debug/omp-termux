@@ -1,16 +1,17 @@
+import type { type as ArkType } from "@oh-my-pi/omptype";
+import type * as TypeBox from "@oh-my-pi/omptype/typebox";
+import type * as zod from "@oh-my-pi/omptype/zod";
 import type { ImageContent, Message, Model, TextContent } from "@oh-my-pi/pi-ai";
 import type { Component, TUI } from "@oh-my-pi/pi-tui";
 import type { logger as PiLogger } from "@oh-my-pi/pi-utils";
-import type { Type } from "arktype";
-import type * as zod from "zod/v4";
 import type { ModelRegistry } from "../../config/model-registry";
 import type { EditToolDetails } from "../../edit";
 import type { ExecOptions, ExecResult } from "../../exec/exec";
 import type * as PiCodingAgent from "../../index";
 import type { Theme } from "../../modes/theme/theme";
-import type { HookMessage } from "../../session/messages";
+import type { CustomMessagePayload, HookMessage } from "../../session/messages";
 import type { ReadonlySessionManager, SessionManager } from "../../session/session-manager";
-import type { BashToolDetails, FindToolDetails, ReadToolDetails, SearchToolDetails } from "../../tools";
+import type { BashToolDetails, GlobToolDetails, GrepToolDetails, ReadToolDetails } from "../../tools";
 import type {
 	AgentEndEvent,
 	AgentStartEvent,
@@ -43,7 +44,6 @@ import type {
 	TurnEndEvent,
 	TurnStartEvent,
 } from "../shared-events";
-import type * as TypeBox from "../typebox";
 
 // Re-export for backward compatibility
 export type { ExecOptions, ExecResult } from "../../exec/exec";
@@ -352,16 +352,16 @@ export interface WriteToolResultEvent extends ToolResultEventBase {
 	details: undefined;
 }
 
-/** Tool result event for search tool */
-export interface SearchToolResultEvent extends ToolResultEventBase {
-	toolName: "search";
-	details: SearchToolDetails | undefined;
+/** Tool result event for grep tool */
+export interface GrepToolResultEvent extends ToolResultEventBase {
+	toolName: "grep";
+	details: GrepToolDetails | undefined;
 }
 
-/** Tool result event for find tool */
-export interface FindToolResultEvent extends ToolResultEventBase {
-	toolName: "find";
-	details: FindToolDetails | undefined;
+/** Tool result event for glob tool */
+export interface GlobToolResultEvent extends ToolResultEventBase {
+	toolName: "glob";
+	details: GlobToolDetails | undefined;
 }
 
 /** Tool result event for custom/unknown tools */
@@ -380,8 +380,8 @@ export type ToolResultEvent =
 	| ReadToolResultEvent
 	| EditToolResultEvent
 	| WriteToolResultEvent
-	| SearchToolResultEvent
-	| FindToolResultEvent
+	| GrepToolResultEvent
+	| GlobToolResultEvent
 	| CustomToolResultEvent;
 
 /**
@@ -425,7 +425,7 @@ export type { ToolCallEventResult, ToolResultEventResult } from "../shared-event
  */
 export interface BeforeAgentStartEventResult {
 	/** Message to inject into context (persisted to session, visible in TUI) */
-	message?: Pick<HookMessage, "customType" | "content" | "display" | "details" | "attribution">;
+	message?: CustomMessagePayload;
 }
 
 export type {
@@ -444,7 +444,6 @@ export type {
  * Handler function type for each event.
  * Handlers can return R, undefined, or void (bare return statements).
  */
-// biome-ignore lint/suspicious/noConfusingVoidType: void allows bare return statements in handlers
 export type HookHandler<E, R = undefined> = (event: E, ctx: HookContext) => Promise<R | void> | R | void;
 
 export interface HookMessageRenderOptions {
@@ -519,7 +518,7 @@ export interface HookAPI {
 	 * Use this when you want the LLM to see the message content.
 	 * For hook state that should NOT be sent to the LLM, use appendEntry() instead.
 	 *
-	 * @param message - The message to send
+	 * @param message - The message object to send, or a string shorthand for visible message content
 	 * @param message.customType - Identifier for your hook (used for filtering on reload)
 	 * @param message.content - Message content (string or TextContent/ImageContent array)
 	 * @param message.display - Whether to show in TUI (true = styled display, false = hidden)
@@ -530,7 +529,7 @@ export interface HookAPI {
 	 * @param options.deliverAs - How to deliver the message: "steer" or "followUp".
 	 */
 	sendMessage<T = unknown>(
-		message: Pick<HookMessage<T>, "customType" | "content" | "display" | "details" | "attribution">,
+		message: CustomMessagePayload<T>,
 		options?: { triggerTurn?: boolean; deliverAs?: "steer" | "followUp" },
 	): void;
 
@@ -583,11 +582,11 @@ export interface HookAPI {
 
 	/** File logger for error/warning/debug messages */
 	logger: typeof PiLogger;
-	/** Injected zod-backed typebox shim (legacy/compat — prefer `arktype`). */
+	/** Injected TypeBox shim (legacy/compat — prefer `arktype`). */
 	typebox: typeof TypeBox;
-	/** Injected arktype module for arktype-authored hooks. */
-	arktype: typeof Type;
-	/** Injected zod/v4 module for canonical hook validation. */
+	/** Injected omptype schema builder for hooks. */
+	arktype: typeof ArkType;
+	/** Injected Zod-compatible omptype builder for hooks. */
 	zod: typeof zod;
 	/** Injected pi-coding-agent exports */
 	pi: typeof PiCodingAgent;

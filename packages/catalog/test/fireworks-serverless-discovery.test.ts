@@ -10,6 +10,7 @@
  */
 import { describe, expect, it } from "bun:test";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
+import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { fireworksModelManagerOptions } from "@oh-my-pi/pi-catalog/provider-models/openai-compat";
 import type { FetchImpl, ModelSpec } from "@oh-my-pi/pi-catalog/types";
 
@@ -78,9 +79,9 @@ function createMockFetch(): { fetch: FetchImpl; controlPlaneUrls: string[] } {
 	const controlPlaneUrls: string[] = [];
 	const fetch = (async (input: string | URL | Request): Promise<Response> => {
 		const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
-		// models.dev reference fetch — return an empty catalog so the mapper relies
+		// stencil.so reference fetch — return an empty catalog so the mapper relies
 		// purely on control-plane + bundled references.
-		if (url.startsWith("https://models.dev")) {
+		if (url.startsWith("https://stencil.so")) {
 			return jsonResponse({});
 		}
 		if (url.includes("/v1/accounts/fireworks/models")) {
@@ -132,8 +133,10 @@ describe("Fireworks control-plane serverless discovery", () => {
 		expect(kimi.provider).toBe("fireworks");
 		expect(kimi.baseUrl).toBe("https://api.fireworks.ai/inference/v1");
 		expect(kimi.contextWindow).toBe(262144);
-		// Kimi family clamps to the published 32,768 output cap.
-		expect(kimi.maxTokens).toBe(32768);
+		// K2.7-Code is excluded from the K2.5/K2.6 32,768 cap; its ceiling stays
+		// in lockstep with the bundled reference rather than a pinned constant.
+		expect(kimi.maxTokens).toBe(getBundledModel("fireworks", "kimi-k2.7-code")?.maxTokens ?? null);
+		expect(kimi.maxTokens).toBeGreaterThan(32_768);
 		expect(kimi.input).toEqual(["text", "image"]);
 		// Control plane reports no reasoning bit; serverless chat LLMs default on.
 		expect(kimi.reasoning).toBe(true);
@@ -164,7 +167,7 @@ describe("Fireworks control-plane serverless discovery", () => {
 	it("returns null on a control-plane transport failure so the manager keeps its cache", async () => {
 		const fetch = (async (input: string | URL | Request): Promise<Response> => {
 			const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
-			if (url.startsWith("https://models.dev")) return jsonResponse({});
+			if (url.startsWith("https://stencil.so")) return jsonResponse({});
 			return new Response("server error", { status: 500 });
 		}) as unknown as FetchImpl;
 		const options = fireworksModelManagerOptions({ apiKey: "fw_test_key", fetch });

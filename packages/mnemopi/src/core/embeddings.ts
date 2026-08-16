@@ -1,5 +1,8 @@
 import { mkdirSync } from "node:fs";
-import { type ApiKey, getOpenRouterHeaders, ProviderHttpError, withAuth } from "@oh-my-pi/pi-ai";
+import * as fsp from "node:fs/promises";
+import * as nodePath from "node:path";
+import { type ApiKey, getOpenRouterHeaders, withAuth } from "@oh-my-pi/pi-ai";
+import { ProviderHttpError } from "@oh-my-pi/pi-ai/error";
 import { hostMatchesUrl } from "@oh-my-pi/pi-catalog/hosts";
 import {
 	$env,
@@ -9,8 +12,8 @@ import {
 	getFastembedCacheDir,
 	logger,
 } from "@oh-my-pi/pi-utils";
+import { LRUCache } from "@oh-my-pi/pi-utils/lru";
 import type { EmbeddingModel } from "fastembed";
-import { LRUCache } from "lru-cache/raw";
 import { ensureFastembedModelSidecars } from "./fastembed-model-cache";
 import { loadFastembed } from "./fastembed-runtime";
 import {
@@ -61,21 +64,105 @@ const queryCache = new LRUCache<string, Vector>({ max: QUERY_CACHE_MAX });
 const providerIds = new WeakMap<object, number>();
 let nextProviderId = 1;
 
-async function defaultLocalModelInitializer(options: LocalModelInitOptions): Promise<LocalEmbeddingModel> {
-	const { FlagEmbedding } = await loadFastembed();
+/**
+ * Quarantine the exact ONNX file named by a "Protobuf parsing failed" init
+ * error. A truncated cached model blocks local embeddings forever: the
+ * downloader treats the existing file as complete, so every init re-parses
+ * the same broken bytes. The extracted path is error-message CONTENT, so it
+ * is only honored when it resolves inside the fastembed cache directory —
+ * never rename an arbitrary file a dependency happens to mention. Atomic
+ * rename; losing a concurrent-heal race (file already renamed/removed)
+ * still returns true because a retry is safe either way.
+ * @internal exported for tests
+ */
+export async function quarantineCorruptModelFile(message: string, cacheDir?: string): Promise<boolean> {
+	const match = /Load model from (.+?\.onnx) failed:.*Protobuf parsing failed/i.exec(message);
+	if (!match) return false;
+	const modelFile = nodePath.resolve(match[1]);
+	const cacheRoot = nodePath.resolve(cacheDir ?? getFastembedCacheDir());
+	if (!modelFile.startsWith(cacheRoot + nodePath.sep)) return false;
 	try {
-		return await FlagEmbedding.init(options);
+		await fsp.rename(modelFile, `${modelFile}.corrupt-${Date.now()}`);
+		logger.warn("mnemopi: quarantined corrupt local embedding model; retrying init", { modelFile });
+	} catch {
+		// Concurrent heal or vanished file: the single retry stays safe. A
+		// rename that failed with the file still in place just makes the
+		// retry surface the original error again.
+	}
+	return true;
+}
+
+/**
+ * Recover from a partially-extracted fastembed model cache. An interrupted
+ * archive download/extraction leaves `<cacheDir>/<model>/` populated with
+ * sidecars and a truncated `model.onnx_data` but WITHOUT the graph file
+ * (`model.onnx` / `model_optimized.onnx`), so `FlagEmbedding.init` throws
+ * `Model file not found at .../model.onnx`. Upstream `retrieveModel`
+ * short-circuits on the existing model dir and never re-downloads, and
+ * `downloadFileFromGCS` reuses a leftover partial `<model>.tar.gz` as-is, so
+ * the cache is stuck broken forever: recall silently dies and the rebuild
+ * queue grows every session. Delete the incomplete model dir AND the leftover
+ * partial archive so the retry re-downloads from scratch. The model path is
+ * error-message CONTENT, so the dir is only removed when it is a direct child
+ * of the fastembed cache root — never touch a directory a dependency merely
+ * names. Returns true when a retry is worth attempting (the incomplete cache
+ * was cleared, or already gone from a concurrent heal).
+ * @internal exported for tests
+ */
+export async function clearIncompleteModelCache(message: string, cacheDir?: string): Promise<boolean> {
+	const match = /Model file not found at (.+?\.onnx)\b/i.exec(message);
+	if (!match) return false;
+	const modelFile = nodePath.resolve(match[1]);
+	const modelDir = nodePath.dirname(modelFile);
+	const cacheRoot = nodePath.resolve(cacheDir ?? getFastembedCacheDir());
+	// Only a direct child of the cache root: `<cacheRoot>/<model>`.
+	if (nodePath.dirname(modelDir) !== cacheRoot) return false;
+	try {
+		await fsp.rm(modelDir, { recursive: true, force: true });
+		await fsp.rm(`${modelDir}.tar.gz`, { force: true });
+		logger.warn("mnemopi: cleared incomplete local embedding model cache; re-downloading", { modelDir });
+	} catch {
+		// Concurrent heal or vanished dir: the single retry stays safe.
+	}
+	return true;
+}
+
+const SIDECAR_ERROR_RE =
+	/(?:Config file not found at .*config|Tokenizer file not found at .*tokenizer|Tokens map file not found at .*special_tokens_map)/u;
+
+/**
+ * Shared local-model initializer: FlagEmbedding.init with BOTH cache heals.
+ * Missing sidecars (config/tokenizer/tokens map) re-fetch and retry; a
+ * corrupt model blob (Protobuf parse failure) quarantines the file and
+ * retries THROUGH the sidecar heal, so a cache that is broken in both ways
+ * still recovers in one pass. Also the initializer the embed worker uses in
+ * its subprocess; the in-process seam stays {@link setLocalModelInitializer}.
+ */
+export async function defaultLocalModelInitializer(options: LocalModelInitOptions): Promise<LocalEmbeddingModel> {
+	const cacheDir = options.cacheDir ?? getFastembedCacheDir();
+	const initOptions = options.cacheDir === undefined ? { ...options, cacheDir } : options;
+	const { FlagEmbedding } = await loadFastembed();
+	const initWithSidecarHeal = async (): Promise<LocalEmbeddingModel> => {
+		try {
+			return await FlagEmbedding.init(initOptions);
+		} catch (error) {
+			const message = error instanceof Error ? error.message : "";
+			if (!SIDECAR_ERROR_RE.test(message)) throw error;
+			if (!(await ensureFastembedModelSidecars(options.model, cacheDir))) throw error;
+			return FlagEmbedding.init(initOptions);
+		}
+	};
+	try {
+		return await initWithSidecarHeal();
 	} catch (error) {
 		const message = error instanceof Error ? error.message : "";
-		if (
-			!/(?:Config file not found at .*config|Tokenizer file not found at .*tokenizer|Tokens map file not found at .*special_tokens_map)/u.test(
-				message,
-			)
-		) {
-			throw error;
+		if (/Protobuf parsing failed/i.test(message) && (await quarantineCorruptModelFile(message, cacheDir))) {
+			return initWithSidecarHeal();
 		}
-		if (!(await ensureFastembedModelSidecars(options.model, options.cacheDir))) throw error;
-		return FlagEmbedding.init(options);
+		if (await clearIncompleteModelCache(message, cacheDir)) {
+			return initWithSidecarHeal();
+		}
+		throw error;
 	}
 }
 

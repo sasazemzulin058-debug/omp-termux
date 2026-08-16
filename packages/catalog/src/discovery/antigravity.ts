@@ -1,12 +1,12 @@
-import { type } from "arktype";
+import { type } from "@oh-my-pi/omptype";
 import type { ModelSpec } from "../types";
-import { toPositiveNumber } from "../utils";
+import { discoveryFetch, toPositiveNumber } from "../utils";
 import {
 	ANTIGRAVITY_VARIANT_COLLAPSE_TABLE,
 	collapseEffortVariants,
 	type VariantCollapseTable,
 } from "../variant-collapse";
-import { getAntigravityUserAgent } from "../wire/gemini-headers";
+import { ensureAntigravityVersion, getAntigravityUserAgent } from "../wire/gemini-headers";
 
 export const ANTIGRAVITY_PRIMARY_ENDPOINT = "https://daily-cloudcode-pa.googleapis.com";
 export const ANTIGRAVITY_SANDBOX_ENDPOINT = "https://daily-cloudcode-pa.sandbox.googleapis.com";
@@ -161,7 +161,11 @@ export interface FetchAntigravityDiscoveryModelsOptions {
 export async function fetchAntigravityDiscoveryModels(
 	options: FetchAntigravityDiscoveryModelsOptions,
 ): Promise<ModelSpec<"google-gemini-cli">[] | null> {
-	const fetcher = options.fetcher ?? fetch;
+	if (options.userAgent === undefined) {
+		await ensureAntigravityVersion(options.fetcher ?? fetch, options.signal);
+	}
+
+	const fetcher = discoveryFetch(options.fetcher);
 	const endpoints = options.endpoint
 		? [trimTrailingSlashes(options.endpoint)]
 		: DEFAULT_ANTIGRAVITY_DISCOVERY_ENDPOINTS.map(trimTrailingSlashes);

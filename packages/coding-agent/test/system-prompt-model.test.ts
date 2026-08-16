@@ -10,6 +10,8 @@ import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { buildSystemPrompt } from "@oh-my-pi/pi-coding-agent/system-prompt";
+import { usesCodexTaskPrompt } from "@oh-my-pi/pi-coding-agent/task/prompt-policy";
+import { removeSyncWithRetries } from "@oh-my-pi/pi-utils";
 import { cleanupTempHome } from "./helpers/temp-home-cleanup";
 
 const EMPTY_TREE = {
@@ -19,6 +21,60 @@ const EMPTY_TREE = {
 	totalLines: 0,
 	agentsMdFiles: [],
 };
+
+async function expectPromptDateFromStartupTimezone(options: {
+	tempDir: string;
+	tempHomeDir: string;
+	timeZone: string;
+	now: string;
+	expectedDate: string;
+	rejectedDate: string;
+}): Promise<void> {
+	const scenarioPath = path.join(options.tempDir, "prompt-date-timezone.test.ts");
+	await Bun.write(
+		scenarioPath,
+		`import { setSystemTime } from "bun:test";
+import { renderDateCwdReminder } from ${JSON.stringify(
+			path.resolve(import.meta.dir, "../src/session/date-cwd-reminder.ts"),
+		)};
+import { formatLocalCalendarDate } from ${JSON.stringify(path.resolve(import.meta.dir, "../src/utils/local-date.ts"))};
+
+setSystemTime(new Date(process.env.OMP_TEST_NOW!));
+try {
+	// The date/cwd reminder is built per request in the startup local timezone;
+	// the system prompt no longer embeds the date (#7404).
+	const reminder = renderDateCwdReminder(formatLocalCalendarDate(), "/cwd");
+	if (!reminder.includes(\`Today: \${process.env.OMP_EXPECTED_DATE}\`)) {
+		throw new Error(\`Reminder did not contain expected local date:\\n\${reminder}\`);
+	}
+	if (reminder.includes(\`Today: \${process.env.OMP_REJECTED_DATE}\`)) {
+		throw new Error(\`Reminder contained rejected UTC date:\\n\${reminder}\`);
+	}
+} finally {
+	setSystemTime();
+}
+`,
+	);
+	const child = Bun.spawn([process.execPath, scenarioPath], {
+		cwd: options.tempDir,
+		env: {
+			...process.env,
+			HOME: options.tempHomeDir,
+			TZ: options.timeZone,
+			OMP_TEST_NOW: options.now,
+			OMP_EXPECTED_DATE: options.expectedDate,
+			OMP_REJECTED_DATE: options.rejectedDate,
+		},
+		stdout: "pipe",
+		stderr: "pipe",
+	});
+	const [stdout, stderr, exitCode] = await Promise.all([
+		new Response(child.stdout).text(),
+		new Response(child.stderr).text(),
+		child.exited,
+	]);
+	expect(exitCode, `${stdout}\n${stderr}`).toBe(0);
+}
 
 describe("system prompt model identifier", () => {
 	let tempDir = "";
@@ -46,6 +102,17 @@ describe("system prompt model identifier", () => {
 		});
 
 		expect(systemPrompt.join("\n\n")).toContain("Model: anthropic/claude-opus-4");
+	});
+
+	it("renders the first-turn reminder date from the startup local timezone rather than UTC", async () => {
+		await expectPromptDateFromStartupTimezone({
+			tempDir,
+			tempHomeDir,
+			timeZone: "America/Los_Angeles",
+			now: "2026-07-01T03:15:00Z",
+			expectedDate: "2026-06-30",
+			rejectedDate: "2026-07-01",
+		});
 	});
 
 	it("omits the model line when no model is provided", async () => {
@@ -80,7 +147,7 @@ describe("AgentSession model-change prompt refresh", () => {
 			session = undefined;
 		}
 		authStorage.close();
-		fs.rmSync(tempDir, { recursive: true, force: true });
+		removeSyncWithRetries(tempDir);
 	});
 
 	function pickTwoModels(): [Model, Model] {
@@ -89,6 +156,26 @@ describe("AgentSession model-change prompt refresh", () => {
 		const second = all.find(m => m.provider !== first.provider || m.id !== first.id);
 		if (!first || !second) throw new Error("Expected at least two distinct models in the registry");
 		return [first, second];
+	}
+
+	function pickTwoModelsWithSameTaskPolicy(): [Model, Model] {
+		const all = modelRegistry.getAll();
+		const first = all[0];
+		const second = all.find(
+			model =>
+				(model.provider !== first.provider || model.id !== first.id) &&
+				usesCodexTaskPrompt(model.id) === usesCodexTaskPrompt(first.id),
+		);
+		if (!first || !second) throw new Error("Expected two distinct models with the same task prompt policy");
+		return [first, second];
+	}
+
+	function pickModelsAcrossTaskPolicies(): [Model, Model] {
+		const all = modelRegistry.getAll();
+		const defaultPolicy = all.find(model => !usesCodexTaskPrompt(model.id));
+		const codexPolicy = all.find(model => usesCodexTaskPrompt(model.id));
+		if (!defaultPolicy || !codexPolicy) throw new Error("Expected default-policy and GPT-5.6 models");
+		return [defaultPolicy, codexPolicy];
 	}
 
 	function newSession(
@@ -132,8 +219,8 @@ describe("AgentSession model-change prompt refresh", () => {
 		expect(rebuildCount).toBe(1);
 	});
 
-	it("does not rebuild on model change when includeModelInPrompt is disabled", async () => {
-		const [modelA, modelB] = pickTwoModels();
+	it("does not rebuild a hidden-model prompt when the task policy stays the same", async () => {
+		const [modelA, modelB] = pickTwoModelsWithSameTaskPolicy();
 		authStorage.setRuntimeApiKey(modelA.provider, "key-a");
 		authStorage.setRuntimeApiKey(modelB.provider, "key-b");
 
@@ -150,5 +237,25 @@ describe("AgentSession model-change prompt refresh", () => {
 		await session.setModel(modelB);
 		expect(rebuildCount).toBe(0);
 		expect(session.agent.state.systemPrompt).toEqual(["initial"]);
+	});
+
+	it("rebuilds a hidden-model prompt when the task policy changes", async () => {
+		const [modelA, modelB] = pickModelsAcrossTaskPolicies();
+		authStorage.setRuntimeApiKey(modelA.provider, "key-a");
+		authStorage.setRuntimeApiKey(modelB.provider, "key-b");
+
+		let rebuildCount = 0;
+		session = newSession(
+			modelA,
+			Settings.isolated({ "compaction.enabled": false, includeModelInPrompt: false }),
+			async () => {
+				rebuildCount++;
+				return { systemPrompt: ["policy changed"] };
+			},
+		);
+
+		await session.setModel(modelB);
+		expect(rebuildCount).toBe(1);
+		expect(session.agent.state.systemPrompt).toEqual(["policy changed"]);
 	});
 });

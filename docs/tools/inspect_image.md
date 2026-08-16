@@ -1,6 +1,6 @@
 # inspect_image
 
-> Send a local image file to a vision-capable model and return text analysis.
+> Send a local image file or current-turn image attachment to a vision-capable model and return text analysis.
 
 ## Source
 - Entry: `packages/coding-agent/src/tools/inspect-image.ts`
@@ -16,7 +16,7 @@
 
 | Field | Type | Required | Description |
 | --- | --- | --- | --- |
-| `path` | `string` | Yes | Image path passed to `loadImageInput`; resolved relative to `session.cwd` by `resolveReadPath(...)`. |
+| `path` | `string` | Yes | Local image path (resolved relative to `session.cwd`), current-turn `Image #N` label, or `attachment://N` / `image://N` URI. Attachment indexes are 1-based. |
 | `question` | `string` | Yes | User prompt sent as a text content block alongside the image. |
 
 ## Outputs
@@ -25,7 +25,7 @@ The tool returns a single `AgentToolResult`:
 - `content`: one text block, `[{ type: "text", text }]`, where `text` is the concatenated assistant text content from the model response.
 - `details`:
   - `model`: `<provider>/<id>` of the selected model.
-  - `imagePath`: resolved filesystem path returned by `loadImageInput(...)`.
+  - `imagePath`: resolved filesystem path for a file input, or the canonical attachment URI for an attachment input.
   - `mimeType`: MIME type actually sent to the model after optional resize/re-encode.
 
 Model-visible output is single-shot, not streamed by this tool.
@@ -40,17 +40,17 @@ TUI rendering adds presentation-only truncation from `packages/coding-agent/src/
 ## Flow
 1. `InspectImageTool.execute(...)` rejects immediately if `images.blockImages` is enabled in session settings.
 2. It reads `session.modelRegistry`; missing registry, empty registry, missing API key, or unresolved model each raise `ToolError` from `packages/coding-agent/src/tools/inspect-image.ts`.
-3. Model selection tries, in order, `pi/vision`, `pi/default`, the active model string from the session, then `availableModels[0]`. `expandRoleAlias(...)` and `resolveModelFromString(...)` handle each lookup.
+3. Model selection tries, in order, `@vision`, `@default`, the active model string from the session, then `availableModels[0]`. `expandRoleAlias(...)` and `resolveModelFromString(...)` handle each lookup.
 4. The chosen model must advertise `input.includes("image")`; otherwise execution fails before reading the file.
-5. `loadImageInput(...)` in `packages/coding-agent/src/utils/image-loading.ts` resolves the path with `resolveReadPath(...)`, detects MIME type with `readImageMetadata(...)`, and rejects files larger than `MAX_IMAGE_INPUT_BYTES` (`20 * 1024 * 1024`, 20 MiB) using `ImageInputTooLargeError`.
-6. `readImageMetadata(...)` in `packages/utils/src/mime.ts` inspects file headers only. Supported detected MIME types are `image/png`, `image/jpeg`, `image/gif`, and `image/webp`.
-7. `loadImageInput(...)` is called with `excludeWebP: webpExclusionForModel(model)` (`true` only for models that cannot decode WebP, e.g. the Ollama family). It calls `resizeImage(...)` when `images.autoResize` is true, or when `excludeWebP` is set and the detected type is `image/webp` — re-encoding away from WebP even with auto-resize off. The `excludeWebP` flag is forwarded into `resizeImage(...)`. Resize failures are swallowed there and the original bytes are kept.
-8. If MIME detection returned no supported image type, `execute(...)` throws `ToolError("inspect_image only supports PNG, JPEG, GIF, and WEBP files detected by file content.")`.
+5. The tool interprets exact `Image #N` labels (including bracketed labels), `attachment://N`, and `image://N` as 1-based references into the current turn's image attachments. Other values are loaded as files: `loadImageInput(...)` resolves the path with `resolveReadPath(...)`, detects MIME type with `readImageMetadata(...)`, and rejects files larger than `MAX_IMAGE_INPUT_BYTES` (`20 * 1024 * 1024`, 20 MiB). Attachment bytes have the same 20 MiB cap.
+6. File metadata is detected from headers. Attachment inputs use their supplied image MIME type. Supported MIME types are `image/png`, `image/jpeg`, `image/gif`, and `image/webp`.
+7. The loader uses `excludeWebP: webpExclusionForModel(model)` (`true` only for models that cannot decode WebP, such as the Ollama family). It calls `resizeImage(...)` when `images.autoResize` is true, or when WebP must be re-encoded for the selected model. Resize failures are swallowed and the original bytes are kept.
+8. If the file header or attachment MIME type is unsupported, `execute(...)` throws `ToolError("inspect_image only supports PNG, JPEG, GIF, and WEBP files detected by file content.")`.
 9. The tool calls `instrumentedCompleteSimple(...)` with one user message containing two content parts in order:
    - `{ type: "image", data: imageInput.data, mimeType: imageInput.mimeType }`
    - `{ type: "text", text: params.question }`
-10. `systemPrompt` is a one-element array rendered from `packages/coding-agent/src/prompts/tools/inspect-image-system.md`; telemetry is tagged with oneshot kind `inspect_image`.
-11. If the model response stop reason is `error` or `aborted`, the tool maps that to `ToolError`.
+10. `systemPrompt` is a one-element array rendered from `packages/coding-agent/src/prompts/tools/inspect-image-system.md`; telemetry is tagged with oneshot kind `inspect_image`. The request carries the thinking effort selected on the resolved vision/default model role.
+11. The model call uses the caller signal plus `inspect_image.timeoutMs` (default 300,000 ms); `0` disables this timeout. Provider errors, aborts, and timeouts become `ToolError`s.
 12. `extractTextContent(...)` from `packages/coding-agent/src/commit/utils.ts` concatenates only `text` content blocks from the assistant message, trims the result, and the tool fails if nothing remains.
 13. Success returns the text plus `details`; `inspectImageToolRenderer` formats the result for the TUI.
 
@@ -59,11 +59,12 @@ TUI rendering adds presentation-only truncation from `packages/coding-agent/src/
 - **Auto-resized path**: `images.autoResize` enabled. `resizeImage(...)` may downscale and re-encode the image before upload.
 - **Unsupported image path**: file exists but header sniffing does not identify PNG/JPEG/GIF/WEBP. The tool returns a `ToolError` before any model call.
 - **Oversize image path**: file size exceeds 20 MiB before upload. The tool returns a `ToolError` before any model call.
+- **Attachment path**: resolve a current-turn pasted/uploaded image by its `Image #N` label or attachment URI without reading a filesystem path.
 
 ## Side Effects
 - Filesystem
-  - Resolves and reads the target image from disk.
-  - Stats the file once with `Bun.file(...).stat()` and reads it fully with `fs.readFile(...)`.
+  - For file inputs, resolves and reads the target image from disk.
+  - Attachment inputs are loaded from the current turn's in-memory image attachment list.
 - Network
   - Sends the final base64 image payload plus question text to the selected model through `instrumentedCompleteSimple(...)` / the configured simple completion implementation.
 - Session state
@@ -75,8 +76,9 @@ TUI rendering adds presentation-only truncation from `packages/coding-agent/src/
 ## Limits & Caps
 - Supported detected input formats: `image/png`, `image/jpeg`, `image/gif`, `image/webp` (`SUPPORTED_IMAGE_MIME_TYPES` in `packages/utils/src/mime.ts`).
 - Metadata sniff cap: `DEFAULT_IMAGE_METADATA_HEADER_BYTES = 256 * 1024` bytes. Format detection only reads up to 256 KiB from the file header.
-- Availability is gated by `inspect_image.enabled`, default `false`, in `packages/coding-agent/src/config/settings-schema.ts` / `packages/coding-agent/src/tools/index.ts`.
+- Availability is gated by `inspect_image.mode` (`auto`|`on`|`off`, default `auto`) in `packages/coding-agent/src/config/settings-schema.ts`, resolved with the session-scoped `/vision` override and the active model's image capability in `packages/coding-agent/src/utils/inspect-image-mode.ts` / `packages/coding-agent/src/tools/index.ts`. `auto` registers the tool only when the active model lacks native image input; the legacy `inspect_image.enabled` boolean migrates to `mode` (`true`→`on`, `false`→`off`).
 - Upload input cap: `MAX_IMAGE_INPUT_BYTES = 20 * 1024 * 1024` bytes (20 MiB) in `packages/coding-agent/src/utils/image-loading.ts`.
+- Vision request timeout: `inspect_image.timeoutMs` defaults to `300_000` ms (5 minutes); set it to `0` to disable.
 - Auto-resize defaults in `packages/coding-agent/src/utils/image-resize.ts`:
   - `maxWidth: 1568`
   - `maxHeight: 1568`
@@ -104,17 +106,20 @@ TUI rendering adds presentation-only truncation from `packages/coding-agent/src/
 - Input file:
   - `Image file too large: <size> exceeds <limit> limit.` from `ImageInputTooLargeError`, remapped to `ToolError`.
   - `inspect_image only supports PNG, JPEG, GIF, and WEBP files detected by file content.` when header sniffing fails.
+  - `No image attachments are available in this turn...` when a reference is used without current-turn image attachments.
+  - `Could not resolve image attachment ... Available image attachments: ...` when the 1-based reference is out of range.
 - Model call:
   - `inspect_image request failed.` if the response stop reason is `error` without a provider message.
   - Provider `errorMessage` is passed through when present.
   - `inspect_image request aborted.` on aborted responses.
+  - `inspect_image request timed out after <seconds>s...` when `inspect_image.timeoutMs` expires.
   - `inspect_image model returned no text output.` when the assistant message contains no text blocks after filtering.
 
 Failures surface as thrown `ToolError`s from `execute(...)`; the normal success return shape is not used for error reporting.
 
 ## Notes
-- The tool schema is not marked strict in `InspectImageTool`; callers should still treat only `path` and `question` as supported inputs because the implementation reads no other fields.
-- The model-facing prompt path on disk is `packages/coding-agent/src/prompts/tools/inspect-image.md`; the assignment's underscore form does not exist.
+- Although the `AgentTool.strict` transport hint is `false`, the ArkType schema explicitly rejects unknown parameters; only `path` and `question` are accepted.
+- The model-facing prompt path on disk is `packages/coding-agent/src/prompts/tools/inspect-image.md`; the underscore form does not exist.
 - Format support is based on file content, not filename extension. Renaming a non-image file to `.png` does not make it valid.
 - `resolveReadPath(...)` tries macOS-specific path variants: shell-unescaped spaces, AM/PM narrow no-break-space filenames, NFD normalization, and curly-quote variants.
 - `loadImageInput(...)` also computes `textNote`, `dimensionNote`, and final `bytes`, but `inspect_image` does not include those in tool output.

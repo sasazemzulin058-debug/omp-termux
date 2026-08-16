@@ -8,6 +8,7 @@ import * as url from "node:url";
 import { getProjectDir, logger, withTimeout } from "@oh-my-pi/pi-utils";
 import { describeMCPTimeout, isMCPTimeoutEnabled, resolveMCPTimeoutMs } from "./timeout";
 import { createHttpTransport } from "./transports/http";
+import { createSseTransport } from "./transports/sse";
 import { createStdioTransport } from "./transports/stdio";
 import type {
 	MCPGetPromptParams,
@@ -37,8 +38,7 @@ import type {
 	MCPTransport,
 } from "./types";
 
-/** MCP protocol version we support */
-const PROTOCOL_VERSION = "2025-03-26";
+import { MCP_PROTOCOL_VERSION } from "./types";
 
 /** Client info sent during initialization */
 const CLIENT_INFO = {
@@ -77,8 +77,9 @@ async function createTransport(config: MCPServerConfig): Promise<MCPTransport> {
 		case "stdio":
 			return createStdioTransport(config as MCPStdioServerConfig);
 		case "http":
+			return createHttpTransport(config as MCPHttpServerConfig);
 		case "sse":
-			return createHttpTransport(config as MCPHttpServerConfig | MCPSseServerConfig);
+			return createSseTransport(config as MCPSseServerConfig);
 		default:
 			throw new Error(`Unknown server type: ${serverType}`);
 	}
@@ -91,12 +92,12 @@ async function initializeConnection(
 	transport: MCPTransport,
 	options?: {
 		signal?: AbortSignal;
-		/** Called after the initialize response (which sets the session ID) but before notifications/initialized. */
+		/** Called after notifications/initialized succeeds. */
 		onInitialized?: () => void | Promise<void>;
 	},
 ): Promise<MCPInitializeResult> {
 	const params: MCPInitializeParams = {
-		protocolVersion: PROTOCOL_VERSION,
+		protocolVersion: MCP_PROTOCOL_VERSION,
 		capabilities: {
 			roots: { listChanged: false },
 		},
@@ -113,13 +114,17 @@ async function initializeConnection(
 		throw options.signal.reason instanceof Error ? options.signal.reason : new Error("Aborted");
 	}
 
-	// Hook point: the transport now has the session ID from the initialize response.
-	// For HTTP, this is the moment to open the SSE stream so server-to-client requests
-	// triggered by notifications/initialized (e.g. roots/list) can be delivered.
-	await options?.onInitialized?.();
+	// Echo the negotiated protocol version on every subsequent request. The MCP
+	// Streamable HTTP spec requires the MCP-Protocol-Version header after
+	// initialize; transports that don't need it ignore this.
+	transport.setProtocolVersion?.(result.protocolVersion);
 
-	// Send initialized notification
+	// Send initialized before opening the optional GET SSE stream. Servers may
+	// reject or terminate sessions that receive session traffic before this
+	// notification; POST response streams already carry messages during setup.
 	await transport.notify("notifications/initialized");
+
+	await options?.onInitialized?.();
 
 	return result;
 }
@@ -156,8 +161,8 @@ export async function connectToServer(
 			const initResult = await initializeConnection(transport, {
 				signal: options?.signal,
 				async onInitialized() {
-					// Open the SSE stream before sending initialized, so server-to-client
-					// requests triggered by on_initialized (e.g. roots/list) are delivered.
+					// Open the optional GET SSE stream only after the initialized
+					// notification makes the session ready for further traffic.
 					if ("startSSEListener" in transport! && typeof transport!.startSSEListener === "function") {
 						await (transport as { startSSEListener(): Promise<void> }).startSSEListener();
 					}
