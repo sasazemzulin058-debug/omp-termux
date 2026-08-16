@@ -69,7 +69,7 @@ jobs:
           add-to-path: false
 
       - name: Install JS dependencies
-        run: bun install --frozen-lockfile --minimum-release-age 0
+        run: bun install --minimum-release-age 0
 
       - name: Verify Android overlay
         run: python3 android/scripts/verify-overlay.py
