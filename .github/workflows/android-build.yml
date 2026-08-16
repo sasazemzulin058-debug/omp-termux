@@ -25,11 +25,10 @@ on:
       - "android/**"
       - ".github/workflows/android-build.yml"
   workflow_dispatch:
-
 jobs:
   build:
     name: Cross-compile android-arm64 addon
-    runs-on: blacksmith-8vcpu-ubuntu-2404
+    runs-on: tenki-standard-small-2c-4g
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
