@@ -142,18 +142,16 @@ jobs:
       - name: Build JavaScript bundle
         run: |
           set -euo pipefail
-          bun --cwd=packages/stats scripts/generate-client-bundle.ts --generate
-          bun --cwd=packages/coding-agent scripts/generate-docs-index.ts --generate
-          bun --cwd=packages/coding-agent scripts/embed-mupdf-wasm.ts --generate
-          bun build --target=bun --minify --keep-names \
-            --external @oh-my-pi/pi-natives \
-            --define 'process.env.PI_BUNDLED="true"' \
-            packages/coding-agent/src/cli.ts --outdir termux-build
+          # Full arm64 Termux package: docs/stats-aware CLI bundle + natives loader
+          # stubs. Native .node is attached later in package-release.
+          bun --cwd=packages/coding-agent run gen:bundle
+          test -s packages/coding-agent/dist/cli.js
           mkdir -p termux-bundle/node_modules/@oh-my-pi/pi-natives/native
-          cp termux-build/cli.js termux-bundle/cli.js
+          cp packages/coding-agent/dist/cli.js termux-bundle/cli.js
           cp packages/natives/package.json termux-bundle/node_modules/@oh-my-pi/pi-natives/
           cp packages/natives/native/index.js packages/natives/native/loader-state.js \
             packages/natives/native/embedded-addon.js \
+            packages/natives/native/clipboard.js packages/natives/native/desktop.js \
             termux-bundle/node_modules/@oh-my-pi/pi-natives/native/
           tar -czf termux-js.tar.gz -C termux-bundle .
 
