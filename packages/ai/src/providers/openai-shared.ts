@@ -31,6 +31,7 @@ import {
 	parseStreamingJsonThrottled,
 	stringifyJson,
 	structuredCloneJSON,
+	USER_AGENT,
 } from "@oh-my-pi/pi-utils";
 import * as AIError from "../error";
 import {
@@ -314,6 +315,10 @@ export function resolveOpenAIRequestSetup(
 
 	if (options.defaultBaseUrl !== undefined) {
 		baseUrl = baseUrl ?? ($env.OPENAI_BASE_URL?.trim() || options.defaultBaseUrl);
+	}
+	// Attribute xAI traffic as omp unless a User-Agent is already set.
+	if (model.provider === "xai" || model.provider === "xai-oauth") {
+		setHeaderIfAbsent(headers, "User-Agent", USER_AGENT);
 	}
 	const requestHeaders = { ...headers };
 	// A keyless provider (`auth: none` in models.yml) resolves to the `N/A`

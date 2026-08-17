@@ -104,9 +104,6 @@ impl JobTask {
 				check_result.map(|polled_result| polled_result.map(|output| output.into()))
 			},
 			Self::Internal(handle) => {
-				if !handle.is_finished() {
-					return None;
-				}
 				let checkable_handle = handle;
 				checkable_handle.now_or_never().and_then(|r| r.ok())
 			},

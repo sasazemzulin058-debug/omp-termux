@@ -4880,7 +4880,7 @@ dependencies = [
 
 [[package]]
 name = "pi-ast"
-version = "17.3.5"
+version = "17.3.6"
 dependencies = [
  "anyhow",
  "ast-grep-core",
@@ -4949,7 +4949,7 @@ dependencies = [
 
 [[package]]
 name = "pi-builtins"
-version = "17.3.5"
+version = "17.3.6"
 dependencies = [
  "ansi-width",
  "anyhow",
@@ -5016,7 +5016,7 @@ dependencies = [
  "rustix 1.1.4",
  "self_cell",
  "serde_json",
- "similar 3.1.2",
+ "similar 3.2.0",
  "smallvec",
  "strum",
  "strum_macros",
@@ -5034,19 +5034,19 @@ dependencies = [
 
 [[package]]
 name = "pi-iso"
-version = "17.3.5"
+version = "17.3.6"
 dependencies = [
  "async-trait",
  "libc",
  "parking_lot",
- "similar 3.1.2",
+ "similar 3.2.0",
  "tokio",
  "windows-sys 0.61.2",
 ]
 
 [[package]]
 name = "pi-natives"
-version = "17.3.5"
+version = "17.3.6"
 dependencies = [
  "anyhow",
  "arboard",
@@ -5118,7 +5118,7 @@ dependencies = [
 
 [[package]]
 name = "pi-shell"
-version = "17.3.5"
+version = "17.3.6"
 dependencies = [
  "anyhow",
  "brush-core",
@@ -5146,7 +5146,7 @@ dependencies = [
 
 [[package]]
 name = "pi-voice"
-version = "17.3.5"
+version = "17.3.6"
 dependencies = [
  "audiopus_sys",
  "bytes",
@@ -5161,7 +5161,7 @@ dependencies = [
 
 [[package]]
 name = "pi-walker"
-version = "17.3.5"
+version = "17.3.6"
 dependencies = [
  "dashmap",
  "globset",
@@ -6178,9 +6178,9 @@ checksum = "bbbb5d9659141646ae647b42fe094daf6c6192d1620870b449d9557f748b2daa"
 
 [[package]]
 name = "similar"
-version = "3.1.2"
+version = "3.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "85ee016af5d736b69fc89e19254540fa4b5f5492853fb5503920f084011c78b6"
+checksum = "4f66ca1f7aca2474dc10c942eb22feffc897735f54cd1db90138c2fddb490987"
 dependencies = [
  "bstr",
 ]
@@ -9145,9 +9145,9 @@ dependencies = [
 
 [[package]]
 name = "zvariant_utils"
-version = "4.0.0"
+version = "4.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "629d80ece222cad20fe0e8741be493c4ab166acf3b85341bdc2cdbcfd8f3c2d6"
+checksum = "6b84ebb462416c27cdb97f2e7f5f0ccc844da1fe2ecc7121e1b690b41318bf42"
 dependencies = [
  "proc-macro2",
  "quote",

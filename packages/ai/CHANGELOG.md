@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Send the `omp/<version>` User-Agent on xAI chat (`xai` and `xai-oauth`) unless the request already set its own.
+
 ## [17.3.5] - 2026-08-16
 
 ### Added
