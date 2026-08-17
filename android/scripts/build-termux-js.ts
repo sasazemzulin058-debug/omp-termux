@@ -45,8 +45,6 @@ async function main(): Promise<void> {
 			"fastembed",
 			"onnxruntime-node",
 			"omp-legacy-pi-modules",
-			"puppeteer-core",
-			"@babel/parser",
 		],
 		define: {
 			"process.env.PI_BUNDLED": JSON.stringify("true"),
