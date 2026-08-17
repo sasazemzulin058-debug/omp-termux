@@ -127,6 +127,7 @@ jobs:
   js-bundle:
     name: Build Termux JavaScript bundle
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
         with:
@@ -171,7 +172,9 @@ jobs:
 
   package-release:
     name: Package and publish GitHub Release
+    needs: [native-addon, js-bundle]
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
         with:

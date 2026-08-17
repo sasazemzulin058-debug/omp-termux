@@ -186,14 +186,16 @@ PY
 # constrain ring/opus cmake or rayon inside rustc; those still OOM the runner.
 # CGU=16 + RAYON_NUM_THREADS=1: smaller units, processed serially (lower peak
 # than CGU=1 which puts the whole crate in one LLVM unit).
-export MAKEFLAGS="${MAKEFLAGS:--j8}"
-export CMAKE_BUILD_PARALLEL_LEVEL="${CMAKE_BUILD_PARALLEL_LEVEL:-8}"
-export NINJAFLAGS="${NINJAFLAGS:--j8}"
-export CARGO_BUILD_JOBS="${CARGO_BUILD_JOBS:-8}"
-export NUM_JOBS="${NUM_JOBS:-8}"
-export RAYON_NUM_THREADS="${RAYON_NUM_THREADS:-8}"
+export MAKEFLAGS="${MAKEFLAGS:--j2}"
+export CMAKE_BUILD_PARALLEL_LEVEL="${CMAKE_BUILD_PARALLEL_LEVEL:-2}"
+export NINJAFLAGS="${NINJAFLAGS:--j2}"
+export CARGO_BUILD_JOBS="${CARGO_BUILD_JOBS:-2}"
+export NUM_JOBS="${NUM_JOBS:-2}"
+export RAYON_NUM_THREADS="${RAYON_NUM_THREADS:-2}"
 export CARGO_BUILD_PIPELINING=true
-export RUSTC_WRAPPER=sccache
+if command -v sccache >/dev/null 2>&1; then
+	export RUSTC_WRAPPER=sccache
+fi
 export RUSTFLAGS="${RUSTFLAGS:--C opt-level=3 -C debuginfo=0 -C strip=symbols -C linker-plugin-lto=no -C link-arg=-fuse-ld=lld}"
 echo "    MAKEFLAGS=$MAKEFLAGS RAYON_NUM_THREADS=$RAYON_NUM_THREADS RUSTFLAGS=$RUSTFLAGS"
 echo "    memory before cargo:"
