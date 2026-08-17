@@ -34,32 +34,6 @@ The most capable agent surface that ships. Continuously tuned by real-world use 
 
 ## Install
 
-### Termux (Android, aarch64)
-
-```sh
-curl -fsSL https://raw.githubusercontent.com/sasazemzulin058-debug/omp-termux/main/quickstart.sh | sh
-omp --version
-```
-
-Requires Android 14+ (API 34+), an aarch64 device, and Termux from F-Droid or GitHub (the Play Store build is outdated). The installer pulls the prebuilt `omp-termux.tar.gz` release bundle and packages Bun.
-
-#### Termux Configuration & Troubleshooting
-
-1. **Memory Backend (Mnemopi / Embeddings)**:
-   Local `onnxruntime` (ONNX vector embeddings) is not natively compatible with Android Bionic libc and will cause background threads to hang on `Working...`.
-   - Use FTS5 keyword memory: `memory.backend: mnemopi` with `mnemopi.noEmbeddings: true` in `~/.omp/agent/config.yml`.
-   - Or use remote API embeddings: set `mnemopi.embeddingApiUrl` (OpenAI / OpenRouter compatible).
-   - Or disable memory: `memory.backend: off`.
-
-2. **Subprocess Workers (`PI_BUNDLED`)**:
-   In bundled standalone mode, background task/eval workers re-enter `cli.js` via `PI_BUNDLED=true`.
-
-See [`android/`](android/) for full architectural details and port documentation.
-
----
-
-### Other Platforms
-
 **macOS · Linux**
 
 ```sh
@@ -75,7 +49,6 @@ brew install can1357/tap/omp
 ```
 
 **Bun (recommended)**
-
 
 ```sh
 bun install -g @oh-my-pi/pi-coding-agent

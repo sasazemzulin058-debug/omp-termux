@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { type Api, Effort, type Model } from "@oh-my-pi/pi-ai";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
+import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { DEFAULT_MODEL_PER_PROVIDER } from "@oh-my-pi/pi-catalog/provider-models";
 import {
 	expandRoleAlias,
@@ -439,30 +440,11 @@ describe("pickDefaultAvailableModel", () => {
 	});
 
 	test("prefers SuperGrok over paid xAI when both defaults are present", () => {
-		const paid = buildModel({
-			id: "grok-4.5",
-			name: "Grok 4.5",
-			api: "openai-responses",
-			provider: "xai",
-			baseUrl: "https://api.x.ai/v1",
-			reasoning: true,
-			input: ["text", "image"],
-			cost: { input: 2, output: 6, cacheRead: 0.3, cacheWrite: 0 },
-			contextWindow: 500000,
-			maxTokens: 500000,
-		});
-		const oauth = buildModel({
-			id: "grok-4.5",
-			name: "Grok 4.5",
-			api: "openai-responses",
-			provider: "xai-oauth",
-			baseUrl: "https://api.x.ai/v1",
-			reasoning: true,
-			input: ["text", "image"],
-			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-			contextWindow: 500000,
-			maxTokens: 500000,
-		});
+		const paid = getBundledModel("xai", DEFAULT_MODEL_PER_PROVIDER.xai);
+		const oauth = getBundledModel("xai-oauth", DEFAULT_MODEL_PER_PROVIDER["xai-oauth"]);
+		if (!paid || !oauth) {
+			throw new Error("Expected bundled xAI provider defaults");
+		}
 
 		expect(pickDefaultAvailableModel([paid, oauth])?.provider).toBe("xai-oauth");
 		expect(pickDefaultAvailableModel([paid])?.provider).toBe("xai");

@@ -4,7 +4,6 @@
 //! lives in `pi_voice::audio`; these classes adapt its mono `f32` contract to
 //! TypeScript callbacks and `Float32Array` buffers.
 
-#[cfg(not(target_os = "android"))]
 use std::sync::Arc;
 
 use napi::{
@@ -12,25 +11,18 @@ use napi::{
 	threadsafe_function::{ThreadsafeFunction, ThreadsafeFunctionCallMode, UnknownReturnValue},
 };
 use napi_derive::napi;
-#[cfg(not(target_os = "android"))]
 use parking_lot::Mutex;
-#[cfg(not(target_os = "android"))]
 use pi_voice::audio::{CaptureStream, PlaybackState, PlaybackStream};
 
-#[cfg(not(target_os = "android"))]
-type CaptureCallback = ThreadsafeFunction<Float32Array, UnknownReturnValue>;
-#[cfg(target_os = "android")]
 type CaptureCallback = ThreadsafeFunction<Float32Array, UnknownReturnValue>;
 
 /// Default-microphone capture converted to mono `f32` at the requested sample
 /// rate.
 #[napi]
 pub struct AudioCapture {
-	#[cfg(not(target_os = "android"))]
 	stream: Mutex<Option<CaptureStream>>,
 }
 
-#[cfg(not(target_os = "android"))]
 #[napi]
 impl AudioCapture {
 	/// Open the default microphone and deliver low-latency mono PCM chunks.
@@ -59,34 +51,13 @@ impl AudioCapture {
 	}
 }
 
-#[cfg(target_os = "android")]
-#[napi]
-impl AudioCapture {
-	#[napi(constructor)]
-	pub fn new(
-		_sample_rate: u32,
-		#[napi(ts_arg_type = "(error: Error | null, samples: Float32Array) => void")]
-		_on_audio: CaptureCallback,
-	) -> Result<Self> {
-		Err(napi::Error::from_reason("Native audio capture is not supported on Android/Termux"))
-	}
-
-	#[napi]
-	pub fn stop(&self) -> Result<()> {
-		Ok(())
-	}
-}
-
 /// Gapless mono `f32` playback through the default speaker.
 #[napi]
 pub struct AudioPlayback {
-	#[cfg(not(target_os = "android"))]
 	stream: Mutex<Option<PlaybackStream>>,
-	#[cfg(not(target_os = "android"))]
 	state:  Arc<PlaybackState>,
 }
 
-#[cfg(not(target_os = "android"))]
 #[napi]
 impl AudioPlayback {
 	/// Open the default speaker at the requested logical sample rate.
@@ -151,33 +122,3 @@ impl AudioPlayback {
 		Ok(())
 	}
 }
-
-#[cfg(target_os = "android")]
-#[napi]
-impl AudioPlayback {
-	#[napi(constructor)]
-	pub fn new(_sample_rate: u32) -> Result<Self> {
-		Err(napi::Error::from_reason("Native audio playback is not supported on Android/Termux"))
-	}
-
-	#[napi]
-	pub fn write(&self, _samples: Float32Array) -> Result<()> {
-		Ok(())
-	}
-
-	#[napi]
-	pub fn set_gain(&self, _gain: f64) -> Result<()> {
-		Ok(())
-	}
-
-	#[napi]
-	pub async fn end(&self) -> Result<()> {
-		Ok(())
-	}
-
-	#[napi]
-	pub fn stop(&self) -> Result<()> {
-		Ok(())
-	}
-}
-

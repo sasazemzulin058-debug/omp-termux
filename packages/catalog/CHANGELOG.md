@@ -1,6 +1,15 @@
 # Changelog
 
 ## [Unreleased]
+### Fixed
+
+- Raised the GPT-5.6 Sol/Terra/Luna context window on the Codex transport (openai-codex) from 372K to 1M tokens: OpenAI enabled the 1M window for subscription Codex on 2026-08-16, but the Codex model registry still reports the stale 272,000, so discovery now floors these SKUs at 1,000,000 instead of trusting the reported value ([openai/codex#38917](https://github.com/openai/codex/issues/38917)).
+
+
+### Changed
+
+- Changed the paid xAI (XAI_API_KEY) and SuperGrok (xai-oauth) default models to grok-4.6.
+
 
 ## [17.3.5] - 2026-08-16
 
