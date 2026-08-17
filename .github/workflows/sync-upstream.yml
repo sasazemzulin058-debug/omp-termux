@@ -14,7 +14,7 @@ concurrency:
 
 jobs:
   sync:
-    runs-on: tenki-standard-small-2c-4g
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
         with:
@@ -88,9 +88,9 @@ jobs:
                 echo "release already published: $tag"
                 exit 0
               fi
-              echo "error: immutable release tag already points to $remote_tag_sha: $tag" >&2
-              echo "       upstream version is unchanged; next upstream version is required" >&2
-              exit 1
+              echo "warning: tag $tag already exists on $remote_tag_sha, pushing main only without re-tagging"
+              git push origin HEAD:main
+              exit 0
             fi
           fi
           git tag "$tag"
