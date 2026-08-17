@@ -19,13 +19,18 @@ trap 'rm -rf "$TMP" "$LIB_DIR.new"' EXIT INT TERM
 mkdir -p "$TMP" "$LIB_DIR.new" "$BIN_DIR"
 pkg install -y curl tar
 
-curl -fL --retry 5 --retry-all-errors --retry-delay 2 \
-  "https://registry.npmjs.org/@oven/bun-linux-aarch64-android/-/bun-linux-aarch64-android-${BUN_VERSION}.tgz" \
-  -o "$TMP/bun.tgz"
-tar -xzf "$TMP/bun.tgz" -C "$TMP"
-install -m 755 "$TMP/package/bin/bun" "$LIB_DIR.new/bun"
+# Download bun if not found in PATH
+if command -v bun >/dev/null 2>&1; then
+  BUN_BIN="$(command -v bun)"
+  cp "$BUN_BIN" "$LIB_DIR.new/bun"
+else
+  curl -fL --retry 5 --retry-all-errors --retry-delay 2 \
+    "https://registry.npmjs.org/@oven/bun-linux-aarch64-android/-/bun-linux-aarch64-android-${BUN_VERSION}.tgz" \
+    -o "$TMP/bun.tgz"
+  tar -xzf "$TMP/bun.tgz" -C "$TMP"
+  install -m 755 "$TMP/package/bin/bun" "$LIB_DIR.new/bun"
+fi
 "$LIB_DIR.new/bun" -e 'if (process.platform !== "android" || process.arch !== "arm64") process.exit(1)'
-
 curl -fL --retry 5 --retry-all-errors --retry-delay 2 \
   "$BASE/omp-termux.tar.gz" -o "$TMP/omp-termux.tar.gz"
 curl -fL --retry 5 --retry-all-errors --retry-delay 2 \
