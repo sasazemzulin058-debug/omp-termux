@@ -34,21 +34,7 @@ The most capable agent surface that ships. Continuously tuned by real-world use 
 
 ## Install
 
-**macOS · Linux**
-
-```sh
-curl -fsSL https://omp.sh/install | sh
-```
-
-> **Alpine / musl:** the prebuilt musl binary links `libstdc++`/`libgcc` dynamically, which stock Alpine does not ship. Install them first: `apk add libstdc++ libgcc`.
-
-**Homebrew**
-
-```sh
-brew install can1357/tap/omp
-```
-
-**Termux (Android, aarch64)**
+### Termux (Android, aarch64)
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/sasazemzulin058-debug/omp-termux/main/quickstart.sh | sh
@@ -69,7 +55,27 @@ Requires Android 14+ (API 34+), an aarch64 device, and Termux from F-Droid or Gi
    In bundled standalone mode, background task/eval workers re-enter `cli.js` via `PI_BUNDLED=true`.
 
 See [`android/`](android/) for full architectural details and port documentation.
+
+---
+
+### Other Platforms
+
+**macOS · Linux**
+
+```sh
+curl -fsSL https://omp.sh/install | sh
+```
+
+> **Alpine / musl:** the prebuilt musl binary links `libstdc++`/`libgcc` dynamically, which stock Alpine does not ship. Install them first: `apk add libstdc++ libgcc`.
+
+**Homebrew**
+
+```sh
+brew install can1357/tap/omp
+```
+
 **Bun (recommended)**
+
 
 ```sh
 bun install -g @oh-my-pi/pi-coding-agent
