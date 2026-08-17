@@ -37,7 +37,7 @@ jobs:
 
       - uses: actions/checkout@v4
         with:
-          ref: ${{ github.ref }}
+          ref: ${{ github.event.inputs.tag || github.ref }}
 
       - name: Install system dependencies
         run: |
@@ -131,7 +131,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ github.ref }}
+          ref: ${{ github.event.inputs.tag || github.ref }}
 
       - name: Verify Android overlay and release tag
         run: python3 android/scripts/verify-overlay.py
@@ -178,7 +178,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ github.ref }}
+          ref: ${{ github.event.inputs.tag || github.ref }}
 
       - name: Verify Android overlay and release tag
         run: python3 android/scripts/verify-overlay.py
