@@ -25,6 +25,7 @@ jobs:
   native-addon:
     name: Build Android ARM64 native addon
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     steps:
       - name: Free runner disk space
         run: |
@@ -121,6 +122,7 @@ jobs:
   js-bundle:
     name: Build Termux JavaScript bundle
     runs-on: tenki-standard-medium-4c-8g
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
         with:
@@ -167,6 +169,7 @@ jobs:
     name: Package and publish GitHub Release
     needs: [native-addon, js-bundle]
     runs-on: tenki-standard-medium-4c-8g
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
         with:
@@ -174,7 +177,6 @@ jobs:
 
       - name: Verify Android overlay and release tag
         run: python3 android/scripts/verify-overlay.py
-
       - name: Validate release inputs
         run: python3 android/scripts/check-release-inputs.py
 

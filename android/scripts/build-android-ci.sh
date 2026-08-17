@@ -65,10 +65,14 @@ mkdir -p .cargo
 CARGO_CONFIG_BACKUP=""
 CARGO_MANIFEST_BACKUP="$(mktemp)"
 cp Cargo.toml "$CARGO_MANIFEST_BACKUP"
+TMP_DIR=""
 restore_cargo_config() {
 	if [ -n "$CARGO_CONFIG_BACKUP" ]; then cp "$CARGO_CONFIG_BACKUP" .cargo/config.toml; rm -f "$CARGO_CONFIG_BACKUP"; else rm -f .cargo/config.toml; fi
 	cp "$CARGO_MANIFEST_BACKUP" Cargo.toml
 	rm -f "$CARGO_MANIFEST_BACKUP"
+	if [ -n "$TMP_DIR" ] && [ -d "$TMP_DIR" ]; then
+		rm -rf "$TMP_DIR"
+	fi
 }
 if [ -f .cargo/config.toml ]; then
 	CARGO_CONFIG_BACKUP="$(mktemp)"
@@ -127,7 +131,6 @@ echo "    napi bin:  $NAPI_BIN"
 
 mkdir -p "$NATIVE_DIR/.build"
 TMP_DIR="$(mktemp -d "$NATIVE_DIR/.build/cross-XXXXXX")"
-
 # Memory-safe Android overrides on existing workspace [profile.ci].
 # Do NOT redefine [profile.ci] (duplicate key breaks cargo).
 python3 - <<'PY'
