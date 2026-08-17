@@ -52,8 +52,8 @@ setProcessName(APP_NAME);
 // (`B:\~BUN\root\cli.js`) but registers the main path with forward slashes
 // (`B:/~BUN/root/cli.js`), so Bun's internal match fails. `bun build --compile`
 // CLI builds are unaffected. A compiled binary's entry module is by definition
-// the process entry, so the define-folded PI_COMPILED marker stands in.
-const isProcessEntry = import.meta.main || process.env.PI_COMPILED === "true";
+// the process entry, so the define-folded PI_COMPILED / PI_BUNDLED marker stands in.
+const isProcessEntry = import.meta.main || process.env.PI_COMPILED === "true" || process.env.PI_BUNDLED === "true";
 
 // Worker-host entry declaration (Worker threads and worker subprocesses
 // re-enter `Bun.main` with a hidden argv selector instead of loading separate
