@@ -1,100 +1,152 @@
 # Port changes: oh-my-pi → Termux/Android (aarch64)
 
-Catalog of every delta from upstream, why it exists, and how it was verified.
-All deltas are delivered as patches under `android/patches/` — the upstream
-source tree is unmodified until `apply-patches.sh` runs.
+Catalog of the **currently maintained** deltas from upstream, why each
+exists, and how the port is re-based onto a new upstream. It distinguishes
+**current state** (merged and shipped) from **approved pending changes**
+(decided, not yet applied). Upstream source is unmodified until the
+deterministic overlay runs; everything Android-specific lives in `android/`.
+
+## Current state vs. approved pending
+
+| Area | Current (merged) | Approved pending (implementation plan) |
+|------|------------------|----------------------------------------|
+| JS packaging | single `cli.js` bundle | code splitting (`splitting:true`) + whole-tree packaging |
+| Runtime | Termux apt `bun` | bundled official Bionic Bun in tarball |
+| Version pins | inline, floating nightly | single `android/versions.env` |
+| Installer | destructive `rm -rf` then `mv` replacement | guarded two-rename swap with rollback; `omp update` reinstall guard |
+
+Pending items land via `../../specs/ANDROID_IMPLEMENTATION_PLAN.md` and
+are **not** claimed applied here.
 
 ## Target facts (verified)
 
 - `rustc --print cfg --target aarch64-linux-android` →
   `target_family="unix"`, `target_os="android"`, `unix`. **`target_os="linux"`
-  is NOT set.** This is the single most important fact: any code gated on
-  `target_os = "linux"` is dead on Android, and any `not(target_os = "linux")`
-  branch fires on Android.
-- Termux's own Rust reports `host: aarch64-linux-android`, so an on-device build
-  is a native (non-cross) build — no NDK needed.
+  is NOT set.** Any code gated on `target_os = "linux"` is dead on Android;
+  any `not(target_os = "linux")` branch fires on Android.
+- Termux's own Rust reports `host: aarch64-linux-android`, so on-device
+  builds are native (non-cross); only CI cross-compiles with the NDK.
 - Bun on Android reports `process.platform === "android"`, `process.arch ===
-  "arm64"` → loader platform tag `android-arm64`, addon file
-  `pi_natives.android-arm64.node`.
+  "arm64"` → loader tag `android-arm64`, addon `pi_natives.android-arm64.node`.
 - bionic provides `forkpty`/`openpty` since API 23 → `portable-pty` works.
-- `pidfd_open`/`pidfd_send_signal` work on Android 14+ (API 34). On API 31–33
-  seccomp may SIGSYS-kill the syscall, hence the API 34 floor in the installer.
+- `pidfd_open`/`pidfd_send_signal`: API 34 capability floor; on API 31–33
+  seccomp may SIGSYS-kill the syscall. **Only one API 34-class device tested;
+  no broad compatibility claim.** Binary floor is API 24.
+- bionic has no X11/Wayland/AppKit/Win32 surfaces for native code →
+  `arboard` (clipboard) has no backend on Android (text-only fallback).
+- The `pi-voice` + webrtc/opus dependency graph OOM-kills free GitHub
+  runners (~15 GB RAM + 24 GB swap still killed) → pi-voice gated off
+  Android; audio/WebRTC/desktop/ONNX surfaces are unsupported.
 
-## Patch 01 — Cargo.toml: gate arboard
+## Delivery
 
-`arboard` has no bionic backend (no X11/Wayland/AppKit/Win32 surface available
-to native code in Termux). Moving it from unconditional `[dependencies]` to
-`[target.'cfg(not(target_os = "android"))'.dependencies]` keeps it off the
-Android build entirely. Verified: `cargo check -p pi-natives` on
-`aarch64-linux-android` completes with no arboard in the dependency graph.
+There is **one** delivery mechanism: the deterministic overlay.
 
-## Patch 02 — lib.rs: drop feature(alloc_error_hook)
+`android/scripts/apply-overlay.py` applies 8 checked string
+transformations to a fresh upstream tree. Each edit is guarded by a marker
+`once()` match and aborts loudly on drift. `android/scripts/verify-overlay.py`
+proves the gates. `.github/workflows/sync-upstream.yml` runs it after
+importing upstream; `android/scripts/build-termux.sh` runs it on-device
+when verify fails.
 
-`#![feature(alloc_error_hook)]` is nightly-only. Termux ships **stable** Rust
-(1.95.0). Removing the feature attribute lets the crate compile on stable. The
-runtime alloc-error diagnostics are sacrificed (see patch 03).
+The legacy patch files under `android/patches/` and their apply/regen
+scripts are **retired**: no current workflow consumes them. The sync bot
+uses the overlay only. See git history for the former patch set.
 
-## Patch 03 — crash_handler.rs: disable alloc hook
+## Transformation catalog (current)
 
-`std::alloc::set_alloc_error_hook` requires the removed feature, so the
-registration block is replaced with a comment. The alloc-report helpers
-(`format_alloc_report`, `write_alloc_failure_line`, `CrashKind::Alloc`) are kept
-— the unit tests still exercise them — but marked `#[allow(dead_code)]` and the
-now-unused `ALLOC_HOOK_ACTIVE` static and `atomic::Ordering` import are removed
-so the lib compiles warning-clean. Panic diagnostics are unaffected.
+The eight overlay transforms, one concern each:
 
-## Patch 04 — clipboard.rs: Android cfg gates + stubs
+### 1. Cargo.toml — gate arboard + pi-voice off Android
 
-The most involved patch. Because `target_os = "linux"` is false on Android, the
-existing `#[cfg(not(target_os = "linux"))]` arm would otherwise select the
-arboard path on Android. Changes:
+`arboard` has no bionic backend. `pi-voice` drags in the webrtc/opus graph
+that OOM-kills CI runners. Both move from always-on `[dependencies]` to
+`[target.'cfg(not(target_os = "android"))'.dependencies]`.
 
-- `use std::io::Cursor`, `use arboard::…`, `use image::…`, `use crate::task`
-  gated `#[cfg(not(target_os = "android"))]`.
-- `encode_png` gated `#[cfg(not(target_os = "android"))]`.
-- Linux arm tightened to `#[cfg(all(target_os = "linux", not(target_os = "android")))]`.
-- macOS/Windows arm tightened to `#[cfg(all(not(target_os = "linux"), not(target_os = "android")))]`.
-- Android `set_clipboard_text` stub returns an error (copy unsupported; JS can
-  fall back to `termux-clipboard-set`).
-- `read_image_from_clipboard` split: the arboard version gated
-  `#[cfg(not(target_os = "android"))]`; an Android `async fn` returns `Ok(None)`.
+### 2. lib.rs — drop `feature(alloc_error_hook)`
 
-Both `#[napi]` exports keep the same name so the JS binding surface is identical
-on every platform. Verified: `cargo check -p pi-natives` clean on Android.
+Nightly-only feature; Termux ships stable Rust. Keeping it off lets the
+crate compile on stable. Runtime alloc diagnostics are sacrificed (see 3).
 
-## Patch 05 — process.rs: enable platform module on Android
+### 3. crash_handler.rs — disable alloc hook
 
-The Linux `mod platform` (pidfd-based process management) is gated
-`#[cfg(target_os = "linux")]`, which excludes Android. Widened to
-`#[cfg(any(target_os = "linux", target_os = "android"))]`. The macOS and Windows
-`mod platform` blocks are left untouched. Verified: `cargo check -p pi-shell`
-clean on Android.
+The `std::alloc::set_alloc_error_hook` registration block is replaced by a
+comment; alloc-report helpers stay and are exercised by unit tests but
+marked `#[allow(dead_code)]`, and unused statics/imports are removed.
+Panic diagnostics are unaffected.
 
-## Patch 06 — loader-state.js: register android-arm64
+### 4. clipboard.rs — Android cfg gates + stubs
 
-`SUPPORTED_PLATFORMS` did not list `android-arm64`, so the loader would reject
-the addon at startup. Added `"android-arm64"` to the array. The loader builds
-its platform tag from `${process.platform}-${process.arch}`, which is
-`android-arm64` under Bun on Termux.
+Because `target_os = "linux"` is false on Android, the existing
+`not(target_os = "linux")` arm would otherwise select the arboard path.
+The Linux arm is tightened to
+`#[cfg(all(target_os = "linux", not(target_os = "android")))]`; macOS/Windows
+arms to `#[cfg(all(not(target_os = "linux"), not(target_os = "android")))]`.
+Android `set_clipboard_text` stub returns an error directing JS to
+`termux-clipboard-set`; `read_image_from_clipboard` returns `Ok(None)`.
+`#[napi]` export names stay identical across platforms.
 
-## Verification performed
+### 5. process.rs (pi-shell) — enable platform module on Android
 
-- `rustc --print cfg --target aarch64-linux-android` — confirmed target_os.
-- `cargo check -p pi-natives` on host `aarch64-linux-android` — **0 errors, 0
-  warnings** after patches.
-- `cargo check -p pi-shell` on host `aarch64-linux-android` — clean.
-- `cargo check -p pi-iso` on host `aarch64-linux-android` — clean.
-- `git apply --check` on all six patches individually and combined — clean
-  against the upstream tree.
-- Cross-compile (CI) uses the Android NDK r27 directly. **cargo-zigbuild is
-  not viable for Android targets** — zig ships no bionic libc, so
-  `zig cc -target aarch64-linux-android` fails with `libc not available`. The
-  CI pipeline therefore calls `napi build --target aarch64-linux-android`
-  directly (bypassing `build-native.ts`'s `--cross-compile` branch), and
-  points `CC_aarch64_linux_android` and `CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER`
-  at the NDK clang.
+The Linux `mod platform` gate is widened to
+`#[cfg(any(target_os = "linux", target_os = "android"))]`. macOS/Windows
+blocks untouched.
 
-## Not yet runtime-verified
+### 6. pi-builtins — proc_snapshot.rs + ps.rs
 
-- End-to-end `omp` run on-device (compile is proven via `cargo check` on the
-  Android host triple; the napi link/copy step is exercised by CI).
+Same widening: `proc_snapshot` module and its enclosing cfg block gain
+`target_os = "android"`; `ps_total_memory_bytes()` gate widened to
+`any(target_os = "linux", target_os = "android")`. Keeps process snapshotting
+and memory reporting native.
+
+### 7. loader-state.js — register android-arm64
+
+`SUPPORTED_PLATFORMS` gains `"android-arm64"` so the loader accepts the
+addon at startup and maps the tag to `pi_natives.android-arm64.node`.
+
+### 8. In-tree stubs (not overlay produces them)
+
+`crates/pi-natives/src/audio.rs` and `src/live.rs` are committed directly
+in the fork (commit `fix(android): stub pi-voice/webrtc on arm64 to escape
+CI OOM`), not generated by the overlay — `verify-overlay.py` asserts their
+presence. `AudioCapture`, `AudioPlayback`, `LiveWebRtcPeer` constructors
+and media ops return napi errors; real implementations stay under
+`#[cfg(not(target_os = "android"))]`.
+
+Note for maintainers: a sync rsyncs the upstream tree, restoring the real
+`audio.rs`/`live.rs`; after a sync these two files must be re-stubbed by
+hand before `verify-overlay.py` passes. The overlay intentionally leaves
+them alone so the upstream diff stays reviewable.
+
+## Approved pending (not applied)
+
+Version pins, code splitting, bundled Bionic runtime, and the guarded installer
+swap are decided in `../../specs/ANDROID_IMPLEMENTATION_PLAN.md`.
+Do not treat them as shipped.
+
+## Re-base onto a new upstream (deterministic overlay)
+
+```sh
+git fetch --no-tags https://github.com/can1357/oh-my-pi.git main
+git archive FETCH_HEAD | tar -x -C /tmp/upstream
+rsync -a --delete --exclude='.git/' --exclude='.github/' --exclude='android/' \
+  --exclude='quickstart.sh' --exclude='install.sh' --exclude='.bun-cache/' \
+  --exclude='tmp/' /tmp/upstream/ ./
+python3 android/scripts/apply-overlay.py   # fails loudly on any marker drift
+python3 android/scripts/verify-overlay.py  # proves all gates
+# fix by hand anything the overlay rejected (upstream moved a marker)
+# re-stub audio.rs / live.rs (see 8), then:
+git diff --check
+```
+
+`.github/workflows/sync-upstream.yml` automates exactly this, then commits
+`chore: sync upstream OMP <version>` and pushes tag
+`v<version>-termux`.
+
+## Verification
+
+All acceptance and measured regression gates, CI and on-device, live in
+[verification.md](verification.md). On-device verification is
+**reference-device only** (kernel 6.1.118, API 34-class environment) and is
+stated as such there. Per-patch `cargo check` results are recorded in git
+history / implementation plan, not duplicated here.

@@ -16,11 +16,8 @@ import { loadNative } from "./loader-state.js";
 const nativeBindings = loadNative();
 // --- generated native exports (do not edit) ---
 // classes
-export const AudioCapture = nativeBindings.AudioCapture;
-export const AudioPlayback = nativeBindings.AudioPlayback;
 export const DesktopSession = nativeBindings.DesktopSession;
 export const FileLock = nativeBindings.FileLock;
-export const LiveWebRtcPeer = nativeBindings.LiveWebRtcPeer;
 export const MacAppearanceObserver = nativeBindings.MacAppearanceObserver;
 export const MacOSPowerAssertion = nativeBindings.MacOSPowerAssertion;
 export const Process = nativeBindings.Process;

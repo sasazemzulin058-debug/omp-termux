@@ -23,6 +23,7 @@
 
 pub mod appearance;
 pub mod ast;
+#[cfg(not(target_os = "android"))]
 pub mod audio;
 pub mod block;
 pub mod clipboard;
@@ -39,6 +40,7 @@ pub mod highlight;
 pub mod html;
 pub mod iofs;
 pub mod keys;
+#[cfg(not(target_os = "android"))]
 pub mod live;
 /// PDF inspection and Markdown conversion.
 pub mod pdf;
