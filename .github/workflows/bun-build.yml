@@ -62,10 +62,10 @@ jobs:
           clang --version || true
 
       - name: Install Rust toolchain
+        run: |
           curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain "${{ steps.manifest.outputs.rust_toolchain }}"
           source "$HOME/.cargo/env"
           rustup target add aarch64-linux-android
-
       - name: Setup Android NDK
         uses: nttld/setup-ndk@v1
         id: setup_ndk
@@ -116,7 +116,9 @@ jobs:
           grep -rn "18\.0\.0" scripts/ || echo "No occurrences replaced"
 
       - name: Install Bun bootstrapper
-
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: ${{ steps.manifest.outputs.bun_version }}
       - name: Cross-compile Bun for aarch64-linux-android
         env:
           ANDROID_NDK_ROOT: ${{ steps.setup_ndk.outputs.ndk-path }}
