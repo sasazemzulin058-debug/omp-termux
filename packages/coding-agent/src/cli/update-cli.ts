@@ -1661,8 +1661,14 @@ function installerHint(): string {
  * Run the update command.
  */
 export async function runUpdateCommand(opts: { force: boolean; check: boolean }): Promise<void> {
-	console.log(chalk.dim(`Current version: ${VERSION}`));
+	if (process.env.OMP_PLATFORM === "android") {
+		console.log(chalk.yellow("Self-update is disabled on Android/Termux."));
+		console.log(chalk.dim("Reinstall the latest release with:"));
+		console.log(chalk.cyan("curl -fsSL https://raw.githubusercontent.com/sasazemzulin058-debug/omp-termux/main/install.sh | sh"));
+		return;
+	}
 
+	console.log(chalk.dim(`Current version: ${VERSION}`));
 	// Check for updates
 	let release: ReleaseInfo;
 	try {
