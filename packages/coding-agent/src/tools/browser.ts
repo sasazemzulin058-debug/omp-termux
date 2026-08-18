@@ -5,7 +5,7 @@ import { prompt, untilAborted } from "@oh-my-pi/pi-utils";
 import browserDescription from "../prompts/tools/browser.md" with { type: "text" };
 import type { ToolSession } from "../sdk";
 import { enforceInlineByteCap } from "../session/streaming-output";
-import { truncateForPrompt } from "./approval";
+import { type ToolApprovalDecision, truncateForPrompt } from "./approval";
 import { resolveCmuxKind } from "./browser/cmux/rpc";
 import {
 	acquireBrowser,
@@ -138,7 +138,34 @@ function resolveBrowserKind(params: BrowserParams, session: ToolSession): Browse
  */
 export class BrowserTool implements AgentTool<typeof browserSchema, BrowserToolDetails> {
 	readonly name = "browser";
-	readonly approval = "exec" as const;
+	readonly approval = (args: unknown): ToolApprovalDecision => {
+		const params = args as Partial<BrowserParams>;
+		const action = params?.action;
+		const name = params?.name ?? DEFAULT_TAB_NAME;
+		const existing = getTab(name);
+		const isLiveRequested =
+			Boolean(params?.app?.cdp_url) ||
+			Boolean(params?.app?.relay) ||
+			Boolean(this.session.settings.get("browser.cdpUrl")) ||
+			Boolean(this.session.settings.get("browser.relay"));
+		const isLiveBound = existing && (existing.browser.kind.kind === "connected" || existing.browser.kind.kind === "relay");
+
+		if (action === "close") {
+			return "exec";
+		}
+
+		if ((action === "open" && isLiveRequested) || (action === "run" && isLiveBound)) {
+			return {
+				tier: "exec",
+				policy: "prompt",
+				override: true,
+				policyKey: "browser.live",
+				reason: "Accessing live/connected browser tab requires explicit per-call confirmation",
+			};
+		}
+
+		return "exec";
+	};
 	readonly formatApprovalDetails = (args: unknown): string[] => {
 		const params = args as Partial<BrowserParams>;
 		const lines = [`Action: ${typeof params.action === "string" ? params.action : "(missing)"}`];

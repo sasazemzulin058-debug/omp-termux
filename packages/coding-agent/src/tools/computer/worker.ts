@@ -711,10 +711,11 @@ export class ComputerWorkerCore {
 			},
 			clipboard: {
 				read: async (): Promise<string> => {
-					const { signal } = getContext();
-					throwIfAborted(signal);
+					const context = getContext();
+					throwIfAborted(context.signal);
+					guardRun(context, "clipboard.read");
 					const text = await readTextFromClipboard();
-					throwIfAborted(signal);
+					throwIfAborted(context.signal);
 					return text;
 				},
 				write: async (text: string): Promise<void> => {
