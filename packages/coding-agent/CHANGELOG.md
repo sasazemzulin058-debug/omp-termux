@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+## [17.3.7] - 2026-08-17
+
+### Changed
+
+- Send the `omp/<version>` User-Agent on xAI chat (`xai` and `xai-oauth`) unless the request already set its own ([#8840](https://github.com/can1357/oh-my-pi/pull/8840) by [@Jaaneek](https://github.com/Jaaneek)).
+
 ## [17.3.6] - 2026-08-17
 
 ### Added
