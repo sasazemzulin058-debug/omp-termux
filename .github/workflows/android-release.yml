@@ -200,6 +200,7 @@ jobs:
       - name: Assemble and test release bundle
         run: |
           set -euo pipefail
+          source android/versions.env
           test -s packages/natives/native/pi_natives.android-arm64.node
           test -s packages/natives/native/pi_natives.android-arm64.node.sha256
           (cd packages/natives/native && sha256sum -c pi_natives.android-arm64.node.sha256)
@@ -213,15 +214,22 @@ jobs:
             termux-bundle/node_modules/@oh-my-pi/pi-natives/native/
           test -s termux-bundle/cli.js
           test -s termux-bundle/node_modules/@oh-my-pi/pi-natives/native/pi_natives.android-arm64.node
+
+          # Download official Bionic Bun binary
+          bun_pkg_url="https://registry.npmjs.org/@oven/bun-linux-aarch64-android/-/bun-linux-aarch64-android-${BUN_VERSION}.tgz"
+          curl -fsSL "$bun_pkg_url" | tar -xz -C termux-bundle --strip-components=1 package/bin/bun
+          chmod +x termux-bundle/bun
+          test -x termux-bundle/bun
+
           tar -czf omp-termux.tar.gz -C termux-bundle .
           sha256sum omp-termux.tar.gz > omp-termux.tar.gz.sha256
           test -s omp-termux.tar.gz
           test -s omp-termux.tar.gz.sha256
           sha256sum -c omp-termux.tar.gz.sha256
           tar -tzf omp-termux.tar.gz | grep -Fx './cli.js'
+          tar -tzf omp-termux.tar.gz | grep -Fx './bun'
           tar -tzf omp-termux.tar.gz | grep -F './node_modules/@oh-my-pi/pi-natives/native/pi_natives.android-arm64.node'
           (cd packages/natives/native && sha256sum -c pi_natives.android-arm64.node.sha256)
-
       - name: Attach to release
         uses: softprops/action-gh-release@v2
         with:

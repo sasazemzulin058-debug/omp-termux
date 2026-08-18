@@ -45,10 +45,11 @@ jobs:
 
       - name: Install Rust with Android target
         run: |
-          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain nightly
+          set -euo pipefail
+          source android/versions.env
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain "$RUST_TOOLCHAIN"
           source $HOME/.cargo/env
           rustup target add aarch64-linux-android
-
       - name: Cache Rust artifacts
         uses: actions/cache@v4
         with:
@@ -60,13 +61,12 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-cargo-
 
-      - name: Install Android NDK r27
+      - name: Install Android NDK
         id: ndk
         uses: nttld/setup-ndk@v1
         with:
-          ndk-version: r27
+          ndk-version: r27c
           add-to-path: false
-
       - name: Install JS dependencies
         run: bun install --minimum-release-age 0
 
