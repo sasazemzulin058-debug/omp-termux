@@ -106,9 +106,10 @@ def lib(text):
     return once(text, "pub mod live;\n", "#[cfg(not(target_os = \"android\"))]\npub mod live;\n", "lib.rs")
 
 def webrtc(text):
-    if "#![cfg(not(target_os = \"android\"))]\n" not in text:
-        text = text.replace("//! ", "//! ", 1) # Find top of file
-        return "#![cfg(not(target_os = \"android\"))]\n" + text
+    # napi-build parses files via regex/syn ignoring module-level #![cfg].
+    # We must physically remove #[napi] markers so it stops generating C ABI
+    # wrappers that reference disabled pi_voice modules.
+    text = text.replace("#[napi]", "/* #[napi] disabled on android */")
     return text
 
 edit("crates/pi-natives/Cargo.toml", cargo)
