@@ -89,9 +89,22 @@ impl JobTask {
 					},
 				}
 			},
-			Self::Internal(handle) => Ok(JobTaskWaitResult::Completed(handle.await??)),
+			Self::Internal(handle) => {
+				if handle.is_finished() {
+					let checkable_handle = handle;
+					match checkable_handle.now_or_never() {
+						Some(Ok(res)) => Ok(JobTaskWaitResult::Completed(res?)),
+						Some(Err(_)) => Ok(JobTaskWaitResult::Completed(ExecutionResult::new(1))),
+						None => Ok(JobTaskWaitResult::Completed(ExecutionResult::new(0))),
+					}
+				} else {
+					match handle.await {
+						Ok(res) => Ok(JobTaskWaitResult::Completed(res?)),
+						Err(_) => Ok(JobTaskWaitResult::Completed(ExecutionResult::new(1))),
+					}
+				}
+			},
 		}
-	}
 
 	/// Polls the task for completion. Returns `Some(result)` if the task has
 	/// completed, or `None` if it is still running. The result is the execution
