@@ -105,8 +105,17 @@ def lib(text):
     text = once(text, "pub mod audio;\n", "#[cfg(not(target_os = \"android\"))]\npub mod audio;\n", "lib.rs")
     return once(text, "pub mod live;\n", "#[cfg(not(target_os = \"android\"))]\npub mod live;\n", "lib.rs")
 
+def webrtc(text):
+    if "#![cfg(not(target_os = \"android\"))]\n" not in text:
+        text = text.replace("//! ", "//! ", 1) # Find top of file
+        return "#![cfg(not(target_os = \"android\"))]\n" + text
+    return text
+
 edit("crates/pi-natives/Cargo.toml", cargo)
 edit("crates/pi-natives/src/lib.rs", lib)
+edit("crates/pi-natives/src/audio.rs", webrtc)
+edit("crates/pi-natives/src/live.rs", webrtc)
+
 edit("crates/pi-natives/src/crash_handler.rs", crash)
 edit("crates/pi-natives/src/clipboard.rs", clipboard)
 edit("crates/pi-shell/src/process.rs", process)
