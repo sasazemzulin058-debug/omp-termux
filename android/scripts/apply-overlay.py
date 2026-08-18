@@ -100,8 +100,13 @@ def cli(text):
     new_dispatch = '\tif (arg === COMPUTER_WORKER_ARG) {\n\t\tif (parentPort) installWorkerInbox(parentPort);\n\t\t// Dynamic import prevents eager native addon path in cold CLI startup graph.\n\t\tconst { startComputerWorker } = await import("./tools/computer/worker-entry");\n\t\tstartComputerWorker();\n\t\treturn true;\n\t}'
     return once(text, old_dispatch, new_dispatch, "cli.ts")
 
+def lib(text):
+    text = once(text, "#![feature(alloc_error_hook)]\n", "", "lib.rs")
+    text = once(text, "pub mod audio;\n", "#[cfg(not(target_os = \"android\"))]\npub mod audio;\n", "lib.rs")
+    return once(text, "pub mod live;\n", "#[cfg(not(target_os = \"android\"))]\npub mod live;\n", "lib.rs")
+
 edit("crates/pi-natives/Cargo.toml", cargo)
-edit("crates/pi-natives/src/lib.rs", lambda s: once(s, "#![feature(alloc_error_hook)]\n", "", "lib.rs"))
+edit("crates/pi-natives/src/lib.rs", lib)
 edit("crates/pi-natives/src/crash_handler.rs", crash)
 edit("crates/pi-natives/src/clipboard.rs", clipboard)
 edit("crates/pi-shell/src/process.rs", process)
