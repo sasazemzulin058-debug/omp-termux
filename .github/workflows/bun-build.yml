@@ -73,19 +73,21 @@ jobs:
           ndk-version: ${{ steps.manifest.outputs.ndk_version }}
           add-to-path: true
 
-      - name: Configure NDK clang as default
+      - name: Link NDK compiler-rt builtins for Clang 21
         env:
           NDK_ROOT: ${{ steps.setup_ndk.outputs.ndk-path }}
         run: |
-          NDK_BIN="$NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64/bin"
-          sudo ln -sf "$NDK_BIN/clang" /usr/local/bin/clang
-          sudo ln -sf "$NDK_BIN/clang++" /usr/local/bin/clang++
-          sudo ln -sf "$NDK_BIN/llvm-ar" /usr/local/bin/llvm-ar
-          sudo ln -sf "$NDK_BIN/llvm-ranlib" /usr/local/bin/llvm-ranlib
-          sudo ln -sf "$NDK_BIN/ld.lld" /usr/local/bin/ld.lld
-          sudo ln -sf "$NDK_BIN/llvm-strip" /usr/local/bin/llvm-strip
-          clang --version
-
+          set -euo pipefail
+          CLANG_21_DIR="/usr/lib/llvm-21/lib/clang/21/lib/aarch64-unknown-linux-android28"
+          sudo mkdir -p "$CLANG_21_DIR"
+          NDK_CLANG_LIB="$NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64/lib/clang/18/lib/linux"
+          NDK_BUILTINS=$(find "$NDK_CLANG_LIB" -name "*builtins*aarch64*" 2>/dev/null | head -1)
+          if [ -n "$NDK_BUILTINS" ]; then
+            echo "Found NDK builtins: $NDK_BUILTINS"
+            sudo ln -sf "$NDK_BUILTINS" "$CLANG_21_DIR/libclang_rt.builtins.a"
+            echo "Created symlink: $CLANG_21_DIR/libclang_rt.builtins.a -> $NDK_BUILTINS"
+          fi
+          ls -la "$CLANG_21_DIR"
       - name: Clone Bun source
         env:
           BUN_REF: ${{ github.event.inputs.bun_ref || 'main' }}
