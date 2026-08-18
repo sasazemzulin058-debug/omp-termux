@@ -7,7 +7,7 @@ on:
 permissions:
   contents: write
   actions: write
-
+  issues: write
 concurrency:
   group: upstream-sync
   cancel-in-progress: false
@@ -96,5 +96,19 @@ jobs:
           git tag "$tag"
           git push --atomic origin HEAD:main "refs/tags/$tag"
           echo "release queued for $tag"
+        env:
+          GH_TOKEN: ${{ github.token }}
+      - name: Notify upstream sync failure
+        if: failure()
+        shell: bash
+        run: |
+          set -euo pipefail
+          issue_num=$(gh issue list --repo "${{ github.repository }}" --label "android-sync" --state open --json number --jq '.[0].number // empty')
+          msg="Upstream sync failed on run [${{ github.run_id }}](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})."
+          if [ -n "$issue_num" ]; then
+            gh issue comment "$issue_num" --repo "${{ github.repository }}" --body "$msg"
+          else
+            gh issue create --repo "${{ github.repository }}" --title "Upstream sync failure" --label "android-sync" --body "$msg"
+          fi
         env:
           GH_TOKEN: ${{ github.token }}

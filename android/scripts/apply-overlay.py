@@ -94,6 +94,11 @@ def loader(text):
     old = 'const SUPPORTED_PLATFORMS = ["linux-x64", "linux-arm64", "darwin-x64", "darwin-arm64", "win32-x64"];'
     new = 'const SUPPORTED_PLATFORMS = ["linux-x64", "linux-arm64", "android-arm64", "darwin-x64", "darwin-arm64", "win32-x64"];'
     return once(text, old, new, "loader-state.js")
+def cli(text):
+    text = once(text, 'import { startComputerWorker } from "./tools/computer/worker-entry";\n', "", "cli.ts")
+    old_dispatch = '\tif (arg === COMPUTER_WORKER_ARG) {\n\t\tif (parentPort) installWorkerInbox(parentPort);\n\t\tstartComputerWorker();\n\t\treturn true;\n\t}'
+    new_dispatch = '\tif (arg === COMPUTER_WORKER_ARG) {\n\t\tif (parentPort) installWorkerInbox(parentPort);\n\t\t// Dynamic import prevents eager native addon path in cold CLI startup graph.\n\t\tconst { startComputerWorker } = await import("./tools/computer/worker-entry");\n\t\tstartComputerWorker();\n\t\treturn true;\n\t}'
+    return once(text, old_dispatch, new_dispatch, "cli.ts")
 
 edit("crates/pi-natives/Cargo.toml", cargo)
 edit("crates/pi-natives/src/lib.rs", lambda s: once(s, "#![feature(alloc_error_hook)]\n", "", "lib.rs"))
@@ -103,4 +108,5 @@ edit("crates/pi-shell/src/process.rs", process)
 edit("crates/pi-builtins/src/proc_snapshot.rs", builtins)
 edit("crates/pi-builtins/src/ps.rs", lambda s: s.replace('#[cfg(target_os = "linux")]\nfn ps_total_memory_bytes()', '#[cfg(any(target_os = "linux", target_os = "android"))]\nfn ps_total_memory_bytes()', 1) if '#[cfg(target_os = "linux")]\nfn ps_total_memory_bytes()' in s else s)
 edit("packages/natives/native/loader-state.js", loader)
-print("Android overlay applied: 8 transformations")
+edit("packages/coding-agent/src/cli.ts", cli)
+print("Android overlay applied: 9 transformations")
