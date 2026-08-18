@@ -38,6 +38,7 @@ async function main(): Promise<void> {
 		entrypoints: [path.join(packageDir, "src/cli.ts")],
 		outdir: outDir,
 		target: "bun",
+		splitting: true,
 		// Keep runtime natives external — Android .node is injected into the tarball.
 		external: [
 			"@oh-my-pi/pi-natives",
@@ -62,9 +63,9 @@ async function main(): Promise<void> {
 		throw new Error(`Termux CLI bundle failed:\n${output.logs.map(log => log.message).join("\n")}`);
 	}
 
-	const cliSrc = path.join(outDir, "cli.js");
+	await Bun.$`cp -R ${outDir}/. ${bundleDir}/`.quiet();
 	const cliDst = path.join(bundleDir, "cli.js");
-	const cli = await Bun.file(cliSrc).text();
+	const cli = await Bun.file(cliDst).text();
 	const shebang = cli.startsWith("#!") ? cli : `#!/usr/bin/env bun\n${cli}`;
 	await Bun.write(cliDst, shebang);
 
