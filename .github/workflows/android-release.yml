@@ -217,9 +217,14 @@ jobs:
           test -s termux-bundle/cli.js
           test -s termux-bundle/node_modules/@oh-my-pi/pi-natives/native/pi_natives.android-arm64.node
 
-          # Download official Bionic Bun binary
-          bun_pkg_url="https://registry.npmjs.org/@oven/bun-linux-aarch64-android/-/bun-linux-aarch64-android-${BUN_VERSION}.tgz"
-          curl -fsSL "$bun_pkg_url" | tar -xz -C termux-bundle --strip-components=1 package/bin/bun
+          # Download Bun binary (prefer custom built release asset if available, fallback to npm 1.3.14)
+          if curl -fsSL "https://github.com/${{ github.repository }}/releases/download/${{ env.RELEASE_TAG }}/bun" -o termux-bundle/bun 2>/dev/null; then
+            echo "Using custom built Bun from release asset"
+          else
+            echo "Fetching official Bionic Bun from npm"
+            bun_pkg_url="https://registry.npmjs.org/@oven/bun-linux-aarch64-android/-/bun-linux-aarch64-android-${BUN_VERSION}.tgz"
+            curl -fsSL "$bun_pkg_url" | tar -xz -C termux-bundle --strip-components=1 package/bin/bun
+          fi
           chmod +x termux-bundle/bun
           test -x termux-bundle/bun
 

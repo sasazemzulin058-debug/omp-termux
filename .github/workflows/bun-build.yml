@@ -1,0 +1,167 @@
+name: Build Bun for Android ARM64
+
+on:
+  workflow_dispatch:
+    inputs:
+      bun_ref:
+        description: "Git ref/branch/tag of oven-sh/bun to build"
+        required: true
+        default: "main"
+      use_commit:
+        description: "Specific commit SHA to checkout (overrides ref if set)"
+        required: false
+        default: ""
+
+permissions:
+  contents: write
+
+jobs:
+  build-bun:
+    name: Cross-compile Bun for Android aarch64 (Bionic)
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - name: Free runner disk space
+        run: |
+          set -euo pipefail
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/share/boost
+          sudo apt-get clean
+          df -h /
+
+      - name: Checkout omp-termux
+        uses: actions/checkout@v4
+
+      - name: Load version manifest
+        id: manifest
+        run: |
+          source android/versions.env
+          echo "ndk_version=$NDK_VERSION" >> "$GITHUB_OUTPUT"
+          echo "rust_toolchain=$RUST_TOOLCHAIN" >> "$GITHUB_OUTPUT"
+          echo "bun_version=$BUN_VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Install system build dependencies
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y \
+            curl wget git cmake ninja-build pkg-config \
+            libssl-dev libcurl4-openssl-dev \
+            golang-go ruby-full \
+            xz-utils unzip jq python3 \
+            ccache
+
+      - name: Install Rust toolchain
+        run: |
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain "${{ steps.manifest.outputs.rust_toolchain }}"
+          source "$HOME/.cargo/env"
+          rustup target add aarch64-linux-android
+
+      - name: Setup Android NDK
+        uses: nttld/setup-ndk@v1
+        id: setup_ndk
+        with:
+          ndk-version: ${{ steps.manifest.outputs.ndk_version }}
+          add-to-path: true
+
+      - name: Configure NDK clang as default
+        env:
+          NDK_ROOT: ${{ steps.setup_ndk.outputs.ndk-path }}
+        run: |
+          NDK_BIN="$NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64/bin"
+          sudo ln -sf "$NDK_BIN/clang" /usr/local/bin/clang
+          sudo ln -sf "$NDK_BIN/clang++" /usr/local/bin/clang++
+          sudo ln -sf "$NDK_BIN/llvm-ar" /usr/local/bin/llvm-ar
+          sudo ln -sf "$NDK_BIN/llvm-ranlib" /usr/local/bin/llvm-ranlib
+          sudo ln -sf "$NDK_BIN/ld.lld" /usr/local/bin/ld.lld
+          sudo ln -sf "$NDK_BIN/llvm-strip" /usr/local/bin/llvm-strip
+          clang --version
+
+      - name: Clone Bun source
+        env:
+          BUN_REF: ${{ github.event.inputs.bun_ref || 'main' }}
+          COMMIT_SHA: ${{ github.event.inputs.use_commit }}
+        run: |
+          echo "=== Cloning oven-sh/bun ($BUN_REF) ==="
+          git clone --depth 50 "https://github.com/oven-sh/bun.git" /tmp/bun-src
+          cd /tmp/bun-src
+          if [ -n "$COMMIT_SHA" ]; then
+            git checkout "$COMMIT_SHA"
+          else
+            git checkout "$BUN_REF"
+          fi
+          git submodule update --init --recursive --depth 1
+          echo "Checked out commit: $(git rev-parse HEAD)"
+          echo "bun_commit=$(git rev-parse HEAD)" >> "$GITHUB_ENV"
+
+      - name: Install Bun bootstrapper
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: ${{ steps.manifest.outputs.bun_version }}
+
+      - name: Cross-compile Bun for aarch64-linux-android
+        env:
+          ANDROID_NDK_ROOT: ${{ steps.setup_ndk.outputs.ndk-path }}
+          ANDROID_NDK_HOME: ${{ steps.setup_ndk.outputs.ndk-path }}
+          CCACHE_DIR: /tmp/ccache
+          LDFLAGS: "-L${{ steps.setup_ndk.outputs.ndk-path }}/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/lib/aarch64-linux-android/28"
+        run: |
+          mkdir -p /tmp/ccache
+          cd /tmp/bun-src
+          echo "=== Building Bun for aarch64-linux-android (release) ==="
+          echo "NDK: $ANDROID_NDK_ROOT"
+          echo "Bootstrapper: $(bun --version)"
+          echo "Start: $(date)"
+
+          bun scripts/build.ts \
+            --profile=release \
+            --abi=android \
+            --arch=aarch64 \
+            --build-dir="build/release"
+
+          echo "End: $(date)"
+
+      - name: Verify and strip binary
+        env:
+          ANDROID_NDK_HOME: ${{ steps.setup_ndk.outputs.ndk-path }}
+        run: |
+          BUN_BIN=$(find /tmp/bun-src/build -name "bun" -o -name "bun-profile" 2>/dev/null | head -1)
+          if [ -z "$BUN_BIN" ] || [ ! -f "$BUN_BIN" ]; then
+            echo "error: Bun binary not found in build dir" >&2
+            find /tmp/bun-src/build -type f 2>/dev/null
+            exit 1
+          fi
+
+          mkdir -p /tmp/bun-dist
+          cp "$BUN_BIN" /tmp/bun-dist/bun
+
+          NDK_STRIP="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-strip"
+          if [ -x "$NDK_STRIP" ]; then
+            "$NDK_STRIP" --strip-all /tmp/bun-dist/bun || true
+          fi
+
+          chmod +x /tmp/bun-dist/bun
+          file /tmp/bun-dist/bun
+          ls -lh /tmp/bun-dist/bun
+
+          # Verify ELF architecture and Bionic interpreter
+          if ! file /tmp/bun-dist/bun | grep -q "aarch64"; then
+            echo "error: built binary is not aarch64" >&2
+            exit 1
+          fi
+
+          (cd /tmp/bun-dist && sha256sum bun > bun.sha256)
+
+      - name: Upload Bun binary artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: bun-android-arm64
+          path: /tmp/bun-dist/*
+          if-no-files-found: error
+
+      - name: Attach Bun to release (if tag provided)
+        if: startsWith(github.ref, 'refs/tags/') || github.event.inputs.bun_ref != 'main'
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            /tmp/bun-dist/bun
+            /tmp/bun-dist/bun.sha256
+        continue-on-error: true
