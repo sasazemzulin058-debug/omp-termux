@@ -41,14 +41,11 @@ jobs:
 
       - name: Install system build dependencies
         run: |
-          sudo apt-get update -y
-          sudo apt-get install -y \
-            curl wget git cmake ninja-build pkg-config \
-            libssl-dev libcurl4-openssl-dev \
-            golang-go ruby-full \
-            xz-utils unzip jq python3 \
-            ccache
-
+          set -euo pipefail
+          export DEBIAN_FRONTEND=noninteractive
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+            ninja-build cmake libssl-dev libcurl4-openssl-dev ruby-full ccache
       - name: Install Rust toolchain
         run: |
           curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain "${{ steps.manifest.outputs.rust_toolchain }}"
