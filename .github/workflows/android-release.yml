@@ -52,8 +52,10 @@ jobs:
 
       - name: Install Rust target
         run: |
-          rustup show active-toolchain
-          rustup toolchain install
+          set -euo pipefail
+          source android/versions.env
+          rustup toolchain install "$RUST_TOOLCHAIN"
+          rustup default "$RUST_TOOLCHAIN"
           rustup target add aarch64-linux-android
 
       - name: Setup Android NDK

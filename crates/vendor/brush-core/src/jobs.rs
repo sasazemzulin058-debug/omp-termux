@@ -118,9 +118,12 @@ impl JobTask {
 			},
 			Self::Internal(handle) => {
 				let checkable_handle = handle;
-				checkable_handle.now_or_never().and_then(|r| r.ok())
+				match checkable_handle.now_or_never() {
+					Some(Ok(res)) => Some(res),
+					Some(Err(_)) => Some(Ok(ExecutionResult::new(1))),
+					None => None,
+				}
 			},
-		}
 	}
 }
 

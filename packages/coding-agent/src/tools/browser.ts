@@ -408,11 +408,11 @@ export class BrowserTool implements AgentTool<typeof browserSchema, BrowserToolD
 			throw new ToolError("Missing required parameter 'code' for action 'run'.");
 		}
 		const tab = getTab(name);
-		if (tab) {
-			details.browser = tab.browser.kind.kind;
-			details.url = tab.info.url;
+		if (!tab) {
+			throw new ToolError(`No active tab named ${JSON.stringify(name)}. Open a tab first.`);
 		}
-
+		details.browser = tab.browser.kind.kind;
+		details.url = tab.info.url;
 		const { displays, returnValue, screenshots } = await runInTab(name, {
 			code: params.code,
 			timeoutMs,

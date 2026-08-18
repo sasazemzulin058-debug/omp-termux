@@ -71,14 +71,21 @@ if ! "$LIB_DIR/bun" "$LIB_DIR/cli.js" --version >/dev/null 2>&1; then
     fi
     exit 1
 fi
-
-rm -rf "$LIB_DIR.old"
-had_old=0
-
 cat > "$BIN_DIR/omp" <<EOF
 #!/bin/sh
 exec env OMP_PLATFORM=android "$LIB_DIR/bun" "$LIB_DIR/cli.js" "\$@"
 EOF
 chmod 755 "$BIN_DIR/omp"
-"$BIN_DIR/omp" --version
+
+if ! "$BIN_DIR/omp" --version >/dev/null 2>&1; then
+    echo 'error: installed omp launcher failed verification' >&2
+    rm -rf "$LIB_DIR"
+    if [ "$had_old" -eq 1 ]; then
+        mv "$LIB_DIR.old" "$LIB_DIR"
+    fi
+    exit 1
+fi
+
+rm -rf "$LIB_DIR.old"
+had_old=0
 printf '%s\n' 'Installed omp. Run: omp'

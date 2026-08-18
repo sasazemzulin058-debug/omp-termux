@@ -714,6 +714,10 @@ export class ComputerWorkerCore {
 					const context = getContext();
 					throwIfAborted(context.signal);
 					guardRun(context, "clipboard.read");
+					// Prompt host approval RPC before accessing clipboard
+					if (this.#hostCall) {
+						await this.#hostCall("clipboard.read", {});
+					}
 					const text = await readTextFromClipboard();
 					throwIfAborted(context.signal);
 					return text;
