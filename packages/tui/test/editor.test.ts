@@ -1025,7 +1025,7 @@ describe("Editor component", () => {
 				await terminal.waitForRender();
 				for (const char of "ast") editor.handleInput(char);
 				tui.requestRender();
-				await terminal.waitForRender();
+				await terminal.waitForRender(() => terminal.getViewport()[1]?.includes("ast") === true);
 
 				const beforePreedit = terminal.getViewport().map(row => row.trimEnd());
 				expect(beforePreedit.slice(0, 3)).toEqual(["+------------------+", "|  ast", "+------------------+"]);
