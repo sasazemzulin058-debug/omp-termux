@@ -414,6 +414,11 @@ export function spawnWorkerOrUnavailable<Handle>(
 	unavailable: (error: unknown) => Handle,
 	warnMessage: string,
 ): Handle {
+	if (process.env.OMP_PLATFORM === "android") {
+		const androidError = new Error("Local machine learning worker is unavailable on Android/Termux.");
+		logger.debug(warnMessage, { error: androidError.message });
+		return unavailable(androidError);
+	}
 	try {
 		return spawn();
 	} catch (error) {
