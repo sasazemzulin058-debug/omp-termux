@@ -1,5 +1,6 @@
 import type { AgentToolUpdateCallback } from "@oh-my-pi/pi-agent-core";
-import { formatBytes, sanitizeText } from "@oh-my-pi/pi-utils";
+import { sanitizeText } from "@oh-my-pi/pi-utils";
+import { formatBytes } from "../tools/render-utils";
 import { sanitizeWithOptionalSixelPassthrough } from "../utils/sixel";
 
 // =============================================================================

@@ -99,16 +99,6 @@ impl ChildProcess {
 		#[allow(unused_mut, reason = "only mutated on some platforms")]
 		let mut sigchld = sys::signal::chld_signal_listener()?;
 
-		// A child that stopped before the SIGCHLD listener above was registered
-		// (e.g. a pipeline stage that traps a signal and stops itself the moment
-		// it starts) will never send a second SIGCHLD, so blocking on the
-		// listener alone would wait forever. Poll the current stopped state
-		// once up front: `waitid(WUNTRACED|WNOHANG)` reports a child that is
-		// already stopped exactly as if its stop event had just arrived.
-		if sys::signal::poll_for_stopped_children()? {
-			return Ok(ProcessWaitResult::Stopped);
-		}
-
 		let cancelled = async {
 			match &cancel_token {
 				Some(token) => token.cancelled().await,
