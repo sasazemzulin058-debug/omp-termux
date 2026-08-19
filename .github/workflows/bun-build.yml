@@ -38,6 +38,7 @@ jobs:
           echo "ndk_version=$NDK_VERSION" >> "$GITHUB_OUTPUT"
           echo "rust_toolchain=$RUST_TOOLCHAIN" >> "$GITHUB_OUTPUT"
           echo "bun_version=$BUN_VERSION" >> "$GITHUB_OUTPUT"
+          echo "android_api=$ANDROID_API" >> "$GITHUB_OUTPUT"
 
       - name: Install system build dependencies and LLVM 21
         run: |
@@ -76,9 +77,10 @@ jobs:
       - name: Link NDK compiler-rt builtins for Clang 21
         env:
           NDK_ROOT: ${{ steps.setup_ndk.outputs.ndk-path }}
+          ANDROID_API: ${{ steps.manifest.outputs.android_api }}
         run: |
           set -euo pipefail
-          CLANG_21_DIR="/usr/lib/llvm-21/lib/clang/21/lib/aarch64-unknown-linux-android28"
+          CLANG_21_DIR="/usr/lib/llvm-21/lib/clang/21/lib/aarch64-unknown-linux-android${ANDROID_API}"
           sudo mkdir -p "$CLANG_21_DIR"
           NDK_CLANG_LIB="$NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64/lib/clang/18/lib/linux"
           NDK_BUILTINS=$(find "$NDK_CLANG_LIB" -name "*builtins*aarch64*" 2>/dev/null | head -1)
@@ -126,7 +128,7 @@ jobs:
           ANDROID_NDK_ROOT: ${{ steps.setup_ndk.outputs.ndk-path }}
           ANDROID_NDK_HOME: ${{ steps.setup_ndk.outputs.ndk-path }}
           CCACHE_DIR: /tmp/ccache
-          LDFLAGS: "-L${{ steps.setup_ndk.outputs.ndk-path }}/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/lib/aarch64-linux-android/28"
+          LDFLAGS: "-L${{ steps.setup_ndk.outputs.ndk-path }}/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/lib/aarch64-linux-android/${{ steps.manifest.outputs.android_api }}"
         run: |
           mkdir -p /tmp/ccache
           cd /tmp/bun-src

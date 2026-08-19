@@ -112,6 +112,39 @@ def webrtc(text):
     text = text.replace("#[napi]", "/* #[napi] disabled on android */")
     return text
 
+def update_cli(text):
+    marker = "export async function runUpdateCommand(opts: { force: boolean; check: boolean }): Promise<void> {\n\tconsole.log(chalk.dim(`Current version: ${VERSION}`));\n"
+    guard = '''\tconsole.log(chalk.dim(`Current version: ${VERSION}`));
+
+\t// Android/Termux: self-update downloads desktop binaries; block early.
+\tif (process.platform === "android" || process.env.OMP_PLATFORM === "android" || process.env.TERMUX_VERSION) {
+\t\tconsole.log(chalk.yellow("Self-update is disabled on Android/Termux."));
+\t\tconsole.log(chalk.dim("Update via: curl -fsSL https://github.com/sasazemzulin058-debug/omp-termux/releases/latest/download/omp-termux.tar.gz | tar xz"));
+\t\treturn;
+\t}
+'''
+    if "Self-update is disabled on Android" in text:
+        return text
+    return once(text, marker, "export async function runUpdateCommand(opts: { force: boolean; check: boolean }): Promise<void> {\n" + guard, "update-cli.ts")
+
+def native_index(text):
+    stub = '''
+// Android: audio/live/webrtc modules are excluded from native addon.
+// Provide stub classes that throw a clear error instead of undefined TypeError.
+function _unsupported(name) {
+  return class {
+    constructor() { throw new Error(`${name} is not available on Android/Termux`); }
+  };
+}
+'''
+    if "_unsupported" in text:
+        return text
+    text = text.replace("const nativeBindings = loadNative();\n", "const nativeBindings = loadNative();\n" + stub)
+    text = text.replace("export const AudioCapture = nativeBindings.AudioCapture;", 'export const AudioCapture = nativeBindings.AudioCapture ?? _unsupported("AudioCapture");')
+    text = text.replace("export const AudioPlayback = nativeBindings.AudioPlayback;", 'export const AudioPlayback = nativeBindings.AudioPlayback ?? _unsupported("AudioPlayback");')
+    text = text.replace("export const LiveWebRtcPeer = nativeBindings.LiveWebRtcPeer;", 'export const LiveWebRtcPeer = nativeBindings.LiveWebRtcPeer ?? _unsupported("LiveWebRtcPeer");')
+    return text
+
 edit("crates/pi-natives/Cargo.toml", cargo)
 edit("crates/pi-natives/src/lib.rs", lib)
 edit("crates/pi-natives/src/audio.rs", webrtc)
@@ -124,4 +157,6 @@ edit("crates/pi-builtins/src/proc_snapshot.rs", builtins)
 edit("crates/pi-builtins/src/ps.rs", lambda s: s.replace('#[cfg(target_os = "linux")]\nfn ps_total_memory_bytes()', '#[cfg(any(target_os = "linux", target_os = "android"))]\nfn ps_total_memory_bytes()', 1) if '#[cfg(target_os = "linux")]\nfn ps_total_memory_bytes()' in s else s)
 edit("packages/natives/native/loader-state.js", loader)
 edit("packages/coding-agent/src/cli.ts", cli)
-print("Android overlay applied: 9 transformations")
+edit("packages/coding-agent/src/cli/update-cli.ts", update_cli)
+edit("packages/natives/native/index.js", native_index)
+print("Android overlay applied: 11 transformations")
