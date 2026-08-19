@@ -1666,7 +1666,11 @@ export async function runUpdateCommand(opts: { force: boolean; check: boolean })
 	// Android/Termux: self-update downloads desktop binaries; block early.
 	if (process.platform === "android" || process.env.OMP_PLATFORM === "android" || process.env.TERMUX_VERSION) {
 		console.log(chalk.yellow("Self-update is disabled on Android/Termux."));
-		console.log(chalk.dim("Update via: curl -fsSL https://github.com/sasazemzulin058-debug/omp-termux/releases/latest/download/omp-termux.tar.gz | tar xz"));
+		console.log(
+			chalk.dim(
+				"Update via: curl -fsSL https://github.com/sasazemzulin058-debug/omp-termux/releases/latest/download/omp-termux.tar.gz | tar xz",
+			),
+		);
 		return;
 	}
 

@@ -119,7 +119,11 @@ def update_cli(text):
 \t// Android/Termux: self-update downloads desktop binaries; block early.
 \tif (process.platform === "android" || process.env.OMP_PLATFORM === "android" || process.env.TERMUX_VERSION) {
 \t\tconsole.log(chalk.yellow("Self-update is disabled on Android/Termux."));
-\t\tconsole.log(chalk.dim("Update via: curl -fsSL https://github.com/sasazemzulin058-debug/omp-termux/releases/latest/download/omp-termux.tar.gz | tar xz"));
+\t\tconsole.log(
+\t\t\tchalk.dim(
+\t\t\t\t"Update via: curl -fsSL https://github.com/sasazemzulin058-debug/omp-termux/releases/latest/download/omp-termux.tar.gz | tar xz",
+\t\t\t),
+\t\t);
 \t\treturn;
 \t}
 '''
