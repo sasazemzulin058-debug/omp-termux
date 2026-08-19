@@ -41,8 +41,10 @@ jobs:
 
       - name: Install system dependencies
         run: |
-          sudo apt-get update
-          sudo apt-get install -y ninja-build cmake python3
+          set -euo pipefail
+          export DEBIAN_FRONTEND=noninteractive
+          timeout 300 sudo apt-get update -qq
+          timeout 300 sudo apt-get install -y ninja-build cmake python3
 
       - name: Verify Android overlay and release tag
         run: python3 android/scripts/verify-overlay.py
