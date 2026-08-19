@@ -30,56 +30,73 @@ async function buildDocsPayload(): Promise<string> {
 }
 
 async function main(): Promise<void> {
-	const docsPayload = await buildDocsPayload();
-	await Bun.$`rm -rf ${outDir} ${bundleDir}`.quiet();
-	await Bun.$`mkdir -p ${outDir} ${bundleDir}/node_modules/@oh-my-pi/pi-natives/native`.quiet();
+	process.chdir(repoRoot);
+	const statsDir = path.join(repoRoot, "packages/stats");
+	try {
+		// Static imports cannot run here: stats build scripts use cwd-relative paths
+		// and must execute before CLI bundling, then reset their generated source.
+		// Stats scripts use project-relative paths; execute them after entering package root.
+		process.chdir(statsDir);
+		await import(path.join(statsDir, "build.ts"));
+		const { buildArchiveBase64 } = await import(path.join(statsDir, "scripts/generate-client-bundle.ts"));
+		await Bun.write("src/embedded-client.generated.txt", await buildArchiveBase64("dist/client"));
+		process.chdir(repoRoot);
 
-	const output = await Bun.build({
-		entrypoints: [path.join(packageDir, "src/cli.ts")],
-		outdir: outDir,
-		target: "bun",
-		splitting: true,
-		// Keep runtime natives external — Android .node is injected into the tarball.
-		external: [
-			"@oh-my-pi/pi-natives",
-			"@huggingface/transformers",
-			"fastembed",
-			"onnxruntime-node",
-			"omp-legacy-pi-modules",
-		],
-		define: {
-			"process.env.PI_BUNDLED": JSON.stringify("true"),
-			"process.env.PI_DOCS_EMBED": JSON.stringify(docsPayload),
-		},
-		minify: {
-			whitespace: true,
-			syntax: true,
-			identifiers: true,
-			keepNames: true,
-		},
-		throw: false,
-	});
-	if (!output.success) {
-		throw new Error(`Termux CLI bundle failed:\n${output.logs.map(log => log.message).join("\n")}`);
+		// The prebuilt CLI has no stats source tree at runtime. Generate the
+		// deterministic dashboard archive before Bun.build embeds it.
+		const docsPayload = await buildDocsPayload();
+
+		await Bun.$`rm -rf ${outDir} ${bundleDir}`.quiet();
+		await Bun.$`mkdir -p ${outDir} ${bundleDir}/node_modules/@oh-my-pi/pi-natives/native`.quiet();
+
+		const output = await Bun.build({
+			entrypoints: [path.join(packageDir, "src/cli.ts")],
+			outdir: outDir,
+			target: "bun",
+			splitting: true,
+			external: [
+				"@oh-my-pi/pi-natives",
+				"@huggingface/transformers",
+				"fastembed",
+				"onnxruntime-node",
+				"omp-legacy-pi-modules",
+			],
+			define: {
+				"process.env.PI_BUNDLED": JSON.stringify("true"),
+				"process.env.PI_DOCS_EMBED": JSON.stringify(docsPayload),
+			},
+			minify: {
+				whitespace: true,
+				syntax: true,
+				identifiers: true,
+				keepNames: true,
+			},
+			throw: false,
+		});
+		if (!output.success) {
+			throw new Error(`Termux CLI bundle failed:\n${output.logs.map(log => log.message).join("\n")}`);
+		}
+
+		await Bun.$`cp -R ${outDir}/. ${bundleDir}/`.quiet();
+		const cliDst = path.join(bundleDir, "cli.js");
+		const cli = await Bun.file(cliDst).text();
+		const shebang = cli.startsWith("#!") ? cli : `#!/usr/bin/env bun\n${cli}`;
+		await Bun.write(cliDst, shebang);
+
+		const nativesPkg = path.join(repoRoot, "packages/natives/package.json");
+		const nativesNative = path.join(repoRoot, "packages/natives/native");
+		await Bun.$`cp ${nativesPkg} ${bundleDir}/node_modules/@oh-my-pi/pi-natives/`.quiet();
+		for (const name of ["index.js", "loader-state.js", "embedded-addon.js", "clipboard.js", "desktop.js"]) {
+			await Bun.$`cp ${path.join(nativesNative, name)} ${bundleDir}/node_modules/@oh-my-pi/pi-natives/native/`.quiet();
+		}
+
+		const tarPath = path.join(repoRoot, "termux-js.tar.gz");
+		await Bun.$`tar -czf ${tarPath} -C ${bundleDir} .`.quiet();
+		const size = (await Bun.file(tarPath).size) / 1024 / 1024;
+		console.log(`Termux JS bundle: ${tarPath} (${size.toFixed(1)} MiB), docs files=${docsPayload.split("\n")[0].length > 2 ? "yes" : "no"}`);
+	} finally {
+		await Bun.write(path.join(statsDir, "src/embedded-client.generated.txt"), "");
 	}
-
-	await Bun.$`cp -R ${outDir}/. ${bundleDir}/`.quiet();
-	const cliDst = path.join(bundleDir, "cli.js");
-	const cli = await Bun.file(cliDst).text();
-	const shebang = cli.startsWith("#!") ? cli : `#!/usr/bin/env bun\n${cli}`;
-	await Bun.write(cliDst, shebang);
-
-	const nativesPkg = path.join(repoRoot, "packages/natives/package.json");
-	const nativesNative = path.join(repoRoot, "packages/natives/native");
-	await Bun.$`cp ${nativesPkg} ${bundleDir}/node_modules/@oh-my-pi/pi-natives/`.quiet();
-	for (const name of ["index.js", "loader-state.js", "embedded-addon.js", "clipboard.js", "desktop.js"]) {
-		await Bun.$`cp ${path.join(nativesNative, name)} ${bundleDir}/node_modules/@oh-my-pi/pi-natives/native/`.quiet();
-	}
-
-	const tarPath = path.join(repoRoot, "termux-js.tar.gz");
-	await Bun.$`tar -czf ${tarPath} -C ${bundleDir} .`.quiet();
-	const size = (await Bun.file(tarPath).size) / 1024 / 1024;
-	console.log(`Termux JS bundle: ${tarPath} (${size.toFixed(1)} MiB), docs files=${docsPayload.split("\n")[0].length > 2 ? "yes" : "no"}`);
 }
 
 await main();
