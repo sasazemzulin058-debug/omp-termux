@@ -14,6 +14,7 @@ import {
 	isMinimaxM3FamilyModelId,
 	isOpenAIGptOssModelId,
 	isOpenAIModelId,
+	isQwen38PlusTemplateEffortModelId,
 	isReasoningGlmModelId,
 	modelFamilyToken,
 	parseAnthropicModel,
@@ -27,6 +28,27 @@ describe("isKimiModelId", () => {
 		expect(isKimiModelId("kimi-k2.6")).toBe(true);
 		expect(isKimiModelId("vendor/kimi.x")).toBe(true);
 		expect(isKimiModelId("akimbo-model")).toBe(false);
+	});
+});
+
+describe("isQwen38PlusTemplateEffortModelId", () => {
+	test("matches Qwen 3.8+ open-weight ids across id shapes and versions", () => {
+		expect(isQwen38PlusTemplateEffortModelId("qwen3.8-27b")).toBe(true);
+		expect(isQwen38PlusTemplateEffortModelId("qwen3.8-2.4t-a95b")).toBe(true);
+		expect(isQwen38PlusTemplateEffortModelId("qwen/qwen3.8-27b")).toBe(true);
+		expect(isQwen38PlusTemplateEffortModelId("Qwen3.8-27B-UD-Q6_K_XL")).toBe(true);
+		expect(isQwen38PlusTemplateEffortModelId("qwen3.8-27b:thinking")).toBe(true);
+		// Component-wise version compare: 3.10 sorts after 3.8.
+		expect(isQwen38PlusTemplateEffortModelId("qwen3.10-27b")).toBe(true);
+	});
+	test("rejects pre-3.8 versions, parameter-count lookalikes, and API-only Max SKUs", () => {
+		expect(isQwen38PlusTemplateEffortModelId("qwen3-8b")).toBe(false);
+		expect(isQwen38PlusTemplateEffortModelId("qwen-3.6-27b")).toBe(false);
+		expect(isQwen38PlusTemplateEffortModelId("qwen3.7-plus")).toBe(false);
+		expect(isQwen38PlusTemplateEffortModelId("qwen2.5-coder-7b")).toBe(false);
+		expect(isQwen38PlusTemplateEffortModelId("qwen-3.8b")).toBe(false);
+		expect(isQwen38PlusTemplateEffortModelId("qwen3.8-max")).toBe(false);
+		expect(isQwen38PlusTemplateEffortModelId("qwen3.8-max-preview")).toBe(false);
 	});
 });
 

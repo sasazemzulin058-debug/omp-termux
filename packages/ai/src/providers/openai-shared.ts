@@ -747,7 +747,7 @@ export type OpenAICompletionsParams = Omit<ChatCompletionCreateParamsStreaming, 
 	thinking?: { type: "enabled" | "disabled"; effort?: string; keep?: "all" };
 	enable_thinking?: boolean;
 	preserve_thinking?: boolean;
-	chat_template_kwargs?: { enable_thinking?: boolean; preserve_thinking?: boolean };
+	chat_template_kwargs?: { enable_thinking?: boolean; preserve_thinking?: boolean; reasoning_effort?: string };
 	reasoning?: { effort?: string } | { enabled: false };
 	reasoning_effort?: string | null;
 	service_tier?: ServiceTier;
@@ -1049,12 +1049,34 @@ export function applyChatCompletionsCompatPolicy(params: OpenAICompletionsParams
 				break;
 			case "qwen-enable-thinking-false":
 				params.enable_thinking = true;
+				// Qwen 3.8+ templates steer thinking depth via the
+				// `reasoning_effort` kwarg (low/medium/xhigh, template default
+				// xhigh) — without it every effort selection lands on xhigh.
+				// Twin emission mirrors `preserve_thinking` above: newer
+				// llama.cpp builds map the top-level OpenAI field into the
+				// template, older builds and Alibaba-style local servers read
+				// only the kwargs copy. The `qwen-chat-template` dialect (NIM,
+				// vLLM/SGLang) rides kwargs alone — NIM's request schema
+				// rejects unknown top-level fields (#2299).
+				if (policy.compat.qwenTemplateReasoningEffort && reasoning.wireEffort !== undefined) {
+					params.reasoning_effort = reasoning.wireEffort;
+					params.chat_template_kwargs = {
+						...params.chat_template_kwargs,
+						reasoning_effort: reasoning.wireEffort,
+					};
+				}
 				break;
 			case "qwen-template-false":
 				// Spread so the `preserve_thinking` kwarg hoisted above
 				// survives the merge — a bare `{ enable_thinking: true }`
 				// would clobber it.
-				params.chat_template_kwargs = { ...params.chat_template_kwargs, enable_thinking: true };
+				params.chat_template_kwargs = {
+					...params.chat_template_kwargs,
+					enable_thinking: true,
+					...(policy.compat.qwenTemplateReasoningEffort && reasoning.wireEffort !== undefined
+						? { reasoning_effort: reasoning.wireEffort }
+						: {}),
+				};
 				break;
 			case "openrouter-enabled-false":
 				if (reasoning.wireEffort !== undefined) {

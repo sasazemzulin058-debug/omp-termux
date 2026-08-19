@@ -16,6 +16,7 @@ import {
 	isGrokReasoningEffortCapable,
 	isKimiK3ModelId,
 	isKimiModelId,
+	isQwen38PlusTemplateEffortModelId,
 	isReasoningGlmModelId,
 } from "../identity/family";
 import { resolveModelReference } from "../identity/reference";
@@ -4994,6 +4995,11 @@ export function vllmModelManagerOptions(config?: VllmModelManagerConfig): ModelM
 					return {
 						...model,
 						contextWindow: toPositiveNumber(entry.max_model_len, model.contextWindow),
+						// vLLM's /v1/models reports no reasoning capability. Qwen 3.8+
+						// open weights always think (the template cannot disable it), so
+						// light up the effort dial; buildModel derives the template
+						// ladder from the id + local-backend compat.
+						reasoning: model.reasoning || isQwen38PlusTemplateEffortModelId(model.id),
 					};
 				},
 				fetch: config?.fetch,

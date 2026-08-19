@@ -73,8 +73,10 @@ export function resolveModelCacheProviderId(providerId: string, options: ModelCa
 		case "openrouter":
 			return "openrouter:pseudo-api";
 		case "vllm": {
+			// v2: qwen3.8 rows cached before the reasoning/template-effort upgrade
+			// carry `reasoning: false` and must be refetched.
 			const baseUrl = options.baseUrl ?? getDefaultModelDiscoveryBaseUrl(providerId)!;
-			return `vllm:${Bun.hash(baseUrl).toString(36)}`;
+			return `vllm:models-v2:${Bun.hash(baseUrl).toString(36)}`;
 		}
 		default:
 			return providerId;
