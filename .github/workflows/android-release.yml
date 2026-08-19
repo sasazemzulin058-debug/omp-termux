@@ -19,7 +19,7 @@ concurrency:
 
 env:
   RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
-  BUN_VERSION: "1.3.14"
+  BUN_BOOTSTRAP_VERSION: "1.3.14"
 
 jobs:
   native-addon:
@@ -91,7 +91,7 @@ jobs:
       - name: Install Bun
         uses: oven-sh/setup-bun@v2
         with:
-          bun-version: ${{ env.BUN_VERSION }}
+          bun-version: ${{ env.BUN_BOOTSTRAP_VERSION }}
 
       - name: Install JS dependencies
         run: bun install --minimum-release-age 0
@@ -144,7 +144,7 @@ jobs:
       - name: Install Bun
         uses: oven-sh/setup-bun@v2
         with:
-          bun-version: ${{ env.BUN_VERSION }}
+          bun-version: ${{ env.BUN_BOOTSTRAP_VERSION }}
 
       - name: Install JS dependencies
         run: bun install --minimum-release-age 0
@@ -199,16 +199,14 @@ jobs:
           name: termux-js-bundle
           path: .
 
-      - name: Download custom Bun binary from latest build
-        id: bun_artifact
+      - name: Download required custom Bun binary
         uses: dawidd6/action-download-artifact@v6
         with:
           workflow: bun-build.yml
           name: bun-android-arm64
           path: /tmp/bun-custom
-          if_no_artifact_found: warn
+          if_no_artifact_found: error
           search_artifacts: true
-        continue-on-error: true
 
       - name: Assemble and test release bundle
         run: |
@@ -228,18 +226,13 @@ jobs:
           test -s termux-bundle/cli.js
           test -s termux-bundle/node_modules/@oh-my-pi/pi-natives/native/pi_natives.android-arm64.node
 
-          # Use custom Bun 1.4.0 from bun-build workflow artifact, fallback to npm
-          if [ -f /tmp/bun-custom/bun ] && [ -s /tmp/bun-custom/bun ]; then
-            cp /tmp/bun-custom/bun termux-bundle/bun
-            echo "Using custom Bun from bun-build workflow artifact"
-          elif curl -fsSL "https://github.com/${{ github.repository }}/releases/download/${{ env.RELEASE_TAG }}/bun" -o termux-bundle/bun 2>/dev/null; then
-            echo "Using custom Bun from release asset"
-          else
-            echo "Fetching official Bionic Bun ${BUN_VERSION} from npm"
-            bun_pkg_url="https://registry.npmjs.org/@oven/bun-linux-aarch64-android/-/bun-linux-aarch64-android-${BUN_VERSION}.tgz"
-            curl -fsSL "$bun_pkg_url" | tar -xz -C termux-bundle --strip-components=1 package/bin/bun
-          fi
+          # Releases require custom Bun built from source; no silent npm fallback.
+          test -s /tmp/bun-custom/bun
+          cp /tmp/bun-custom/bun termux-bundle/bun
           chmod +x termux-bundle/bun
+          actual_bun_version=$(termux-bundle/bun --version)
+          echo "Custom Bun version: $actual_bun_version"
+          test "$actual_bun_version" = "$BUN_VERSION"
           test -x termux-bundle/bun
 
           tar -czf omp-termux.tar.gz -C termux-bundle .
