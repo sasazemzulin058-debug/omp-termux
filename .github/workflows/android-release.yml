@@ -228,11 +228,11 @@ jobs:
 
           # Releases require custom Bun built from source; no silent npm fallback.
           test -s /tmp/bun-custom/bun
+          test -s /tmp/bun-custom/bun.version
+          test "$(cat /tmp/bun-custom/bun.version)" = "$BUN_VERSION"
           cp /tmp/bun-custom/bun termux-bundle/bun
           chmod +x termux-bundle/bun
-          actual_bun_version=$(termux-bundle/bun --version)
-          echo "Custom Bun version: $actual_bun_version"
-          test "$actual_bun_version" = "$BUN_VERSION"
+          echo "Using custom Bun $(cat /tmp/bun-custom/bun.version)"
           test -x termux-bundle/bun
 
           tar -czf omp-termux.tar.gz -C termux-bundle .
