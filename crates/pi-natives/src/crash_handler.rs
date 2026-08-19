@@ -90,7 +90,6 @@ pub fn install() {
 		}));
 
 		// alloc hook disabled on Android: unstable on bionic.
-
 	});
 }
 

@@ -58,7 +58,7 @@ def crash(text):
         raise SystemExit("overlay marker mismatch: alloc hook")
     i = text.index(start)
     j = text.index("\n\t\t});", i) + len("\n\t\t});")
-    text = text[:i] + "\n\t\t// alloc hook disabled on Android: unstable on bionic.\n" + text[j:]
+    text = text[:i] + "\n\t\t// alloc hook disabled on Android: unstable on bionic." + text[j:]
     text = once(text, "\tAlloc,\n", "\t#[allow(dead_code, reason = \"alloc hook disabled on Android\")]\n\tAlloc,\n", "crash_handler.rs")
     text = once(text, "fn format_alloc_report(", "#[allow(dead_code, reason = \"alloc hook disabled on Android\")]\nfn format_alloc_report(", "crash_handler.rs")
     return once(text, "fn write_alloc_failure_line(", "#[allow(dead_code, reason = \"alloc hook disabled on Android\")]\nfn write_alloc_failure_line(", "crash_handler.rs")
@@ -76,10 +76,23 @@ def clipboard(text):
         ("#[cfg(not(target_os = \"linux\"))]\nfn set_clipboard_text(", "#[cfg(all(not(target_os = \"linux\"), not(target_os = \"android\")))]\nfn set_clipboard_text("),
     ]:
         text = once(text, old, new, "clipboard.rs")
-    stub = '''#[cfg(target_os = "android")]\nfn set_clipboard_text(_text: String) -> Result<()> {\n\tErr(Error::from_reason("Clipboard copy is not supported on Android/Termux native build; use termux-clipboard-set"))\n}\n\n'''
+    stub = '''#[cfg(target_os = "android")]
+fn set_clipboard_text(_text: String) -> Result<()> {
+\tErr(Error::from_reason(
+\t\t"Clipboard copy is not supported on Android/Termux native build; use termux-clipboard-set",
+\t))
+}
+
+'''
     text = once(text, "/// Read an image from the system clipboard.", stub + "/// Read an image from the system clipboard.", "clipboard.rs")
     text = once(text, "#[napi]\npub fn read_image_from_clipboard(", "#[cfg(not(target_os = \"android\"))]\n#[napi]\npub fn read_image_from_clipboard(", "clipboard.rs")
-    return text + '''\n#[cfg(target_os = "android")]\n#[napi]\npub async fn read_image_from_clipboard() -> Result<Option<ClipboardImage>> { Ok(None) }\n'''
+    return text + '''
+#[cfg(target_os = "android")]
+#[napi]
+pub async fn read_image_from_clipboard() -> Result<Option<ClipboardImage>> {
+\tOk(None)
+}
+'''
 
 def process(text):
     return once(text, '#[cfg(target_os = "linux")]\nmod platform {', '#[cfg(any(target_os = "linux", target_os = "android"))]\nmod platform {', "process.rs")

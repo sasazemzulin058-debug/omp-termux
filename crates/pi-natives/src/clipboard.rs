@@ -198,7 +198,9 @@ fn set_clipboard_text(text: String) -> Result<()> {
 
 #[cfg(target_os = "android")]
 fn set_clipboard_text(_text: String) -> Result<()> {
-	Err(Error::from_reason("Clipboard copy is not supported on Android/Termux native build; use termux-clipboard-set"))
+	Err(Error::from_reason(
+		"Clipboard copy is not supported on Android/Termux native build; use termux-clipboard-set",
+	))
 }
 
 /// Read an image from the system clipboard.
@@ -382,4 +384,6 @@ mod tests {
 
 #[cfg(target_os = "android")]
 #[napi]
-pub async fn read_image_from_clipboard() -> Result<Option<ClipboardImage>> { Ok(None) }
+pub async fn read_image_from_clipboard() -> Result<Option<ClipboardImage>> {
+	Ok(None)
+}
