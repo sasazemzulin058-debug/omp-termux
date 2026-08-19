@@ -150,7 +150,11 @@ jobs:
             --profile=release \
             --abi=android \
             --arch=aarch64 \
-            --build-dir="build/release"
+            --build-dir="build/release" \
+            --configure-only
+          find build/release -type f -name build.ninja -print0 | \
+            xargs -0 -r sed -i 's/-Wno-character-conversion//g'
+          ninja -C build/release
 
           echo "End: $(date)"
 
