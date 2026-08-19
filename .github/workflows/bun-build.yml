@@ -111,11 +111,16 @@ jobs:
             -e 's/LLVM_VERSION = "21[.]1[.]8"/LLVM_VERSION = "18.0.3"/g' \
             -e 's/LLVM_MAJOR = "21"/LLVM_MAJOR = "18"/g' \
             /tmp/bun-src/scripts/build/tools.ts
-          sed -i \
-            -e 's/>=[[:space:]]*21[.]1[.]0/>=18.0.0/g' \
-            -e 's/<[[:space:]]*21[.]1[.]99/<22.0.0/g' \
-            /tmp/bun-src/scripts/build/tools.ts
-          grep -n 'LLVM_VERSION\|LLVM_MAJOR' /tmp/bun-src/scripts/build/tools.ts
+          flag_files=$(grep -RIl --exclude-dir=.git --exclude-dir=node_modules --exclude-dir=build \
+            -- '-Wno-character-conversion' /tmp/bun-src || true)
+          if [ -n "$flag_files" ]; then
+            printf '%s\n' "$flag_files" | xargs sed -i 's/[[:space:]]*-Wno-character-conversion//g'
+          fi
+          if grep -RIn --exclude-dir=.git --exclude-dir=node_modules --exclude-dir=build \
+            -- '-Wno-character-conversion' /tmp/bun-src; then
+            echo 'error: unsupported Bun warning flag remains' >&2
+            exit 1
+          fi
           if grep -nE 'LLVM_MAJOR = "21"|LLVM_VERSION = "21[.]1[.]8"' /tmp/bun-src/scripts/build/tools.ts; then
             echo 'error: Bun tools.ts LLVM gate patch incomplete' >&2
             exit 1
