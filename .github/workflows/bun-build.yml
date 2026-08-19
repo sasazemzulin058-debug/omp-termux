@@ -183,6 +183,7 @@ jobs:
           if ! file /tmp/bun-dist/bun | grep -q "aarch64"; then
             echo "error: built binary is not aarch64" >&2
             exit 1
+          fi
           echo "${{ steps.manifest.outputs.bun_version }}" > /tmp/bun-dist/bun.version
           (cd /tmp/bun-dist && sha256sum bun > bun.sha256)
 
