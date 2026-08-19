@@ -99,16 +99,16 @@ jobs:
         run: |
           set -euo pipefail
           cd /tmp/bun-src
-          files=$(grep -RIl --include='*.ts' --include='*.js' --include='*.zig' \
-            -E '21\.1\.0|21\.1\.99' . || true)
+          files=$(grep -RIl --exclude-dir=.git --exclude-dir=node_modules --exclude-dir=build \
+            -E '21[.]1[.]0|21[.]1[.]99' . || true)
           test -n "$files"
           printf '%s\n' "$files" | xargs sed -i \
-            -e 's/>=21\.1\.0/>=18.0.0/g' \
-            -e 's/version >=21\.1\.0/version >=18.0.0/g' \
-            -e 's/<21\.1\.99/<22.0.0/g' \
-            -e 's/21\.1\.[0-9]*/18.0.3/g'
-          if grep -RIl --include='*.ts' --include='*.js' --include='*.zig' \
-            -E '>=21\.1\.0|version >=21\.1\.0' . | grep -q .; then
+            -e 's/>=[[:space:]]*21[.]1[.]0/>=18.0.0/g' \
+            -e 's/version >=[[:space:]]*21[.]1[.]0/version >=18.0.0/g' \
+            -e 's/<[[:space:]]*21[.]1[.]99/<22.0.0/g' \
+            -e 's/21[.]1[.][0-9]*/18.0.3/g'
+          if grep -RIl --exclude-dir=.git --exclude-dir=node_modules --exclude-dir=build \
+            -E '21[.]1[.]0|21[.]1[.]99' . | grep -q .; then
             echo 'error: Bun clang requirement patch incomplete' >&2
             exit 1
           fi
