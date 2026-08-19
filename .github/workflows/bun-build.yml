@@ -106,9 +106,11 @@ jobs:
             -e 's/>=[[:space:]]*21[.]1[.]0/>=18.0.0/g' \
             -e 's/version >=[[:space:]]*21[.]1[.]0/version >=18.0.0/g' \
             -e 's/<[[:space:]]*21[.]1[.]99/<22.0.0/g' \
-            -e 's/21[.]1[.][0-9]*/18.0.3/g'
+            -e 's/21[.]1[.][0-9]*/18.0.3/g' \
+            -e 's/LLVM_VERSION = "21[.]1[.]8"/LLVM_VERSION = "18.0.3"/g' \
+            -e 's/LLVM_MAJOR = "21"/LLVM_MAJOR = "18"/g'
           if grep -RIl --exclude-dir=.git --exclude-dir=node_modules --exclude-dir=build \
-            -E '21[.]1[.]0|21[.]1[.]99' . | grep -q .; then
+            -E '21[.]1[.]0|21[.]1[.]99|LLVM_MAJOR = "21"|LLVM_VERSION = "21[.]1[.]8"' . | grep -q .; then
             echo 'error: Bun clang requirement patch incomplete' >&2
             exit 1
           fi
