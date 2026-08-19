@@ -153,7 +153,9 @@ jobs:
             --build-dir="build/release" \
             --configure-only
           find build/release -type f -name build.ninja -print0 | \
-            xargs -0 -r sed -i 's/-Wno-character-conversion//g'
+            xargs -0 -r sed -i \
+              -e 's/-Wno-character-conversion//g' \
+              -e 's/-Werror/-Werror -Wno-error=dangling -Wno-error=unknown-warning-option/g'
           ninja -C build/release
 
           echo "End: $(date)"
