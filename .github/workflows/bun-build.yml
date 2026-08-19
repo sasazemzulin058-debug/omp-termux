@@ -95,14 +95,23 @@ jobs:
           git submodule update --init --recursive --depth 1
           echo "Checked out commit: $(git rev-parse HEAD)"
           echo "bun_commit=$(git rev-parse HEAD)" >> "$GITHUB_ENV"
-      - name: Patch Clang version requirement for NDK r27c fallback
+      - name: Patch Bun clang requirement for NDK r27c
         run: |
+          set -euo pipefail
           cd /tmp/bun-src
-          find scripts/ -type f \( -name "*.ts" -o -name "*.js" -o -name "*.zig" \) -exec sed -i \
+          files=$(grep -RIl --include='*.ts' --include='*.js' --include='*.zig' \
+            -E '21\.1\.0|21\.1\.99' . || true)
+          test -n "$files"
+          printf '%s\n' "$files" | xargs sed -i \
             -e 's/>=21\.1\.0/>=18.0.0/g' \
             -e 's/version >=21\.1\.0/version >=18.0.0/g' \
             -e 's/<21\.1\.99/<22.0.0/g' \
-            -e 's/21\.1\.[0-9]*/18.0.3/g' {} + || true
+            -e 's/21\.1\.[0-9]*/18.0.3/g'
+          if grep -RIl --include='*.ts' --include='*.js' --include='*.zig' \
+            -E '>=21\.1\.0|version >=21\.1\.0' . | grep -q .; then
+            echo 'error: Bun clang requirement patch incomplete' >&2
+            exit 1
+          fi
 
       - name: Install Bun bootstrapper
         uses: oven-sh/setup-bun@v2
