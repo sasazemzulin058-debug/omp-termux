@@ -11,13 +11,6 @@ name: Android build
 # at the NDK clang.
 
 on:
-  push:
-    branches: [main]
-    paths:
-      - "crates/**"
-      - "packages/natives/**"
-      - "android/**"
-      - ".github/workflows/android-build.yml"
   pull_request:
     paths:
       - "crates/**"
@@ -109,7 +102,7 @@ jobs:
           CMAKE_MAKE_PROGRAM: /usr/bin/ninja
           CMAKE_ARGS: -DCMAKE_MAKE_PROGRAM=/usr/bin/ninja
           CARGO_INCREMENTAL: "0"
-        run: timeout 55m bash android/scripts/build-android-ci.sh || true
+        run: timeout 55m bash android/scripts/build-android-ci.sh
 
       - name: Upload addon artifact
         uses: actions/upload-artifact@v4
@@ -118,4 +111,4 @@ jobs:
           path: |
             packages/natives/native/pi_natives.android-arm64.node
             packages/natives/native/pi_natives.android-arm64.node.sha256
-          if-no-files-found: ignore
+          if-no-files-found: error
