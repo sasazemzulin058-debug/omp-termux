@@ -135,8 +135,8 @@ jobs:
           ANDROID_NDK_ROOT: ${{ steps.setup_ndk.outputs.ndk-path }}
           ANDROID_NDK_HOME: ${{ steps.setup_ndk.outputs.ndk-path }}
           CCACHE_DIR: /tmp/ccache
-          CFLAGS: "-Wno-unknown-warning-option"
-          CXXFLAGS: "-Wno-unknown-warning-option"
+          CFLAGS: "-Wno-error=unknown-warning-option"
+          CXXFLAGS: "-Wno-error=unknown-warning-option"
           LDFLAGS: "-L${{ steps.setup_ndk.outputs.ndk-path }}/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/lib/aarch64-linux-android/${{ steps.manifest.outputs.android_api }}"
         run: |
           mkdir -p /tmp/ccache
