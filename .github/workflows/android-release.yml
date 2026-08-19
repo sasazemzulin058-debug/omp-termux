@@ -37,7 +37,7 @@ jobs:
 
       - uses: actions/checkout@v4
         with:
-          ref: ${{ github.event_name == 'push' && github.ref || 'main' }}
+          ref: ${{ github.event_name == 'push' && github.ref || inputs.tag || 'main' }}
 
       - name: Install system dependencies
         run: |
@@ -133,7 +133,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ github.event_name == 'push' && github.ref || 'main' }}
+          ref: ${{ github.event_name == 'push' && github.ref || inputs.tag || 'main' }}
 
       - name: Verify Android overlay and release tag
         run: python3 android/scripts/verify-overlay.py
@@ -180,7 +180,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ github.event_name == 'push' && github.ref || 'main' }}
+          ref: ${{ github.event_name == 'push' && github.ref || inputs.tag || 'main' }}
 
       - name: Verify Android overlay and release tag
         run: python3 android/scripts/verify-overlay.py
@@ -229,6 +229,8 @@ jobs:
           # Releases require custom Bun built from source; no silent npm fallback.
           test -s /tmp/bun-custom/bun
           test -s /tmp/bun-custom/bun.version
+          test -s /tmp/bun-custom/bun.sha256
+          (cd /tmp/bun-custom && sha256sum -c bun.sha256)
           test "$(cat /tmp/bun-custom/bun.version)" = "$BUN_VERSION"
           cp /tmp/bun-custom/bun termux-bundle/bun
           chmod +x termux-bundle/bun
