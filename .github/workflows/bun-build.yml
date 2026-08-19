@@ -91,12 +91,14 @@ jobs:
           fi
           if [ -n "$COMMIT_SHA" ]; then
             echo "Using explicit use_commit: $COMMIT_SHA"
+            git fetch --depth 1 origin "$COMMIT_SHA"
             git checkout "$COMMIT_SHA"
           elif [ -n "$BUN_REF" ] && [ "$BUN_REF" != "main" ]; then
             echo "Using explicit bun_ref override: $BUN_REF"
             git checkout "$BUN_REF"
           else
             echo "Using pinned manifest source commit: $MANIFEST_COMMIT"
+            git fetch --depth 1 origin "$MANIFEST_COMMIT"
             git checkout "$MANIFEST_COMMIT"
           fi
           git submodule update --init --recursive --depth 1
