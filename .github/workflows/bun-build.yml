@@ -40,6 +40,7 @@ jobs:
           echo "bun_version=$BUN_VERSION" >> "$GITHUB_OUTPUT"
           echo "bun_bootstrap_version=$BUN_BOOTSTRAP_VERSION" >> "$GITHUB_OUTPUT"
           echo "android_api=$ANDROID_API" >> "$GITHUB_OUTPUT"
+          echo "bun_source_commit=$BUN_SOURCE_COMMIT" >> "$GITHUB_OUTPUT"
 
       - name: Install system build dependencies
         run: |
@@ -79,14 +80,24 @@ jobs:
         env:
           BUN_REF: ${{ github.event.inputs.bun_ref || 'main' }}
           COMMIT_SHA: ${{ github.event.inputs.use_commit }}
+          MANIFEST_COMMIT: ${{ steps.manifest.outputs.bun_source_commit }}
         run: |
-          echo "=== Cloning oven-sh/bun ($BUN_REF) ==="
+          echo "=== Cloning oven-sh/bun ==="
           git clone --depth 50 "https://github.com/oven-sh/bun.git" /tmp/bun-src
           cd /tmp/bun-src
+          if [ -z "$MANIFEST_COMMIT" ]; then
+            echo "error: manifest BUN_SOURCE_COMMIT is empty" >&2
+            exit 1
+          fi
           if [ -n "$COMMIT_SHA" ]; then
+            echo "Using explicit use_commit: $COMMIT_SHA"
             git checkout "$COMMIT_SHA"
-          else
+          elif [ -n "$BUN_REF" ] && [ "$BUN_REF" != "main" ]; then
+            echo "Using explicit bun_ref override: $BUN_REF"
             git checkout "$BUN_REF"
+          else
+            echo "Using pinned manifest source commit: $MANIFEST_COMMIT"
+            git checkout "$MANIFEST_COMMIT"
           fi
           git submodule update --init --recursive --depth 1
           echo "Checked out commit: $(git rev-parse HEAD)"
@@ -185,6 +196,11 @@ jobs:
             exit 1
           fi
           echo "${{ steps.manifest.outputs.bun_version }}" > /tmp/bun-dist/bun.version
+          if [ -z "${bun_commit:-}" ]; then
+            echo "error: bun_commit is empty; cannot record source commit" >&2
+            exit 1
+          fi
+          echo "$bun_commit" > /tmp/bun-dist/bun.source-commit
           (cd /tmp/bun-dist && sha256sum bun > bun.sha256)
 
       - name: Upload Bun binary artifact
