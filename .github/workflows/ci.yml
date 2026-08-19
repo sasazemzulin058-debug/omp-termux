@@ -115,7 +115,9 @@ jobs:
            run: |
               source_hash=$(find crates Cargo.toml Cargo.lock rust-toolchain.toml \
                       packages/natives/scripts packages/natives/package.json \
-                      scripts/ci-build-native.ts scripts/host-detect.ts \
+                      scripts/host-detect.ts \
+                      android/scripts/build-android-ci.sh \
+                      android/scripts/apply-overlay.py android/versions.env \
                       -type f -print0 \
                     | sort -z \
                     | xargs -0 sha256sum \
