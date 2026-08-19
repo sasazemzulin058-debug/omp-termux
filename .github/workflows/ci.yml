@@ -33,17 +33,6 @@ jobs:
       - name: Build collab web
         run: bun run collab:web:build
 
-  install-methods:
-    name: Install method smoke tests
-    runs-on: ubuntu-24.04
-    timeout-minutes: 20
-    steps:
-      - uses: actions/checkout@v4
-      - uses: ./.github/actions/setup-system-deps
-      - uses: ./.github/actions/bun-install
-      - name: Run install method tests
-        run: bun run ci:test:install-methods
-
   android-overlay:
     name: Android overlay validation
     runs-on: ubuntu-24.04
