@@ -35,6 +35,8 @@ jobs:
         id: manifest
         run: |
           source android/versions.env
+          echo "ndk_version=$NDK_VERSION" >> "$GITHUB_OUTPUT"
+          echo "rust_toolchain=$RUST_TOOLCHAIN" >> "$GITHUB_OUTPUT"
           echo "bun_version=$BUN_VERSION" >> "$GITHUB_OUTPUT"
           echo "bun_bootstrap_version=$BUN_BOOTSTRAP_VERSION" >> "$GITHUB_OUTPUT"
           echo "android_api=$ANDROID_API" >> "$GITHUB_OUTPUT"
