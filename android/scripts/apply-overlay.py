@@ -77,7 +77,7 @@ def clipboard(text):
     ]:
         text = once(text, old, new, "clipboard.rs")
     stub = '''#[cfg(target_os = "android")]
-fn set_clipboard_text(_text: String) -> Result<()> {
+fn set_clipboard_text(_text: &str) -> Result<()> {
 \tErr(Error::from_reason(
 \t\t"Clipboard copy is not supported on Android/Termux native build; use termux-clipboard-set",
 \t))

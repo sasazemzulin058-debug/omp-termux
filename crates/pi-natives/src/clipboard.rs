@@ -144,7 +144,7 @@ fn read_raw_cf_dib() -> Option<Vec<u8>> {
 /// Returns an error if clipboard access fails.
 #[napi]
 pub fn copy_to_clipboard(text: JsString) -> Result<()> {
-    set_clipboard_text((&js::utf8(text)?).to_string())
+    set_clipboard_text(&js::utf8(text)?)
 }
 
 /// Linux: keep a single `arboard::Clipboard` alive for the whole process.
@@ -198,7 +198,7 @@ fn set_clipboard_text(text: &str) -> Result<()> {
 }
 
 #[cfg(target_os = "android")]
-fn set_clipboard_text(_text: String) -> Result<()> {
+fn set_clipboard_text(_text: &str) -> Result<()> {
 	Err(Error::from_reason(
 		"Clipboard copy is not supported on Android/Termux native build; use termux-clipboard-set",
 	))
