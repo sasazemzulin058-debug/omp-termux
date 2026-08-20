@@ -239,7 +239,7 @@ omp --version
 Additional probes:
 
 ```sh
-"$PREFIX/lib/omp-termux/bun" -e 'if (!Bun.version) process.exit(1)'  # bundled runtime (1.4.0)
+"$PREFIX/lib/omp-termux/bun" -e 'if (!Bun.version) process.exit(1)'  # equals BUN_VERSION
 "$PREFIX/lib/omp-termux/bun" -e 'console.log(`${process.platform}-${process.arch}`)'
 pkg install -y termux-api
 echo -n "test" | termux-clipboard-set   # dummy value; never real secrets

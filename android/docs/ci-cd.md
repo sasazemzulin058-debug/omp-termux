@@ -191,8 +191,7 @@ checksum, stages the tree, and executes the shim
 `$LIB_DIR/bun` is the **custom Bun built from Bun source** — not the Termux
 `pkg bun` glibc wrapper and not an npm artifact. The release pipeline
 verifies the artifact's sha256 and that `bun.version` equals the manifest
-`BUN_VERSION` (1.4.0) before packaging; the source commit is recorded in
-`bun.source-commit`.
+`BUN_VERSION`; the source commit is recorded in `bun.source-commit`.
 
 <details>
 <summary>Historical note — pkg bun and the official-runtime goal (superseded)</summary>
@@ -229,9 +228,8 @@ Three jobs, each starting with `verify-overlay.py` and
 
 - **Tag:** `v<version>-termux` where `<version>` =
   `packages/coding-agent/package.json` (enforced by the preflight scripts).
-- **Assets:** `omp-termux.tar.gz`, `.sha256`, the `.node`, the `.node.sha256`.
-- **Runtime requirements:** aarch64 Termux, bundled custom Bun (1.4.0,
-  Bionic). No glibc, no proot, no npm, no source build on device.
+- **Runtime requirements:** aarch64 Termux, bundled custom Bun matching
+  `BUN_VERSION` on Bionic. No glibc, no proot, no npm, no source build on device.
 
 **Installer swap (implemented).** `install.sh` stages the new tree as
 `$LIB_DIR.new`, smoke-tests it with the bundled bun before touching the live
