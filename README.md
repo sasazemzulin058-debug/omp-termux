@@ -22,15 +22,25 @@
   Fork of <a href="https://github.com/badlogic/pi-mono">Pi</a> by <a href="https://github.com/mariozechner">@mariozechner</a> 
 </p>
 
-The most capable agent surface that ships. Continuously tuned by real-world use — complete out of the box, open all the way down.
-
-**60+** providers · **31** built-in tools · **14** lsp ops · **28** dap ops · **~80k** lines of Rust core.
 
 > [!NOTE]
 > Pull requests are **temporarily open to everyone** as a trial. We previously
 > required a vouch before accepting PRs; that requirement is lifted for now
 > while we evaluate how open contributions go. Depending on the results, the
 > vouch system may return.
+
+
+> [!IMPORTANT]
+> **Android ARM64 / Termux compatibility**
+>
+> This fork ships a dedicated `aarch64` Android/Termux release with a
+> Bionic-compatible native addon, split OMP bundle, and bundled Bun runtime.
+> Use Android quickstart below. Do not use desktop installers, `pkg install bun`,
+> glibc Bun, or `bun build --compile`.
+>
+> Supported path: **Termux · Android arm64 · Bionic · API 24 binary floor**.
+> Audio, WebRTC/live, local ONNX/STT, and clipboard image input are not part of
+> Android support. See [Android/Termux](#androidtermux) for exact boundaries.
 
 ## Table of contents
 
