@@ -14,8 +14,9 @@ use image::{DynamicImage, ImageFormat, RgbaImage};
 use napi::{JsString, bindgen_prelude::*};
 use napi_derive::napi;
 
+use crate::js;
 #[cfg(not(target_os = "android"))]
-use crate::{js, task};
+use crate::task;
 
 /// Clipboard image payload encoded as PNG bytes.
 #[napi(object)]
