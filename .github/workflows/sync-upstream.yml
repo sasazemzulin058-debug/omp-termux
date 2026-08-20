@@ -95,7 +95,8 @@ jobs:
           fi
           git tag "$tag"
           git push --atomic origin HEAD:main "refs/tags/$tag"
-          echo "release queued for $tag"
+          echo "dispatching android release for $tag"
+          gh workflow run android-release.yml --repo "${{ github.repository }}" --ref "$tag" -f tag="$tag"
         env:
           GH_TOKEN: ${{ github.token }}
       - name: Notify upstream sync failure
