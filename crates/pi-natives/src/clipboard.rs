@@ -144,7 +144,7 @@ fn read_raw_cf_dib() -> Option<Vec<u8>> {
 /// Returns an error if clipboard access fails.
 #[napi]
 pub fn copy_to_clipboard(text: JsString) -> Result<()> {
-	set_clipboard_text(&js::utf8(text)?)
+    set_clipboard_text((&js::utf8(text)?).to_string())
 }
 
 /// Linux: keep a single `arboard::Clipboard` alive for the whole process.
