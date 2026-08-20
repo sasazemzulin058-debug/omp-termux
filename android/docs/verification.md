@@ -2,8 +2,8 @@
 
 Every gate that exists for the port, grouped by kind. Each is marked
 **implemented** (runs today) or **pending** (defined contract, not yet
-enforced). The on-device checks run on the reference device only — see the
-disclosure at the end.
+enforced/verified). The on-device checks run on the reference device only —
+see the disclosure at the end.
 
 ## 1. Current vs target
 
@@ -11,10 +11,10 @@ disclosure at the end.
 |------|--------|
 | Overlay gates, release preflight, rustc cfg, addon artifact, current tarball content | implemented (CI) |
 | Version/help, grep/executeShell/PTY | implemented (manual smoke) |
-| Official bundled Bun ELF/provenance | pending |
-| Split chunks/assets + lazy-subcommand integrity | pending |
-| Benchmark <=200 ms and <=65 MB | pending CI enforcement |
-| Swap fault injection, update guard, browser prompt matrix | pending |
+| Bundled custom Bun ELF/provenance/version/source-commit | implemented (CI + manual) |
+| Split chunks/assets + lazy-import integrity | implemented (CI + manual) |
+| Benchmark <=200 ms and <=65 MB | pending CI enforcement (run manually) |
+| Swap fault model, update guard, browser prompt matrix | swap logic + update guard implemented; fault-injection test matrix and browser consent matrix pending verification |
 | Unsupported diagnostics | implemented (manual) |
 
 ## 2. Automated static gates — implemented
@@ -37,13 +37,13 @@ is set it must equal `v<version>-termux`.
 **Release-input preflight**
 
 ```sh
-RELEASE_TAG=v17.3.5-termux python3 android/scripts/check-release-inputs.py
+VERSION=$(python3 -c 'import json; print(json.load(open("packages/coding-agent/package.json"))["version"])')
+RELEASE_TAG="v${VERSION}-termux" python3 android/scripts/check-release-inputs.py
 ```
 
 Expected: `Release preflight passed`. Asserts `package.json` + `bun.lock`,
 tag match, overlay marker files, and no `node_modules/`, `target/`, or
 `.cache/` in the staging tree.
-
 
 **Rust target facts** (source of truth for every cfg gate)
 
@@ -69,6 +69,7 @@ file packages/natives/native/pi_natives.android-arm64.node   # *ELF*aarch64*
 ```sh
 sha256sum -c omp-termux.tar.gz.sha256
 tar -tzf omp-termux.tar.gz | grep -Fx './cli.js'
+tar -tzf omp-termux.tar.gz | grep -Fx './bun'
 tar -tzf omp-termux.tar.gz | grep -F './node_modules/@oh-my-pi/pi-natives/native/pi_natives.android-arm64.node'
 tar -tzf omp-termux.tar.gz | grep -F './node_modules/@oh-my-pi/pi-natives/package.json'
 ```
@@ -76,22 +77,37 @@ tar -tzf omp-termux.tar.gz | grep -F './node_modules/@oh-my-pi/pi-natives/packag
 The `package-release` job runs exactly these checks before attaching
 anything to a release.
 
-## 3. Official Bun runtime — pending
+## 3. Bundled Bun runtime — implemented
 
-Gate: the shipped runtime is the official Bionic
-`@oven/bun-linux-aarch64-android@1.3.14`, not the pkg glibc-wrapper Bun.
-
+Gate: the shipped runtime is the **custom Bun built from Bun source**
+(Bionic aarch64, manifest `BUN_VERSION`), not the pkg glibc-wrapper Bun and
+not an unverified artifact.
 ```sh
 file "$LIB_DIR/bun"                              # ELF, aarch64, linked against bionic
-"$LIB_DIR/bun" --version                        # 1.3.14
-sha256sum "$LIB_DIR/bun"                         # matches the provenance record
+"$LIB_DIR/bun" --version                        # equals BUN_VERSION
+sha256sum "$LIB_DIR/bun"                         # matches bun.sha256 from the build
+cat "$LIB_DIR/bun.source-commit"                 # equals BUN_SOURCE_COMMIT
+cat "$LIB_DIR/bun.version"                       # equals BUN_VERSION
 ```
 
-For each release, record the artifact's expected sha256 from the official
-release provenance. Compute the actual and compare. Do not ship a runtime
-whose provenance is unverifiable.
+The CI pipeline verifies the downloaded artifact's sha256 and that
+`bun.version` equals the manifest `BUN_VERSION` before packaging; the build
+workflow refuses to produce an artifact when `BUN_SOURCE_COMMIT` is empty,
+so the recorded source commit is always non-empty and pinned. Do not ship a
+runtime whose provenance is unverifiable.
 
-## 4. Split bundle integrity — pending
+<details>
+<summary>Historical note — official-runtime target (superseded)</summary>
+
+The gate previously targeted the official Bionic
+`@oven/bun-linux-aarch64-android@1.3.14`. The shipped runtime is now the
+repo's own source-built Bun 1.4.0, built and verified by `bun-build.yml`
+(the bootstrap Bun 1.3.14 exists only inside CI, never on device). The
+provenance discipline is unchanged: expected sha256 recorded, actual
+computed, compared, and shipped with the release.
+</details>
+
+## 4. Split bundle integrity — implemented
 
 Gate: the tarball carries a split build (not a single `cli.js`).
 
@@ -102,7 +118,10 @@ tar -tzf omp-termux.tar.gz | grep -Fx './cli.js' # entry point
 ```
 
 Startup must not reference a missing chunk: `"$LIB_DIR/bun" "$LIB_DIR/cli.js" --version`
-prints the version with no chunk-not-found error.
+prints the version with no chunk-not-found error. The build script uses
+`splitting: true` and packages the whole outDir; the computer worker is
+loaded via a dynamic `import()` in `src/cli.ts`, so cold startup does not
+eagerly load the native addon path.
 
 ## 5. Behavioral gates — implemented (manual)
 
@@ -113,7 +132,7 @@ omp --version
 omp --help          # renders; no is-not-a-function errors
 ```
 
-**Lazy entry (pending).** After splitting and the dynamic computer-worker import,
+**Lazy entry.** After splitting and the dynamic computer-worker import,
 `--version` must not load pi-natives.
 
 ```sh
@@ -121,8 +140,10 @@ android/scripts/bench.sh --runs 9 --json
 # target: addon_rss_kb == 0 after the lazy-worker phase
 ```
 
-Current monolith samples vary from 0 to about 6.2 MB because the external sampler may
-miss the short mapping. The exact in-process split probe measured 0 KB.
+Current monolith samples vary from 0 to about 6.2 MB because the external
+sampler may miss the short mapping. The exact in-process split probe measured
+0 KB. The split build is the shipped bundle, so the lazy entry is the
+default path.
 
 **grep / executeShell / PTY** run natively on Android (exercises the
 pi-shell/pi-builtins platform gates):
@@ -145,16 +166,20 @@ success:
   `LiveWebRtcPeer is not supported on Android/Termux arm64 build`.
 - Desktop, local ONNX/STT/tiny inference: unsupported, with a clear message.
 
-## 7. Security gates — pending
+## 7. Security gates
 
-**Browser prompt matrix.** Live CDP/relay browser use requires a forced,
-per-call prompt on `open` and `run`. `close` takes no prompt. Both the
-requested URL args and an already-bound tab are classified and require the
-prompt. `yolo` cannot bypass. Clipboard text read, where exposed, requires
-per-read host approval. When verifying, do not dump page or clipboard
-secrets to outputs; assert prompt/no-prompt behavior only.
+**Update guard — implemented.** The installed `omp` shim exports
+`OMP_PLATFORM=android`; `update-cli.ts` detects Android
+(`process.platform === "android" || OMP_PLATFORM === "android" ||
+TERMUX_VERSION`) and immediately prints a reinstall instruction without any
+network or updater work.
 
-**Swap fault injection.** Test fresh install and upgrade from an existing tree.
+**Guarded installer swap — logic implemented, fault-injection matrix
+pending.** `install.sh` stages `$LIB_DIR.new`, smoke-tests it before the
+swap, uses a guarded two-rename swap (current → `.old` → `.new` → current),
+and rolls back on every failure path (failed pre-swap smoke, failed `mv`,
+failed post-swap smoke, failed launcher check). What remains pending is the
+automated fault-injection test matrix:
 
 - fail before backup rename: prior install stays runnable;
 - fail after current→`.old`: rollback restores `.old`;
@@ -163,11 +188,16 @@ secrets to outputs; assert prompt/no-prompt behavior only.
 - corrupt archive/checksum aborts before swap;
 - isolated test uses `OMP_LIB_DIR` and `OMP_BIN_DIR` overrides.
 
-Portable POSIX uses two renames, not an atomic exchange. A concurrent launch may fail
-between renames; final state must always be old-working or new-working.
+Portable POSIX uses two renames, not an atomic exchange. A concurrent launch
+may fail between renames; final state must always be old-working or
+new-working.
 
-**Update guard.** Through the installed shim, `OMP_PLATFORM=android`; `omp update`
-returns reinstall instructions before network or updater method selection.
+**Browser prompt matrix — pending.** Live CDP/relay browser use requires a
+forced, per-call prompt on `open` and `run`. `close` takes no prompt. Both
+the requested URL args and an already-bound tab are classified and require
+the prompt. `yolo` cannot bypass. Clipboard text read, where exposed,
+requires per-read host approval. When verifying, do not dump page or
+clipboard secrets to outputs; assert prompt/no-prompt behavior only.
 
 ## 8. Benchmark gates — pending CI enforcement
 
@@ -190,6 +220,18 @@ release enforcement; today it is run by a maintainer.
 ## 9. On-device smoke test — reference device only
 
 ```sh
+TAG="${OMP_VERSION:-latest}"
+if [ "$TAG" = latest ]; then
+  curl -fsSL https://raw.githubusercontent.com/sasazemzulin058-debug/omp-termux/main/install.sh | sh
+else
+  curl -fsSL "https://raw.githubusercontent.com/sasazemzulin058-debug/omp-termux/${TAG}/install.sh" | sh
+fi
+omp --version
+```
+
+Or the rolling `main` path:
+
+```sh
 curl -fsSL https://raw.githubusercontent.com/sasazemzulin058-debug/omp-termux/main/install.sh | sh
 omp --version
 ```
@@ -197,14 +239,16 @@ omp --version
 Additional probes:
 
 ```sh
-"$PREFIX/lib/omp-termux/bun" -e 'if (!Bun.version) process.exit(1)' # after bundled-runtime phase
+"$PREFIX/lib/omp-termux/bun" -e 'if (!Bun.version) process.exit(1)'  # bundled runtime (1.4.0)
 "$PREFIX/lib/omp-termux/bun" -e 'console.log(`${process.platform}-${process.arch}`)'
 pkg install -y termux-api
 echo -n "test" | termux-clipboard-set   # dummy value; never real secrets
 ```
 
-Before the bundled-runtime phase, use the current launcher (`omp --version`) rather
-than treating global `bun` as verified provenance.
+The launcher path (`omp --version`) and the direct bundled-bun path above
+exercise the same shipped runtime; never treat the global `bun` binary as
+verified provenance — only `$LIB_DIR/bun` (or the CI artifact from
+`bun-build.yml`) is the verified runtime.
 
 ### One-device disclosure
 

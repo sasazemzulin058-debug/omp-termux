@@ -35,6 +35,7 @@ jobs:
             --exclude='install.sh' \
             --exclude='.bun-cache/' \
             --exclude='tmp/' \
+            --exclude='README.md' \
             "$tmp/" ./
       - name: Apply deterministic Android overlay
         shell: bash

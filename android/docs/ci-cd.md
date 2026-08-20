@@ -1,67 +1,50 @@
 # CI/CD: build, package, release, sync
 
-Android automation lives in `.github/workflows/`. Three workflows cooperate:
-an upstream sync bot, a per-PR build smoke job, and the release pipeline.
-This page states the intended pipeline and marks what is implemented today
-versus pending.
+Android automation lives in `.github/workflows/`. Four workflows cooperate:
+an upstream sync bot, the custom Bun source build, the per-PR build smoke
+job, and the release pipeline. This page states the current pipeline as it
+runs today. Older goals and superseded behavior are preserved in the
+collapsible sections rather than deleted.
 
-## 1. Current vs target
+## 1. Current state at a glance
 
-| Area | Implemented today | Target |
-|------|-------------------|--------|
-| Version policy | Scattered — `BUN_VERSION` in `android-release.yml`, NDK inline, Rust nightly pinned by `rust-toolchain.toml` | One `android/versions.env` (BUN, NDK, ANDROID_API, RUST) |
-| NDK | `r27c` (release, self-hosted setup) / `r27` (PR smoke) | `r27c` everywhere |
-| Rust channel | `nightly-2026-07-28` via `rust-toolchain.toml` (release); PR smoke uses unpinned `nightly` | `nightly-2026-07-28` everywhere |
-| Bun runtime | Termux `pkg bun` + shim `$PREFIX_DIR/bin/bun` | Official Bionic `@oven/bun-linux-aarch64-android@1.3.14` bundled in tarball |
-| JS bundle | Single-file `cli.js` | `splitting:true`, whole outDir packaged |
-| Release assets | Attach tarball + checksums | Guarded two-rename installer swap with rollback |
-| Sync failure | Job fails loudly, no notification | Failure notification |
+| Area | Current state |
+|------|---------------|
+| Version policy | `android/versions.env` is consumed by Android workflows; OMP version comes from `packages/coding-agent/package.json` |
+| Manifest values | `BUN_VERSION`, `BUN_BOOTSTRAP_VERSION`, `BUN_SOURCE_COMMIT`, `NDK_VERSION`, `ANDROID_API`, `RUST_TOOLCHAIN` are read from the manifest |
+| Bun runtime | Bundled custom Bun built from pinned source for Bionic aarch64; version follows `BUN_VERSION` |
+| Bootstrap Bun | `BUN_BOOTSTRAP_VERSION` is CI-only and never shipped |
+| JS bundle | Split build (`splitting: true`), whole outDir packaged |
+| Installer | Guarded two-rename swap with pre/post smoke test and rollback; `omp update` disabled on Android |
+| Sync failure | Fails loudly and opens/updates a GitHub Issue, without masking the original failure |
+| Release trigger | `v<version>-termux` tag plus explicit dispatch from `sync-upstream` after atomic push |
 
-Follows are per-item detail. Until `android/versions.env` exists and the
-workflows read it, the workflow files are the current source of truth.
-
-## 2. Version policy — one source (pending)
-
-Target: a single `android/versions.env` consumed by every workflow:
+To inspect current values without copying stale versions into docs:
 
 ```sh
-BUN_VERSION=1.3.14
-NDK_VERSION=r27c
-ANDROID_API=24
-RUST_TOOLCHAIN=nightly-2026-07-28
+cat android/versions.env
+python3 -c 'import json; print(json.load(open("packages/coding-agent/package.json"))["version"])'
 ```
 
-`ANDROID_API=24` is the binary floor: the toolchain driver is
-`aarch64-linux-android24-clang`. API34 is the `pidfd` capability floor at
-runtime, but only one API34 device is tested; no broad compatibility claim.
-
-Today the values live in separate places and drift:
-
-- `BUN_VERSION=1.3.14` in `android-release.yml`.
-- NDK version inline per workflow (`r27c` release, `r27` PR smoke).
-- Rust nightly pinned in `rust-toolchain.toml` as `nightly-2026-07-28`;
-  `android-release.yml` installs it via `rustup show`+`toolchain install`,
-  but `android-build.yml` installs unpinned `nightly`.
-
-The single file is the pending consolidation. Until merged, do not trust any
-one spot; read the workflow.
-
-## 3. Workflow overview (implemented)
+## 2. Workflow overview
 
 | Workflow | Trigger | Purpose |
 |----------|---------|---------|
-| `sync-upstream.yml` | cron `17 */6 * * *` + manual | Import upstream `can1357/oh-my-pi` main, apply deterministic overlay, commit, tag `v<version>-termux`, push |
+| `sync-upstream.yml` | cron `17 3 */2 * *` + manual | Import upstream `can1357/oh-my-pi` main, apply deterministic overlay, verify inputs, commit, tag `v<version>-termux`, push atomically, dispatch the release |
+| `bun-build.yml` | manual (`workflow_dispatch`) | Cross-compile the custom Bionic Bun from Bun source; upload `bun-android-arm64` artifact |
 | `android-build.yml` | push/PR touching `crates/**`, `packages/natives/**`, `android/**`, the workflow; manual | Cross-compile smoke: build the arm64 addon, upload as artifact |
-| `android-release.yml` | tag push `v*-termux`; manual with existing tag | Build addon + JS bundle, assemble `omp-termux.tar.gz`, attach to GitHub Release |
+| `android-release.yml` | tag push `v*-termux`; manual with existing `tag` input; dispatched by `sync-upstream` | Build addon + JS bundle, download custom Bun, verify provenance, assemble `omp-termux.tar.gz`, attach to GitHub Release |
 
 `ci.yml` is the upstream main CI and is not Android-specific.
 
-## 4. Upstream sync (`sync-upstream.yml`) — implemented
+## 3. Upstream sync (`sync-upstream.yml`)
 
 1. `git fetch --no-tags can1357/oh-my-pi main`, `git archive FETCH_HEAD | tar -x` to a temp dir.
-2. `rsync -a --delete` upstream tree over the working copy, excluding
+2. `rsync -a --delete` the upstream tree over the working copy, excluding
    `.git/`, `.github/`, `android/`, `quickstart.sh`, `install.sh`,
-   `.bun-cache/`, `tmp/`. The fork's own additions survive.
+   `.bun-cache/`, `tmp/`. The fork's own additions survive. Note that
+   `README.md` is **not** excluded, so a sync replaces the local README with
+   the upstream one.
 3. `android/scripts/apply-overlay.py` re-applies the deterministic
    transformations on the fresh upstream tree.
 4. `git diff --check`, then verifies build inputs (`package.json`,
@@ -73,14 +56,63 @@ one spot; read the workflow.
 6. Reads `packages/coding-agent/package.json` version, commits
    `chore: sync upstream OMP <version>`, pushes
    `--atomic origin HEAD:main refs/tags/v<version>-termux`.
+7. Because a `GITHUB_TOKEN` tag push does **not** trigger downstream
+   push-triggered workflows, the sync job explicitly dispatches the release
+   on the new tag: `gh workflow run android-release.yml --repo
+   ${{ github.repository }} --ref "$tag" -f tag="$tag"` and logs the
+   dispatch.
 
 Release tags are immutable. If `v<version>-termux` already exists at a
 different commit, the sync fails loudly. If it already points at the new
 HEAD, the release is considered published and the job exits clean.
 
-**Pending:** overlay/sync failure currently fails via `set -e` but sends no alert.
-Target: create or update one GitHub Issue labeled `android-sync`, keyed by the failed
-workflow/ref. No email integration or external notification secret.
+**Failure notification (implemented).** When the job fails, the final step
+creates or updates a GitHub Issue titled `Upstream sync failure` (labeled
+`android-sync`) keyed by the failed run, falling back through several
+lookups so a missing label or issue can never make the notification step
+itself fail. The original sync failure remains visible in the run log
+regardless.
+
+<details>
+<summary>Historical note — notification target (superseded)</summary>
+
+The original design goal was: overlay/sync failure fails via `set -e` but
+sends no alert. The current workflow creates or updates a GitHub Issue when
+possible and never masks the original sync failure.
+</details>
+
+## 4. Version policy — one source of truth
+Android workflows source `android/versions.env`; OMP version comes from
+`packages/coding-agent/package.json`. Do not duplicate version literals in
+workflow text, scripts, or release notes.
+
+```sh
+cat android/versions.env
+python3 -c 'import json; print(json.load(open("packages/coding-agent/package.json"))["version"])'
+```
+
+- `BUN_VERSION` — shipped runtime version.
+- `BUN_BOOTSTRAP_VERSION` — CI-only bootstrap; never shipped.
+- `BUN_SOURCE_COMMIT` — exact Bun source provenance; empty values are rejected.
+- `BUN_BUILD_REF` — optional experiment ref, not production provenance.
+- `NDK_VERSION`, `ANDROID_API`, `RUST_TOOLCHAIN` — Android build inputs.
+
+The release artifact records `bun.version`, `bun.source-commit`, and
+`bun.sha256`; packaging verifies all available provenance before publishing.
+- `ANDROID_API=24` is the binary floor: the toolchain driver is
+  `aarch64-linux-android24-clang`. API34 is the `pidfd` capability floor at
+  runtime, but only one API34 device is tested; no broad compatibility claim.
+- NDK and Rust channel are pinned in one place and read by all workflows.
+
+<details>
+<summary>Historical note — scattered versions (superseded)</summary>
+
+Previously the values lived in separate places and drifted: `BUN_VERSION`
+inline in `android-release.yml`, NDK inline per workflow (`r27c` release,
+`r27` PR smoke), and unpinned `nightly` in `android-build.yml`. The merged
+manifest is the current source of truth; do not trust any single workflow
+file over it.
+</details>
 
 ## 5. NDK toolchain wiring (`build-android-ci.sh`) — implemented
 
@@ -107,9 +139,6 @@ The CMake/Ninja shim (`$RUNNER_TEMP/bin/cmake`) strips
 `-DCMAKE_SYSTEM_PROCESSOR=*` and injects Ninja so ring/opus cmake builds
 work.
 
-**Pending:** NDK `r27c` everywhere. `android-build.yml` still uses `r27`.
-Target one pin.
-
 ## 6. Memory strategy
 
 The pi-voice + webrtc/opus graph OOM-killed free runners before the
@@ -129,34 +158,53 @@ between workflows and have changed over time. Do not hardcode them here:
 ## 7. JS bundle packaging
 
 **Current (implemented):** `build-termux-js.ts` runs `Bun.build` on
-`src/cli.ts` to a single-file `cli.js`, prepends `#!/usr/bin/env bun`,
-embeds the gzipped `docs/**/*.md` payload, copies the natives loader stubs
-and `package.json`, and tars the result as `termux-js.tar.gz`.
+`src/cli.ts` with `splitting: true` into an outDir, copies the **entire
+outDir** (`cli.js` plus chunk files) into the bundle, applies the shebang
+only to `cli.js`, embeds the gzipped `docs/**/*.md` payload, copies the
+natives loader stubs and `package.json`, and tars the result as
+`termux-js.tar.gz` with no manifest — all chunks and assets included.
 
-**Target (pending): `splitting:true`.** Bun emits `cli.js` plus chunk files
-into an outDir; the build copies the entire outDir into the bundle, applies
-the shebang only to `cli.js`, writes no manifest, and tars all chunks and
-assets. Rationale, measured on the reference device: split `--version`
-median 134 ms vs 640 ms monolith (~4.8x), split RSS 54.9 MB vs 129–144 MB
-(~2x). Runtime resources `models.json`, protobuf, CHANGELOG, and tool views
-are required; splitting moves them off the cold path, it does not remove
-them.
+Runtime resources `models.json`, protobuf, CHANGELOG, and tool views are
+required; splitting moves them off the cold path, it does not remove them.
+The computer worker is loaded through a dynamic `import()` in
+`src/cli.ts`, so the cold startup graph does not eagerly pull the native
+addon path.
 
 `bun build --compile` is prohibited: the built Android binary segfaulted
 5/5. The runtime stays packaged Bun + JS chunks.
 
-## 8. Official Bun runtime (pending)
+<details>
+<summary>Historical note — single-file monolith and split target (superseded)</summary>
 
-**Current: diverges.** `install.sh` runs `pkg install bun` and the `omp`
-shim does `exec "$PREFIX_DIR/bin/bun" "$LIB_DIR/cli.js"`. That is the
-Termux-packaged Bun.
+The previous bundle was a single-file `cli.js`. The split target was:
+`splitting:true`, whole outDir packaged, shebang only on `cli.js`, no
+manifest. Rationale, measured on the reference device: split `--version`
+median 134 ms vs 640 ms monolith (~4.8x), split RSS 54.9 MB vs 129–144 MB
+(~2x). That target is now the shipped build.
+</details>
 
-**Target:** bundle the official Bionic runtime
-`@oven/bun-linux-aarch64-android@1.3.14` into the release tarball; the shim
-executes `"$LIB_DIR/bun" "$LIB_DIR/cli.js"`. Never use the apt/pkg
-glibc-wrapper Bun. Verify the runtime's provenance and checksum before
-shipping. Until the installer is changed, `install.sh` remains the current
-behavior.
+## 8. Bundled Bun runtime (implemented)
+
+**Current:** `install.sh` downloads `omp-termux.tar.gz`, verifies the
+checksum, stages the tree, and executes the shim
+`env OMP_PLATFORM=android "$LIB_DIR/bun" "$LIB_DIR/cli.js"` where
+`$LIB_DIR/bun` is the **custom Bun built from Bun source** — not the Termux
+`pkg bun` glibc wrapper and not an npm artifact. The release pipeline
+verifies the artifact's sha256 and that `bun.version` equals the manifest
+`BUN_VERSION` (1.4.0) before packaging; the source commit is recorded in
+`bun.source-commit`.
+
+<details>
+<summary>Historical note — pkg bun and the official-runtime goal (superseded)</summary>
+
+Previously `install.sh` ran `pkg install bun` and the `omp` shim exec'd the
+Termux-packaged (`glibc-wrapper`) Bun. The target was to bundle the official
+Bionic runtime `@oven/bun-linux-aarch64-android@1.3.14`. The shipped runtime
+is instead the custom source-built Bun 1.4.0 (Bionic, aarch64), built and
+verified by this repo's own pipeline — same provenance discipline (checksum
++ version recorded), no glibc wrapper. Never use the apt/pkg glibc-wrapper
+Bun.
+</details>
 
 ## 9. Release pipeline (`android-release.yml`)
 
@@ -166,11 +214,14 @@ Three jobs, each starting with `verify-overlay.py` and
 - `native-addon`: cross-compiles the addon (section 5 env), verifies
   `pi_natives.android-arm64.node` and `.sha256` match (`sha256sum -c`),
   uploads `android-arm64-native`.
-- `js-bundle`: builds the JS bundle (section 7), verifies `./cli.js`,
+- `js-bundle`: builds the split JS bundle (section 7), verifies `./cli.js`,
   `node_modules/@oh-my-pi/pi-natives/package.json`, `native/index.js`,
   uploads `termux-js-bundle`.
-- `package-release` (needs both): downloads both, copies the addon into
-  `node_modules/@oh-my-pi/pi-natives/native/`, re-verifies every entry, tars
+- `package-release` (needs both): downloads both, downloads the custom Bun
+  artifact from the `bun-build.yml` run (`bun-android-arm64` via
+  `dawidd6/action-download-artifact` with `search_artifacts`), verifies the
+  bun sha256 and `bun.version == $BUN_VERSION`, copies `bun` into the
+  bundle root as `./bun`, re-verifies every entry, tars
   `omp-termux.tar.gz`, emits+checks `.sha256`, attaches all four files via
   `softprops/action-gh-release@v2` (`fail_on_unmatched_files: true`).
 
@@ -179,16 +230,74 @@ Three jobs, each starting with `verify-overlay.py` and
 - **Tag:** `v<version>-termux` where `<version>` =
   `packages/coding-agent/package.json` (enforced by the preflight scripts).
 - **Assets:** `omp-termux.tar.gz`, `.sha256`, the `.node`, the `.node.sha256`.
-- **Runtime requirements:** aarch64 Termux, packaged Bun (target: bundled
-  Bun). No glibc, no proot, no npm, no source build.
+- **Runtime requirements:** aarch64 Termux, bundled custom Bun (1.4.0,
+  Bionic). No glibc, no proot, no npm, no source build on device.
 
-**Pending — guarded installer swap:** `install.sh` currently runs
-`rm -rf "$LIB_DIR"` then `mv`, which can leave the install absent. Target:
-stage and verify, use a guarded two-rename swap, and restore the old tree on failure.
-There is a short rename window where concurrent launch may fail. `omp update` returns
-early on Android and instructs reinstall.
+**Installer swap (implemented).** `install.sh` stages the new tree as
+`$LIB_DIR.new`, smoke-tests it with the bundled bun before touching the live
+tree, then performs a guarded two-rename swap (`current → .old` → `.new →
+current`) with rollback on any failure: a failed `mv` restores `.old`; a
+failed post-swap smoke test removes the broken current tree and restores
+`.old`; a failed fresh install leaves no `.old` and removes the failed tree.
+On success the stale `.old` is removed. `omp update` is disabled on Android
+(`update-cli.ts` returns a reinstall instruction immediately when
+`process.platform === "android"` or `OMP_PLATFORM=android`), so recovery is
+always a clean re-run of the installer.
 
-## 10. Preflight scripts (shared by all workflows)
+<details>
+<summary>Historical note — unguarded replacement and pending swap (superseded)</summary>
+
+Previously `install.sh` ran `rm -rf "$LIB_DIR"` then `mv`, which could leave
+the install absent, and `omp update` was not Android-aware. Target: stage
+and verify, use a guarded two-rename swap, restore the old tree on failure.
+There is a short rename window where concurrent launch may fail; final state
+must always be old-working or new-working. That target is now the shipped
+installer.
+</details>
+
+## 10. Custom Bun build (`bun-build.yml`) — the runtime source
+
+The shipped runtime is **not** a released Bun artifact. It is compiled by
+this repo from the Bun source tree against the Android NDK (Bionic).
+
+- **Trigger:** `workflow_dispatch` only. No automatic rebuild.
+- **Inputs:**
+  - `bun_ref` (default `main`) — git ref/branch/tag of `oven-sh/bun`.
+  - `use_commit` (optional, default empty) — exact commit SHA; when set it
+    overrides `bun_ref`. When empty, the workflow **must** resolve the
+    `BUN_SOURCE_COMMIT` from `android/versions.env` and errors out if that
+    manifest value is empty — the default can never silently become a
+    mutable `main` checkout.
+- **Steps:** checkout the resolved commit (shallow fetch of the exact SHA),
+  patch Bun's clang-version gates (`21.1.x` → `18.0.3`) for NDK r27c, build
+  with `bun scripts/build.ts --profile=release --abi=android
+  --arch=aarch64 --configure-only` plus `ninja`, strip with llvm-strip,
+  verify the ELF is aarch64/Bionic, record `bun.version` (manifest
+  `BUN_VERSION`) and `bun.source-commit` (the checked-out SHA) and a
+  `sha256sum`, and upload the `bun-android-arm64` artifact.
+- **Release attach:** when invoked under a tag ref (or with a non-`main`
+  `bun_ref`), the binary and its checksum are also attached to the GitHub
+  Release.
+
+### Dispatching a build
+
+Pinned manifest commit (the normal path):
+
+```sh
+gh workflow run bun-build.yml --repo sasazemzulin058-debug/omp-termux
+```
+
+Explicit experimental override (dev build from a specific commit):
+
+```sh
+gh workflow run bun-build.yml --repo sasazemzulin058-debug/omp-termux \
+  -f bun_ref=main -f use_commit=<commit-sha>
+```
+
+The build takes on the order of an hour on a GitHub runner and produces the
+artifact `bun-android-arm64` that `android-release.yml` consumes.
+
+## 11. Preflight scripts (shared by all workflows)
 
 - `android/scripts/verify-overlay.py` — asserts the overlay is present (10
   gates across crate sources + loader) and the release tag matches the
