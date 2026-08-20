@@ -103,12 +103,15 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          issue_num=$(gh issue list --repo "${{ github.repository }}" --label "android-sync" --state open --json number --jq '.[0].number // empty')
+          issue_num=$(gh issue list --repo "${{ github.repository }}" --label "android-sync" --state open --json number --jq '.[0].number // empty' || \
+                       gh issue list --repo "${{ github.repository }}" --state open --search "Upstream sync failure" --json number --jq '.[0].number // empty' || \
+                       echo "")
           msg="Upstream sync failed on run [${{ github.run_id }}](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})."
           if [ -n "$issue_num" ]; then
-            gh issue comment "$issue_num" --repo "${{ github.repository }}" --body "$msg"
+            gh issue comment "$issue_num" --repo "${{ github.repository }}" --body "$msg" || true
           else
-            gh issue create --repo "${{ github.repository }}" --title "Upstream sync failure" --label "android-sync" --body "$msg"
+            gh issue create --repo "${{ github.repository }}" --title "Upstream sync failure" --label "android-sync" --body "$msg" || \
+            gh issue create --repo "${{ github.repository }}" --title "Upstream sync failure" --body "$msg" || true
           fi
         env:
           GH_TOKEN: ${{ github.token }}
