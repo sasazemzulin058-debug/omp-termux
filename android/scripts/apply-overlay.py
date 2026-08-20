@@ -68,7 +68,7 @@ def clipboard(text):
         ("use std::io::Cursor;", "#[cfg(not(target_os = \"android\"))]\nuse std::io::Cursor;"),
         ("use arboard::{", "#[cfg(not(target_os = \"android\"))]\nuse arboard::{"),
         ("use image::{", "#[cfg(not(target_os = \"android\"))]\nuse image::{"),
-        ("use crate::{js, task};", "#[cfg(not(target_os = \"android\"))]\nuse crate::{js, task};"),
+        ("use crate::{js, task};", "use crate::js;\n#[cfg(not(target_os = \"android\"))]\nuse crate::task;"),
         ("fn encode_png(", "#[cfg(not(target_os = \"android\"))]\nfn encode_png("),
         ("fn rgba_to_png(", "#[cfg(not(target_os = \"android\"))]\nfn rgba_to_png("),
         ("fn dib_to_png(", "#[cfg(not(target_os = \"android\"))]\nfn dib_to_png("),
