@@ -104,9 +104,15 @@ def builtins(text):
     return once(text, '#[cfg(target_os = "linux")]\nmod proc_snapshot {', '#[cfg(any(target_os = "linux", target_os = "android"))]\nmod proc_snapshot {', "proc_snapshot.rs")
 
 def loader(text):
+    json_import = 'import packageJson from "../package.json" with { type: "json" };'
+    json_require = 'const packageJson = createRequire(import.meta.url)("../package.json");'
+    if json_import in text:
+        text = once(text, json_import, json_require, "loader-state.js")
     old = 'const SUPPORTED_PLATFORMS = ["linux-x64", "linux-arm64", "darwin-x64", "darwin-arm64", "win32-x64"];'
     new = 'const SUPPORTED_PLATFORMS = ["linux-x64", "linux-arm64", "android-arm64", "darwin-x64", "darwin-arm64", "win32-x64"];'
-    return once(text, old, new, "loader-state.js")
+    if old in text:
+        text = once(text, old, new, "loader-state.js")
+    return text
 def cli(text):
     text = once(text, 'import { startComputerWorker } from "./tools/computer/worker-entry";\n', "", "cli.ts")
     old_dispatch = '\tif (arg === COMPUTER_WORKER_ARG) {\n\t\tif (parentPort) installWorkerInbox(parentPort);\n\t\tstartComputerWorker();\n\t\treturn true;\n\t}'
