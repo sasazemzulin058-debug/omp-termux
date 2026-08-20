@@ -66,6 +66,10 @@ export const modelsHelp = { description: "List, search, and refresh available mo
 
 export const pluginHelp = { description: "Manage plugins (install, uninstall, list, etc.)" } satisfies CommandMetadata;
 
+export const psHelp = {
+	description: "List and control daemon-supervised background processes (logs, stop, kill, restart)",
+} satisfies CommandMetadata;
+
 export const readHelp = {
 	description: "Show what the read tool will return for a path, URL, or internal URI",
 } satisfies CommandMetadata;

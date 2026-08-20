@@ -110,8 +110,10 @@ export function isAdvisorInterruptImmuneTurnActive(opts: {
  *   auto-resume anything, so it is delivered live. Parking it during an active
  *   run instead strands it (it never reaches the running agent) and the withheld
  *   notes dump as one burst at the next user prompt — the bug this guards.
- * - During the post-interrupt immune-turn window, further `concern`/`blocker`
- *   notes are downgraded to asides; preservation still wins.
+ * - During the post-interrupt immune-turn window, further `concern` notes are
+ *   downgraded to asides; preservation still wins. A `blocker` is exempt: it
+ *   means the agent handed off broken or unexercised work, so it still steers a
+ *   triggered turn even right after a prior interrupt (#5628).
  */
 export function resolveAdvisorDeliveryChannel(opts: {
 	severity: AdvisorSeverity | undefined;
@@ -127,7 +129,7 @@ export function resolveAdvisorDeliveryChannel(opts: {
 	if (opts.autoResumeSuppressed && (opts.aborting || !opts.streaming)) return "preserve";
 	if (opts.terminalAnswerNoQueuedWork && opts.severity !== "blocker" && !opts.streaming && !opts.aborting)
 		return "preserve";
-	if (opts.interruptImmuneTurnActive) return "aside";
+	if (opts.interruptImmuneTurnActive && opts.severity !== "blocker") return "aside";
 	return "steer";
 }
 

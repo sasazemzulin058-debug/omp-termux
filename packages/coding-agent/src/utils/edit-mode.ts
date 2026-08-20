@@ -1,3 +1,4 @@
+import { supportsHashlineEdits } from "@oh-my-pi/pi-catalog/identity";
 import { $env, $flag } from "@oh-my-pi/pi-utils";
 
 export type EditMode = "replace" | "patch" | "hashline" | "apply_patch";
@@ -12,22 +13,6 @@ const EDIT_MODE_IDS = {
 } as const satisfies Record<string, EditMode>;
 
 export const EDIT_MODES = Object.keys(EDIT_MODE_IDS) as EditMode[];
-
-const HASHLINE_EXCLUDED_MODEL_MODES: Array<{ pattern: string; mode: EditMode }> = [
-	{ pattern: "kimi", mode: "replace" },
-	{ pattern: "mimo", mode: "replace" },
-	{ pattern: "deepseek-v4-flash", mode: "replace" },
-	{ pattern: "step-3.7-flash", mode: "replace" },
-];
-
-function resolveHashlineExcludedModelMode(model: string | undefined): EditMode | null {
-	if (!model) return null;
-	const modelLower = model.toLowerCase();
-	for (const entry of HASHLINE_EXCLUDED_MODEL_MODES) {
-		if (modelLower.includes(entry.pattern)) return entry.mode;
-	}
-	return null;
-}
 
 export function normalizeEditMode(mode?: string | null): EditMode | undefined {
 	if (!mode) return undefined;
@@ -54,8 +39,8 @@ export function resolveEditMode(session: EditModeSessionLike): EditMode {
 
 	const settingsMode = normalizeEditMode(String(session.settings.get("edit.mode") ?? ""));
 	const mode = settingsMode ?? DEFAULT_EDIT_MODE;
-	if (mode === "hashline" && !$flag("PI_STRICT_EDIT_MODE")) {
-		return resolveHashlineExcludedModelMode(activeModel) ?? mode;
+	if (mode === "hashline" && !$flag("PI_STRICT_EDIT_MODE") && activeModel && !supportsHashlineEdits(activeModel)) {
+		return "replace";
 	}
 	return mode;
 }

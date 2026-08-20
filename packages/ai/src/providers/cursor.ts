@@ -1,9 +1,7 @@
 import { createHash } from "node:crypto";
 import * as fs from "node:fs/promises";
 import http2 from "node:http2";
-import { create, fromBinary, fromJson, type JsonValue, toBinary, toJson } from "@bufbuild/protobuf";
-import { ValueSchema } from "@bufbuild/protobuf/wkt";
-import type { ConversationStep, McpToolDefinition } from "@oh-my-pi/pi-catalog/discovery/cursor-gen/agent_pb";
+import type { ConversationStep, McpToolDefinition } from "@oh-my-pi/pi-catalog/discovery/cursor-proto";
 import {
 	AgentClientMessageSchema,
 	AgentConversationTurnStructureSchema,
@@ -139,11 +137,21 @@ import {
 	WriteShellStdinErrorSchema,
 	WriteShellStdinResultSchema,
 	WriteSuccessSchema,
-} from "@oh-my-pi/pi-catalog/discovery/cursor-gen/agent_pb";
+} from "@oh-my-pi/pi-catalog/discovery/cursor-proto";
+import {
+	create,
+	decodeJsonValue,
+	encodeJsonValue,
+	fromBinary,
+	type JsonValue,
+	toBinary,
+	toJson,
+} from "@oh-my-pi/pi-catalog/discovery/protobuf";
 import { isKimiK3ModelId } from "@oh-my-pi/pi-catalog/identity";
 import { calculateCost } from "@oh-my-pi/pi-catalog/models";
 import {
 	$env,
+	isRecord,
 	logger,
 	parseJsonWithRepair,
 	parseStreamingJson,
@@ -220,6 +228,7 @@ import {
 	piReadPathHasRange,
 	piTimeout,
 } from "./cursor/exec-modern";
+import { handleInteractionQuery } from "./cursor/interaction-query";
 
 export const CURSOR_API_URL = "https://api2.cursor.sh";
 export const CURSOR_CLIENT_VERSION = "cli-2026.07.23-e383d2b";
@@ -615,7 +624,7 @@ export const streamCursor: StreamFunction<"cursor-agent"> = (
 			const blobStore = conversationBlobStores.get(conversationId) ?? new Map<string, Uint8Array>();
 			conversationBlobStores.set(conversationId, blobStore);
 			const cachedState = conversationStateCache.get(conversationId);
-			const { requestBytes, conversationState } = buildGrpcRequest(model, context, options, {
+			const { requestBytes, conversationState } = await buildGrpcRequest(model, context, options, {
 				conversationId,
 				blobStore,
 				conversationState: cachedState,
@@ -940,7 +949,7 @@ export type ToolCallState = ToolCall & {
 	[kStreamingBlockIndex]: number;
 	[kStreamingPartialJson]?: string;
 	[kStreamingLastParseLen]?: number;
-	[kStreamingBlockKind]: "mcp" | "todo" | "cursor-exec" | "connect-scm";
+	[kStreamingBlockKind]: "mcp" | "todo" | "cursor-exec" | "connect-scm" | "web-fetch";
 	[kStreamingEnvelopeId]?: string;
 	[kCursorExecResolved]?: true;
 };
@@ -1024,9 +1033,65 @@ export async function handleServerMessage(
 				state,
 			),
 		);
+	} else if (msgCase === "interactionQuery") {
+		// Cursor asks the client to approve native web search / Exa fetch / etc.
+		// before it will continue the turn. Dropping the frame leaves the server
+		// waiting on a reply that never comes; the lazy idle watchdog then
+		// aborts a live stream with "Provider stream stalled while waiting for
+		// the next event" (cursor-grok-4.6-xhigh after a WebFetch/WebSearch
+		// permission prompt).
+		handleInteractionQuery(msg.message.value, h2Request);
 	} else if (msgCase === "conversationCheckpointUpdate") {
 		handleConversationCheckpointUpdate(msg.message.value, output, usageState, onConversationCheckpoint);
 	}
+}
+
+type ProtoUnknownField = { no: number; wireType: number; data: Uint8Array };
+
+type HostedFetchCall = {
+	args?: { url?: string; toolCallId?: string };
+	result?: { result?: { case?: string; value?: { content?: string; error?: string; url?: string } } };
+};
+
+function selectHostedFetchCall(
+	toolCall: { tool?: { case?: string; value?: HostedFetchCall } } | undefined,
+): HostedFetchCall | undefined {
+	const oneof = toolCall?.tool;
+	if (oneof?.case === "fetchToolCall" || oneof?.case === "webFetchToolCall") return oneof.value;
+	return undefined;
+}
+
+function hostedFetchUnknown(toolCall: object | undefined): boolean {
+	if (!toolCall) return false;
+	return (
+		protoUnknownFields(toolCall).some(field => field.no === 37) ||
+		protoUnknownFields((toolCall as { tool?: object }).tool ?? {}).some(field => field.no === 37)
+	);
+}
+
+function extractHttpUrlFromUnknown(message: object): string | undefined {
+	for (const field of protoUnknownFields(message)) {
+		const match = new TextDecoder().decode(field.data).match(/https?:\/\/[^\x00-\x1f]+/);
+		if (match) return match[0];
+	}
+	const nested = (message as { tool?: object }).tool;
+	return nested ? extractHttpUrlFromUnknown(nested) : undefined;
+}
+
+function describeHostedFetchResult(call: HostedFetchCall | undefined): { text: string; isError: boolean } {
+	const result = call?.result?.result;
+	if (result?.case === "success") {
+		return { text: result.value?.content || result.value?.url || "Fetched", isError: false };
+	}
+	if (result?.case === "error") {
+		return { text: result.value?.error || "Fetch failed", isError: true };
+	}
+	return { text: "Fetch completed", isError: false };
+}
+
+function protoUnknownFields(message: object): ProtoUnknownField[] {
+	const raw = (message as { $unknown?: ProtoUnknownField[] }).$unknown;
+	return Array.isArray(raw) ? raw : [];
 }
 
 function handleKvServerMessage(
@@ -3042,8 +3107,7 @@ function parseToolArgsJson(text: string): unknown {
 
 function decodeMcpArgValue(value: Uint8Array): unknown {
 	try {
-		const parsedValue = fromBinary(ValueSchema, value);
-		const jsonValue = toJson(ValueSchema, parsedValue) as JsonValue;
+		const jsonValue = decodeJsonValue(value);
 		if (typeof jsonValue === "string") {
 			return parseToolArgsJson(jsonValue);
 		}
@@ -3905,6 +3969,28 @@ export function processInteractionUpdate(
 				output.content.push(block);
 				retainStreamedCall(state, block, update.message.value.callId);
 				stream.push({ type: "toolcall_start", contentIndex: output.content.length - 1, partial: output });
+				return;
+			}
+
+			const fetchCall = selectHostedFetchCall(toolCall);
+			if (fetchCall || hostedFetchUnknown(toolCall)) {
+				// Hosted WebFetch / Fetch is permission-gated via InteractionQuery, then
+				// run server-side. Stamp resolved so agent-loop does not try a local tool.
+				const url = fetchCall?.args?.url || extractHttpUrlFromUnknown(toolCall);
+				const callId = fetchCall?.args?.toolCallId || update.message.value.callId || crypto.randomUUID();
+				const block: ToolCallState = {
+					type: "toolCall",
+					id: callId,
+					name: "web_fetch",
+					arguments: url ? { url } : {},
+					[kStreamingBlockIndex]: output.content.length,
+					[kStreamingBlockKind]: "web-fetch",
+					[kStreamingEnvelopeId]: update.message.value.callId || undefined,
+					[kCursorExecResolved]: true,
+				};
+				output.content.push(block);
+				retainStreamedCall(state, block, update.message.value.callId);
+				stream.push({ type: "toolcall_start", contentIndex: output.content.length - 1, partial: output });
 			}
 		}
 	} else if (updateCase === "toolCallDelta" || updateCase === "partialToolCall") {
@@ -3978,6 +4064,19 @@ export function processInteractionUpdate(
 					role: "toolResult",
 					toolCallId: settled.id,
 					toolName: "connect_scm",
+					content: [{ type: "text", text }],
+					isError,
+					timestamp: Date.now(),
+				});
+			} else if (settled[kStreamingBlockKind] === "web-fetch") {
+				const fetchCall = selectHostedFetchCall(toolCall);
+				const url = fetchCall?.args?.url || extractHttpUrlFromUnknown(toolCall ?? {});
+				if (url) settled.arguments = { url };
+				const { text, isError } = describeHostedFetchResult(fetchCall);
+				state.onToolResult?.({
+					role: "toolResult",
+					toolCallId: settled.id,
+					toolName: "web_fetch",
 					content: [{ type: "text", text }],
 					isError,
 					timestamp: Date.now(),
@@ -4120,10 +4219,10 @@ export function buildMcpToolDefinitions(tools: Tool[] | undefined): McpToolDefin
 	return forwarded.map(tool => {
 		const jsonSchema = toolWireSchema(tool);
 		const schemaValue: JsonValue =
-			jsonSchema && typeof jsonSchema === "object"
-				? (jsonSchema as JsonValue)
+			jsonSchema !== null && !Array.isArray(jsonSchema) && isJsonValue(jsonSchema)
+				? jsonSchema
 				: { type: "object", properties: {}, required: [] };
-		const inputSchema = toBinary(ValueSchema, fromJson(ValueSchema, schemaValue));
+		const inputSchema = encodeJsonValue(schemaValue);
 		return create(McpToolDefinitionSchema, {
 			name: tool.name,
 			description: tool.description || "",
@@ -4371,17 +4470,11 @@ function buildRootPromptMessagesJson(
 	return entries;
 }
 
-function isPlainRecord(value: unknown): value is Record<string, unknown> {
-	if (value === null || typeof value !== "object" || Array.isArray(value)) return false;
-	const prototype = Object.getPrototypeOf(value);
-	return prototype === Object.prototype || prototype === null;
-}
-
 function isJsonValue(value: unknown): value is JsonValue {
 	if (value === null || typeof value === "string" || typeof value === "boolean") return true;
 	if (typeof value === "number") return Number.isFinite(value);
 	if (Array.isArray(value)) return value.every(isJsonValue);
-	if (!isPlainRecord(value)) return false;
+	if (!isRecord(value)) return false;
 	for (const key in value) {
 		if (!isJsonValue(value[key])) return false;
 	}
@@ -4396,7 +4489,7 @@ function encodeCursorMcpArguments(toolCall: ToolCall): Record<string, Uint8Array
 		if (!isJsonValue(value)) {
 			throw new AIError.ValidationError(`Cursor tool argument ${toolCall.name}.${name} is not JSON-serializable`);
 		}
-		encoded[name] = toBinary(ValueSchema, fromJson(ValueSchema, value));
+		encoded[name] = encodeJsonValue(value);
 	}
 	return encoded;
 }
@@ -4642,7 +4735,7 @@ function extractImages(content: (TextContent | ImageContent)[]) {
 		);
 }
 
-function buildGrpcRequest(
+export async function buildGrpcRequest(
 	model: Model<"cursor-agent">,
 	context: Context,
 	options: CursorOptions | undefined,
@@ -4651,11 +4744,11 @@ function buildGrpcRequest(
 		blobStore: Map<string, Uint8Array>;
 		conversationState?: ConversationStateStructure;
 	},
-): {
+): Promise<{
 	requestBytes: Uint8Array;
 	blobStore: Map<string, Uint8Array>;
 	conversationState: ConversationStateStructure;
-} {
+}> {
 	const blobStore = state.blobStore;
 
 	const systemPromptIds = buildCursorSystemPromptJsons(context.systemPrompt).map(json =>
@@ -4761,7 +4854,7 @@ function buildGrpcRequest(
 		maxMode: cursorMaxMode,
 	});
 
-	const runRequest = create(AgentRunRequestSchema, {
+	let runRequest = create(AgentRunRequestSchema, {
 		conversationState,
 		action,
 		modelDetails,
@@ -4769,13 +4862,17 @@ function buildGrpcRequest(
 		conversationId: state.conversationId,
 	});
 
-	options?.onPayload?.(runRequest, model);
-
-	// Tools are sent later via requestContext (exec handshake)
-
+	// Apply customSystemPrompt BEFORE the hook so the onPayload replacement is the
+	// final word on the wire body — same contract as anthropic, where the hook runs
+	// right before serialization. An extension may inspect or drop it via the
+	// replacement it returns.
 	if (options?.customSystemPrompt) {
 		runRequest.customSystemPrompt = options.customSystemPrompt;
 	}
+
+	// Tools are sent later via requestContext (exec handshake)
+	const replacementRequest = await options?.onPayload?.(runRequest, model);
+	if (replacementRequest !== undefined) runRequest = replacementRequest as typeof runRequest;
 
 	const clientMessage = create(AgentClientMessageSchema, {
 		message: { case: "runRequest", value: runRequest },

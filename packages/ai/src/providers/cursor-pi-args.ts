@@ -9,7 +9,7 @@
  *
  * Kept apart from `cursor/exec-modern.ts` on purpose: these are pure
  * string/path functions with no protobuf coupling, while that module pulls in
- * `@bufbuild/protobuf` and the generated `agent_pb` graph. The legacy shim is
+ * the generated cursor protobuf graph. The legacy shim is
  * compiled into the bundled virtual module registry, so importing it from a
  * nested path would drag the whole exec implementation in with it — and
  * `./providers/*` is a single-segment wildcard export that cannot serve a

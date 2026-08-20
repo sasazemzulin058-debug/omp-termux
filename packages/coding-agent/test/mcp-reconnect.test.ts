@@ -6,7 +6,12 @@ import {
 	isRetriableConnectionError,
 	MCPTool,
 } from "@oh-my-pi/pi-coding-agent/mcp/tool-bridge";
-import type { MCPServerConnection, MCPToolCallResult, MCPTransport } from "@oh-my-pi/pi-coding-agent/mcp/types";
+import type {
+	MCPImageContent,
+	MCPServerConnection,
+	MCPToolCallResult,
+	MCPTransport,
+} from "@oh-my-pi/pi-coding-agent/mcp/types";
 import { ToolAbortError } from "@oh-my-pi/pi-coding-agent/tools/tool-errors";
 import { logger } from "@oh-my-pi/pi-utils";
 
@@ -144,6 +149,18 @@ describe("MCPTool.execute retry on connection error", () => {
 		expect(callCount).toBe(2); // 1 fail + 1 retry
 		expect(result.details?.isError).toBeFalsy();
 		expect(result.content[0]).toEqual({ type: "text", text: "ok" });
+	});
+
+	it("preserves image blocks returned by MCP tools", async () => {
+		const image: MCPImageContent = { type: "image", data: "iVBORw0KGgo=", mimeType: "image/png" };
+		const transport = mockTransport(async () => ({
+			content: [{ type: "text", text: "Screenshot captured" }, image],
+		}));
+		const tool = new MCPTool(makeConnection(transport), TOOL_DEF);
+
+		const result = await tool.execute("call-1", {}, noop, noCtx);
+
+		expect(result.content).toEqual([{ type: "text", text: "Screenshot captured" }, image]);
 	});
 
 	it("retries on transport closed and rebinding succeeds", async () => {

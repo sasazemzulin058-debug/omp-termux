@@ -3,6 +3,7 @@ import { streamSimple } from "@oh-my-pi/pi-ai";
 import type { CacheControlEphemeral, MessageCreateParams } from "@oh-my-pi/pi-ai/providers/anthropic-wire";
 import type { CacheRetention, Context, FetchImpl, Model, ProviderSessionState } from "@oh-my-pi/pi-ai/types";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
+import { withOfficialAnthropicEndpoint } from "./helpers";
 
 const CACHE_REFRESH_DELAY_MS = 5 * 60_000 - 15_000;
 const CACHE_TOKENS = 1_200;
@@ -210,6 +211,8 @@ afterEach(() => {
 	vi.useRealTimers();
 	vi.restoreAllMocks();
 });
+
+withOfficialAnthropicEndpoint();
 
 describe("Anthropic prompt-cache refresh", () => {
 	it("replays max_tokens=0 once per interval and stops after three refreshes", async () => {

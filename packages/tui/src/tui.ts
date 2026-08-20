@@ -28,6 +28,7 @@ import {
 	encodeKittyDeletePlacement,
 	encodeKittyPlacementLine,
 	ImageProtocol,
+	isImageProtocolForced,
 	isInsideTerminalMultiplexer,
 	parseKittyDirectPlacementLine,
 	setCellDimensions,
@@ -1249,7 +1250,6 @@ export class TUI extends Container {
 	#hardwareCursorState: HardwareCursorState | null = null;
 	#hardwareCursorVisibilityKnown = false;
 	#hardwareCursorVisible = false;
-	#sixelProbePendingDa = false;
 	#sixelProbePendingGraphics = false;
 	#sixelProbeBuffer = "";
 	#sixelProbeTimeout?: NodeJS.Timeout;
@@ -1332,6 +1332,12 @@ export class TUI extends Container {
 	#previousWindow: string[] = [];
 	#nativeScrollbackLiveRegionStart: number | undefined;
 	#nativeScrollbackLiveRegionPinned = false;
+	// Start row of the topmost live region that pinned itself. The topmost seam
+	// governs the exactness boundary and the frame-wide pin policy, but a pinned
+	// region BELOW an unpinned seam (an anchored HUD/panel under a streaming
+	// transcript) still must never commit its rows to native scrollback. This is
+	// the ceiling no commit may cross, independent of the topmost seam's policy.
+	#nativeScrollbackPinnedBoundary: number | undefined;
 	#fullRedrawCount = 0;
 	// Caps how many inline images render as live graphics; older ones fall back
 	// to text via a purge + full redraw. Cap is configured by the host app.
@@ -1625,6 +1631,7 @@ export class TUI extends Container {
 		width = Math.max(1, width);
 		this.#nativeScrollbackLiveRegionStart = undefined;
 		this.#nativeScrollbackLiveRegionPinned = false;
+		this.#nativeScrollbackPinnedBoundary = undefined;
 		const children = this.children;
 		const previousSegments = this.#frameSegments;
 		const segments: FrameSegment[] = new Array(children.length);
@@ -1705,9 +1712,18 @@ export class TUI extends Container {
 			// transcript) must never overwrite it — moving the boundary down
 			// would commit the earlier child's still-mutable rows as stale
 			// history.
-			if (liveLocalStart !== undefined && this.#nativeScrollbackLiveRegionStart === undefined) {
-				this.#nativeScrollbackLiveRegionStart = offset + liveLocalStart;
-				this.#nativeScrollbackLiveRegionPinned = liveRegionPinned;
+			if (liveLocalStart !== undefined) {
+				const start = offset + liveLocalStart;
+				if (this.#nativeScrollbackLiveRegionStart === undefined) {
+					this.#nativeScrollbackLiveRegionStart = start;
+					this.#nativeScrollbackLiveRegionPinned = liveRegionPinned;
+				}
+				// A pinned region anywhere in the frame caps commits at its start,
+				// even when an earlier unpinned seam won the topmost merge above:
+				// its rows (a growing anchored panel) must never reach scrollback.
+				if (liveRegionPinned && this.#nativeScrollbackPinnedBoundary === undefined) {
+					this.#nativeScrollbackPinnedBoundary = start;
+				}
 			}
 			if (chainStable) {
 				if (previous !== undefined && previous.component === child && previous.start === offset) {
@@ -2200,19 +2216,21 @@ export class TUI extends Container {
 	}
 
 	#querySixelSupport(): void {
+		// A statically known protocol (Kitty/iTerm2 terminals) or an explicit
+		// PI_FORCE_IMAGE_PROTOCOL choice — including its `off` kill switch — wins
+		// over the probe.
 		if (TERMINAL.imageProtocol) return;
-		// win32 native or WSL under Windows Terminal — both are ConPTY-hosted and
-		// reach the same WT graphics negotiation. WSL reports process.platform
-		// "linux", so a bare win32 check silently skips the probe there (#6009).
-		if (!isConPTYHosted()) return;
-		if (!Bun.env.WT_SESSION) return;
+		if (isImageProtocolForced()) return;
 		if (!process.stdin.isTTY || !process.stdout.isTTY) return;
 
 		this.#clearSixelProbeState();
-		this.#sixelProbePendingDa = true;
 		this.#sixelProbePendingGraphics = true;
 		this.#sixelProbeUnsubscribe = this.addInputListener(data => this.#handleSixelProbeInput(data));
-		this.terminal.write("\x1b[c");
+		// XTSMGRAPHICS item 2 reports the terminal's maximum SIXEL geometry. DA1
+		// attribute 4 advertises SIXEL as well, but ProcessTerminal swallows every
+		// `CSI ? … c` reply for the whole session so a late one cannot leak into the
+		// composer (#8542): those bytes never reach an input listener, so this probe
+		// cannot read them.
 		this.terminal.write("\x1b[?2;1;0S");
 		this.#sixelProbeTimeout = setTimeout(() => {
 			this.#finishSixelProbe(false);
@@ -2220,7 +2238,7 @@ export class TUI extends Container {
 	}
 
 	#handleSixelProbeInput(data: string): InputListenerResult {
-		if (!this.#sixelProbePendingDa && !this.#sixelProbePendingGraphics) {
+		if (!this.#sixelProbePendingGraphics) {
 			return undefined;
 		}
 
@@ -2229,47 +2247,24 @@ export class TUI extends Container {
 		let probeOutcome: boolean | null = null;
 
 		while (this.#sixelProbeBuffer.length > 0) {
-			const daMatch = this.#sixelProbeBuffer.match(/\x1b\[\?([0-9;]+)c/u);
 			const graphicsMatch = this.#sixelProbeBuffer.match(/\x1b\[\?2;(\d+);([0-9;]+)S/u);
+			if (!graphicsMatch || graphicsMatch.index === undefined) break;
 
-			if (!daMatch && !graphicsMatch) break;
+			passthrough += this.#sixelProbeBuffer.slice(0, graphicsMatch.index);
+			this.#sixelProbeBuffer = this.#sixelProbeBuffer.slice(graphicsMatch.index + graphicsMatch[0].length);
 
-			const daIndex = daMatch?.index ?? Number.POSITIVE_INFINITY;
-			const graphicsIndex = graphicsMatch?.index ?? Number.POSITIVE_INFINITY;
-			const useDa = daIndex <= graphicsIndex;
-			const match = useDa ? daMatch : graphicsMatch;
-			if (!match || match.index === undefined) break;
-
-			passthrough += this.#sixelProbeBuffer.slice(0, match.index);
-			this.#sixelProbeBuffer = this.#sixelProbeBuffer.slice(match.index + match[0].length);
-
-			if (useDa && this.#sixelProbePendingDa) {
-				this.#sixelProbePendingDa = false;
-				const attributes = (match[1] ?? "")
-					.split(";")
-					.map(value => Number.parseInt(value, 10))
-					.filter(value => Number.isFinite(value));
-				const hasSixelAttribute = attributes.includes(4);
-				if (hasSixelAttribute) {
-					this.#sixelProbePendingGraphics = false;
-					probeOutcome = true;
-				} else if (!this.#sixelProbePendingGraphics) {
-					probeOutcome = false;
-				}
-			} else if (!useDa && this.#sixelProbePendingGraphics) {
+			if (this.#sixelProbePendingGraphics) {
 				this.#sixelProbePendingGraphics = false;
-				const status = Number.parseInt(match[1] ?? "", 10);
-				const supportsSixel = !Number.isNaN(status) && status !== 0;
-				if (supportsSixel) {
-					this.#sixelProbePendingDa = false;
-					probeOutcome = true;
-				} else if (!this.#sixelProbePendingDa) {
-					probeOutcome = false;
-				}
+				// Reply shape `CSI ? 2 ; Ps ; Pv S`: per xterm ctlseqs Ps is the status
+				// (0 = success, 1..3 = error/failure) and Pv the maximum SIXEL geometry,
+				// which a terminal without SIXEL reports as zero.
+				const status = Number.parseInt(graphicsMatch[1] ?? "", 10);
+				const hasGeometry = (graphicsMatch[2] ?? "").split(";").some(part => Number.parseInt(part, 10) > 0);
+				probeOutcome = status === 0 && hasGeometry;
 			}
 		}
 
-		if (this.#sixelProbePendingDa || this.#sixelProbePendingGraphics) {
+		if (this.#sixelProbePendingGraphics) {
 			const partialStart = this.#getSixelProbePartialStart(this.#sixelProbeBuffer);
 			if (partialStart >= 0) {
 				passthrough += this.#sixelProbeBuffer.slice(0, partialStart);
@@ -2313,7 +2308,6 @@ export class TUI extends Container {
 			this.#sixelProbeUnsubscribe();
 			this.#sixelProbeUnsubscribe = undefined;
 		}
-		this.#sixelProbePendingDa = false;
 		this.#sixelProbePendingGraphics = false;
 		this.#sixelProbeBuffer = "";
 	}
@@ -3551,6 +3545,11 @@ export class TUI extends Container {
 		// reports no seam (shell semantics).
 		const frameLength = rawFrame.length;
 		const finalBoundary = Math.max(0, Math.min(frameLength, liveRegionStart ?? frameLength));
+		// No commit may cross into a pinned region, even one below an unpinned
+		// topmost seam (an anchored HUD/panel under a streaming transcript). The
+		// topmost seam still governs exactness (finalBoundary); this ceiling only
+		// bars a growing pinned region's scrolled-off rows from native scrollback.
+		const commitCeiling = this.#nativeScrollbackPinnedBoundary ?? frameLength;
 
 		// 2. Transition state captured before any emitter runs.
 		let prevWindowTop = this.#windowTopRow;
@@ -3769,7 +3768,7 @@ export class TUI extends Container {
 		if (fullPaint) {
 			committedPrefixResliced = true;
 			windowTop = Math.max(0, frameLength - height);
-			chunkTo = liveRegionPinned ? Math.min(windowTop, finalBoundary) : windowTop;
+			chunkTo = Math.min(windowTop, commitCeiling);
 		} else if (widthEpochReset) {
 			// A terminal width change ends the physical-row coordinate epoch.
 			// Resolve the last emitted logical source boundary at the new width;
@@ -3789,7 +3788,7 @@ export class TUI extends Container {
 				hasVisibleOverlay || widthEpochCurrentRows === undefined
 					? hasVisibleOverlay
 						? widthEpochAppendFrom
-						: Math.max(widthEpochAppendFrom, liveRegionPinned ? finalBoundary : frameLength)
+						: Math.max(widthEpochAppendFrom, commitCeiling)
 					: Math.max(widthEpochAppendFrom, widthEpochCurrentRows);
 		} else if (this.#widthEpochBaselineRows !== undefined) {
 			// Only rows physically appended after the width epoch may drive the
@@ -3800,7 +3799,7 @@ export class TUI extends Container {
 			windowTop = Math.max(0, frameLength - height);
 			chunkTo = this.#committedRows;
 			widthEpochAppendFrom = this.#widthEpochBaselineRows;
-			const appendBoundary = liveRegionPinned ? finalBoundary : frameLength;
+			const appendBoundary = commitCeiling;
 			widthEpochAppendTo = hasVisibleOverlay ? widthEpochAppendFrom : Math.max(widthEpochAppendFrom, appendBoundary);
 		} else if (
 			frameLength <= this.#committedRows ||
@@ -3821,7 +3820,7 @@ export class TUI extends Container {
 			// "duplication, never loss" is the ED3-unsafe fallback contract.
 			committedPrefixResliced = true;
 			windowTop = Math.max(0, frameLength - height);
-			chunkTo = liveRegionPinned ? Math.min(windowTop, finalBoundary) : windowTop;
+			chunkTo = Math.min(windowTop, commitCeiling);
 			this.#committedRows = chunkTo;
 			this.#committedPrefix = rawFrame.slice(0, chunkTo);
 		} else if (geometryChanged && Math.max(0, frameLength - height) < this.#committedRows) {
@@ -3853,9 +3852,7 @@ export class TUI extends Container {
 			chunkTo =
 				hasVisibleOverlay || geometryChanged
 					? this.#committedRows
-					: liveRegionPinned
-						? Math.min(windowTop, Math.max(this.#committedRows, finalBoundary))
-						: windowTop;
+					: Math.min(windowTop, Math.max(this.#committedRows, commitCeiling));
 			if (geometryChanged) {
 				committedPrefixResliced = true;
 				this.#committedPrefix = rawFrame.slice(0, this.#committedRows);
@@ -3965,7 +3962,7 @@ export class TUI extends Container {
 			let commitTo: number;
 			if (replayUnresolvedWidthEpoch) {
 				commitFrom = 0;
-				commitTo = liveRegionPinned ? Math.min(windowTop, finalBoundary) : windowTop;
+				commitTo = Math.min(windowTop, commitCeiling);
 				scrollRows = commitTo;
 			} else if (logicalAppend && !logicalPrefixAppend) {
 				const sourceWindowTop = Math.max(0, widthEpochSourceBoundary - height);

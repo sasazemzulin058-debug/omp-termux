@@ -19,6 +19,7 @@ import {
 	modelFamilyToken,
 	parseAnthropicModel,
 	supportsAdaptiveThinkingDisplay,
+	supportsHashlineEdits,
 	supportsMidConversationSystemMessages,
 } from "@oh-my-pi/pi-catalog/identity";
 
@@ -28,6 +29,20 @@ describe("isKimiModelId", () => {
 		expect(isKimiModelId("kimi-k2.6")).toBe(true);
 		expect(isKimiModelId("vendor/kimi.x")).toBe(true);
 		expect(isKimiModelId("akimbo-model")).toBe(false);
+	});
+});
+
+describe("supportsHashlineEdits", () => {
+	test("declines the families that miscount line anchors", () => {
+		expect(supportsHashlineEdits("openrouter/moonshotai/Kimi-K2-Instruct")).toBe(false);
+		expect(supportsHashlineEdits("xiaomi/MiMo-V2.5-Pro")).toBe(false);
+		expect(supportsHashlineEdits("tensormesh/deepseek-ai/DeepSeek-V4-Flash")).toBe(false);
+		expect(supportsHashlineEdits("kilo/stepfun/step-3.7-flash:free")).toBe(false);
+	});
+	test("vouches for structured-edit-capable models", () => {
+		expect(supportsHashlineEdits("google/gemini-3.5-flash")).toBe(true);
+		expect(supportsHashlineEdits("claude-fable-5")).toBe(true);
+		expect(supportsHashlineEdits("moonshot/moonshot-v1-128k")).toBe(true);
 	});
 });
 
@@ -364,6 +379,7 @@ describe("isGrokReasoningEffortCapable", () => {
 		expect(isGrokReasoningEffortCapable("xai-oauth/grok-4.3")).toBe(true);
 		expect(isGrokReasoningEffortCapable("xai-oauth/grok-4.5")).toBe(true);
 		expect(isGrokReasoningEffortCapable("xai-oauth/grok-4.6")).toBe(true);
+		expect(isGrokReasoningEffortCapable("grok-4.6")).toBe(true);
 		expect(isGrokReasoningEffortCapable("openrouter/xai/grok-3-mini")).toBe(true);
 	});
 

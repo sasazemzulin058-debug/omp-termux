@@ -859,6 +859,24 @@ export interface ModelCost extends TokenCost {
 	longContext?: LongContextTokenCost;
 }
 
+/**
+ * Exact local content tokenizer family for a model.
+ *
+ * Absent means no first-party local tokenizer is known and consumers retain
+ * their estimate/default-tokenizer policy. The values name tokenizer
+ * generations rather than providers: DeepSeek V3 through V4 share
+ * `"deepseek-v3"`; Kimi K2 through K3 share `"kimi-k2"`.
+ */
+export type ModelTokenizer =
+	| "claude-v3"
+	| "claude-v47"
+	| "claude-v5"
+	| "claude-v5-sonnet"
+	| "qwen3"
+	| "deepseek-v3"
+	| "kimi-k2"
+	| "glm5";
+
 // Model interface for the unified model system
 export interface Model<TApi extends Api = Api> {
 	id: string;
@@ -883,6 +901,12 @@ export interface Model<TApi extends Api = Api> {
 	provider: Provider;
 	baseUrl: string;
 	reasoning: boolean;
+	/**
+	 * Exact local tokenizer family resolved from the model identity or supplied
+	 * explicitly by a catalog/discovery source. Absent leaves local counting to
+	 * the consumer's fallback policy.
+	 */
+	tokenizer?: ModelTokenizer;
 	input: ("text" | "image")[];
 	/**
 	 * Decoder family used for image inputs when it has narrower format support

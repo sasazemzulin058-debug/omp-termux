@@ -603,10 +603,10 @@ describe("TurnRecovery replay-unsafe output classification", () => {
 			expect(recovery.classifyResolvedInterruptedToolTurn(message)).toBe("stream-stall");
 		});
 
-		it("does not continue a Cursor idle stall after an unmarked MCP call", () => {
+		it("continues a Cursor idle stall after an unmarked MCP call", () => {
 			const message = cursorMessage([mcpToolCall("mcp-1")], stallMessage);
 			const recovery = recoveryForReset(message, [realResult("mcp-1", "mcp__databricks_production_execute_sql")]);
-			expect(recovery.classifyResolvedInterruptedToolTurn(message)).toBeUndefined();
+			expect(recovery.classifyResolvedInterruptedToolTurn(message)).toBe("stream-stall");
 		});
 
 		it("does not continue an HTTP/2 reset whose tool call has no result", () => {

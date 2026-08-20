@@ -268,6 +268,17 @@ export const BUILTIN_LIFECYCLE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> =
 		},
 	},
 	{
+		name: "cleanse",
+		description: "Detect and fix project diagnostics with weighted parallel subagents",
+		inlineHint: "[request] [--all]",
+		allowArgs: true,
+		handleTui: async (command, runtime) => {
+			const args = command.text.slice(`/${command.name}`.length).trim();
+			runtime.ctx.editor.setText("");
+			await runtime.ctx.handleCleanseCommand(args);
+		},
+	},
+	{
 		name: "retry",
 		description: "Retry the last failed agent turn",
 		handleTui: async (_command, runtime) => {

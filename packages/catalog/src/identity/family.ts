@@ -119,6 +119,11 @@ export const isMimoModelIdOrName = memo((value: string): boolean => {
 	return value.toLowerCase().includes("mimo");
 });
 
+/** StepFun Step 3.7 Flash SKU in any namespace form (`kilo/stepfun/step-3.7-flash:free`). */
+export const isStep37FlashModelId = memo((modelId: string): boolean => {
+	return modelId.toLowerCase().includes("step-3.7-flash");
+});
+
 /** Gemini family ids in any namespace form (`gemini-*`, `google/gemini-*`, `openrouter/google/gemini-…`). */
 export const isGeminiModelId = memo((modelId: string): boolean => {
 	return /(^|\/)gemini[-.]?/i.test(modelId);
@@ -140,7 +145,8 @@ const GROK_EFFORT_CAPABLE_PREFIXES = [
 /**
  * Grok SKUs that expose the wire `reasoning.effort` dial. Other Grok reasoners
  * (e.g. `grok-build`, `grok-4.20-0309-reasoning`) think natively but reject the
- * param, so callers must omit reasoning effort for them.
+ * param, so callers must omit reasoning effort for them. `grok-4.6` accepts
+ * `low`/`medium`/`high`/`xhigh` and 400s on `max`.
  */
 export const isGrokReasoningEffortCapable = memo((modelId: string): boolean => {
 	const bare = bareModelId(modelId).trim().toLowerCase();
@@ -396,6 +402,22 @@ export const hasOpus47ApiRestrictions = memo((modelId: string): boolean => {
 export const supportsMidConversationSystemMessages = memo((modelId: string): boolean => {
 	const parsed = parseAnthropicModel(bareModelId(modelId));
 	return parsed !== null && isAnthropicAdaptiveGenAtLeast(parsed, "4.8");
+});
+
+/**
+ * Models that reliably follow the hashline line-anchored edit dialect
+ * (`[path#TAG]` headers plus 1-indexed anchors). Kimi, MiMo, DeepSeek V4
+ * Flash, and Step 3.7 Flash miscount anchors or drop the tag header often
+ * enough that hosts fall back to a literal search-replace edit format for
+ * them.
+ */
+export const supportsHashlineEdits = memo((modelId: string): boolean => {
+	return !(
+		isKimiModelId(modelId) ||
+		isMimoModelIdOrName(modelId) ||
+		isDeepseekV4FlashModelId(modelId) ||
+		isStep37FlashModelId(modelId)
+	);
 });
 
 export const isAnthropicFableOrMythosModel = memo((modelId: string): boolean => {

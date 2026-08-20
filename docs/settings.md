@@ -172,6 +172,8 @@ Valid rule approvals are `allow`, `prompt`, and `deny`. Critical bash commands s
 
 Matching is asymmetric so that rules mean what they appear to: `deny` and `prompt` rules fire when the glob matches the whole command **or any single segment** of a compound line (split on `&&`, `||`, `;`, `|`, a single `&`, subshells, and newlines), so `match: "rm -rf *"` still denies `cd /tmp && rm -rf build` and `sleep 1 & rm -rf build`. `allow` rules must match the **entire** command and never apply to a compound line, so a narrow allow such as `match: "git *"` cannot vouch for `git status && rm -rf /`.
 
+`bash.patterns` gates the `bash` tool only. It does not cover shells started through `eval`, which can spawn one via subprocess, so a `deny` rule here is bypassed when the same command runs through `eval`. To close that path, add a `tools.approval.eval` policy (`prompt` or `deny`) as well; see [Tool approval mode](./approval-mode.md).
+
 ### Bash interceptor patterns
 
 `bashInterceptor` is separate from `bash.patterns`: it redirects Bash commands to dedicated tools rather than defining whether a command may execute. Enable it explicitly and configure regular-expression patterns with a replacement tool and a model-facing message:
@@ -609,29 +611,26 @@ contextPromotion:
 
 compaction:
   enabled: true
-  strategy: snapcompact # context-full, handoff, shake, snapcompact, off
+  methodOrder: [remote, snapcompact, handoff, shake, soft]
   midTurnEnabled: true # check thresholds between tool-loop provider requests
   thresholdPercent: -1 # -1 = default reserve-based behavior
   thresholdTokens: -1 # fixed token limit when > 0
-  remoteEnabled: true
-
 memory:
   backend: off # off, local, hindsight, mnemopi
 ```
 
-| Key                           | Type    | Default       | Notes                                                                                                                                                                                                                                     |
-| ----------------------------- | ------- | ------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `contextPromotion.enabled`    | boolean | `false`       | Promote to the active model's explicit `contextPromotionTarget` on context overflow.                                                                                                                                                      |
-| `compaction.enabled`          | boolean | `true`        | Automatic conversation compaction.                                                                                                                                                                                                        |
-| `compaction.midTurnEnabled`   | boolean | `true`        | Check thresholds at safe mid-turn tool-loop boundaries before the next provider request.                                                                                                                                                  |
-| `compaction.strategy`         | enum    | `snapcompact` | `context-full`, `handoff`, `shake`, `snapcompact`, `off`.                                                                                                                                                                                 |
-| `compaction.thresholdPercent` | number  | `-1`          | Percent-of-context trigger; `-1` = reserve-based default.                                                                                                                                                                                 |
-| `compaction.thresholdTokens`  | number  | `-1`          | Fixed token trigger when `> 0`.                                                                                                                                                                                                           |
-| `compaction.reserveTokens`    | number  | _(unset)_     | Absolute reserve floor. When unset, the effective reserve is the larger of `16384` and 15% of the context window; if that default would leave no practical small-window budget, it falls back to the 15% reserve.                         |
-| `compaction.keepRecentTokens` | number  | `20000`       | Recent tokens always preserved.                                                                                                                                                                                                           |
-| `compaction.remoteEnabled`    | boolean | `true`        | Allow remote compaction service.                                                                                                                                                                                                          |
-| `compaction.autoContinue`     | boolean | `true`        | Continue automatically after compaction.                                                                                                                                                                                                  |
-| `memory.backend`              | enum    | `off`         | `off`, `local`, `hindsight`, `mnemopi`. Each backend has its own `hindsight.*` / `mnemopi.*` / `memories.*` tuning keys.                                                                                                                  |
+| Key                           | Type    | Default                                  | Notes                                                                                                                                                                                                                                     |
+| ----------------------------- | ------- | ---------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `contextPromotion.enabled`    | boolean | `false`                                  | Promote to the active model's explicit `contextPromotionTarget` on context overflow.                                                                                                                                                      |
+| `compaction.enabled`          | boolean | `true`                                   | Automatic conversation compaction.                                                                                                                                                                                                        |
+| `compaction.midTurnEnabled`   | boolean | `true`                                   | Check thresholds at safe mid-turn tool-loop boundaries before the next provider request.                                                                                                                                                  |
+| `compaction.methodOrder`      | array   | `remote, snapcompact, handoff, shake, soft` | Ordered fallbacks. `remote` uses provider-native OpenAI-compatible server compaction; unavailable or failed methods advance. |
+| `compaction.thresholdPercent` | number  | `-1`                                     | Percent-of-context trigger; `-1` = reserve-based default.                                                                                                                                                                                 |
+| `compaction.thresholdTokens`  | number  | `-1`                                     | Fixed token trigger when `> 0`.                                                                                                                                                                                                           |
+| `compaction.reserveTokens`    | number  | _(unset)_                                | Absolute reserve floor. When unset, the effective reserve is the larger of `16384` and 15% of the context window; if that default would leave no practical small-window budget, it falls back to the 15% reserve.                         |
+| `compaction.keepRecentTokens` | number  | `20000`                                  | Recent tokens always preserved.                                                                                                                                                                                                           |
+| `compaction.autoContinue`     | boolean | `true`                                   | Continue automatically after compaction.                                                                                                                                                                                                  |
+| `memory.backend`              | enum    | `off`                                    | `off`, `local`, `hindsight`, `mnemopi`. Each backend has its own `hindsight.*` / `mnemopi.*` / `memories.*` tuning keys.                                                                                                                  |
 | `autolearn.enabled`           | boolean | `false`       | Experimental: after the agent stops, nudge it to capture lessons to memory and create/enhance isolated managed skills under `~/.omp/agent/managed-skills`. Enables the `manage_skill` tool (and `learn` when a memory backend is active). |
 | `autolearn.autoContinue`      | boolean | `false`       | When `autolearn.enabled`, auto-run one capture turn at stop (uses extra tokens). Off = a passive reminder rides your next turn.                                                                                                           |
 | `autolearn.minToolCalls`      | number  | `5`           | Only nudge after a turn that used at least this many tools.                                                                                                                                                                               |

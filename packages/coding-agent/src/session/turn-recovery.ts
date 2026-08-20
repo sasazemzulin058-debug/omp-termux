@@ -20,7 +20,6 @@ import type {
 } from "@oh-my-pi/pi-ai";
 import { calculateRateLimitBackoffMs, parseRateLimitReason } from "@oh-my-pi/pi-ai";
 import * as AIError from "@oh-my-pi/pi-ai/error";
-import { kCursorExecResolved } from "@oh-my-pi/pi-ai/utils/block-symbols";
 import { isFireworksFastModelId, toFireworksBaseModelId } from "@oh-my-pi/pi-catalog/fireworks-model-id";
 import { modelsAreEqual } from "@oh-my-pi/pi-catalog/models";
 import { extractRetryHint, logger, prompt } from "@oh-my-pi/pi-utils";
@@ -1177,25 +1176,15 @@ export class TurnRecovery {
 		if (!reasonlessAbort && !streamStall && !transportReset) return undefined;
 		if (reasonlessAbort && genericAbort) message.errorId = AIError.create(AIError.Flag.Abort);
 
-		// The Cursor server-execution marker gate applies only to the idle stream-stall
-		// path: an unmarked/unresolved Cursor block there means the server has not
-		// finished executing, so resuming would race it. A reasonless abort instead
-		// ends the turn and the agent loop pairs every un-run call (Cursor's unmarked
-		// `todo`/MCP blocks included) with a synthetic `executed: false` result, so
-		// the tool-result reconciliation below is the safety gate and the marker is
-		// irrelevant. An HTTP/2 RST_STREAM / NGHTTP2_* close also ends the Connect
-		// stream, so there is no in-flight server exec to race — unmarked MCP/todo
-		// blocks are safe to continue once every emitted call has a result.
+		// Idle stall and HTTP/2 RST both close the Cursor Connect stream:
+		// the lazy watchdog aborts the request signal, and cursor.ts then
+		// calls `h2Request.close()`. There is no in-flight server exec to
+		// race, so unmarked MCP/todo blocks can continue once every emitted
+		// call has a matching result. A reasonless abort ends the turn and
+		// the agent loop pairs leftover calls with `executed: false`.
 		const resolvedToolCallIds: string[] = [];
 		for (const block of message.content) {
 			if (block.type !== "toolCall") continue;
-			if (
-				streamStall &&
-				message.provider === "cursor" &&
-				(!(kCursorExecResolved in block) || block[kCursorExecResolved] !== true)
-			) {
-				return undefined;
-			}
 			resolvedToolCallIds.push(block.id);
 		}
 		if (resolvedToolCallIds.length === 0) return undefined;
@@ -1660,6 +1649,9 @@ export class TurnRecovery {
 		if (AIError.isContextOverflow(message, model.contextWindow ?? 0)) return false;
 		if (AIError.is(id, AIError.Flag.UsageLimit)) return false;
 		if (AIError.is(id, AIError.Flag.AuthFailed)) return false;
+		// A thinking loop is a same-model resample signal, not a router fault, so a
+		// base-model swap would abandon the loop-guard redirect (issue #8760).
+		if (AIError.is(id, AIError.Flag.ThinkingLoop)) return false;
 		return this.#host.modelRegistry.find("fireworks", toFireworksBaseModelId(model.id)) !== undefined;
 	}
 
@@ -1969,10 +1961,23 @@ export class TurnRecovery {
 			);
 			if (switchedCredential) delayMs = 0;
 		}
+		// A thinking-loop abort is not a provider failure — it is the loop guard
+		// asking for a same-model resample, paired with a hidden
+		// `thinking-loop-redirect` notice that only makes sense on the model that
+		// looped. Walking `fallbackChains` (or parking the selector on a cooldown)
+		// would swap a healthy planning turn to another family based on chain
+		// contents, not model health (issue #8760). Keep it on the same model; the
+		// retry budget still bounds a genuinely stuck stream.
+		const thinkingLoop = AIError.is(id, AIError.Flag.ThinkingLoop);
 		if (!staleOpenAIResponsesReplayError && !switchedCredential && currentSelector) {
 			// A refusal chain stops at the retry budget: the exhausted-attempt
 			// last resort is for provider failures, not classifier decisions.
-			if (allowModelFallback && retrySettings.modelFallback && !(retryBudgetExhausted && classifierRefusal)) {
+			if (
+				allowModelFallback &&
+				retrySettings.modelFallback &&
+				!thinkingLoop &&
+				!(retryBudgetExhausted && classifierRefusal)
+			) {
 				if (!classifierRefusal) {
 					this.noteRetryFallbackCooldown(currentSelector, parsedRetryAfterMs, errorMessage);
 				}

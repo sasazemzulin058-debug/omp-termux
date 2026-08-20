@@ -20,7 +20,7 @@
 
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "bun:test";
 import { Agent } from "@oh-my-pi/pi-agent-core";
-import { effectiveReserveTokens, estimateTokens, prepareCompaction } from "@oh-my-pi/pi-agent-core/compaction";
+import { effectiveReserveTokens, prepareCompaction } from "@oh-my-pi/pi-agent-core/compaction";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
@@ -91,7 +91,7 @@ describe("AgentSession snapcompact frame-budget sizing", () => {
 			agent,
 			sessionManager,
 			settings: Settings.isolated({
-				"compaction.strategy": "snapcompact",
+				"compaction.methodOrder": ["snapcompact", "soft"],
 				"compaction.autoContinue": false,
 				// Force a small kept-recent window so the seeded conversation
 				// definitely splits into discard + kept and prepareCompaction()
@@ -170,10 +170,8 @@ describe("AgentSession snapcompact frame-budget sizing", () => {
 		// numFrames × FRAME_TOKEN_ESTIMATE + non-message + kept-recent.
 		const preparation = prepareCompaction(branchEntries, settings);
 		if (!preparation) throw new Error("Expected non-empty preparation");
-		let baseTokens = computeNonMessageTokens(session);
-		for (const message of preparation.recentMessages) {
-			baseTokens += estimateTokens(message);
-		}
+		let baseTokens = computeNonMessageTokens(session, session.agent.tokenizer);
+		baseTokens += session.agent.tokenizer.countMessages(preparation.recentMessages);
 		const shape = snapcompact.resolveShape(model);
 		const edgeCap = snapcompact.geometry(shape).capacity;
 		// Worst-case `textHead + textTail` tokenized at the cl100k 4-chars/token

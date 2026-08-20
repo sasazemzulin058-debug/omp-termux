@@ -474,6 +474,7 @@ export const CATALOG_PROVIDERS = [
 		defaultModel: "openai/gpt-oss-120b",
 		envVars: ["COREWEAVE_API_KEY", "WANDB_API_KEY"],
 		createModelManagerOptions: (config: ModelManagerConfig) => coreWeaveModelManagerOptions(config),
+		dynamicModelsAuthoritative: true,
 		catalogDiscovery: { label: "CoreWeave Serverless Inference" },
 	},
 	{

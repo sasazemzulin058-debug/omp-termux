@@ -155,6 +155,8 @@ const RPC_BACKGROUND_DEFAULTED_SETTING_PATHS: SettingPath[] = [
 	"async.maxJobs",
 	"bash.autoBackground.enabled",
 	"bash.autoBackground.thresholdMs",
+	"eval.autoBackground.enabled",
+	"eval.autoBackground.thresholdMs",
 ];
 
 // Protocol-mode hosts opt into a small set of paths whose host-default we
@@ -1287,9 +1289,9 @@ export async function runRootCommand(
 	// tree; declare it so headless subagent optimizations (e.g. skipping replan
 	// title refresh) can tell a focusable process from a print/RPC/eval one.
 	setInteractiveHost(isInteractive);
-	// Create AuthStorage and ModelRegistry upfront. A configured-but-unreachable
-	// auth broker throws here; convert it to an actionable stderr message + clean
-	// exit instead of a raw uncaught stack trace (issue #8096).
+	// Create AuthStorage upfront. A configured-but-unreachable auth broker throws
+	// here; convert it to an actionable stderr message + clean exit instead of a
+	// raw uncaught stack trace (issue #8096).
 	let authStorage: AuthStorage;
 	try {
 		authStorage = await logger.time("discoverAuthStorage", deps.discoverAuthStorage ?? discoverAuthStorage);
@@ -1299,7 +1301,6 @@ export async function runRootCommand(
 		process.stderr.write(`${chalk.red(`Error: ${message}`)}\n`);
 		process.exit(1);
 	}
-	const modelRegistry = logger.time("modelRegistry:init", () => new ModelRegistry(authStorage));
 
 	const settingsInstance =
 		deps.settings ?? (await logger.time("settings:init", Settings.init, { cwd, configFiles: parsedArgs.config }));
@@ -1317,6 +1318,13 @@ export async function runRootCommand(
 	} else if (parsedArgs.mode === "acp") {
 		applyAcpDefaultSettingOverrides(settingsInstance);
 	}
+
+	// The registry composes policy-dependent metadata synchronously, including
+	// extended-context window caps, so it must receive the finalized settings.
+	const modelRegistry = logger.time(
+		"modelRegistry:init",
+		() => new ModelRegistry(authStorage, undefined, { settings: settingsInstance }),
+	);
 	if (parsedArgs.noPty || parsedArgs.mode === "rpc-ui") {
 		Bun.env.PI_NO_PTY = "1";
 	}

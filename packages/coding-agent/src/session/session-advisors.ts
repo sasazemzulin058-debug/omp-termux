@@ -5,18 +5,17 @@ import {
 	type AgentToolContext,
 	AppendOnlyContextManager,
 	type CompactionSummaryMessage,
-	countTokens,
 	resolveTelemetry,
 	type StreamFn,
 	ThinkingLevel,
+	type Tokenizer,
 } from "@oh-my-pi/pi-agent-core";
 import {
 	type CompactionResult,
-	calculateContextTokens,
 	compact,
 	compactionContextTokens,
 	createCompactionSummaryMessage,
-	estimateTokens,
+	estimateTranscriptTokens,
 	NativeCompactionError,
 	prepareCompaction,
 	type SessionMessageEntry,
@@ -84,6 +83,7 @@ import {
 } from "../thinking";
 import type { AgentSessionEvent } from "./agent-session-events";
 import type { ClientBridge } from "./client-bridge";
+import { resolveCompactionMethodOrder } from "./compaction-methods";
 import type { CustomMessage, CustomMessagePayload } from "./messages";
 import { isAdvisorCard, isTerminalTextAssistantAnswer } from "./queued-messages";
 import {
@@ -892,8 +892,7 @@ export class SessionAdvisors {
 			const runtime = new AdvisorRuntime(advisorAgentFacade, {
 				snapshotMessages: () => this.#host.agent.state.messages,
 				enqueueAdvice: (note, severity) => this.#routeAdvice(advisorRef, note, severity),
-				maintainContext: (incomingTokens, signal) =>
-					this.#maintainAdvisorContext(advisorRef, incomingTokens, signal),
+				maintainContext: (incoming, signal) => this.#maintainAdvisorContext(advisorRef, incoming, signal),
 				obfuscator: this.#host.obfuscator,
 				getModelIdentity: () => formatModelString(advisorRef.agent.state.model),
 				beginAdvisorUpdate: inProgress => {
@@ -1318,35 +1317,33 @@ export class SessionAdvisors {
 
 	async #maintainAdvisorContext(
 		advisor: ActiveAdvisor,
-		incomingTokens: number,
+		incoming: AgentMessage,
 		signal: AbortSignal,
 	): Promise<boolean> {
 		await this.#maybeRestoreAdvisorRetryFallbackPrimary(advisor, signal);
 		const agent = advisor.agent;
+		const incomingTokens = agent.tokenizer.countMessage(incoming);
 
 		const compactionSettings = this.#host.settings.getGroup("compaction");
-		if (compactionSettings.strategy === "off") return false;
-		if (!compactionSettings.enabled) return false;
+		if (!compactionSettings.enabled || resolveCompactionMethodOrder(compactionSettings.methodOrder).length === 0) {
+			return false;
+		}
 
 		const advisorModel = agent.state.model;
 		const contextWindow = advisorModel.contextWindow ?? 0;
 		if (contextWindow <= 0) return false;
 
 		const messages = agent.state.messages;
-		const estimateOptions = { excludeEncryptedReasoning: true } as const;
-		let storedConversationTokens = 0;
-		for (const message of messages) {
-			storedConversationTokens += estimateTokens(message, estimateOptions);
-		}
+		const storedConversationTokens = agent.tokenizer.countMessages(messages, { excludeEncryptedReasoning: true });
 		// Provider usage (including cache reads and generated output) is the
 		// trustworthy anchor for accumulated context. Add only the trailing incoming
 		// delta to that arm. Floor it by a full local estimate — fixed advisor system
 		// prompt, tool schemas, stored messages, and incoming delta — so provider
 		// under-reporting or payload transforms cannot suppress maintenance.
-		const providerContextTokens = this.#estimateAdvisorContextTokens(messages) + incomingTokens;
+		const providerContextTokens = this.#estimateAdvisorContextTokens(messages, agent.tokenizer) + incomingTokens;
 		const localContextTokens =
-			countTokens(agent.state.systemPrompt) +
-			estimateToolSchemaTokens(agent.state.tools) +
+			agent.tokenizer.countTokens(agent.state.systemPrompt) +
+			estimateToolSchemaTokens(agent.state.tools, agent.tokenizer) +
 			storedConversationTokens +
 			incomingTokens;
 		const contextTokens = compactionContextTokens(providerContextTokens, localContextTokens);
@@ -1406,7 +1403,7 @@ export class SessionAdvisors {
 			this.#host.sessionId(),
 			advisor.slug,
 		);
-		const preparation = prepareCompaction(pathEntries, compactionSettings, advisorModel);
+		const preparation = prepareCompaction(pathEntries, compactionSettings, advisorModel, agent.tokenizer);
 		if (!preparation) {
 			// Cannot prepare compaction, fallback to re-prime
 			return true;
@@ -1504,7 +1501,7 @@ export class SessionAdvisors {
 		// only assistants appended afterward can become the next usage anchor.
 		const advisorUsageAnchorStartIndex = preparation.recentMessages.length + 1;
 		const summaryMessage = {
-			...createCompactionSummaryMessage(summary, tokensBefore, new Date().toISOString(), shortSummary),
+			...createCompactionSummaryMessage(summary, tokensBefore, new Date().toISOString(), { shortSummary }),
 			firstKeptEntryId,
 			advisorUsageAnchorStartIndex,
 		} satisfies AdvisorCompactionSummaryMessage;
@@ -1682,6 +1679,14 @@ export class SessionAdvisors {
 		for (const advisorCost of this.#advisorCosts.values()) cost += advisorCost;
 		return cost;
 	}
+	/** Return whether any active or configured advisor is running on an OAuth/subscription model. */
+	isUsingSubscription(): boolean {
+		if (this.#advisors.length > 0) {
+			return this.#advisors.some(a => this.#host.modelRegistry.isUsingOAuth(a.model));
+		}
+		const sel = resolveAdvisorRoleSelection(this.#host.settings, this.#host.modelRegistry.getAvailable());
+		return sel ? this.#host.modelRegistry.isUsingOAuth(sel.model) : false;
+	}
 	/**
 	 * Return structured advisor stats for the status command and TUI panel.
 	 */
@@ -1758,7 +1763,7 @@ export class SessionAdvisors {
 	#computeAdvisorStat(advisor: ActiveAdvisor): PerAdvisorStat {
 		const model = advisor.agent.state.model;
 		const messages = advisor.agent.state.messages;
-		const contextTokens = this.#estimateAdvisorContextTokens(messages);
+		const contextTokens = this.#estimateAdvisorContextTokens(messages, advisor.agent.tokenizer);
 		let input = 0;
 		let output = 0;
 		let reasoning = 0;
@@ -1848,7 +1853,7 @@ export class SessionAdvisors {
 	 * retained pre-compaction messages is stale and must not immediately retrigger
 	 * maintenance on the newly compacted context.
 	 */
-	#estimateAdvisorContextTokens(messages: AgentMessage[]): number {
+	#estimateAdvisorContextTokens(messages: AgentMessage[], tokenizer: Tokenizer): number {
 		let usageAnchorStartIndex = 0;
 		for (let i = messages.length - 1; i >= 0; i--) {
 			const message = messages[i];
@@ -1860,33 +1865,10 @@ export class SessionAdvisors {
 			usageAnchorStartIndex = advisorSummary.advisorUsageAnchorStartIndex ?? messages.length;
 			break;
 		}
-
-		let lastUsageIndex: number | undefined;
-		let lastUsage: AssistantMessage["usage"] | undefined;
-		for (let i = messages.length - 1; i >= usageAnchorStartIndex; i--) {
-			const message = messages[i];
-			if (message.role !== "assistant") continue;
-			const assistant = message as AssistantMessage;
-			if (assistant.stopReason !== "aborted" && assistant.stopReason !== "error" && assistant.usage) {
-				lastUsage = assistant.usage;
-				lastUsageIndex = i;
-				break;
-			}
-		}
-
-		const estimateOptions = { excludeEncryptedReasoning: true } as const;
-		if (!lastUsage || lastUsageIndex === undefined) {
-			let estimated = 0;
-			for (const message of messages) {
-				estimated += estimateTokens(message, estimateOptions);
-			}
-			return estimated;
-		}
-		let trailingTokens = 0;
-		for (let i = lastUsageIndex + 1; i < messages.length; i++) {
-			trailingTokens += estimateTokens(messages[i], estimateOptions);
-		}
-		return calculateContextTokens(lastUsage) + trailingTokens;
+		return estimateTranscriptTokens(messages, tokenizer, {
+			anchorFromIndex: usageAnchorStartIndex,
+			excludeEncryptedReasoning: true,
+		});
 	}
 
 	/**

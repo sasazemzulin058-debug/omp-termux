@@ -68,6 +68,12 @@ export interface CleanseCheckerDescriptor {
 	command: string;
 }
 
+/** Lifecycle notifications for one {@link CleanseDiagnosticSuite.run} pass, used by the CLI status board. */
+export interface CleanseCheckerRunEvents {
+	onCheckerStart?(checker: CleanseCheckerDescriptor): void;
+	onCheckerEnd?(check: CleanseCheckResult, durationMs: number): void;
+}
+
 /** Re-runnable checker set discovered from one project snapshot. */
 export interface CleanseDiagnosticSuite {
 	/** Every discovered checker; unaffected by {@link CleanseDiagnosticSuite.select}. */
@@ -75,7 +81,7 @@ export interface CleanseDiagnosticSuite {
 	readonly skipped: readonly SkippedCleanseCheck[];
 	/** Narrow subsequent {@link CleanseDiagnosticSuite.run} calls to the named checker ids. */
 	select(ids: readonly string[]): void;
-	run(signal?: AbortSignal): Promise<CleanseDiagnosticReport>;
+	run(signal?: AbortSignal, events?: CleanseCheckerRunEvents): Promise<CleanseDiagnosticReport>;
 }
 
 /** Discover configured language checkers without installing missing tools. */
@@ -128,14 +134,24 @@ function createSuite(
 			const wanted = new Set(ids);
 			active = plans.filter(plan => wanted.has(plan.id));
 		},
-		async run(signal?: AbortSignal): Promise<CleanseDiagnosticReport> {
+		async run(signal?: AbortSignal, events?: CleanseCheckerRunEvents): Promise<CleanseDiagnosticReport> {
+			const execute = async (plan: CheckerPlan): Promise<CleanseCheckResult> => {
+				events?.onCheckerStart?.({
+					id: plan.id,
+					label: plan.label,
+					language: plan.language,
+					command: plan.command,
+				});
+				const startedAt = Date.now();
+				const check = await runChecker(plan, projectCwd, allowedFiles, signal);
+				events?.onCheckerEnd?.(check, Date.now() - startedAt);
+				return check;
+			};
 			const mutatingChecks: CleanseCheckResult[] = [];
 			for (const plan of active) {
-				if (plan.mutates) mutatingChecks.push(await runChecker(plan, projectCwd, allowedFiles, signal));
+				if (plan.mutates) mutatingChecks.push(await execute(plan));
 			}
-			const parallelChecks = await Promise.all(
-				active.filter(plan => !plan.mutates).map(plan => runChecker(plan, projectCwd, allowedFiles, signal)),
-			);
+			const parallelChecks = await Promise.all(active.filter(plan => !plan.mutates).map(execute));
 			const checks = [...mutatingChecks, ...parallelChecks];
 			return {
 				checks,

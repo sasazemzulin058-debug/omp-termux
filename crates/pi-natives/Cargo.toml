@@ -27,6 +27,7 @@ ast-grep-core.workspace = true
 base64.workspace = true
 clap.workspace = true
 globset.workspace = true
+heapless.workspace = true
 fontdue.workspace = true
 grep-matcher.workspace = true
 futures.workspace = true
@@ -58,12 +59,11 @@ serde.workspace = true
 serde_json.workspace = true
 smallvec.workspace = true
 syntect.workspace = true
-tiktoken-rs.workspace = true
 tokio.workspace = true
 tokio-util.workspace = true
 toml.workspace = true
-unicode-segmentation.workspace = true
-unicode-width.workspace = true
+xutf.workspace = true
+zstd.workspace = true
 xxhash-rust.workspace = true
 
 [target.'cfg(target_os = "linux")'.dependencies]
@@ -103,6 +103,8 @@ arboard.workspace = true
 pi-voice.workspace = true
 
 [dev-dependencies]
+fancy-regex.workspace = true # utok scanner differential oracle
+tiktoken-rs.workspace = true # utok openai differential oracle
 xkeysym = "=0.2.1"
 
 [build-dependencies]

@@ -15,6 +15,7 @@ import { googleGeminiCliModelManagerOptions } from "@oh-my-pi/pi-catalog/provide
 import type { ModelSpec } from "@oh-my-pi/pi-catalog/types";
 import {
 	ANTIGRAVITY_VARIANT_COLLAPSE_TABLE,
+	CURSOR_VARIANT_COLLAPSE_TABLE,
 	collapseEffortVariants,
 	collapseEffortVariantsAcrossProviders,
 	DEVIN_VARIANT_COLLAPSE_TABLE,
@@ -653,6 +654,77 @@ describe("Devin tier routing", () => {
 		expect(resolveWireModelId(buildModel(fable), Effort.XHigh)).toBe("claude-5-fable-xhigh");
 		expect(resolveWireModelId(buildModel(swe), Effort.Medium)).toBe("swe-1-7-medium");
 		expect(resolveWireModelId(buildModel(swe), Effort.Max)).toBe("swe-1-7");
+	});
+});
+
+describe("Cursor Grok tier routing (issue #8803)", () => {
+	function cursorMemberSpec(id: string): ModelSpec<"cursor-agent"> {
+		return {
+			id,
+			name: id,
+			api: "cursor-agent",
+			provider: "cursor",
+			baseUrl: "https://api2.cursor.sh",
+			// Live GetUsableModels + bundled references mark these reasoning:false;
+			// collapse must still recognize the effort ladder.
+			reasoning: false,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 200_000,
+			maxTokens: 64_000,
+		};
+	}
+
+	const RAW_SIBLINGS = [
+		"cursor-grok-4.5-high",
+		"cursor-grok-4.5-high-fast",
+		"cursor-grok-4.5-low",
+		"cursor-grok-4.5-low-fast",
+		"cursor-grok-4.5-medium",
+		"cursor-grok-4.5-medium-fast",
+		"cursor-grok-4.6-high",
+		"cursor-grok-4.6-high-fast",
+		"cursor-grok-4.6-low",
+		"cursor-grok-4.6-low-fast",
+		"cursor-grok-4.6-medium",
+		"cursor-grok-4.6-medium-fast",
+		"cursor-grok-4.6-xhigh",
+		"cursor-grok-4.6-xhigh-fast",
+	];
+
+	it("collapses the 14 effort siblings into four logical models, split by the -fast lane", () => {
+		const collapsed = collapseEffortVariants(RAW_SIBLINGS.map(cursorMemberSpec), CURSOR_VARIANT_COLLAPSE_TABLE);
+		expect(collapsed.map(model => model.id).sort()).toEqual([
+			"cursor-grok-4.5",
+			"cursor-grok-4.5-fast",
+			"cursor-grok-4.6",
+			"cursor-grok-4.6-fast",
+		]);
+
+		const g46 = collapsed.find(model => model.id === "cursor-grok-4.6");
+		if (!g46) throw new Error("cursor-grok-4.6 did not collapse");
+		expect(g46.name).toBe("Grok 4.6");
+		// Effort route forces reasoning even though every member said false.
+		expect(g46.reasoning).toBe(true);
+		expect(g46.thinking?.mode).toBe("effort");
+		expect(g46.thinking?.efforts).toEqual([Effort.Low, Effort.Medium, Effort.High, Effort.XHigh]);
+		expect(g46.thinking?.requiresEffort).toBe(true);
+	});
+
+	it("routes each user effort onto the live sibling wire id per service-tier lane", () => {
+		const collapsed = collapseEffortVariants(RAW_SIBLINGS.map(cursorMemberSpec), CURSOR_VARIANT_COLLAPSE_TABLE);
+		const model = (id: string) => {
+			const found = collapsed.find(m => m.id === id);
+			if (!found) throw new Error(`${id} did not collapse`);
+			return buildModel(found as ModelSpec<"cursor-agent">);
+		};
+
+		expect(resolveWireModelId(model("cursor-grok-4.6"), Effort.XHigh)).toBe("cursor-grok-4.6-xhigh");
+		expect(resolveWireModelId(model("cursor-grok-4.6"), Effort.Low)).toBe("cursor-grok-4.6-low");
+		expect(resolveWireModelId(model("cursor-grok-4.6-fast"), Effort.High)).toBe("cursor-grok-4.6-high-fast");
+		expect(resolveWireModelId(model("cursor-grok-4.5"), Effort.Medium)).toBe("cursor-grok-4.5-medium");
+		// 4.5 has no xhigh sibling: the ceiling stays at high.
+		expect(model("cursor-grok-4.5").thinking?.efforts).toEqual([Effort.Low, Effort.Medium, Effort.High]);
 	});
 });
 

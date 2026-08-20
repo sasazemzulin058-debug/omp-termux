@@ -4,8 +4,7 @@ import { createRequire } from "node:module";
 import * as os from "node:os";
 import * as path from "node:path";
 import * as zlib from "node:zlib";
-const require = createRequire(import.meta.url);
-const packageJson = require("../package.json");
+import packageJson from "../package.json" with { type: "json" };
 import { embeddedAddon } from "./embedded-addon.js";
 
 /**

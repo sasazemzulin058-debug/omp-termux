@@ -1026,6 +1026,28 @@ function resolveOpenAICodexPlanRequirement(provider: string, modelId: string | u
 	return "none";
 }
 
+const MODEL_ACCOUNT_POLICY_BLOCK_SCOPE_PREFIX = "model-policy:";
+
+function modelAccountPolicyBlockScope(provider: string, modelId: string | undefined): string | undefined {
+	if (provider !== "openai-codex" || typeof modelId !== "string") return undefined;
+	const separator = modelId.lastIndexOf("/");
+	const bareModelId = (separator === -1 ? modelId : modelId.slice(separator + 1)).trim().toLowerCase();
+	if (!bareModelId || bareModelId.includes("\0")) return undefined;
+	return `${MODEL_ACCOUNT_POLICY_BLOCK_SCOPE_PREFIX}${bareModelId}`;
+}
+
+function credentialBlockScopesForRequest(
+	provider: string,
+	strategy: CredentialRankingStrategy | undefined,
+	rankingContext: CredentialRankingContext,
+	blockScope: string | undefined,
+): readonly string[] {
+	const scopes = strategy?.blockScopes?.(rankingContext) ?? (blockScope ? [blockScope] : []);
+	const modelPolicyScope = modelAccountPolicyBlockScope(provider, rankingContext.modelId);
+	if (!modelPolicyScope || scopes.includes(modelPolicyScope)) return scopes;
+	return [...scopes, modelPolicyScope];
+}
+
 function getUsagePlanType(report: UsageReport | null): string | undefined {
 	const metadata = report?.metadata;
 	if (!metadata) return undefined;
@@ -2169,7 +2191,7 @@ export class AuthStorage {
 
 		const rankingContext: CredentialRankingContext = { modelId: options?.modelId };
 		const blockScope = strategy.blockScope?.(rankingContext);
-		const blockScopes = strategy.blockScopes?.(rankingContext) ?? (blockScope ? [blockScope] : []);
+		const blockScopes = credentialBlockScopesForRequest(provider, strategy, rankingContext, blockScope);
 		const candidates = await this.#rankApiKeySelections({
 			providerKey,
 			provider,
@@ -3911,7 +3933,7 @@ export class AuthStorage {
 		const planRequirement = resolveOpenAICodexPlanRequirement(provider, options.modelId);
 		const planEligibilityByCredential = new Map<number, boolean | undefined>();
 		const blockScope = strategy.blockScope?.(rankingContext);
-		const blockScopes = strategy.blockScopes?.(rankingContext) ?? (blockScope ? [blockScope] : []);
+		const blockScopes = credentialBlockScopesForRequest(provider, strategy, rankingContext, blockScope);
 		const reserveFraction = Number.isFinite(options.reserveFraction)
 			? Math.max(0, Math.min(1, options.reserveFraction))
 			: 0;
@@ -3961,7 +3983,12 @@ export class AuthStorage {
 				}
 				if (!report) return { credentialId: entry.id, credentialType, state: "unknown" };
 
-				const limits = this.#getScopedUsageLimits(strategy, report, rankingContext);
+				// Reserve health is opt-in and non-destructive: prefer the strategy's
+				// reserve scoping, which may expose mapped model/tier rows that the
+				// hard-block scoper withholds until confirmed exhaustion.
+				const limits =
+					strategy.scopeLimitsForReserve?.(report, rankingContext) ??
+					this.#getScopedUsageLimits(strategy, report, rankingContext);
 				if (limits.length === 0) return { credentialId: entry.id, credentialType, state: "unknown" };
 
 				const currentLimits = limits.filter(limit => {
@@ -4378,17 +4405,24 @@ export class AuthStorage {
 		provider: string,
 		credentialType: AuthCredential["type"],
 		modelId: string | undefined,
+		blockScopeOverride?: string,
 	): CredentialBlockRouting {
 		const providerKey = this.#getProviderTypeKey(provider, credentialType);
 		const strategy = this.#rankingStrategyResolver?.(provider);
 		const rankingContext: CredentialRankingContext = { modelId };
-		const blockScope = strategy?.blockScope?.(rankingContext);
+		const defaultBlockScope = strategy?.blockScope?.(rankingContext);
+		const blockScope = blockScopeOverride ?? defaultBlockScope;
+		const requestBlockScopes = credentialBlockScopesForRequest(provider, strategy, rankingContext, defaultBlockScope);
+		const siblingBlockScopes =
+			blockScopeOverride && !requestBlockScopes.includes(blockScopeOverride)
+				? [...requestBlockScopes, blockScopeOverride]
+				: requestBlockScopes;
 		return {
 			providerKey,
 			strategy,
 			rankingContext,
 			blockScope,
-			siblingBlockScopes: strategy?.blockScopes?.(rankingContext) ?? (blockScope ? [blockScope] : []),
+			siblingBlockScopes,
 		};
 	}
 
@@ -4755,7 +4789,7 @@ export class AuthStorage {
 		const rankingContext: CredentialRankingContext = { modelId: options?.modelId };
 		const blockScope = strategy?.blockScope?.(rankingContext);
 		// Reads honour every scope that applies; the scalar above is for args that persist.
-		const blockScopes = strategy?.blockScopes?.(rankingContext) ?? (blockScope ? [blockScope] : []);
+		const blockScopes = credentialBlockScopesForRequest(provider, strategy, rankingContext, blockScope);
 		const planRequirement = resolveOpenAICodexPlanRequirement(provider, options?.modelId);
 		const hasPlanRequirement = planRequirement !== "none";
 		const checkUsage = strategy !== undefined && (credentials.length > 1 || hasPlanRequirement);
@@ -6205,8 +6239,10 @@ export class AuthStorage {
 	 * - usage-limit / account-rate-limit error → {@link AuthStorage.markUsageLimitReached}
 	 *   (temporary block via its own backoff — default plus server usage-report
 	 *   reset; sticky left intact so the next resolve re-ranks around the block).
-	 * - account-scoped policy denial → temporarily block that account without
-	 *   marking its credential suspect, then rotate through eligible siblings.
+	 * - exact Codex model-entitlement denial → temporarily block only that
+	 *   requested model after provider/model identity matches, then rotate.
+	 * - other account-scoped policy denial → temporarily block that account
+	 *   without marking its credential suspect, then rotate through siblings.
 	 * - otherwise (hard 401 / auth failure) → mark the credential suspect (or
 	 *   reload when no broker hook is wired) and block it, then drop matching
 	 *   sticky state.
@@ -6243,8 +6279,24 @@ export class AuthStorage {
 		});
 		if (!sessionCredential) return false;
 
-		if (AIError.isAccountPolicyError(error)) {
-			const routing = this.#credentialBlockRouting(provider, sessionCredential.type, options?.modelId);
+		const deniedModel = AIError.codexChatGPTAccountPolicyModel(error);
+		const exactCodexModelPolicy =
+			deniedModel !== undefined && AIError.isCodexChatGPTAccountPolicyError(error, provider, options?.modelId);
+		// The exact sentence is provider-controlled input. A non-Codex provider,
+		// absent request model, or mismatched model must not turn it into either a
+		// global block or a hard-auth invalidation.
+		if (deniedModel !== undefined && !exactCodexModelPolicy) return false;
+		if (exactCodexModelPolicy || AIError.isAccountPolicyError(error)) {
+			const modelPolicyScope = exactCodexModelPolicy
+				? modelAccountPolicyBlockScope(provider, options?.modelId)
+				: undefined;
+			if (exactCodexModelPolicy && modelPolicyScope === undefined) return false;
+			const routing = this.#credentialBlockRouting(
+				provider,
+				sessionCredential.type,
+				options?.modelId,
+				modelPolicyScope,
+			);
 			return this.#blockCredentialForRotation(
 				provider,
 				sessionCredential.type,

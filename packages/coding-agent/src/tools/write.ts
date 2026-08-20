@@ -360,12 +360,16 @@ function stripWriteContent(session: ToolSession, content: string): { text: strin
  * when the session is not in hashline mode so callers can no-op cheaply.
  *
  * Mirrors the post-commit snapshot recording the hashline patcher performs
- * after a successful edit: the model gets a tag without an extra `read`.
+ * after a successful edit — the model gets a tag without an extra `read` —
+ * but with EMPTY seen-line provenance: a write displays no numbered lines,
+ * so anchored edits against this tag must first see the anchor content (the
+ * patcher rejects them with an inline reveal). Authoring content is not
+ * knowing its line numbers.
  */
 function maybeWriteSnapshotHeader(session: ToolSession, absolutePath: string, content: string): string | undefined {
 	if (!resolveFileDisplayMode(session).hashLines) return undefined;
 	const normalized = normalizeToLF(content);
-	const tag = getFileSnapshotStore(session).record(canonicalSnapshotKey(absolutePath), normalized);
+	const tag = getFileSnapshotStore(session).record(canonicalSnapshotKey(absolutePath), normalized, []);
 	return formatHashlineHeader(formatPathRelativeToCwd(absolutePath, session.cwd), tag);
 }
 

@@ -360,6 +360,28 @@ describe("model thinking derivation", () => {
 		expect(() => requireSupportedEffort(model, Effort.Medium)).toThrow(/not supported/);
 	});
 
+	it("maps minimal to LOW when a collapsed family aliases it onto the low wire id", () => {
+		const model = createModel({
+			id: "gemini-3.7-flash",
+			api: "google-gemini-cli",
+			provider: "google-antigravity",
+			thinking: {
+				mode: "google-level",
+				efforts: [Effort.Minimal, Effort.Low, Effort.Medium, Effort.High],
+				requiresEffort: true,
+				effortRouting: {
+					[Effort.Minimal]: "gemini-3.7-flash-low",
+					[Effort.Low]: "gemini-3.7-flash-low",
+					[Effort.Medium]: "gemini-3.7-flash-medium",
+					[Effort.High]: "gemini-3.7-flash-high",
+				},
+			},
+		});
+		expect(mapEffortToGoogleThinkingLevel(Effort.Minimal, model)).toBe("LOW");
+		expect(mapEffortToGoogleThinkingLevel(Effort.Low, model)).toBe("LOW");
+		expect(mapEffortToGoogleThinkingLevel(Effort.Minimal)).toBe("MINIMAL");
+	});
+
 	it("bakes requiresEffort for Gemini 3.x on any provider and backfills explicit metadata", () => {
 		// Derivation: aggregator-hosted Gemini 3.5 gets the flag, 2.5 does not.
 		const openRouterFlash = createModel({

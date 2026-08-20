@@ -671,6 +671,8 @@ def create_proxy_app(settings: Settings) -> FastAPI:
         body = _require_str(data.get("body"), "body")
         event = str(data.get("event") or "COMMENT")
         comments = _require_review_comments(data.get("comments"))
+        commit_id_raw = data.get("commit_id")
+        commit_id = commit_id_raw if isinstance(commit_id_raw, str) and commit_id_raw else None
         github: GitHubClient = request.app.state.github
         try:
             review = await github.submit_pr_review(
@@ -679,6 +681,7 @@ def create_proxy_app(settings: Settings) -> FastAPI:
                 body=body,
                 event=event,
                 comments=comments,
+                commit_id=commit_id,
             )
         except GitHubError as exc:
             return _gh_error_response(exc)

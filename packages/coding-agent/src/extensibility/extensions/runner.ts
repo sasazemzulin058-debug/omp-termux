@@ -31,6 +31,7 @@ import type {
 	BeforeProviderRequestEvent,
 	BeforeProviderRequestEventResult,
 	CompactOptions,
+	ComposerShapeDefinition,
 	ContextEvent,
 	ContextEventResult,
 	ContextUsage,
@@ -976,6 +977,15 @@ export class ExtensionRunner {
 		if (firstFailure) throw firstFailure.reason;
 	}
 
+	/** Composer shapes registered during extension load, with later extensions winning id collisions. */
+	getComposerShapes(): ComposerShapeDefinition[] {
+		const shapes = new Map<string, ComposerShapeDefinition>();
+		for (const extension of this.extensions) {
+			for (const [id, shape] of extension.composerShapes) shapes.set(id, shape);
+		}
+		return [...shapes.values()];
+	}
+
 	/**
 	 * Aggregate the registered CLI flags across a set of extensions (last write
 	 * wins on name collision). Static so callers that need the flag set before a
@@ -1665,8 +1675,9 @@ export class ExtensionRunner {
 		return currentPayload;
 	}
 
-	async emitAfterProviderResponse(response: ProviderResponseMetadata, _model?: Model): Promise<void> {
-		const ctx = this.createContext();
+	/** Runs response hooks with the model that produced that provider response. */
+	async emitAfterProviderResponse(response: ProviderResponseMetadata, model?: Model): Promise<void> {
+		const ctx = this.createContext(model);
 
 		for (const ext of this.extensions) {
 			const handlers = ext.handlers.get("after_provider_response");

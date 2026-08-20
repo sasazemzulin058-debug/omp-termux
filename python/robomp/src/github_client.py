@@ -69,6 +69,7 @@ class PullRequestInfo:
     head_repo: str = ""
     title: str = ""
     body: str = ""
+    head_sha: str = ""
 
 
 @dataclass(slots=True, frozen=True)
@@ -77,6 +78,7 @@ class PullRequestFileInfo:
     status: str
     additions: int
     deletions: int
+    patch: str = ""
 
 
 @dataclass(slots=True, frozen=True)
@@ -179,7 +181,13 @@ def _parse_retry_after(resp: httpx.Response) -> float | None:
 class GitHubClient:
     """Async + sync facades over a small slice of the GitHub REST API."""
 
-    def __init__(self, token: str, *, transport: httpx.BaseTransport | None = None) -> None:
+    def __init__(
+        self,
+        token: str,
+        *,
+        transport: httpx.BaseTransport | None = None,
+        platform: str = "github",
+    ) -> None:
         self._token = token
         self._headers = {
             "Authorization": f"Bearer {token}",
@@ -188,6 +196,7 @@ class GitHubClient:
             "User-Agent": "robomp/0.1",
         }
         self._transport = transport
+        self._platform = platform
 
     def _client(self) -> httpx.Client:
         return httpx.Client(
@@ -581,6 +590,26 @@ class GitHubClient:
             f"/repos/{repo}/issues/{number}/labels/{encoded}",
         )
 
+    def _review_comments_payload(self, comments: list[Mapping[str, Any]]) -> list[dict[str, Any]]:
+        """Adapt canonical host-tool comment shape to the wire schema for this platform.
+
+        GitHub keeps line/side/start_line/start_side; Forgejo only reads
+        path/body/new_position (+old_position), so github-only keys are dropped
+        and `line` is mapped to `new_position` for RIGHT-side comments or
+        `old_position` for LEFT-side (removed-line) comments.
+        """
+        if self._platform != "forgejo":
+            return [dict(c) for c in comments]
+        payload: list[dict[str, Any]] = []
+        for c in comments:
+            entry: dict[str, Any] = {"path": c["path"], "body": c["body"]}
+            if str(c.get("side", "RIGHT")).upper() == "LEFT":
+                entry["old_position"] = c["line"]
+            else:
+                entry["new_position"] = c["line"]
+            payload.append(entry)
+        return payload
+
     async def submit_pr_review(
         self,
         *,
@@ -589,12 +618,12 @@ class GitHubClient:
         body: str,
         event: str,
         comments: list[Mapping[str, Any]],
+        commit_id: str | None = None,
     ) -> PullRequestReviewInfo:
-        data = await self.request(
-            "POST",
-            f"/repos/{repo}/pulls/{pr_number}/reviews",
-            json={"body": body, "event": event, "comments": comments},
-        )
+        payload: dict[str, Any] = {"body": body, "event": event, "comments": self._review_comments_payload(comments)}
+        if commit_id:
+            payload["commit_id"] = commit_id
+        data = await self.request("POST", f"/repos/{repo}/pulls/{pr_number}/reviews", json=payload)
         return _pr_review_from_payload(data)
 
     async def add_assignees(self, repo: str, number: int, assignees: list[str]) -> None:
@@ -750,6 +779,7 @@ def _pr_file_from_payload(data: Mapping[str, Any]) -> PullRequestFileInfo:
         status=str(data.get("status") or ""),
         additions=int(data.get("additions") or 0),
         deletions=int(data.get("deletions") or 0),
+        patch=str(data.get("patch") or ""),
     )
 
 
@@ -769,6 +799,7 @@ def _pr_from_payload(repo: str, data: Mapping[str, Any]) -> PullRequestInfo:
         head_repo=str(head_repo.get("full_name") or "") if isinstance(head_repo, Mapping) else "",
         title=str(data.get("title") or ""),
         body=str(data.get("body") or ""),
+        head_sha=str(head.get("sha") or "") if isinstance(head, Mapping) else "",
     )
 
 

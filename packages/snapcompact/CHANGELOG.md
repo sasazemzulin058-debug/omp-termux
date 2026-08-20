@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+## [17.3.8] - 2026-08-19
+
+### Fixed
+
+- Fixed image-based compaction confusing digit `0` with letter `O` and corrupting compacted identifiers (e.g. Slack IDs): the default frame fonts (X.org `8x13`, `6x12`, `5x8`) drew zero as a bare oval indistinguishable from `O`. Zero now carries a disambiguating interior slash (`8x13`) or bar (`6x12`/`5x8`); unscii-8 already shipped a slashed zero ([#8713](https://github.com/can1357/oh-my-pi/issues/8713)).
+
 ## [17.2.15] - 2026-08-12
 
 ### Fixed

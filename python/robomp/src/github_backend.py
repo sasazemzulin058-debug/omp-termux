@@ -100,6 +100,7 @@ class GitHubBackend(Protocol):
         body: str,
         event: str,
         comments: list[Mapping[str, Any]],
+        commit_id: str | None = None,
     ) -> PullRequestReviewInfo: ...
 
     async def add_assignees(self, repo: str, number: int, assignees: list[str]) -> None: ...

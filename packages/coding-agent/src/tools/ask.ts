@@ -205,9 +205,9 @@ interface CustomInputContext {
 const MAX_CUSTOM_INPUT_OPTION_ROWS = 8;
 const MAX_CUSTOM_INPUT_TITLE_ROWS = 16;
 const MIN_CUSTOM_INPUT_CONTENT_WIDTH = 20;
-/** Subtracted from the terminal width to leave room for the surrounding
- *  `Text(... padX=1)` padding + DynamicBorder vertical chrome. */
-const CUSTOM_INPUT_CHROME_COLUMNS = 4;
+/** Subtracted from the terminal width to leave room for `Text` padding and
+ *  surrounding {@link OverlayPanel} chrome. */
+const CUSTOM_INPUT_CHROME_COLUMNS = 8;
 const CUSTOM_INPUT_DESCRIPTION_INDENT = "    ";
 
 function customInputContentWidth(): number {

@@ -7,6 +7,7 @@ import { discoverAuthStorage } from "../sdk";
 import { SessionManager } from "../session/session-manager";
 import { mapWithConcurrencyLimitAllSettled } from "../task/parallel";
 import { runStructuredSubagent } from "../task/structured-subagent";
+import type { AgentProgress } from "../task/types";
 import type { ToolSession } from "../tools";
 import { EventBus } from "../utils/event-bus";
 import type { CustomCleanseCheckerSpec } from "./checkers";
@@ -49,6 +50,8 @@ const DISCOVERY_SCHEMA = {
 /** Hooks used by the standalone command to render subagent lifecycle progress. */
 export interface CleanseAgentHooks {
 	onStart?(name: string, assignment: CleanseAssignment): void;
+	/** Streaming progress snapshots from a running repair subagent. */
+	onProgress?(name: string, assignment: CleanseAssignment, progress: AgentProgress): void;
 	onFinish?(outcome: CleanseAgentOutcome, assignment: CleanseAssignment): void;
 }
 
@@ -168,6 +171,7 @@ export async function createCleanseAgentRuntime(options: {
 						enableLsp: true,
 						enableIrc: true,
 						signal: workerSignal,
+						onProgress: progress => options.hooks?.onProgress?.(name, assignment, progress),
 					});
 					const outcome: CleanseAgentOutcome = {
 						name,

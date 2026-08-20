@@ -432,7 +432,7 @@ The Ollama integration consists of two distinct provider definitions in `package
 Cursor's integration in `packages/ai` operates over an HTTP/2 Connect RPC transport (`/agent.v1.AgentService/Run`) sending length-prefixed binary Protobuf messages (`AgentClientMessage` and `AgentServerMessage`). Key implementation entry points include `packages/ai/src/providers/cursor.ts` for connection lifecycle, Connect message streaming, and frame dispatching; `packages/ai/src/providers/cursor-pi-args.ts` for pure argument and path transformations; `packages/ai/src/providers/cursor/exec-modern.ts` for local tool result frame builders; `packages/ai/src/registry/cursor.ts` and `packages/ai/src/registry/oauth/cursor.ts` for PKCE browser authentication and token refresh; `packages/ai/src/usage/cursor.ts` for multi-endpoint quota tracking; and `packages/catalog/src/discovery/cursor.ts` for Connect RPC model discovery.
 
 ### Special casings
-- **Pure Argument Translation (`cursor-pi-args.ts`)**: Path and argument formatting functions (`piReadPath`, `piReadPathHasRange`, `piReadDisplayPath`, `piGrepSkip`, `piJoinPath`, `piLsPath`, `piEscapeRegexLiteral`, `piLimit`, `piTimeout`) are kept strictly independent of Protobuf imports so legacy shims can share them without bundling `@bufbuild/protobuf` into virtual registries.
+- **Pure Argument Translation (`cursor-pi-args.ts`)**: Path and argument formatting functions (`piReadPath`, `piReadPathHasRange`, `piReadDisplayPath`, `piGrepSkip`, `piJoinPath`, `piLsPath`, `piEscapeRegexLiteral`, `piLimit`, `piTimeout`) are kept strictly independent of Protobuf imports so legacy shims can share them without bundling protobuf schemas into virtual registries.
 - **Empty Grep Pattern Rejection**: `grepArgs` frames with an empty `pattern` and non-empty `glob` are rejected up front (`emptyGrepPatternRejection`) with a descriptive error, forcing the model to retry or switch tools rather than triggering local tool failure after block persistence.
 - **Native Tools & `SoftToolRequirement` Interplay**:
   - Native tools (`CURSOR_NATIVE_TOOL_NAMES`: `bash`, `read`, `write`, `delete`, `ls`, `grep`, `todo`) are omitted when building `requestContext` MCP tool definitions.
@@ -450,8 +450,12 @@ Cursor's integration in `packages/ai` operates over an HTTP/2 Connect RPC transp
 - **Trailer & Transport Error Handling**:
   - Monitors HTTP/2 trailers (`grpc-status`, `grpc-message`) and maps socket or TLS disconnects using `mapH2TransportError`.
 - **Bi-Directional RPC Dispatch**:
-  - Server streams `AgentServerMessage` (`interactionUpdate`, `execServerMessage`, `kvServerMessage`).
-  - Client writes `AgentClientMessage` (`runRequest`, periodic `clientHeartbeat` every 5 seconds) and `ExecClientMessage` tool responses (`readResult`, `writeResult`, `execClientThrow`, `requestContextResult`).
+  - Server streams `AgentServerMessage` (`interactionUpdate`, `execServerMessage`, `kvServerMessage`, `interactionQuery`).
+  - Client writes `AgentClientMessage` (`runRequest`, periodic `clientHeartbeat` every 5 seconds, `interactionResponse`) and `ExecClientMessage` tool responses (`readResult`, `writeResult`, `execClientThrow`, `requestContextResult`).
+- **Interaction Query Handshake**:
+  - Hosted web search / Exa / unnamed field-9 WebFetch send `interactionQuery` and block the turn until the client writes `interactionResponse`.
+  - Heartbeats keep HTTP/2 alive but are not semantic progress; an unanswered query sits silent until the 300s idle watchdog (`Provider stream stalled while waiting for the next event`).
+  - `handleInteractionQuery` approves network permission gates and rejects interactive ask / switch-mode / create-plan. VM setup is left unanswered because its result oneof is success-only.
 - **Async Execution Drain & Turn Completion**:
   - `handleServerMessage` processes frames asynchronously so the socket continues draining. Dispatches are tracked in `inFlightDispatches` and bounded by `options.signal` abort handling before finalizing stream completion.
   - Stream completion verifies `turnEnded` (`sawTurnEnded`) or throws `incomplete-stream`.

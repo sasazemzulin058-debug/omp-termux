@@ -32,7 +32,7 @@ import type {
 	ShellResult,
 	WriteArgs,
 	WriteResult,
-} from "@oh-my-pi/pi-catalog/discovery/cursor-gen/agent_pb";
+} from "@oh-my-pi/pi-catalog/discovery/cursor-proto";
 import type { Effort } from "@oh-my-pi/pi-catalog/effort";
 import { isOpenAIModelId } from "@oh-my-pi/pi-catalog/identity/family";
 import type { Api, FetchImpl, KnownApi, Model, Provider, ThinkingBudgets, Usage } from "@oh-my-pi/pi-catalog/types";
@@ -886,6 +886,13 @@ export interface ContextSnapshot {
 	nonMessageTokens: number; // estimated non-message total at send time
 	/** Estimated prompt tokens removed by local history rewrites after this provider snapshot was recorded. */
 	historyRewriteTokensRemoved?: number;
+	/**
+	 * Compaction epoch current when this snapshot's provider request was recorded.
+	 * A later compaction bumps the session epoch, so an anchor whose epoch is
+	 * older than the current in-flight snapshot describes pre-compaction history
+	 * and must not override the rebased estimate.
+	 */
+	compactionEpoch?: number;
 	lastMessageTimestamp?: number;
 }
 

@@ -677,6 +677,76 @@ describe("parseModelPattern", () => {
 		});
 	});
 
+	describe("provider-qualified selectors vs aggregator raw-id shadowing", () => {
+		const anthropicOpus5 = createOpusModel("anthropic", "claude-opus-5", "Claude Opus 5");
+		const openRouterOpus5 = buildModel({
+			id: "anthropic/claude-opus-5",
+			name: "Claude Opus 5 (OpenRouter)",
+			api: "anthropic-messages",
+			provider: "openrouter",
+			baseUrl: "https://openrouter.ai/api/v1",
+			reasoning: true,
+			thinking: {
+				mode: "budget",
+				efforts: [Effort.Minimal, Effort.Low, Effort.Medium, Effort.High, Effort.XHigh],
+			},
+			input: ["text", "image"],
+			cost: { input: 15, output: 75, cacheRead: 1.5, cacheWrite: 18.75 },
+			contextWindow: 200000,
+			maxTokens: 32000,
+		});
+
+		test("anthropic/claude-opus-5 does not shadow onto the OpenRouter flat id when anthropic is unavailable", () => {
+			// Anthropic carries claude-opus-5 in the bundled catalog but is absent from
+			// the candidate set (disabled provider, missing creds at boot): the selector
+			// is provider-qualified and must fail rather than re-bind to OpenRouter.
+			const result = parseModelPattern("anthropic/claude-opus-5", [openRouterOpus5]);
+			expect(result.model).toBeUndefined();
+		});
+
+		test("the provider lock is case-insensitive (Anthropic/Claude-Opus-5 still fails closed)", () => {
+			// The matcher compares ids case-insensitively, so the lock must too —
+			// otherwise case variance silently re-enables the aggregator shadow.
+			const result = parseModelPattern("Anthropic/Claude-Opus-5", [openRouterOpus5]);
+			expect(result.model).toBeUndefined();
+		});
+
+		test("anthropic/claude-opus-5 resolves to the anthropic provider when it is available", () => {
+			const result = parseModelPattern("anthropic/claude-opus-5", [anthropicOpus5, openRouterOpus5]);
+			expect(result.model?.provider).toBe("anthropic");
+			expect(result.model?.id).toBe("claude-opus-5");
+		});
+
+		test("explicit openrouter/anthropic/claude-opus-5 still selects the OpenRouter model", () => {
+			const result = parseModelPattern("openrouter/anthropic/claude-opus-5", [openRouterOpus5]);
+			expect(result.model?.provider).toBe("openrouter");
+			expect(result.model?.id).toBe("anthropic/claude-opus-5");
+		});
+
+		test("resolveModelFromString keeps the provider lock when anthropic is absent", () => {
+			const result = resolveModelFromString("anthropic/claude-opus-5", [openRouterOpus5]);
+			expect(result).toBeUndefined();
+		});
+
+		test("resolveCliModel keeps the provider lock when anthropic is absent", () => {
+			const result = resolveCliModel({
+				cliModel: "anthropic/claude-opus-5",
+				modelRegistry: {
+					getAll: () => [openRouterOpus5],
+					getAvailable: () => [],
+				},
+			});
+			expect(result.model).toBeUndefined();
+			expect(result.error).toBeTruthy();
+		});
+
+		test("openai/gpt-4o:extended still resolves to the OpenRouter raw id (openai carries no such id)", () => {
+			const result = parseModelPattern("openai/gpt-4o:extended", allModels);
+			expect(result.model?.provider).toBe("openrouter");
+			expect(result.model?.id).toBe("openai/gpt-4o:extended");
+		});
+	});
+
 	describe("edge cases", () => {
 		test("empty pattern matches via partial matching", () => {
 			// Empty string is included in all model IDs, so partial matching finds a match

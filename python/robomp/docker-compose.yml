@@ -94,7 +94,7 @@ services:
       # subprocess runs with HOME=/srv/agent-home, so ~/.omp and ~/.agent
       # resolve there without exposing mutable host mounts.
       - ${HOME}/.omp/agent/models.container.yml:/srv/agent-home-stage/.omp/agent/models.yml:ro
-      - ${HOME}/.agent/AGENT.md:/srv/agent-home-stage/.agent/AGENTS.md:ro
+      - ${HOME}/.agent/AGENTS.md:/srv/agent-home-stage/.agent/AGENTS.md:ro
       - ${HOME}/.agent/rules:/srv/agent-home-stage/.agent/rules:ro
     ports:
       - "0.0.0.0:6543:8080"

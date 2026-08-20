@@ -821,6 +821,18 @@ export function buildOpenAIResponsesCompat(spec: OpenAIResponsesSpecLike): Resol
 	if (spec.compat?.omitReasoningEffort === undefined && !compat.supportsReasoningEffort) {
 		compat.omitReasoningEffort = true;
 	}
+	// xai-oauth cache/discovery rows written before a SKU joined the
+	// effort-capable allowlist still carry omitReasoningEffort: true. The
+	// allowlist is the live wire contract; do not let that stale flag hide
+	// the picker or strip reasoning.effort.
+	if (
+		spec.provider === "xai-oauth" &&
+		isGrokReasoningEffortCapable(id) &&
+		spec.compat?.supportsReasoningEffort !== false
+	) {
+		compat.supportsReasoningEffort = true;
+		compat.omitReasoningEffort = false;
+	}
 	return compat;
 }
 
