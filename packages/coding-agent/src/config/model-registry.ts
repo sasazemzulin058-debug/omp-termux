@@ -1,5 +1,5 @@
 import * as path from "node:path";
-import type { ApiKeyResolver, FetchImpl } from "@oh-my-pi/pi-ai";
+import type { ApiKeyResolver, FetchImpl, UsageProvider } from "@oh-my-pi/pi-ai";
 import { registerCustomApi, unregisterCustomApis } from "@oh-my-pi/pi-ai/api-registry";
 import { registerOAuthProvider, unregisterOAuthProvider, unregisterOAuthProviders } from "@oh-my-pi/pi-ai/oauth";
 import type { OAuthCredentials, OAuthLoginCallbacks } from "@oh-my-pi/pi-ai/oauth/types";
@@ -16,7 +16,7 @@ import type {
 } from "@oh-my-pi/pi-ai/types";
 import type { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
-import { readModelCache } from "@oh-my-pi/pi-catalog/model-cache";
+import { readModelCache, writeModelCache } from "@oh-my-pi/pi-catalog/model-cache";
 import {
 	createModelManager,
 	type ModelManagerOptions,
@@ -61,6 +61,7 @@ import {
 	type DiscoveryContext,
 	type DiscoveryProviderConfig,
 	discoverLlamaCppModelRuntimeMetadata,
+	discoverLmStudioModelRuntimeMetadata,
 	discoverModelsByProviderType,
 	ensureLlamaCppV1BaseUrl,
 	getImplicitOllamaBaseUrl,
@@ -370,21 +371,51 @@ export class ModelRegistry {
 	}
 
 	/**
+	 * True when the provider's models expose context metadata that only appears
+	 * after a lazy load — llama.cpp's `meta.n_ctx` once a cold instance spins up
+	 * (#3310/#3311), LM Studio's `loaded_context_length` once it JIT-loads the
+	 * model on the first inference (#9001). Callers use this to decide whether a
+	 * post-first-response refresh is worth a native probe.
+	 */
+	hasLazyRuntimeMetadata(provider: string): boolean {
+		return this.#findLazyRuntimeDiscovery(provider) !== undefined;
+	}
+
+	#findLazyRuntimeDiscovery(provider: string): DiscoveryProviderConfig | undefined {
+		return this.#discoverableProviders.find(
+			providerConfig =>
+				providerConfig.provider === provider &&
+				(providerConfig.discovery.type === "llama.cpp" || providerConfig.discovery.type === "lm-studio"),
+		);
+	}
+
+	/**
 	 * Refresh dynamic metadata that can appear only after a local model loads.
+	 *
+	 * llama.cpp exposes `meta.n_ctx` once a lazy-loaded instance is up
+	 * (#3310/#3311); LM Studio exposes `loaded_context_length` once it JIT-loads
+	 * the model on first inference (#9001). Both are captured only as a snapshot
+	 * at discovery time, so re-probe the selected model's native runtime metadata
+	 * and patch its context window to what the backend actually serves.
 	 */
 	async refreshSelectedModelMetadata(model: Model<Api>): Promise<Model<Api>> {
-		const llamaCppDiscoveryConfig = this.#discoverableProviders.find(
-			providerConfig => providerConfig.provider === model.provider && providerConfig.discovery.type === "llama.cpp",
-		);
-		if (!llamaCppDiscoveryConfig) {
+		const discoveryConfig = this.#findLazyRuntimeDiscovery(model.provider);
+		if (!discoveryConfig) {
 			return model;
 		}
 		this.#ensureFullSnapshot();
-		const runtimeMetadata = await discoverLlamaCppModelRuntimeMetadata(
-			model,
-			this.#nonResolvingDiscoveryContext(),
-			llamaCppDiscoveryConfig.discovery.timeoutMs,
-		);
+		const runtimeMetadata =
+			discoveryConfig.discovery.type === "lm-studio"
+				? await discoverLmStudioModelRuntimeMetadata(
+						model,
+						this.#nonResolvingDiscoveryContext(),
+						discoveryConfig.discovery.timeoutMs,
+					)
+				: await discoverLlamaCppModelRuntimeMetadata(
+						model,
+						this.#nonResolvingDiscoveryContext(),
+						discoveryConfig.discovery.timeoutMs,
+					);
 		if (runtimeMetadata === undefined) {
 			return this.find(model.provider, model.id) ?? model;
 		}
@@ -789,15 +820,18 @@ export class ModelRegistry {
 		return { models: cachedModels, authoritativeFreshProviders };
 	}
 
+	#configuredDiscoveryHeaderFallback(providerId: string): Record<string, string> | undefined {
+		const override = this.#providerOverrides.get(providerId);
+		if (override?.authHeader !== true || !override.apiKey) return undefined;
+		const headers = mergeAuthHeaderSources([override.headers], override.authHeader, override.apiKey);
+		return headers?.Authorization ? headers : undefined;
+	}
+
 	#loadCachedDiscoverableModels(): Model<Api>[] {
 		const cachedModels: Model<Api>[] = [];
 		for (const providerConfig of this.#discoverableProviders) {
-			const cache = readModelCache<Api>(
-				this.#configuredDiscoveryCacheProviderId(providerConfig),
-				24 * 60 * 60 * 1000,
-				Date.now,
-				this.#cacheDbPath,
-			);
+			const cacheProviderId = this.#configuredDiscoveryCacheProviderId(providerConfig);
+			const cache = readModelCache<Api>(cacheProviderId, 24 * 60 * 60 * 1000, Date.now, this.#cacheDbPath);
 			if (!cache) {
 				this.#providerDiscoveryStates.set(providerConfig.provider, {
 					provider: providerConfig.provider,
@@ -809,13 +843,33 @@ export class ModelRegistry {
 				continue;
 			}
 			const configStale = this.#isDiscoveryCacheOlderThanModelsConfig(cache.updatedAt);
-			// Cached rows never persist headers (#5780); models that had live
-			// headers cannot be rebuilt here, so exclude them and mark the
-			// discovery stale to force a refetch instead of returning models
-			// missing required transport headers.
+			// Cached rows never persist headers (#5780). A pinned models.yml
+			// authHeader is re-derived from the current config; this also repairs
+			// rows written before the discovery manager knew that fallback, when
+			// every header-bearing model was marked unrestorable.
+			const restorableHeaderFallback = this.#configuredDiscoveryHeaderFallback(providerConfig.provider);
 			const omittedHeaderIds = new Set(cache.headerOmittedModelIds);
+			const hasUnrestoredHeaders = omittedHeaderIds.size > 0 && !restorableHeaderFallback;
 			const usableCacheModels =
-				omittedHeaderIds.size > 0 ? cache.models.filter(model => !omittedHeaderIds.has(model.id)) : cache.models;
+				omittedHeaderIds.size === 0
+					? cache.models
+					: restorableHeaderFallback
+						? cache.models.map(model =>
+								omittedHeaderIds.has(model.id) ? { ...model, headers: { ...restorableHeaderFallback } } : model,
+							)
+						: cache.models.filter(model => !omittedHeaderIds.has(model.id));
+			if (restorableHeaderFallback && cache.unrestorableHeaderModelIds.length > 0) {
+				writeModelCache(
+					cacheProviderId,
+					cache.updatedAt,
+					usableCacheModels.map(model => buildModel(model)),
+					cache.authoritative,
+					cache.staticFingerprint,
+					this.#cacheDbPath,
+					[],
+					restorableHeaderFallback,
+				);
+			}
 			const models = this.#applyProviderModelOverrides(
 				providerConfig.provider,
 				this.#normalizeDiscoverableModels(
@@ -836,7 +890,7 @@ export class ModelRegistry {
 					!cache.fresh ||
 					!cache.authoritative ||
 					configStale ||
-					omittedHeaderIds.size > 0,
+					hasUnrestoredHeaders,
 				fetchedAt: cache.updatedAt,
 				models: models.map(model => model.id),
 			});
@@ -1129,10 +1183,10 @@ export class ModelRegistry {
 			return `${providerConfig.provider}:openai-models-list-context-v3`;
 		}
 		if (providerConfig.discovery.type === "litellm") {
-			// rich-v2 invalidates rows cached before reseller usage-suffix stripping
-			// (stale display names like `MiniMax-M3 (3x usage)`); keep in lockstep
-			// with the catalog package's `litellm:rich-vN` namespace.
-			return `${providerConfig.provider}:litellm-rich-v2`;
+			// rich-v3 invalidates rows cached before per-model Responses routing;
+			// keep in lockstep with the catalog package's `litellm:rich-vN`
+			// namespace whenever LiteLLM mapping behavior changes.
+			return `${providerConfig.provider}:litellm-rich-v3`;
 		}
 		return providerConfig.provider;
 	}
@@ -1197,6 +1251,7 @@ export class ModelRegistry {
 			cacheProviderId,
 			cacheTtlMs: 24 * 60 * 60 * 1000,
 			fetchDynamicModels,
+			restorableHeaderFallback: this.#configuredDiscoveryHeaderFallback(providerId),
 		});
 		const result = await manager.refresh(effectiveStrategy);
 		const status = discoveryError
@@ -1925,6 +1980,7 @@ export class ModelRegistry {
 		this.#runtimeModelModifiers.delete(providerName);
 		this.#lastModelModifierWarnings.delete(providerName);
 		this.authStorage.removeConfigApiKey(providerName);
+		this.authStorage.removeRuntimeUsageProvider(providerName);
 	}
 
 	/**
@@ -2049,6 +2105,13 @@ export class ModelRegistry {
 		}
 
 		this.#ensureFullSnapshot();
+
+		// Extension usage providers override built-ins/configured resolvers for the
+		// provider lifetime. #clearRuntimeProviderState removes this override when
+		// the owning extension is unregistered or replaced.
+		if (config.usage) {
+			this.authStorage.setRuntimeUsageProvider(providerName, config.usage, config.apiKey);
+		}
 		if (config.apiKey) {
 			this.#installProviderApiKey(providerName, config.apiKey);
 			// Persist runtime API keys so they survive #reloadStaticModels() cycles
@@ -2240,6 +2303,8 @@ export interface ProviderConfigInput {
 	authHeader?: boolean;
 	/** Streaming transport override — see {@link Model.transport}. */
 	transport?: Model<Api>["transport"];
+	/** Optional normalized usage fetcher; takes precedence over built-in usage providers. */
+	usage?: UsageProvider;
 	oauth?: {
 		name: string;
 		login(callbacks: OAuthLoginCallbacks): Promise<OAuthCredentials | string>;

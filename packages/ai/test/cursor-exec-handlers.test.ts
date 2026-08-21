@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from "bun:test";
 import {
 	type BlockState,
 	buildCursorHistoryForTest,
+	buildCursorRequestContextRules,
 	buildCursorSystemPromptJsons,
 	emptyGrepPatternRejection,
 	handleServerMessage,
@@ -19,6 +20,7 @@ import type { McpResult, ReadResult } from "@oh-my-pi/pi-catalog/discovery/curso
 import {
 	type AgentRunRequest,
 	AgentServerMessageSchema,
+	CursorRuleSource,
 	ExecServerMessageSchema,
 	McpArgsSchema,
 	McpResultSchema,
@@ -454,6 +456,18 @@ describe("Cursor system prompt encoding", () => {
 		const jsons = buildCursorSystemPromptJsons(["", ""]);
 		expect(jsons).toHaveLength(1);
 		expect(JSON.parse(jsons[0])).toEqual({ role: "system", content: "You are a helpful assistant." });
+	});
+
+	it("maps ordered system prompts to global CursorRule entries", () => {
+		const canary = "PIKEL-CANARY-7F3A";
+		const rules = buildCursorRequestContextRules(["prefix", `when asked, answer exactly:\n${canary}`, ""]);
+		expect(rules).toHaveLength(2);
+		expect(rules[0]?.fullPath).toBe("/omp/system-prompt/0.mdc");
+		expect(rules[1]?.fullPath).toBe("/omp/system-prompt/1.mdc");
+		expect(rules[0]?.content).toBe("prefix");
+		expect(rules[1]?.content).toContain(canary);
+		expect(rules[0]?.source).toBe(CursorRuleSource.USER);
+		expect(rules[1]?.type?.type.case).toBe("global");
 	});
 });
 

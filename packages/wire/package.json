@@ -4,7 +4,7 @@
   "version": "17.4.0",
   "description": "Shared wire protocol types for Oh My Pi packages",
   "homepage": "https://omp.sh",
-  "author": "Can Boluk",
+  "author": "Stencil Labs, Inc.",
   "license": "MIT",
   "repository": {
     "type": "git",

@@ -3,10 +3,7 @@
  *
  * Provides a hierarchical settings interface:
  * - Plugin list (npm plugins + marketplace plugins)
- *   - npm plugin detail (enable/disable, features, config)
- *   - Marketplace plugin detail (enable/disable + read-only metadata)
- *     - Feature toggles
- *     - Config value editor
+ *   - Plugin details (enablement, manifest settings, and marketplace metadata)
  */
 import {
 	type Component,
@@ -23,13 +20,14 @@ import {
 import { logger } from "@oh-my-pi/pi-utils";
 import { clearPluginRootsAndCaches, resolveOrDefaultProjectRegistryPath } from "../../discovery/helpers";
 import { PluginManager } from "../../extensibility/plugins/manager";
-import type { InstalledPluginSummary } from "../../extensibility/plugins/marketplace";
 import {
 	getInstalledPluginsRegistryPath,
 	getMarketplacesCacheDir,
 	getMarketplacesRegistryPath,
 	getPluginsCacheDir,
+	type InstalledPluginSummary,
 	MarketplaceManager,
+	parsePluginId,
 } from "../../extensibility/plugins/marketplace";
 import type { InstalledPlugin, PluginSettingSchema } from "../../extensibility/plugins/types";
 import { getSelectListTheme, getSettingsListTheme, theme } from "../../modes/theme/theme";
@@ -81,6 +79,72 @@ export interface PluginListCallbacks {
  */
 function marketplaceEnabled(summary: InstalledPluginSummary): boolean {
 	return summary.entries[0]?.enabled !== false;
+}
+
+async function buildPluginConfigItems(
+	plugin: InstalledPlugin,
+	manager: PluginManager,
+	onConfigChange: (key: string, value: unknown) => void,
+): Promise<SettingItem[]> {
+	const schemaSettings = plugin.manifest.settings;
+	if (!schemaSettings) return [];
+
+	const settings = await manager.getPluginSettings(plugin.name);
+	const items: SettingItem[] = [];
+	for (const key in schemaSettings) {
+		const schema = schemaSettings[key];
+		const currentValue = settings[key] ?? schema.default;
+		const displayValue = schema.secret && currentValue ? "••••••••" : String(currentValue ?? "(not set)");
+
+		if (schema.type === "boolean") {
+			items.push({
+				id: `config:${key}`,
+				label: `  ${key}`,
+				description: schema.description || `Configure ${key}`,
+				currentValue: currentValue ? "true" : "false",
+				values: ["true", "false"],
+			});
+		} else if (schema.type === "enum") {
+			items.push({
+				id: `config:${key}`,
+				label: `  ${key}`,
+				description: schema.description || `Configure ${key}`,
+				currentValue: String(currentValue ?? schema.default ?? ""),
+				submenu: (cv, done) =>
+					new ConfigEnumSubmenu(
+						key,
+						schema.description || `Select value for ${key}`,
+						schema.values,
+						cv,
+						value => {
+							onConfigChange(key, value);
+							done(value);
+						},
+						() => done(),
+					),
+			});
+		} else {
+			items.push({
+				id: `config:${key}`,
+				label: `  ${key}`,
+				description: schema.description || `Configure ${key}`,
+				currentValue: displayValue,
+				submenu: (cv, done) =>
+					new ConfigInputSubmenu(
+						key,
+						schema,
+						cv === "(not set)" ? "" : cv,
+						value => {
+							const parsed = schema.type === "number" ? Number(value) : value;
+							onConfigChange(key, parsed);
+							done(String(value));
+						},
+						() => done(),
+					),
+			});
+		}
+	}
+	return items;
 }
 
 /**
@@ -273,64 +337,7 @@ export class PluginDetailComponent extends OverlayPanel {
 			}
 		}
 
-		// Config settings
-		if (manifest.settings && Object.keys(manifest.settings).length > 0) {
-			const settings = await this.manager.getPluginSettings(plugin.name);
-
-			for (const [key, schema] of Object.entries(manifest.settings)) {
-				const currentValue = settings[key] ?? schema.default;
-				const displayValue = schema.secret && currentValue ? "••••••••" : String(currentValue ?? "(not set)");
-
-				if (schema.type === "boolean") {
-					items.push({
-						id: `config:${key}`,
-						label: `  ${key}`,
-						description: schema.description || `Configure ${key}`,
-						currentValue: currentValue ? "true" : "false",
-						values: ["true", "false"],
-					});
-				} else if (schema.type === "enum") {
-					items.push({
-						id: `config:${key}`,
-						label: `  ${key}`,
-						description: schema.description || `Configure ${key}`,
-						currentValue: String(currentValue ?? schema.default ?? ""),
-						submenu: (cv, done) =>
-							new ConfigEnumSubmenu(
-								key,
-								schema.description || `Select value for ${key}`,
-								schema.values,
-								cv,
-								value => {
-									this.callbacks.onConfigChange(key, value);
-									done(value);
-								},
-								() => done(),
-							),
-					});
-				} else {
-					// string or number - show as submenu with input
-					items.push({
-						id: `config:${key}`,
-						label: `  ${key}`,
-						description: schema.description || `Configure ${key}`,
-						currentValue: displayValue,
-						submenu: (cv, done) =>
-							new ConfigInputSubmenu(
-								key,
-								schema,
-								cv === "(not set)" ? "" : cv,
-								value => {
-									const parsed = schema.type === "number" ? Number(value) : value;
-									this.callbacks.onConfigChange(key, parsed);
-									done(String(value));
-								},
-								() => done(),
-							),
-					});
-				}
-			}
-		}
+		items.push(...(await buildPluginConfigItems(plugin, this.manager, this.callbacks.onConfigChange)));
 
 		this.#settingsList = new SettingsList(
 			items,
@@ -379,28 +386,57 @@ export class PluginDetailComponent extends OverlayPanel {
 
 export interface MarketplacePluginDetailCallbacks {
 	onEnabledChange: (enabled: boolean) => void;
+	onConfigChange: (pluginName: string, key: string, value: unknown) => void;
+	/** Schedules a TUI frame after asynchronous manifest settings load. */
+	requestRender?: () => void;
 	onBack: () => void;
 }
 
 /**
- * Detail view for a marketplace plugin. Marketplace plugins do not declare
- * features or settings, so the panel exposes a single enable/disable toggle
- * plus the read-only metadata from the installed-plugins registry.
+ * Detail view for a marketplace plugin, including settings declared by its
+ * runtime package and metadata from the installed-plugins registry.
  */
 export class MarketplacePluginDetailComponent extends OverlayPanel {
-	#settingsList: SettingsList;
+	#settingsList!: SettingsList;
 
 	constructor(
 		private plugin: InstalledPluginSummary,
+		private readonly manager: PluginManager,
 		private readonly callbacks: MarketplacePluginDetailCallbacks,
 	) {
 		super(plugin.id);
+		this.#render(undefined, []);
+		void this.#loadConfig();
+	}
 
+	async #loadConfig(): Promise<void> {
+		const entry = this.plugin.entries[0];
+		if (!entry) return;
+
+		const fallbackName = parsePluginId(this.plugin.id)?.name ?? this.plugin.id;
+		try {
+			const runtimePlugin = await this.manager.getPlugin(fallbackName, { path: entry.installPath });
+			if (!runtimePlugin) return;
+			const configItems = await buildPluginConfigItems(runtimePlugin, this.manager, (key, value) =>
+				this.callbacks.onConfigChange(runtimePlugin.name, key, value),
+			);
+			this.#render(runtimePlugin, configItems);
+			this.callbacks.requestRender?.();
+		} catch (err) {
+			logger.error("Settings → Plugins: failed to load marketplace plugin settings", {
+				pluginId: this.plugin.id,
+				path: entry.installPath,
+				error: err instanceof Error ? err.message : String(err),
+			});
+		}
+	}
+
+	#render(runtimePlugin: InstalledPlugin | undefined, configItems: SettingItem[]): void {
+		this.clear();
+
+		const plugin = this.plugin;
 		const entry = plugin.entries[0];
-		const enabled = marketplaceEnabled(plugin);
-
 		this.title = plugin.id;
-
 		const subtitleParts = [`[${plugin.scope}]`];
 		if (plugin.shadowedBy) subtitleParts.push(`${theme.status.shadowed} shadowed by ${plugin.shadowedBy}`);
 		this.addChild(new Text(theme.fg("muted", subtitleParts.join(" ")), 0, 0));
@@ -411,14 +447,14 @@ export class MarketplacePluginDetailComponent extends OverlayPanel {
 				id: "__enabled__",
 				label: "Enabled",
 				description: "Enable or disable this marketplace plugin",
-				currentValue: enabled ? "true" : "false",
+				currentValue: marketplaceEnabled(plugin) ? "true" : "false",
 				values: ["true", "false"],
 			},
+			...configItems,
 		];
-
 		this.#settingsList = new SettingsList(
 			items,
-			items.length,
+			Math.min(items.length, 10),
 			getSettingsListTheme(),
 			(id, newValue) => {
 				if (id === "__enabled__") {
@@ -428,6 +464,11 @@ export class MarketplacePluginDetailComponent extends OverlayPanel {
 						...this.plugin,
 						entries: this.plugin.entries.map(e => ({ ...e, enabled: next })),
 					};
+				} else if (id.startsWith("config:")) {
+					const key = id.slice(7);
+					if (runtimePlugin?.manifest.settings?.[key]?.type === "boolean") {
+						this.callbacks.onConfigChange(runtimePlugin.name, key, newValue === "true");
+					}
 				}
 			},
 			this.callbacks.onBack,
@@ -435,9 +476,6 @@ export class MarketplacePluginDetailComponent extends OverlayPanel {
 
 		this.addChild(this.#settingsList);
 		this.addChild(new Spacer(1));
-
-		// Read-only metadata. SettingsList rejects items without `values`/`submenu`,
-		// so we render the metadata as plain text rows beneath the toggle.
 		this.addChild(new Text(theme.fg("dim", `version       ${entry?.version ?? "(unknown)"}`), 0, 0));
 		this.addChild(new Text(theme.fg("dim", `scope         ${plugin.scope}`), 0, 0));
 		this.addChild(
@@ -454,7 +492,7 @@ export class MarketplacePluginDetailComponent extends OverlayPanel {
 		}
 
 		this.addChild(new Spacer(1));
-		this.addChild(new Text(theme.fg("dim", "Enter to toggle · Esc to go back"), 0, 0));
+		this.addChild(new Text(theme.fg("dim", "Enter to edit · Esc to go back"), 0, 0));
 	}
 
 	handleInput(data: string): void {
@@ -571,6 +609,8 @@ class ConfigInputSubmenu extends OverlayPanel {
 export interface PluginSettingsCallbacks {
 	onClose: () => void;
 	onPluginChanged: () => void | Promise<void>;
+	/** Schedules a TUI frame after asynchronous plugin data loads. */
+	requestRender?: () => void;
 }
 
 /** Component with handleInput method */
@@ -693,7 +733,7 @@ export class PluginSettingsComponent extends Container {
 		this.#currentMarketplacePlugin = plugin;
 		this.clear();
 
-		this.#viewComponent = new MarketplacePluginDetailComponent(plugin, {
+		this.#viewComponent = new MarketplacePluginDetailComponent(plugin, this.#manager, {
 			onEnabledChange: async enabled => {
 				try {
 					const mgr = await this.#buildMarketplaceManager();
@@ -708,7 +748,12 @@ export class PluginSettingsComponent extends Container {
 					});
 				}
 			},
+			onConfigChange: async (pluginName, key, value) => {
+				await this.#manager.setPluginSetting(pluginName, key, value);
+				await this.callbacks.onPluginChanged();
+			},
 			onBack: () => this.#showPluginList(),
+			requestRender: this.callbacks.requestRender,
 		});
 
 		this.addChild(this.#viewComponent);

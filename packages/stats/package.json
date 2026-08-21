@@ -4,7 +4,7 @@
   "version": "17.4.0",
   "description": "Local observability dashboard for pi AI usage statistics",
   "homepage": "https://omp.sh",
-  "author": "Can Boluk",
+  "author": "Stencil Labs, Inc.",
   "license": "MIT",
   "repository": {
     "type": "git",

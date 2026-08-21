@@ -2,6 +2,26 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added helper functions and constants for reading enterprise ChatGPT workspace data-residency regions from Codex OAuth access tokens and forwarding the residency header to Codex backend endpoints.
+
+### Changed
+
+- Preserved API-advertised `tool_mode` metadata (such as `code_mode_only` for GPT-5.6 Code Mode models) on Codex catalog models and types ([#9069](https://github.com/can1357/oh-my-pi/pull/9069)).
+- Added an optional `tokenizer` family field across bundled, discovered, and custom catalog models (`claude-v3`/`v47`/`v5`, Qwen 3.5+, DeepSeek V3/V4/R1, Kimi K2/K3, and GLM-5+), which can also be explicitly overridden in model configuration.
+- Updated subscription Codex GPT-5.6 Sol, Terra, and Luna models to include first-party `cost.longContext` pricing tiers for token inputs exceeding 272K tokens.
+
+### Fixed
+
+- Fixed Vercel AI Gateway Muse Spark 1.2 Contributor requests failing with HTTP 400 errors by capping advertised output allowances to the model's 131K limit.
+- Fixed LiteLLM model discovery to route OpenAI models through the Responses API for reasoning summaries in thinking blocks ([#9085](https://github.com/can1357/oh-my-pi/pull/9085)).
+- Fixed OpenCode Console Go and Zen Responses providers rejecting forced tool choices by automatically downgrading forced or named tool selections to `auto`.
+- Fixed OpenCode Go Muse Spark 1.2 and Muse Spark 1.2 Contributor models failing during tool calls or missing reasoning effort levels, ensuring they correctly route to the Responses API with full thinking, context, and multimodal support ([#8957](https://github.com/can1357/oh-my-pi/issues/8957)).
+- Improved OpenCode gateway model discovery to automatically infer the Responses API route for unlisted models from sibling gateways and billing base variants.
+- Fixed Cursor GPT-5.6 (Luna, Sol, and Terra) model discovery creating duplicate rows for each thinking tier by collapsing tiers into unified models with configurable reasoning effort ([#9025](https://github.com/can1357/oh-my-pi/issues/9025)).
+- Fixed Google Gemini CLI model discovery failing with `403 PERMISSION_DENIED` by directing catalog refresh requests to the appropriate Antigravity discovery endpoints ([#8885](https://github.com/can1357/oh-my-pi/issues/8885)).
+
 ## [17.4.0] - 2026-08-20
 
 ### Added

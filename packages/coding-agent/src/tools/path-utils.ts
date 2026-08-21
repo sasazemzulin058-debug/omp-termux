@@ -1478,7 +1478,7 @@ export async function resolveToolSearchScope(opts: ToolScopeOptions): Promise<To
 		}
 		if (isSshUrl(rawPath)) {
 			throw new ToolError(
-				`Cannot ${internalUrlAction} a remote ssh:// path (no local file): ${rawPath}. Use \`read ${rawPath}\` to view it, or the \`search\` tool to grep remote files.`,
+				`Cannot ${internalUrlAction} a remote ssh:// path (no local file): ${rawPath}. Use \`read ${rawPath}\` to view it, or use \`grep\` on a specific remote file.`,
 			);
 		}
 		if (hasGlobPathChars(rawPath)) {

@@ -19,7 +19,7 @@ resolver = "3"
 version = "17.4.0"
 edition = "2024"
 license = "MIT"
-authors = ["Can Boluk"]
+authors = ["Stencil Labs, Inc."]
 homepage = "https://omp.sh/"
 repository = "https://github.com/can1357/oh-my-pi"
 

@@ -1406,6 +1406,7 @@ export class SettingsSelectorComponent implements Component {
 		this.#pluginComponent = new PluginSettingsComponent(this.context.cwd, {
 			onClose: () => this.callbacks.onCancel(),
 			onPluginChanged: () => this.callbacks.onPluginsChanged?.(),
+			requestRender: this.context.requestRender,
 		});
 	}
 

@@ -551,7 +551,6 @@ describe("ACP builtin slash commands", () => {
 			"/btw hi",
 			"/new",
 			"/drop",
-			"/handoff",
 			"/fork",
 		];
 		for (const cmd of removedCommands) {

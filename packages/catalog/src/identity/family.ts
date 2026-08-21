@@ -209,6 +209,16 @@ export const isOpenAIGptOssModelId = memo((modelId: string): boolean => {
 	return /(^|\/)gpt-oss[-:]/i.test(modelId);
 });
 
+/**
+ * Meta Muse Spark ids (`muse-spark-1.1`, `muse-spark-1.2`,
+ * `muse-spark-1.2-contributor`, `meta/muse-spark-1.2`). The Responses
+ * `reasoning.effort` wire accepts `none` (thinking-off) plus
+ * `minimal`/`low`/`medium`/`high`/`xhigh`.
+ */
+export const isMuseSparkModelId = memo((modelId: string): boolean => {
+	return /(^|\/)muse-spark(?:[-.]|$)/i.test(modelId);
+});
+
 /** OpenAI model ids (gpt-*, chatgpt-*, o1/o3/o4 SKUs, codex-*, or openai/*). */
 export const isOpenAIModelId = memo((modelId: string): boolean => {
 	return (

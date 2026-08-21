@@ -12,6 +12,7 @@ import {
 	isKimiModelId,
 	isMinimaxM2FamilyModelId,
 	isMinimaxM3FamilyModelId,
+	isMuseSparkModelId,
 	isOpenAIGptOssModelId,
 	isOpenAIModelId,
 	isQwen38PlusTemplateEffortModelId,
@@ -229,6 +230,22 @@ describe("isMinimaxM3FamilyModelId", () => {
 		expect(isMinimaxM3FamilyModelId("MiniMax-Text-01")).toBe(false);
 		expect(isMinimaxM3FamilyModelId("minimax-music")).toBe(false);
 		expect(isMinimaxM3FamilyModelId("kimi-m3")).toBe(false);
+	});
+});
+
+describe("isMuseSparkModelId", () => {
+	test("matches Muse Spark ids across namespaces and contributor SKUs", () => {
+		expect(isMuseSparkModelId("muse-spark-1.1")).toBe(true);
+		expect(isMuseSparkModelId("muse-spark-1.2")).toBe(true);
+		expect(isMuseSparkModelId("muse-spark-1.2-contributor")).toBe(true);
+		expect(isMuseSparkModelId("meta/muse-spark-1.2")).toBe(true);
+	});
+
+	test("rejects adjacent spark or muse names", () => {
+		expect(isMuseSparkModelId("spark-1.2")).toBe(false);
+		expect(isMuseSparkModelId("muse-1.2")).toBe(false);
+		expect(isMuseSparkModelId("amuse-spark-1.2")).toBe(false);
+		expect(isMuseSparkModelId("gpt-5.3-codex-spark")).toBe(false);
 	});
 });
 

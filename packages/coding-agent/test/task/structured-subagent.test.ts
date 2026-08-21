@@ -431,7 +431,7 @@ describe("structured subagent primitive", () => {
 			runStructuredSubagent(
 				request({ session: session({ isolationMode: "worktree" }), isolation: { requested: true } }),
 			),
-		).rejects.toThrow("Isolated subagent execution requires a git repository");
+		).rejects.toThrow("Isolated subagent execution could not be prepared: not a repository");
 		expect(artifactsDirsFromRegistry()).toEqual([]);
 	});
 

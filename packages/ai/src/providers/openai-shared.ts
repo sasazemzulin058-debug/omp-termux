@@ -2363,6 +2363,17 @@ export function appendResponsesToolResultMessages<TApi extends Api>(
  */
 type ResponsesToolCallBlock = ToolCall & { [kStreamingPartialJson]: string; [kStreamingLastParseLen]?: number };
 
+function ensureReasoningSummaryPart(
+	item: ResponseReasoningItem,
+	summaryIndex: number,
+): ResponseReasoningItem["summary"][number] {
+	item.summary = item.summary || [];
+	while (item.summary.length <= summaryIndex) {
+		item.summary.push({ type: "summary_text", text: "" });
+	}
+	return item.summary[summaryIndex]!;
+}
+
 export function appendReasoningSummaryPart(
 	item: ResponseReasoningItem,
 	part: ResponseReasoningItem["summary"][number],
@@ -2450,13 +2461,42 @@ export function appendReasoningSummaryTextDelta(
 	stream: AssistantMessageEventStream,
 	output: AssistantMessage,
 	contentIndex: number,
+	summaryIndex = 0,
 ): void {
-	item.summary = item.summary || [];
-	const lastPart = item.summary[item.summary.length - 1];
-	if (!lastPart) return;
+	const part = ensureReasoningSummaryPart(item, summaryIndex);
 	block.thinking += delta;
-	lastPart.text += delta;
+	part.text += delta;
 	stream.push({ type: "thinking_delta", contentIndex, delta, partial: output });
+}
+
+/**
+ * Applies a completed reasoning-summary snapshot, including providers that omit
+ * the preceding summary-part event.
+ */
+export function applyReasoningSummaryTextDone(
+	item: ResponseReasoningItem,
+	block: ThinkingContent,
+	text: string,
+	summaryIndex: number,
+	stream: AssistantMessageEventStream,
+	output: AssistantMessage,
+	contentIndex: number,
+): void {
+	const part = ensureReasoningSummaryPart(item, summaryIndex);
+	const previous = part.text;
+	part.text = text;
+	if (!text || text === previous) return;
+	if (!block.thinking) {
+		block.thinking = text;
+		stream.push({ type: "thinking_delta", contentIndex, delta: text, partial: output });
+		return;
+	}
+	if (text.startsWith(block.thinking)) {
+		const delta = text.slice(block.thinking.length);
+		if (!delta) return;
+		block.thinking += delta;
+		stream.push({ type: "thinking_delta", contentIndex, delta, partial: output });
+	}
 }
 
 export function appendReasoningSummaryPartDone(
@@ -2991,6 +3031,20 @@ export async function processResponsesStream<TApi extends Api>(
 					entry.item,
 					entry.block,
 					event.delta,
+					stream,
+					output,
+					contentIndexOf(entry.block),
+					event.summary_index,
+				);
+			}
+		} else if (event.type === "response.reasoning_summary_text.done") {
+			const entry = lookupOpenItem(event);
+			if (entry?.item.type === "reasoning" && entry.block.type === "thinking") {
+				applyReasoningSummaryTextDone(
+					entry.item,
+					entry.block,
+					event.text,
+					event.summary_index,
 					stream,
 					output,
 					contentIndexOf(entry.block),

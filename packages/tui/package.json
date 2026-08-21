@@ -4,7 +4,7 @@
   "version": "17.4.0",
   "description": "Terminal User Interface library with differential rendering for efficient text-based applications",
   "homepage": "https://omp.sh",
-  "author": "Can Boluk",
+  "author": "Stencil Labs, Inc.",
   "contributors": [
     "Mario Zechner"
   ],

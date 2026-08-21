@@ -314,6 +314,56 @@ describe("AgentSession advisor toggle", () => {
 		);
 	});
 
+	it("activates an enabled advisor once background model discovery settles", async () => {
+		// Advisor role points at a valid model that is missing from the catalog at
+		// construction (discovery-backed provider still loading), so the advisor
+		// starts `no_model`. Regression for the startup ordering race in #9010.
+		const advisorSelector = `${replacementModel.provider}/${replacementModel.id}`;
+		const settings = Settings.isolated({ "compaction.enabled": false, "advisor.enabled": true });
+		settings.setModelRole("advisor", advisorSelector);
+
+		const fullCatalog = modelRegistry.getAvailable();
+		const withoutAdvisorModel = fullCatalog.filter(
+			m => !(m.provider === replacementModel.provider && m.id === replacementModel.id),
+		);
+		let discovered = false;
+		vi.spyOn(modelRegistry, "getAvailable").mockImplementation(() =>
+			discovered ? fullCatalog : withoutAdvisorModel,
+		);
+		const { promise: refreshSettled, resolve: settleRefresh } = Promise.withResolvers<void>();
+		vi.spyOn(modelRegistry, "awaitBackgroundRefresh").mockImplementation(() => refreshSettled);
+
+		const raceSession = new AgentSession({
+			agent: new Agent({ initialState: { model, systemPrompt: ["Test"], tools: [], messages: [] } }),
+			sessionManager,
+			settings,
+			modelRegistry,
+			advisorTools: [],
+		});
+
+		// The retry emits `model_changed` once it rebuilds; await that signal
+		// rather than a wall-clock delay so the test tracks the real event.
+		const { promise: advisorRebuilt, resolve: signalRebuilt } = Promise.withResolvers<void>();
+		const unsubscribe = raceSession.subscribe(event => {
+			if (event.type === "model_changed") signalRebuilt();
+		});
+		try {
+			expect(raceSession.isAdvisorEnabled()).toBe(true);
+			expect(raceSession.isAdvisorActive()).toBe(false);
+
+			// Discovery completes and the background refresh settles: the advisor
+			// rebuilds against the now-complete catalog and goes live.
+			discovered = true;
+			settleRefresh();
+			await advisorRebuilt;
+			expect(raceSession.isAdvisorActive()).toBe(true);
+		} finally {
+			unsubscribe();
+			vi.restoreAllMocks();
+			await raceSession.dispose();
+		}
+	});
+
 	it("keeps sessions isolated when sharing a Settings instance", async () => {
 		const sharedSettings = Settings.isolated({ "compaction.enabled": false });
 		sharedSettings.setModelRole("advisor", "anthropic/claude-sonnet-4-5");

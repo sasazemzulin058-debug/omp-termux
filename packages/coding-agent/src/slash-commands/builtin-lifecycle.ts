@@ -1,10 +1,11 @@
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
-import { setProjectDir } from "@oh-my-pi/pi-utils";
+import { logger, setProjectDir } from "@oh-my-pi/pi-utils";
 import { applyProviderGlobalsFromSettings } from "../config/provider-globals";
 import { memoryStatsUnavailableMessage, resolveMemoryBackend } from "../memory-backend";
-import type { FreshSessionResult } from "../session/agent-session";
+import type { FreshSessionResult, HandoffResult } from "../session/agent-session";
 import { COMPACT_MODES, parseCompactArgs } from "../session/compact-modes";
+import { USER_INTERRUPT_LABEL } from "../session/messages";
 import { resolveResumableSession } from "../session/session-listing";
 import { formatShakeSummary, type ShakeMode } from "../session/shake-types";
 import { resolveToCwd } from "../tools/path-utils";
@@ -196,8 +197,63 @@ export const BUILTIN_LIFECYCLE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> =
 	{
 		name: "handoff",
 		description: "Hand off session context to a new session",
+		acpDescription: "Summarize the session into a handoff document and compact in place",
 		inlineHint: "[focus instructions]",
 		allowArgs: true,
+		handle: async (command, runtime) => {
+			if (runtime.session.isStreaming) {
+				return usage("Wait for the current response to finish or abort it before handing off.", runtime);
+			}
+			if (runtime.session.isGeneratingHandoff) {
+				return usage("Handoff generation is already in progress.", runtime);
+			}
+			const runHandoff = async (): Promise<void> => {
+				let result: HandoffResult | undefined;
+				try {
+					result = await runtime.session.handoff(command.args || undefined);
+				} catch (err) {
+					const message = errorMessage(err);
+					// A user interrupt (ACP `session/cancel`, TUI Esc) already settled the
+					// owning turn: `AgentSession.abort()` forwards its reason into the
+					// handoff abort controller, and `throwIfHandoffAborted` rethrows a
+					// reasoned abort verbatim — so the throw arrives as
+					// `USER_INTERRUPT_LABEL`, not "Handoff cancelled". Emitting anything
+					// here would append an out-of-turn chunk after the client already saw
+					// `stopReason: "cancelled"`, so consume silently.
+					if (message === USER_INTERRUPT_LABEL) {
+						return;
+					}
+					// `session.handoff()` normalizes an unreasoned cancellation to this
+					// exact message; every other throw is a real failure (no model
+					// selected, nothing to hand off, already compacted, provider error)
+					// and is surfaced verbatim behind the same "<verb> failed:" prefix
+					// `/compact` uses.
+					if (message === "Handoff cancelled") {
+						await runtime.output("Handoff cancelled.");
+						return;
+					}
+					// Persist the real failure so it stays debuggable after the client
+					// message scrolls away (same rationale as the TUI path, #7993).
+					logger.error("Handoff failed", { error: message });
+					await runtime.output(`Handoff failed: ${message}`);
+					return;
+				}
+				if (!result) {
+					await runtime.output("Handoff cancelled.");
+					return;
+				}
+				// `savedPath` is deliberately not reported: `SessionHandoff` only writes
+				// the document to disk when `options.autoTriggered` is set, which the
+				// user-invoked path never passes.
+				await runtime.output("Context handed off and compacted in place.");
+			};
+			if (runtime.runCommandInBackground) {
+				runtime.runCommandInBackground(runHandoff);
+				return commandConsumed();
+			}
+			await runHandoff();
+			return commandConsumed();
+		},
 		handleTui: async (command, runtime) => {
 			const customInstructions = command.args || undefined;
 			runtime.ctx.editor.setText("");
@@ -281,6 +337,29 @@ export const BUILTIN_LIFECYCLE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> =
 	{
 		name: "retry",
 		description: "Retry the last failed agent turn",
+		handle: async (_command, runtime) => {
+			if (runtime.session.isStreaming) {
+				return usage("Wait for the current response to finish or abort it before retrying.", runtime);
+			}
+			const didRetry = await runtime.session.retry();
+			if (!didRetry) {
+				return usage("Nothing to retry.", runtime);
+			}
+			await runtime.output("Retrying the last failed turn.");
+			// `AgentSession.retry()` only schedules the continuation as a
+			// post-prompt task; it returns before the retried turn streams. Hosts
+			// whose prompt turn owns the event subscription (ACP) must stay open
+			// across that turn — `AcpAgent.prompt` installs the subscription
+			// before running the command and `#finishPrompt` unsubscribes, so
+			// returning early would silently swallow the entire retried turn
+			// (model output and tool calls). RPC and TUI omit this hook: they
+			// stream the continuation through their own session subscription, and
+			// blocking their command queue here would strand a follow-up `abort`.
+			await runtime.keepTurnOpenUntilIdle?.();
+			// `retry()` returned true, so a real agent turn is now scheduled — RPC
+			// hosts must not be told this was local-only work.
+			return commandConsumed({ agentInvoked: true });
+		},
 		handleTui: async (_command, runtime) => {
 			const didRetry = await runtime.ctx.session.retry();
 			if (!didRetry) {

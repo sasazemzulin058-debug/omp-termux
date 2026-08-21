@@ -573,7 +573,7 @@ export async function runStructuredSubagent(request: StructuredSubagentRequest):
 				const message = error instanceof Error ? error.message : String(error);
 				throw new StructuredSubagentError(
 					"isolation",
-					`Isolated subagent execution requires a git repository. ${message}`,
+					`Isolated subagent execution could not be prepared: ${message}`,
 					{ cause: error },
 				);
 			}

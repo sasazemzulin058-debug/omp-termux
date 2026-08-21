@@ -129,6 +129,48 @@ Core methods:
 
 `getServiceTiers()` returns a detached snapshot of the session's live per-family tier map. `setServiceTier(family, tier)` changes one family for subsequent requests; pass `undefined` to clear that session override. OpenAI accepts `auto`, `default`, `flex`, `scale`, or `priority`; Anthropic accepts `priority`; Google accepts `flex` or `priority`. Changes made while a response is streaming do not alter that in-flight request.
 
+### Provider registration
+
+`pi.registerProvider(name, config)` can include an optional `usage` field containing a
+`UsageProvider` imported from `@oh-my-pi/pi-ai`. Its `fetchUsage` implementation receives the
+normalized credential and returns a normalized `UsageReport`; the result is then handled
+by the host's AuthStorage cache, history, and usage displays just like built-in provider
+usage.
+
+```ts
+pi.registerProvider("my-provider", {
+  baseUrl: "https://api.example.com/v1",
+  api: "openai-completions",
+  usage: {
+    id: "my-provider",
+    async fetchUsage(params, { fetch }) {
+      const response = await fetch("https://api.example.com/usage", {
+        headers: { Authorization: `Bearer ${params.credential.apiKey}` },
+      });
+      if (!response.ok) return null;
+      const payload = (await response.json()) as { used: number; limit: number };
+      return {
+        provider: "my-provider",
+        fetchedAt: Date.now(),
+        limits: [
+          {
+            id: "requests",
+            label: "Requests",
+            scope: { provider: "my-provider" },
+            amount: { used: payload.used, limit: payload.limit, unit: "requests" },
+          },
+        ],
+      };
+    },
+  },
+});
+```
+
+An extension usage provider overrides a built-in provider with the same name for as
+long as that extension registration is active. `pi.unregisterProvider(name)` (and
+extension source cleanup) removes only that runtime override, restoring the built-in
+or configured usage resolver.
+
 In interactive mode, `input` handlers run before the built-in first-message auto-title check. Extensions that call `await pi.setSessionName(...)` from `input` can set the persisted session name and prevent the default auto-generated title from running for that session.
 
 Also exposed:

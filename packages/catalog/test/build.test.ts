@@ -445,6 +445,32 @@ describe("openai-completions wire-quirk compat detection", () => {
 			).supportsForcedToolChoice,
 		).toBe(true);
 	});
+	it("downgrades forced tool choice for OpenCode gateways on Responses API", () => {
+		expect(
+			buildOpenAIResponsesCompat({
+				id: "muse-spark-1.2-contributor",
+				provider: "opencode-go",
+				name: "Muse Spark",
+				baseUrl: "https://opencode.ai/zen/go/v1",
+			}).supportsForcedToolChoice,
+		).toBe(false);
+		expect(
+			buildOpenAIResponsesCompat({
+				id: "muse-spark-1.2",
+				provider: "opencode-zen",
+				name: "Muse Spark",
+				baseUrl: "https://opencode.ai/zen/v1",
+			}).supportsForcedToolChoice,
+		).toBe(false);
+		expect(
+			buildOpenAIResponsesCompat({
+				id: "gpt-5",
+				provider: "openai",
+				name: "GPT-5",
+				baseUrl: "https://api.openai.com/v1",
+			}).supportsForcedToolChoice,
+		).toBe(true);
+	});
 
 	it("requires a synthetic assistant bridge after tool results only for Mistral hosts", () => {
 		// Mistral/Devstral reject a user message directly after a tool result; the chat

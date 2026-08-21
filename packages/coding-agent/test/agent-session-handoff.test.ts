@@ -1168,6 +1168,16 @@ describe("AgentSession handoff", () => {
 			throw new Error("Expected model to be set");
 		}
 		const handoffSpy = vi.spyOn(session, "handoff");
+		// Overflow falls back to context-full compaction; mock the summarization
+		// call so the test never issues a real provider request (the fake runtime
+		// key would 401 at network speed, which is nondeterministic in CI).
+		vi.spyOn(compactionModule, "compact").mockImplementation(async preparation => ({
+			summary: "overflow compacted",
+			shortSummary: undefined,
+			firstKeptEntryId: preparation.firstKeptEntryId,
+			tokensBefore: preparation.tokensBefore,
+			details: {},
+		}));
 
 		const overflowAssistant: AssistantMessage = {
 			role: "assistant",

@@ -245,13 +245,13 @@ This path also works for local OpenAI-compatible servers that are not LM Studio.
 When `litellm` is active (for example through `LITELLM_API_KEY` or stored auth), runtime discovery uses the LiteLLM proxy:
 
 - provider: `litellm`
-- api: `openai-completions`
+- api: `openai-responses` for OpenAI-backed models; `openai-completions` for other models
 - base URL: explicit provider `baseUrl` / `models.yml` config, otherwise `LITELLM_BASE_URL`, otherwise `http://localhost:4000/v1`
 - auth mode: `LITELLM_API_KEY` or stored LiteLLM auth when the proxy requires a key
 
 Runtime discovery probes LiteLLM management metadata in order: `GET /model_group/info`, `GET /v2/model/info`, `GET /model/info`, and `GET /v1/model/info`. The configured key must be authorized to read at least one of these routes; on deployments that restrict management endpoints, grant the route through LiteLLM's `allowed_routes` access controls or use a master/admin key for discovery.
 
-If every metadata route is unavailable, discovery falls back to the OpenAI-compatible `GET /models` list. A forbidden or failed metadata request is logged once with its endpoint and status; `404` is treated as an absent route. Rich metadata maps per-model context and capability fields, while bare fallback ids are enriched against bundled reference metadata when available. Models absent from the bundled catalog can therefore have unknown context and pricing after fallback.
+If every metadata route is unavailable, discovery falls back to the OpenAI-compatible `GET /models` list. A forbidden or failed metadata request is logged once with its endpoint and status; `404` is treated as an absent route. Rich metadata maps per-model context, capability, and upstream-provider fields. OpenAI-backed models use LiteLLM's Responses route so reasoning summaries remain available; mixed-provider groups stay on Chat Completions. Bare fallback ids use the known OpenAI model families for routing and bundled reference metadata when available. Models absent from the bundled catalog can therefore have unknown context and pricing after fallback.
 
 ### Explicit provider discovery
 

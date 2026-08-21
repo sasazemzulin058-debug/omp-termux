@@ -3212,7 +3212,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 			session.sessionManager.appendSessionInit({
 				systemPrompt: session.agent.state.systemPrompt.join("\n\n"),
 				task,
-				tools: session.getActiveToolNames(),
+				tools: session.getEnabledToolNames(),
 				agent: agent.name,
 				modelRole: modelRole ?? resolveExplicitModelRole(modelOverride ?? agent.model, subagentSettings),
 				resolvedModel: progress.resolvedModel,

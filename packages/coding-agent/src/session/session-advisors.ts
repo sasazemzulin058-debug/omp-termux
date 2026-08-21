@@ -267,6 +267,11 @@ export interface SessionAdvisorsHost {
 		currentModel?: Model | null,
 		roleHint?: string,
 	): string | undefined;
+	retryFallbackChainKeys(
+		currentSelector: string,
+		currentModel?: Model | null,
+		options?: { pinnedRole?: string; roleHint?: string },
+	): string[];
 	findRetryFallbackCandidates(
 		role: string,
 		currentSelector: string,
@@ -353,6 +358,38 @@ export class SessionAdvisors {
 		if (!this.#advisorEnabled || this.#host.isDisposed()) return;
 		if (this.#advisors.length > 0 && !this.#advisorRuntimeMatchesCurrentConfig()) this.#stopAdvisorRuntime();
 		this.#buildAdvisorRuntime(true);
+	}
+
+	/**
+	 * True when the enabled advisor roster still has an entry left at `no_model`.
+	 *
+	 * At construction the advisor role is resolved against whatever the model
+	 * catalog holds at that instant. Discovery-backed providers (e.g. GitHub
+	 * Copilot) may not have populated the registry yet, so a valid configured
+	 * model can transiently fail to resolve and record `no_model`. See #9010.
+	 */
+	hasInactiveNoModelAdvisor(): boolean {
+		if (!this.#advisorEnabled) return false;
+		for (const entry of this.#advisorStatuses.values()) {
+			if (entry.status === "no_model") return true;
+		}
+		return false;
+	}
+
+	/**
+	 * Reactivate an enabled advisor stuck at `no_model` after the initial
+	 * background model discovery settles, so a valid configured model that was
+	 * merely late to the catalog starts without a manual `/advisor` toggle. The
+	 * rebuild is quiet (no warnings) because a warning was already emitted at
+	 * construction. Returns true when the rebuild brought an advisor online so the
+	 * caller can refresh the status line. See #9010.
+	 */
+	retryAfterModelDiscovery(): boolean {
+		if (this.#host.isDisposed() || !this.hasInactiveNoModelAdvisor()) return false;
+		const before = this.#advisors.length;
+		if (before > 0 && !this.#advisorRuntimeMatchesCurrentConfig()) this.#stopAdvisorRuntime();
+		this.#buildAdvisorRuntime(true, false);
+		return this.#advisors.length > before;
 	}
 
 	/** Starts configured advisor runtimes when they are eligible. */
@@ -652,7 +689,7 @@ export class SessionAdvisors {
 		return true;
 	}
 
-	#buildAdvisorRuntime(seedToCurrent = false): boolean {
+	#buildAdvisorRuntime(seedToCurrent = false, emitWarnings = true): boolean {
 		if (this.#host.isDisposed()) return false;
 		if (this.#advisors.length > 0) return true;
 		if (!this.#advisorEnabled) return false;
@@ -662,7 +699,7 @@ export class SessionAdvisors {
 		// entry (`paused`/`no_model`/`running`) in roster order; the build loop
 		// below confirms `running` for successfully built advisors.
 		this.#advisorStatuses.clear();
-		const descriptors = this.#resolveAdvisorRuntimeDescriptors(true);
+		const descriptors = this.#resolveAdvisorRuntimeDescriptors(emitWarnings);
 
 		// Advisor service tier (`tier.advisor`): "none" (default) runs the advisor
 		// on standard processing; "inherit" tracks the session's live per-family
@@ -1239,43 +1276,54 @@ export class SessionAdvisors {
 
 		const retrySettings = this.#host.settings.getGroup("retry");
 		if (!retrySettings.enabled || !retrySettings.modelFallback) return false;
-		const role =
-			advisor.retryFallback?.role ?? this.#host.resolveRetryFallbackRole(currentSelector, currentModel, "advisor");
-		if (!role || this.#host.findRetryFallbackCandidates(role, currentSelector, currentModel).length === 0)
+		// Same two-key walk the main loop uses: the chain that owns this advisor's
+		// active fallback, then the chain the current model owns. Without the
+		// second key an advisor that lands on the last entry of one chain never
+		// reaches that entry's own chain and re-hits the dead model instead.
+		const chainKeys = this.#host.retryFallbackChainKeys(currentSelector, currentModel, {
+			pinnedRole: advisor.retryFallback?.role,
+			roleHint: "advisor",
+		});
+		if (
+			!chainKeys.some(role => this.#host.findRetryFallbackCandidates(role, currentSelector, currentModel).length > 0)
+		) {
 			return false;
+		}
 
 		this.#host.noteRetryFallbackCooldown(currentSelector, retryAfterMs, message);
-		for (const selector of this.#host.findRetryFallbackCandidates(role, currentSelector, currentModel)) {
-			if (this.#host.isRetryFallbackSelectorSuppressed(selector)) continue;
-			const resolved = resolveModelOverride([selector.raw], this.#host.modelRegistry, this.#host.settings);
-			const candidate = resolved.model ?? this.#host.modelRegistry.find(selector.provider, selector.id);
-			if (!candidate || modelsAreEqual(candidate, currentModel)) continue;
-			const apiKey = await this.#host.modelRegistry.getApiKey(candidate, advisor.providerSessionId, { signal });
-			if (!apiKey) continue;
-			signal.throwIfAborted();
+		for (const role of chainKeys) {
+			for (const selector of this.#host.findRetryFallbackCandidates(role, currentSelector, currentModel)) {
+				if (this.#host.isRetryFallbackSelectorSuppressed(selector)) continue;
+				const resolved = resolveModelOverride([selector.raw], this.#host.modelRegistry, this.#host.settings);
+				const candidate = resolved.model ?? this.#host.modelRegistry.find(selector.provider, selector.id);
+				if (!candidate || modelsAreEqual(candidate, currentModel)) continue;
+				const apiKey = await this.#host.modelRegistry.getApiKey(candidate, advisor.providerSessionId, { signal });
+				if (!apiKey) continue;
+				signal.throwIfAborted();
 
-			const originalThinkingLevel = advisor.thinkingLevel;
-			const requestedThinkingLevel = selector.thinkingLevel ?? originalThinkingLevel;
-			const nextThinkingLevel = this.#setAdvisorModel(advisor, candidate, requestedThinkingLevel);
-			if (advisor.retryFallback) {
-				advisor.retryFallback.lastAppliedThinkingLevel = nextThinkingLevel;
-			} else {
-				advisor.retryFallback = {
+				const originalThinkingLevel = advisor.thinkingLevel;
+				const requestedThinkingLevel = selector.thinkingLevel ?? originalThinkingLevel;
+				const nextThinkingLevel = this.#setAdvisorModel(advisor, candidate, requestedThinkingLevel);
+				if (advisor.retryFallback) {
+					advisor.retryFallback.lastAppliedThinkingLevel = nextThinkingLevel;
+				} else {
+					advisor.retryFallback = {
+						role,
+						originalSelector: currentSelector,
+						originalThinkingLevel,
+						lastAppliedThinkingLevel: nextThinkingLevel,
+					};
+				}
+				advisor.retryFallbackPendingSuccess = true;
+				this.#host.settings.getStorage()?.recordModelUsage(formatModelStringWithRouting(candidate));
+				await this.#host.emitSessionEvent({
+					type: "retry_fallback_applied",
+					from: currentSelector,
+					to: selector.raw,
 					role,
-					originalSelector: currentSelector,
-					originalThinkingLevel,
-					lastAppliedThinkingLevel: nextThinkingLevel,
-				};
+				});
+				return true;
 			}
-			advisor.retryFallbackPendingSuccess = true;
-			this.#host.settings.getStorage()?.recordModelUsage(formatModelStringWithRouting(candidate));
-			await this.#host.emitSessionEvent({
-				type: "retry_fallback_applied",
-				from: currentSelector,
-				to: selector.raw,
-				role,
-			});
-			return true;
 		}
 		return false;
 	}

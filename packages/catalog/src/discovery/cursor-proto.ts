@@ -31,6 +31,13 @@ export enum DiagnosticSeverity {
 	HINT = 4,
 }
 
+/** Cursor agent enum CursorRuleSource. */
+export enum CursorRuleSource {
+	UNSPECIFIED = 0,
+	TEAM = 1,
+	USER = 2,
+}
+
 /** Cursor agent enum ForceBackgroundShellStatus. */
 export enum ForceBackgroundShellStatus {
 	UNSPECIFIED = 0,

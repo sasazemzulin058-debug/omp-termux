@@ -711,6 +711,8 @@ export const DEVIN_VARIANT_COLLAPSE_TABLE: VariantCollapseTable = {
 /** Cursor's Grok tier tokens equal the effort id, so routing is a direct map. */
 const CURSOR_GROK_45_EFFORTS: readonly Effort[] = [Effort.Low, Effort.Medium, Effort.High];
 const CURSOR_GROK_46_EFFORTS: readonly Effort[] = [Effort.Low, Effort.Medium, Effort.High, Effort.XHigh];
+/** Cursor GPT-5.6 (Luna/Sol/Terra) serves the full five-tier `low..max` scale. */
+const CURSOR_GPT_56_EFFORTS: readonly Effort[] = [Effort.Low, Effort.Medium, Effort.High, Effort.XHigh, Effort.Max];
 
 /**
  * Cursor serves Grok 4.5/4.6 as per-effort sibling ids
@@ -731,11 +733,45 @@ function cursorGrokFamilies(version: "4.5" | "4.6", efforts: readonly Effort[]):
 	return [build(false), build(true)];
 }
 
-/** `cursor` Grok families: per-effort siblings collapsed per service-tier lane. */
+/**
+ * Cursor serves GPT-5.6 (Luna/Sol/Terra) as per-tier sibling ids
+ * (`gpt-5.6-luna-none|-low|-medium|-high|-xhigh|-max`) with a parallel `-fast`
+ * service-tier lane (`gpt-5.6-luna-high-fast`, …). Same shape as Devin's
+ * `devinGpt56Families`, but cursor keys the version with a dot, marks the
+ * thinking-off tier `-none`, and names the fast lane with `-fast` (Devin uses
+ * `-priority`). Each lane collapses into its own logical model — `-fast` is a
+ * sibling SKU, never a second routing dimension — while the 1M / Max Mode SKU
+ * stays a separate row (handled by discovery's context-window resolution).
+ */
+function cursorGpt56Families(variant: "luna" | "sol" | "terra", name: string): readonly EffortVariantFamily[] {
+	const build = (fast: boolean): EffortVariantFamily => {
+		const suffix = fast ? "-fast" : "";
+		const base = `gpt-5.6-${variant}`;
+		return tierFamily(
+			`${base}${suffix}`,
+			`${name}${fast ? " Fast" : ""}`,
+			{
+				off: `${base}-none${suffix}`,
+				low: `${base}-low${suffix}`,
+				medium: `${base}-medium${suffix}`,
+				high: `${base}-high${suffix}`,
+				xhigh: `${base}-xhigh${suffix}`,
+				max: `${base}-max${suffix}`,
+			},
+			CURSOR_GPT_56_EFFORTS,
+		);
+	};
+	return [build(false), build(true)];
+}
+
+/** `cursor` per-effort sibling families collapsed per service-tier lane: Grok 4.5/4.6 plus GPT-5.6 Luna/Sol/Terra. */
 export const CURSOR_VARIANT_COLLAPSE_TABLE: VariantCollapseTable = {
 	families: [
 		...cursorGrokFamilies("4.5", CURSOR_GROK_45_EFFORTS),
 		...cursorGrokFamilies("4.6", CURSOR_GROK_46_EFFORTS),
+		...cursorGpt56Families("luna", "GPT-5.6 Luna"),
+		...cursorGpt56Families("sol", "GPT-5.6 Sol"),
+		...cursorGpt56Families("terra", "GPT-5.6 Terra"),
 	],
 };
 

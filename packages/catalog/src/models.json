@@ -198253,6 +198253,7 @@
 			"maxTokens": 128000,
 			"preferWebsockets": true,
 			"useResponsesLite": true,
+			"toolMode": "code_mode_only",
 			"priority": 3,
 			"applyPatchToolType": "freeform",
 			"thinking": {
@@ -198346,6 +198347,7 @@
 			"maxTokens": 128000,
 			"preferWebsockets": true,
 			"useResponsesLite": true,
+			"toolMode": "code_mode_only",
 			"priority": 1,
 			"applyPatchToolType": "freeform",
 			"thinking": {
@@ -198439,6 +198441,7 @@
 			"maxTokens": 128000,
 			"preferWebsockets": true,
 			"useResponsesLite": true,
+			"toolMode": "code_mode_only",
 			"priority": 2,
 			"applyPatchToolType": "freeform",
 			"thinking": {
@@ -266696,7 +266699,7 @@
 				"cacheWrite": 0
 			},
 			"contextWindow": 1048576,
-			"maxTokens": 1048576,
+			"maxTokens": 131072,
 			"thinking": {
 				"mode": "budget",
 				"efforts": [

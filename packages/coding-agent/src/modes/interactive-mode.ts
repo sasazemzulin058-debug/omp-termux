@@ -42,7 +42,6 @@ import type { TerminalAppearanceRequestToken } from "@oh-my-pi/pi-tui/terminal";
 import { isInsideTerminalMultiplexer } from "@oh-my-pi/pi-tui/terminal-capabilities";
 import {
 	$env,
-	APP_NAME,
 	adjustHsv,
 	formatNumber,
 	getProjectDir,
@@ -140,6 +139,7 @@ import { formatStartupChangelogSummary, type StartupChangelogSelection } from ".
 import { copyToClipboard } from "../utils/clipboard";
 import type { EventBus } from "../utils/event-bus";
 import { getEditorCommand, openInEditor } from "../utils/external-editor";
+import { resumeCommand } from "../utils/resume-command";
 import { getSessionAccentAnsi, getSessionAccentHex } from "../utils/session-color";
 import { messageHasDisplayableThinking } from "../utils/thinking-display";
 import {
@@ -2880,13 +2880,23 @@ export class InteractiveMode implements InteractiveModeContext {
 		// prompt, which predictably invalidates the cache.
 		this.lastAssistantUsage = undefined;
 
-		await this.session.setActiveToolsByName(uniquePlanTools);
+		// Plan mode state must land before the tool partition: under Code Mode the
+		// direct surface keeps `write` only while a transport needs it, and plan
+		// approval is a top-level `write` to `xd://propose`.
+		const previousPlanModeState = this.session.getPlanModeState();
 		this.session.setPlanModeState({
 			enabled: true,
 			planFilePath,
 			workflow: options?.workflow ?? "parallel",
 			reentry: this.#planModeHasEntered,
 		});
+		try {
+			await this.session.setActiveToolsByName(uniquePlanTools);
+		} catch (error) {
+			this.session.setPlanModeState(previousPlanModeState);
+			this.planModeEnabled = false;
+			throw error;
+		}
 		this.session.setPlanProposalHandler?.(title => this.session.preparePlanForReview(title));
 		if (this.session.isStreaming) {
 			await this.session.sendPlanModeContext({ deliverAs: "steer" });
@@ -3199,25 +3209,6 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.#hidePlanReview();
 	}
 
-	#getEditorTerminalPath(): string | null {
-		if (process.platform === "win32") {
-			return null;
-		}
-		return "/dev/tty";
-	}
-
-	async #openEditorTerminalHandle(): Promise<fs.FileHandle | null> {
-		const terminalPath = this.#getEditorTerminalPath();
-		if (!terminalPath) {
-			return null;
-		}
-		try {
-			return await fs.open(terminalPath, "r+");
-		} catch {
-			return null;
-		}
-	}
-
 	#getPlanApprovalContextUsage(): ContextUsage | undefined {
 		const executionModel = this.#planModePreviousModelState?.model ?? this.session.model;
 		const contextWindow = executionModel?.contextWindow;
@@ -3271,18 +3262,10 @@ export class InteractiveMode implements InteractiveModeContext {
 			return;
 		}
 
-		let ttyHandle: fs.FileHandle | null = null;
 		try {
-			ttyHandle = await this.#openEditorTerminalHandle();
 			this.ui.stop();
-
-			const stdio: [number | "inherit", number | "inherit", number | "inherit"] = ttyHandle
-				? [ttyHandle.fd, ttyHandle.fd, ttyHandle.fd]
-				: ["inherit", "inherit", "inherit"];
-
 			const result = await openInEditor(editorCmd, currentText, {
 				extension: path.extname(resolvedPath) || ".md",
-				stdio,
 				trimTrailingNewline: false,
 			});
 			if (result !== null) {
@@ -3293,9 +3276,6 @@ export class InteractiveMode implements InteractiveModeContext {
 		} catch (error) {
 			this.showWarning(`Failed to open external editor: ${error instanceof Error ? error.message : String(error)}`);
 		} finally {
-			if (ttyHandle) {
-				await ttyHandle.close();
-			}
 			this.ui.start();
 			this.ui.requestRender(true);
 		}
@@ -3308,25 +3288,15 @@ export class InteractiveMode implements InteractiveModeContext {
 			return;
 		}
 
-		let ttyHandle: fs.FileHandle | null = null;
 		try {
-			ttyHandle = await this.#openEditorTerminalHandle();
 			this.ui.stop();
-
-			const stdio: [number | "inherit", number | "inherit", number | "inherit"] = ttyHandle
-				? [ttyHandle.fd, ttyHandle.fd, ttyHandle.fd]
-				: ["inherit", "inherit", "inherit"];
-
-			const result = await openInEditor(editorCmd, draft, { extension: ".md", stdio });
+			const result = await openInEditor(editorCmd, draft, { extension: ".md" });
 			if (result !== null) {
 				commit(result);
 			}
 		} catch (error) {
 			this.showWarning(`Failed to open external editor: ${error instanceof Error ? error.message : String(error)}`);
 		} finally {
-			if (ttyHandle) {
-				await ttyHandle.close();
-			}
 			this.ui.start();
 			this.ui.requestRender(true);
 		}
@@ -4404,7 +4374,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		const sessionId = this.sessionManager.getSessionId();
 		const sessionFile = this.sessionManager.getSessionFile();
 		if (sessionId && sessionFile && this.sessionManager.isSessionOnDisk()) {
-			process.stderr.write(`\n${chalk.dim(`Resume this session with ${APP_NAME} --resume ${sessionId}`)}\n`);
+			process.stderr.write(`\n${chalk.dim(`Resume this session with ${resumeCommand(sessionId)}`)}\n`);
 		}
 
 		await postmortem.quit(0);

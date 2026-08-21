@@ -99,6 +99,10 @@ function displaceableToolName(
 	return undefined;
 }
 
+function isHubWaitArgs(args: unknown): boolean {
+	return isRecord(args) && args.op === "wait";
+}
+
 function stabilizeStreamingPreviews(previews: PerFileDiffPreview[]): PerFileDiffPreview[] {
 	let changed = false;
 	const next = previews.map(preview => {
@@ -886,7 +890,14 @@ export class ToolExecutionComponent extends Container implements NativeScrollbac
 	 */
 	isNativeScrollbackLiveRegionPinned(): boolean {
 		if (this.isTranscriptBlockFinalized()) return false;
-		return this.#toolName === "vibe_wait" || this.#toolName === "task" || this.#displaceableByToolName !== undefined;
+		if (this.#toolName === "vibe_wait" || this.#toolName === "task" || this.#displaceableByToolName !== undefined) {
+			return true;
+		}
+		// A hub wait is the same self-replacing dashboard before the first
+		// progress snapshot arrives (`#displaceableByToolName` is set only once
+		// `details.jobs` exist). Pin the pending frame too so its rows cannot
+		// commit and force-seal the live poll.
+		return this.#toolName === "hub" && isHubWaitArgs(this.#args);
 	}
 
 	/**

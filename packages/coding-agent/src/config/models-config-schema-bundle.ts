@@ -50,6 +50,7 @@ export const getModelsConfigSchemaBundle = once(() => {
 		"supportsStrictMode?": "boolean",
 		"toolStrictMode?": '"all_strict" | "none"',
 		"streamIdleTimeoutMs?": "number >= 0",
+		"streamMarkupHealingPattern?": '"kimi" | "dsml" | "qwen" | "thinking"',
 		"supportsLongPromptCacheRetention?": "boolean",
 		"supportsReasoningParams?": "boolean",
 		"alwaysSendMaxTokens?": "boolean",

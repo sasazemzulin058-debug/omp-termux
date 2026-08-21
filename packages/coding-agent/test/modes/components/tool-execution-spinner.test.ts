@@ -197,6 +197,27 @@ describe("ToolExecutionComponent live preview spinners", () => {
 		}
 	});
 
+	it("pins a pending hub wait before the first progress snapshot arrives", () => {
+		const component = new ToolExecutionComponent(
+			"hub",
+			{ op: "wait" },
+			{},
+			undefined,
+			{ requestRender: vi.fn(), requestComponentRender: vi.fn() } as unknown as TUI,
+			process.cwd(),
+		);
+		const transcript = new TranscriptContainer();
+		transcript.addChild(component);
+
+		try {
+			transcript.render(80);
+			expect(component.isNativeScrollbackLiveRegionPinned()).toBe(true);
+			expect(transcript.isNativeScrollbackLiveRegionPinned()).toBe(true);
+		} finally {
+			component.stopAnimation();
+		}
+	});
+
 	it("pins the displaceable hub waiting poll and releases it once jobs settle", () => {
 		const component = new ToolExecutionComponent(
 			"hub",

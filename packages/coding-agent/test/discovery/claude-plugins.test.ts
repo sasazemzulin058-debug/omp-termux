@@ -186,7 +186,7 @@ describe("listClaudePluginRoots", () => {
 		]);
 	});
 
-	test("isolates local plugins to their canonical project", async () => {
+	test("isolates local and project plugins to their canonical project", async () => {
 		const pluginsDir = path.join(tempDir, ".claude", "plugins");
 		const projectA = path.join(tempDir, "project-a");
 		const projectB = path.join(tempDir, "project-b");
@@ -200,7 +200,7 @@ describe("listClaudePluginRoots", () => {
 		]);
 		await fs.symlink(projectB, projectBAlias, "dir");
 
-		const entry = (scope: "user" | "local", installPath: string, projectPath?: string) => ({
+		const entry = (scope: "user" | "project" | "local", installPath: string, projectPath?: string) => ({
 			scope,
 			installPath,
 			projectPath,
@@ -212,16 +212,25 @@ describe("listClaudePluginRoots", () => {
 			version: 2,
 			plugins: {
 				"user-plugin@market": [entry("user", "/plugins/user")],
-				"active-plugin@market": [entry("local", "/plugins/active", projectB)],
-				"foreign-plugin@market": [entry("local", "/plugins/foreign", projectA)],
+				"active-local-plugin@market": [entry("local", "/plugins/active-local", projectB)],
+				"foreign-local-plugin@market": [entry("local", "/plugins/foreign-local", projectA)],
+				"active-project-plugin@market": [entry("project", "/plugins/active-project", projectB)],
+				"foreign-project-plugin@market": [entry("project", "/plugins/foreign-project", projectA)],
 			},
 		};
 		await fs.writeFile(path.join(pluginsDir, "installed_plugins.json"), JSON.stringify(registry));
 
 		const result = await listClaudePluginRoots(tempDir, path.join(projectBAlias, "packages", "app"));
 
-		expect(result.roots.map(root => root.id)).toEqual(["user-plugin@market", "active-plugin@market"]);
-		expect(result.roots.find(root => root.id === "active-plugin@market")?.scope).toBe("project");
+		expect(result.roots.map(root => root.id)).toEqual([
+			"user-plugin@market",
+			"active-local-plugin@market",
+			"active-project-plugin@market",
+		]);
+		expect(result.roots.filter(root => root.id !== "user-plugin@market").map(root => root.scope)).toEqual([
+			"project",
+			"project",
+		]);
 	});
 
 	test("hides a plugin the user switched off with enabledPlugins in project settings", async () => {
@@ -321,32 +330,6 @@ describe("listClaudePluginRoots", () => {
 		expect(after.roots[0]?.scope).toBe("project");
 	});
 
-	test("parses plugin with project scope", async () => {
-		const pluginsDir = path.join(tempDir, ".claude", "plugins");
-		await fs.mkdir(pluginsDir, { recursive: true });
-
-		const registry = {
-			version: 2,
-			plugins: {
-				"project-plugin@market": [
-					{
-						scope: "project",
-						installPath: "/path/to/project-plugin",
-						version: "2.0.0",
-						installedAt: "2025-01-01T00:00:00Z",
-						lastUpdated: "2025-01-01T00:00:00Z",
-					},
-				],
-			},
-		};
-
-		await fs.writeFile(path.join(pluginsDir, "installed_plugins.json"), JSON.stringify(registry));
-
-		const result = await listClaudePluginRoots(tempDir);
-		expect(result.roots).toHaveLength(1);
-		expect(result.roots[0].scope).toBe("project");
-	});
-
 	test("handles multiple entries per plugin ID", async () => {
 		const pluginsDir = path.join(tempDir, ".claude", "plugins");
 		await fs.mkdir(pluginsDir, { recursive: true });
@@ -364,6 +347,7 @@ describe("listClaudePluginRoots", () => {
 					},
 					{
 						scope: "project",
+						projectPath: tempDir,
 						installPath: "/path/to/v1",
 						version: "1.0.0",
 						installedAt: "2025-01-01T00:00:00Z",
@@ -375,7 +359,7 @@ describe("listClaudePluginRoots", () => {
 
 		await fs.writeFile(path.join(pluginsDir, "installed_plugins.json"), JSON.stringify(registry));
 
-		const result = await listClaudePluginRoots(tempDir);
+		const result = await listClaudePluginRoots(tempDir, tempDir);
 		// Should return both entries, not just the first one
 		expect(result.roots).toHaveLength(2);
 		expect(result.roots[0].version).toBe("2.0.0");
@@ -1521,6 +1505,7 @@ describe("discoverAgents plugin precedence", () => {
 					},
 					{
 						scope: "project",
+						projectPath: tempDir,
 						installPath: projectPluginPath,
 						version: "1.0.1",
 						installedAt: "2025-01-02T00:00:00Z",

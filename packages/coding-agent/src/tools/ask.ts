@@ -45,7 +45,7 @@ import { ToolAbortError } from "./tool-errors";
 // Types
 // =============================================================================
 
-const OTHER_OPTION = "Other (type your own)";
+export const OTHER_OPTION = "Other (type your own)";
 const CHAT_ABOUT_THIS_OPTION = "Chat about this";
 const NEXT_OPTION = "Next →";
 const RESERVED_OPTION_LABELS: Record<string, true> = {
@@ -830,11 +830,12 @@ export class AskTool implements AgentTool<typeof askSchema, AskToolDetails> {
 	}
 
 	static createIf(session: ToolSession): AskTool | null {
-		return session.hasUI ? new AskTool(session) : null;
+		return (session.canPromptUser ?? session.hasUI) ? new AskTool(session) : null;
 	}
 
 	/** Send terminal notification when ask tool is waiting for input */
 	#sendAskNotification(): void {
+		if (!this.session.hasUI) return;
 		const method = this.session.settings.get("ask.notify");
 		if (method === "off") return;
 		TERMINAL.sendNotification({

@@ -759,7 +759,7 @@ export function buildOpenAIResponsesCompat(spec: OpenAIResponsesSpecLike): Resol
 		disableReasoningOnForcedToolChoice: isKimiModel,
 		disableReasoningOnToolChoice: isDeepseekFamily && reasoningCapable && !isOpenRouter,
 		supportsToolChoice: true,
-		supportsForcedToolChoice: true,
+		supportsForcedToolChoice: spec.provider !== "opencode-go" && spec.provider !== "opencode-zen",
 		supportsNamedToolChoice: STRING_ONLY_NAMED_TOOL_CHOICE_PROVIDERS[spec.provider] !== true,
 		reasoningContentField: "reasoning_content",
 		requiresReasoningContentForToolCalls:
