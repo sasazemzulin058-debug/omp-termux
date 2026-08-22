@@ -149,8 +149,8 @@ omp completions fish > ~/.config/fish/completions/omp.fish
 
 This repository also ships OMP for **Termux on aarch64 Android** as a
 self-contained release: a tarball with the native `pi_natives` arm64 addon,
-the split JS bundle, and a custom Bun runtime compiled from source against
-Bionic. Nothing is installed from `pkg`, npm, or a source build on the device.
+the split JS bundle, and the official stable Bun Android aarch64 runtime.
+Nothing is installed from `pkg`, npm, or a source build on the device.
 
 ### Quickstart
 
@@ -183,15 +183,15 @@ building or diagnosing a release:
 set -a
 . android/versions.env
 set +a
-printf 'runtime=%s bootstrap=%s source=%s\n' "$BUN_VERSION" "$BUN_BOOTSTRAP_VERSION" "$BUN_SOURCE_COMMIT"
+printf 'runtime=%s bootstrap=%s archive=%s\n' "$BUN_VERSION" "$BUN_BOOTSTRAP_VERSION" "$BUN_ARCHIVE_NAME"
 ```
 
-`BUN_VERSION` is the bundled runtime built from Bun source for Android
+`BUN_VERSION` is the bundled official stable Bun runtime for Android
 aarch64/Bionic. `BUN_BOOTSTRAP_VERSION` is CI-only and is never shipped.
-`BUN_SOURCE_COMMIT` pins source provenance. The release artifact records the
-same value as `bun.source-commit`.
+`BUN_ARCHIVE_NAME` and `BUN_SHA256` identify and verify the official GitHub
+release asset.
 
-Build and provenance details: [Building the bundled Bun from source](#building-the-bundled-bun-from-source).
+Release details: [Android CI/CD](android/docs/ci-cd.md).
 
 ### Capability boundary
 
@@ -213,69 +213,46 @@ Build and provenance details: [Building the bundled Bun from source](#building-t
 |----------|----------|
 | [android/README.md](android/README.md) | Port overview and current capability boundary |
 | [android/docs/setup.md](android/docs/setup.md) | Install behaviors, target installer, uninstall, recovery |
-| [android/docs/ci-cd.md](android/docs/ci-cd.md) | Build/package/release/sync pipeline and the Bun source build |
-| [android/docs/verification.md](android/docs/verification.md) | Implemented and pending acceptance gates |
+| [android/docs/ci-cd.md](android/docs/ci-cd.md) | Build/package/release/sync pipeline and official stable Bun |
 | [android/docs/port-architecture.md](android/docs/port-architecture.md) | Port architecture and capability details |
 
-## Building the bundled Bun from source
+## Android Bun runtime
 
-The runtime shipped to devices is **not** a released Bun artifact.
-`.github/workflows/bun-build.yml` cross-compiles it from the Bun source tree
-(`oven-sh/bun`) for Android aarch64/Bionic with the Android NDK. The workflow
-is manual-only (`workflow_dispatch`).
+Release packages use official stable Bun Android aarch64 assets from
+`oven-sh/bun`. CI verifies the manifest SHA256 before extracting `bun` and
+placing it at `./bun` in the Termux bundle. No source compilation, npm Bun,
+Termux `pkg bun`, or silent fallback is used.
 
 ### Source-of-truth manifest
 
-`android/versions.env` is the single source of truth for the Android build.
-Read it instead of copying version literals into scripts or release notes:
+`android/versions.env` is the single source of truth:
 
 ```sh
 set -a
 . android/versions.env
 set +a
-printf 'runtime=%s\nbootstrap=%s\nsource=%s\nndk=%s\napi=%s\nrust=%s\n' \\
-  "$BUN_VERSION" "$BUN_BOOTSTRAP_VERSION" "$BUN_SOURCE_COMMIT" \\
-  "$NDK_VERSION" "$ANDROID_API" "$RUST_TOOLCHAIN"
+printf 'runtime=%s\nbootstrap=%s\narchive=%s\nsha256=%s\nndk=%s\napi=%s\nrust=%s\n' \
+  "$BUN_VERSION" "$BUN_BOOTSTRAP_VERSION" "$BUN_ARCHIVE_NAME" \
+  "$BUN_SHA256" "$NDK_VERSION" "$ANDROID_API" "$RUST_TOOLCHAIN"
 ```
 
-- `BUN_VERSION` — shipped runtime version.
-- `BUN_BOOTSTRAP_VERSION` — CI-only bootstrap Bun; never shipped.
-- `BUN_SOURCE_COMMIT` — exact Bun source provenance; empty values are rejected.
-- `BUN_BUILD_REF` — optional workflow ref override for experiments.
+- `BUN_VERSION` — shipped stable runtime version.
+- `BUN_BOOTSTRAP_VERSION` — CI-only Bun used by JS/native jobs.
+- `BUN_ARCHIVE_NAME` — official Bun Android aarch64 release asset.
+- `BUN_SHA256` — exact asset checksum.
 - `NDK_VERSION`, `ANDROID_API`, `RUST_TOOLCHAIN` — Android build inputs.
 
-### Dispatching a build
-
-Normal pinned path (uses the manifest source commit):
-
-```sh
-gh workflow run bun-build.yml --repo sasazemzulin058-debug/omp-termux
-```
-
-Experimental explicit override (dev build from any specific commit):
-
-```sh
-gh workflow run bun-build.yml --repo sasazemzulin058-debug/omp-termux \
-  -f bun_ref=main -f use_commit=<commit-sha>
-```
-
-Inputs: `bun_ref` (default `main`) selects the ref to build; `use_commit`
-(optional, default empty) overrides it with an exact SHA. The workflow
-checks out the resolved commit (shallow fetch of the exact SHA), patches
-Bun's clang-version gates (`21.1.x` → 18.0.3) for NDK r27c, builds with
-`bun scripts/build.ts --profile=release --abi=android --arch=aarch64
---configure-only` plus `ninja`, strips with `llvm-strip`, verifies the ELF
-is aarch64/Bionic, records `bun.version` and `bun.source-commit` plus a
-sha256, and uploads the `bun-android-arm64` artifact.
+`android-release.yml` downloads and verifies official Bun, then packages it
+as `./bun`. `sync-upstream.yml` dispatches Android release after each tagged
+upstream sync. There is no separate Bun build workflow.
 
 ### Release flow
 
 `android-release.yml` triggers on the `v<version>-termux` tag push (or a
 manual dispatch with an existing `tag` input), builds the native addon and
-the split JS bundle, downloads the custom Bun artifact, verifies its sha256
-and that `bun.version` equals the manifest `BUN_VERSION`, packages everything
-as `omp-termux.tar.gz` with `./bun` at the root, and attaches it to the
-GitHub Release.
+split JS bundle, downloads and verifies the official stable Bun Android
+asset, packages everything as `omp-termux.tar.gz` with `./bun` at the root,
+and attaches it to the GitHub Release.
 
 `sync-upstream.yml` imports upstream OMP main, applies the deterministic
 Android overlay, verifies build inputs, then commits and pushes the sync

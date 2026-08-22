@@ -38,7 +38,7 @@ The target installer is defined in
 [`../../specs/ANDROID_IMPLEMENTATION_PLAN.md`](../../specs/ANDROID_IMPLEMENTATION_PLAN.md).
 It will:
 
-- ship official Bionic `@oven/bun-linux-aarch64-android@1.3.14` in the tarball;
+- ship official stable Bun Android aarch64 runtime in the tarball;
 - execute `env OMP_PLATFORM=android $LIB_DIR/bun $LIB_DIR/cli.js`;
 - stage and smoke-test the new tree before a guarded two-rename swap with rollback;
 - restore the old tree after interruption or failed verification;

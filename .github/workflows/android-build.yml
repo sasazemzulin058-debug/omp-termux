@@ -26,6 +26,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Load Android manifest environment
+        run: |
+          set -euo pipefail
+          grep -v '^#' android/versions.env >> "$GITHUB_ENV"
+
       - name: Install system dependencies
         run: |
           sudo apt-get update
@@ -34,14 +39,14 @@ jobs:
       - name: Install Bun
         uses: oven-sh/setup-bun@v2
         with:
-          bun-version: "1.3.14"
+          bun-version: ${{ env.BUN_BOOTSTRAP_VERSION }}
 
       - name: Install Rust with Android target
         run: |
           set -euo pipefail
           source android/versions.env
           curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain "$RUST_TOOLCHAIN"
-          source $HOME/.cargo/env
+          source "$HOME/.cargo/env"
           rustup target add aarch64-linux-android
       - name: Cache Rust artifacts
         uses: actions/cache@v4
@@ -50,15 +55,11 @@ jobs:
             ~/.cargo/registry/cache
             ~/.cargo/git/db
             target
-          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-
-
       - name: Install Android NDK
         id: ndk
         uses: nttld/setup-ndk@v1
         with:
-          ndk-version: r27c
+          ndk-version: ${{ env.NDK_VERSION }}
           add-to-path: false
       - name: Install JS dependencies
         run: bun install --minimum-release-age 0

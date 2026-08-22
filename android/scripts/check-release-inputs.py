@@ -15,14 +15,27 @@ def main():
     args = parse_args()
     root = args.root.resolve()
 
-    # 1. Require package.json and bun.lock
+    # 1. Require package.json, bun.lock, and Android runtime manifest.
     pkg_json_path = root / "package.json"
     bun_lock_path = root / "bun.lock"
+    versions_env = root / "android" / "versions.env"
 
     if not pkg_json_path.is_file():
         sys.exit(f"error: missing required package.json at {pkg_json_path}")
     if not bun_lock_path.is_file():
         sys.exit(f"error: missing required bun.lock at {bun_lock_path}")
+    if not versions_env.is_file():
+        sys.exit(f"error: missing required {versions_env}")
+
+    manifest = {}
+    for line in versions_env.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if line and not line.startswith("#") and "=" in line:
+            key, value = line.split("=", 1)
+            manifest[key] = value.strip()
+    for key in ("BUN_VERSION", "BUN_ARCHIVE_NAME", "BUN_SHA256"):
+        if not manifest.get(key):
+            sys.exit(f"error: {key} not specified in {versions_env}")
 
     # 2. Package version check against optional RELEASE_TAG
     coding_agent_pkg = root / "packages" / "coding-agent" / "package.json"

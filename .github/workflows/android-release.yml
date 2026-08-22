@@ -19,7 +19,6 @@ concurrency:
 
 env:
   RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
-  BUN_BOOTSTRAP_VERSION: "1.3.14"
 
 jobs:
   native-addon:
@@ -39,12 +38,17 @@ jobs:
         with:
           ref: ${{ github.event_name == 'push' && github.ref || inputs.tag || 'main' }}
 
+      - name: Load Android manifest environment
+        run: |
+          set -euo pipefail
+          grep -v '^#' android/versions.env >> "$GITHUB_ENV"
+
       - name: Install system dependencies
         run: |
           set -euo pipefail
           export DEBIAN_FRONTEND=noninteractive
           timeout 300 sudo apt-get update -qq
-          timeout 300 sudo apt-get install -y ninja-build cmake python3
+          timeout 300 sudo apt-get install -y ninja-build cmake python3 unzip
 
       - name: Verify Android overlay and release tag
         run: python3 android/scripts/verify-overlay.py
@@ -64,7 +68,7 @@ jobs:
         id: ndk
         uses: nttld/setup-ndk@v1
         with:
-          ndk-version: r27c
+          ndk-version: ${{ env.NDK_VERSION }}
           add-to-path: false
 
       - name: Make CMake find Ninja
@@ -85,11 +89,10 @@ jobs:
             esac
             args="\$args \"\$arg\""
           done
-          eval exec "$cmake_bin" \$args -DCMAKE_MAKE_PROGRAM="$ninja" -DCMAKE_POLICY_DEFAULT_CMP0057=NEW
+          eval exec "$cmake_bin" $args -DCMAKE_MAKE_PROGRAM="$ninja" -DCMAKE_POLICY_DEFAULT_CMP0057=NEW
           EOF
           chmod +x "$RUNNER_TEMP/bin/cmake"
           echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
-
       - name: Install Bun
         uses: oven-sh/setup-bun@v2
         with:
@@ -136,6 +139,11 @@ jobs:
       - uses: actions/checkout@v4
         with:
           ref: ${{ github.event_name == 'push' && github.ref || inputs.tag || 'main' }}
+
+      - name: Load Android manifest environment
+        run: |
+          set -euo pipefail
+          grep -v '^#' android/versions.env >> "$GITHUB_ENV"
 
       - name: Verify Android overlay and release tag
         run: python3 android/scripts/verify-overlay.py
@@ -184,8 +192,14 @@ jobs:
         with:
           ref: ${{ github.event_name == 'push' && github.ref || inputs.tag || 'main' }}
 
+      - name: Load Android manifest environment
+        run: |
+          set -euo pipefail
+          grep -v '^#' android/versions.env >> "$GITHUB_ENV"
+
       - name: Verify Android overlay and release tag
         run: python3 android/scripts/verify-overlay.py
+
       - name: Validate release inputs
         run: python3 android/scripts/check-release-inputs.py
 
@@ -201,14 +215,23 @@ jobs:
           name: termux-js-bundle
           path: .
 
-      - name: Download required custom Bun binary
-        uses: dawidd6/action-download-artifact@v6
-        with:
-          workflow: bun-build.yml
-          name: bun-android-arm64
-          path: /tmp/bun-custom
-          if_no_artifact_found: error
-          search_artifacts: true
+      - name: Download official stable Bun
+        run: |
+          set -euo pipefail
+          source android/versions.env
+          curl -fL --retry 5 --retry-all-errors --retry-delay 2 \
+            "https://github.com/oven-sh/bun/releases/download/bun-v${BUN_VERSION}/${BUN_ARCHIVE_NAME}" \
+            -o /tmp/bun.zip
+          printf '%s  %s\n' "$BUN_SHA256" /tmp/bun.zip | sha256sum -c -
+          rm -rf /tmp/bun-extract
+          mkdir /tmp/bun-extract
+          unzip -q /tmp/bun.zip -d /tmp/bun-extract
+          BUN_BIN=$(find /tmp/bun-extract -type f -name bun -print -quit)
+          test -n "$BUN_BIN"
+          test -x "$BUN_BIN"
+          file "$BUN_BIN" | grep -q 'aarch64'
+          cp "$BUN_BIN" /tmp/bun-extract/bun
+          chmod 755 /tmp/bun-extract/bun
 
       - name: Assemble and test release bundle
         run: |
@@ -228,15 +251,11 @@ jobs:
           test -s termux-bundle/cli.js
           test -s termux-bundle/node_modules/@oh-my-pi/pi-natives/native/pi_natives.android-arm64.node
 
-          # Releases require custom Bun built from source; no silent npm fallback.
-          test -s /tmp/bun-custom/bun
-          test -s /tmp/bun-custom/bun.version
-          test -s /tmp/bun-custom/bun.sha256
-          (cd /tmp/bun-custom && sha256sum -c bun.sha256)
-          test "$(cat /tmp/bun-custom/bun.version)" = "$BUN_VERSION"
-          cp /tmp/bun-custom/bun termux-bundle/bun
+          # Official stable Bun only; no source build or npm/apt fallback.
+          test -x /tmp/bun-extract/bun
+          cp /tmp/bun-extract/bun termux-bundle/bun
           chmod +x termux-bundle/bun
-          echo "Using custom Bun $(cat /tmp/bun-custom/bun.version)"
+          termux-bundle/bun --version | grep -F "${BUN_VERSION}"
           test -x termux-bundle/bun
 
           tar -czf omp-termux.tar.gz -C termux-bundle .
