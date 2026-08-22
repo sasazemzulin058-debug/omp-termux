@@ -390,7 +390,15 @@ describe("TranscriptContainer", () => {
 		expect(rendered.at(-1)).toContain("Finalized notice");
 	});
 
-	it("replays conservatively when finalized history before a live source has no mutation version", () => {
+	it("trusts the version-omission contract for finalized history before a live source", () => {
+		// Per FinalizableBlock, omitting getTranscriptBlockVersion declares a block
+		// immutable post-finalize, so resolution treats it as stable across the
+		// epoch — failing here instead replayed the full transcript into pane
+		// history on every real tmux width resize (only AssistantMessageComponent
+		// implements the version). A block that violates the declaration falls to
+		// the committed-prefix audit's bounded repair; blocks that genuinely
+		// mutate post-finalize must report a version (see the versioned rejection
+		// case below).
 		const container = new TranscriptContainer();
 		const history = new CountingFinalizedBlock(["history"]);
 		const live = new WidthEpochStreamingBlock(["stable", "pending"], 1);
@@ -399,10 +407,9 @@ describe("TranscriptContainer", () => {
 		container.render(40);
 		const boundary = container.captureNativeScrollbackWidthEpoch();
 
-		history.set(["history", "late image"]);
 		container.render(17);
 
-		expect(container.resolveNativeScrollbackWidthEpoch(boundary)).toBeUndefined();
+		expect(container.resolveNativeScrollbackWidthEpoch(boundary)).toBeGreaterThan(0);
 	});
 
 	it("rejects a width epoch when versioned finalized history before its live source grows", () => {

@@ -2017,7 +2017,7 @@ describe("Module-level LRU render cache", () => {
 		expect(l2Markdown.render(width)).toBe(first);
 	});
 
-	it("skips code-block highlighting for transient streaming renders", () => {
+	it("keeps an open non-diff fence plain during transient renders without a highlight stream", () => {
 		clearRenderCache();
 		let highlightCallCount = 0;
 		const themeWithSpy = {
@@ -2028,7 +2028,7 @@ describe("Module-level LRU render cache", () => {
 			},
 		};
 
-		const markdown = new Markdown("```ts\nconst streamed = true;\n```", 0, 0, themeWithSpy);
+		const markdown = new Markdown("```ts\nconst streamed = true;\n", 0, 0, themeWithSpy);
 		markdown.transientRenderCache = true;
 		const plain = stripVTControlCharacters(markdown.render(80).join("\n"));
 
@@ -2037,7 +2037,9 @@ describe("Module-level LRU render cache", () => {
 		expect(plain).not.toContain("HIGHLIGHTED");
 	});
 
-	it("re-renders code-block highlighting when a transient instance becomes stable", () => {
+	it("highlights a fence whole-block once it closes, even during transient renders", () => {
+		// Rows of a closed fence can enter native scrollback before the token
+		// freezes; they must carry the same bytes the finalized render emits.
 		clearRenderCache();
 		let highlightCallCount = 0;
 		const themeWithSpy = {
@@ -2050,34 +2052,75 @@ describe("Module-level LRU render cache", () => {
 
 		const markdown = new Markdown("```ts\nconst streamed = true;\n```", 0, 0, themeWithSpy);
 		markdown.transientRenderCache = true;
-		const plain = stripVTControlCharacters(markdown.render(80).join("\n"));
-		expect(highlightCallCount).toBe(0);
-		expect(plain).toContain("const streamed = true;");
+		const transient = stripVTControlCharacters(markdown.render(80).join("\n"));
+		expect(highlightCallCount).toBe(1);
+		expect(transient).toContain("HIGHLIGHTED");
 
 		markdown.transientRenderCache = false;
 		const highlighted = stripVTControlCharacters(markdown.render(80).join("\n"));
-		expect(highlightCallCount).toBe(1);
 		expect(highlighted).toContain("HIGHLIGHTED");
 	});
 
-	it("skips nested list code-block highlighting for transient streaming renders", () => {
+	it("streams completed-line highlighting through the theme's highlight stream", () => {
 		clearRenderCache();
-		let highlightCallCount = 0;
-		const themeWithSpy = {
+		const pushes: string[] = [];
+		const themeWithStream = {
 			...defaultMarkdownTheme,
-			highlightCode: (_code: string, _lang?: string): string[] => {
-				highlightCallCount++;
-				return ["HIGHLIGHTED"];
+			highlightCode: (code: string, _lang?: string): string[] => code.split("\n").map(line => `F<${line}>`),
+			createHighlightStream: (lang?: string) => {
+				if (lang !== "python") return null;
+				return {
+					push: (chunk: string): string => {
+						pushes.push(chunk);
+						return chunk
+							.split("\n")
+							.map((line, i, arr) => (i === arr.length - 1 ? line : `S<${line}>`))
+							.join("\n");
+					},
+				};
 			},
 		};
 
-		const markdown = new Markdown("- item\n\n  ```ts\n  const streamed = true;\n  ```", 0, 0, themeWithSpy);
+		const markdown = new Markdown("```python\ndef f():\n    x = 1", 0, 0, themeWithStream);
+		markdown.transientRenderCache = true;
+		const first = stripVTControlCharacters(markdown.render(80).join("\n"));
+		// Completed line highlighted through the stream; partial tail stays plain.
+		expect(first).toContain("S<def f():>");
+		expect(first).toContain("    x = 1");
+		expect(first).not.toContain("S<    x = 1");
+		expect(pushes).toEqual(["def f():\n"]);
+
+		// Append-only growth pushes only the newly completed lines — parser
+		// state carries across renders instead of re-feeding the fence.
+		markdown.setText("```python\ndef f():\n    x = 1\n    return x");
+		const second = stripVTControlCharacters(markdown.render(80).join("\n"));
+		expect(second).toContain("S<def f():>");
+		expect(second).toContain("S<    x = 1>");
+		expect(second).toContain("    return x");
+		expect(pushes).toEqual(["def f():\n", "    x = 1\n"]);
+
+		// Closing the fence switches to the whole-block highlightCode call the
+		// finalized render uses.
+		markdown.setText("```python\ndef f():\n    x = 1\n    return x\n```");
+		const closed = stripVTControlCharacters(markdown.render(80).join("\n"));
+		expect(closed).toContain("F<def f():>");
+		expect(pushes).toEqual(["def f():\n", "    x = 1\n"]);
+	});
+
+	it("keeps an open fence plain when the highlight stream factory rejects the language", () => {
+		clearRenderCache();
+		const themeWithStream = {
+			...defaultMarkdownTheme,
+			highlightCode: (code: string, _lang?: string): string[] => [`F<${code}>`],
+			createHighlightStream: (_lang?: string) => null,
+		};
+
+		const markdown = new Markdown("```someunknownlang\nplain text line\nmore", 0, 0, themeWithStream);
 		markdown.transientRenderCache = true;
 		const plain = stripVTControlCharacters(markdown.render(80).join("\n"));
-
-		expect(highlightCallCount).toBe(0);
-		expect(plain).toContain("const streamed = true;");
-		expect(plain).not.toContain("HIGHLIGHTED");
+		expect(plain).toContain("plain text line");
+		expect(plain).not.toContain("S<");
+		expect(plain).not.toContain("F<");
 	});
 });
 

@@ -2,6 +2,24 @@
 
 ## [Unreleased]
 
+## [18.0.0] - 2026-08-22
+
+### Added
+
+- Added model capability metadata for reversible private-use glyph tokenization on Claude-compatible models, so provider request handling can apply the compatibility layer without inferring from transport details.
+
+## [17.4.2] - 2026-08-21
+
+### Added
+
+- Added identification of provider-side image fetchers (OpenAI, Anthropic, xAI, Google), so a server hosting images by URL can attribute an inbound fetch to the vendor that issued it.
+
+### Fixed
+
+- Fixed Cursor model discovery showing separate picker rows for pure effort-suffixed models beyond GPT-5.6 by collapsing each standard and Fast lane into one reasoning-effort model ([#9237](https://github.com/can1357/oh-my-pi/issues/9237)).
+
+## [17.4.1] - 2026-08-21
+
 ### Added
 
 - Added helper functions and constants for reading enterprise ChatGPT workspace data-residency regions from Codex OAuth access tokens and forwarding the residency header to Codex backend endpoints.

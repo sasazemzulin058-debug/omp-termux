@@ -693,20 +693,30 @@ function renderDiffSection(
 	diff: string,
 	rawPath: string,
 	expanded: boolean,
+	innerWidth: number,
 	uiTheme: Theme,
 	renderDiffFn: (t: string, o?: { filePath?: string }) => string,
-	cache?: RenderedStringCache,
+	renderCache?: RenderedStringCache,
+	sectionCache?: RenderedStringCache,
 ): string {
-	return cachedRenderedString(cache, uiTheme, expanded, rawPath, diff, () => {
+	return cachedRenderedString(sectionCache, uiTheme, expanded, `${rawPath}:${innerWidth}`, diff, () => {
 		const {
 			text: truncatedDiff,
 			hiddenHunks,
-			hiddenLines,
+			hiddenLines: logicallyHiddenLines,
 		} = expanded
 			? { text: diff, hiddenHunks: 0, hiddenLines: 0 }
 			: truncateDiffByHunk(diff, PREVIEW_LIMITS.DIFF_COLLAPSED_HUNKS, PREVIEW_LIMITS.DIFF_COLLAPSED_LINES);
 
-		let text = `\n${renderDiffFn(truncatedDiff, { filePath: rawPath })}`;
+		const renderedDiff = cachedRenderedString(renderCache, uiTheme, expanded, rawPath, truncatedDiff, () =>
+			renderDiffFn(truncatedDiff, { filePath: rawPath }),
+		);
+		const { text: visibleDiff, hiddenLines: visuallyHiddenLines } = expanded
+			? { text: renderedDiff, hiddenLines: 0 }
+			: sliceCollapsedDiffRows(renderedDiff, innerWidth, PREVIEW_LIMITS.DIFF_COLLAPSED_LINES);
+		const hiddenLines = logicallyHiddenLines + visuallyHiddenLines;
+
+		let text = `\n${visibleDiff}`;
 		if (!expanded && (hiddenHunks > 0 || hiddenLines > 0)) {
 			const remainder: string[] = [];
 			if (hiddenHunks > 0) remainder.push(`${hiddenHunks} more hunks`);
@@ -754,6 +764,33 @@ function wrapEditRendererLine(line: string, width: number): string[] {
 	return wrappedContent.map(
 		(segment, index) => `${startAnsi}${index === 0 ? prefix : continuationPrefix}${segment}\x1b[27m\x1b[39m`,
 	);
+}
+
+function sliceCollapsedDiffRows(
+	renderedDiff: string,
+	innerWidth: number,
+	maxRows: number,
+): { text: string; hiddenLines: number } {
+	const lines = renderedDiff.split("\n");
+	const visibleRows: string[] = [];
+	let completeLines = 0;
+
+	for (const line of lines) {
+		const wrapped = wrapEditRendererLine(line, innerWidth);
+		const remainingRows = maxRows - visibleRows.length;
+		if (wrapped.length <= remainingRows) {
+			visibleRows.push(...wrapped);
+			completeLines++;
+			continue;
+		}
+		if (remainingRows > 0) visibleRows.push(...wrapped.slice(0, remainingRows));
+		break;
+	}
+
+	return {
+		text: visibleRows.join("\n"),
+		hiddenLines: lines.length - completeLines,
+	};
 }
 
 export const editToolRenderer = {
@@ -912,6 +949,7 @@ function renderSingleFileResult(
 
 	let diffSectionRenderDiffFn: ((t: string, o?: { filePath?: string }) => string) | undefined;
 	const diffSectionCache = createRenderedStringCache();
+	const renderedDiffCache = createRenderedStringCache();
 	const statsSuffixCache = createRenderedStringCache();
 
 	return framedBlock(uiTheme, width => {
@@ -927,6 +965,7 @@ function renderSingleFileResult(
 		if (diffSectionRenderDiffFn !== renderDiffFn) {
 			diffSectionRenderDiffFn = renderDiffFn;
 			invalidateRenderedStringCache(diffSectionCache);
+			invalidateRenderedStringCache(renderedDiffCache);
 		}
 		const firstChangedLine =
 			(editDiffPreview && "firstChangedLine" in editDiffPreview ? editDiffPreview.firstChangedLine : undefined) ||
@@ -951,12 +990,22 @@ function renderSingleFileResult(
 			linkPath,
 			statsSuffix,
 		});
+		const innerWidth = Math.max(1, width - 2);
 
 		let body = "";
 		if (isError) {
 			if (errorText) body = uiTheme.fg("error", replaceTabs(errorText));
 		} else if (details?.diff) {
-			body = renderDiffSection(details.diff, rawPath, expanded, uiTheme, renderDiffFn, diffSectionCache);
+			body = renderDiffSection(
+				details.diff,
+				rawPath,
+				expanded,
+				innerWidth,
+				uiTheme,
+				renderDiffFn,
+				renderedDiffCache,
+				diffSectionCache,
+			);
 		} else if (details) {
 			// Authoritative result with no textual diff: a delete, a move-only
 			// rename, or a genuine no-op. The header already names the op
@@ -969,7 +1018,16 @@ function renderSingleFileResult(
 		} else if (editDiffPreview) {
 			if ("error" in editDiffPreview) body = uiTheme.fg("error", replaceTabs(editDiffPreview.error));
 			else if (editDiffPreview.diff)
-				body = renderDiffSection(editDiffPreview.diff, rawPath, expanded, uiTheme, renderDiffFn, diffSectionCache);
+				body = renderDiffSection(
+					editDiffPreview.diff,
+					rawPath,
+					expanded,
+					innerWidth,
+					uiTheme,
+					renderDiffFn,
+					renderedDiffCache,
+					diffSectionCache,
+				);
 		}
 		if (details?.diagnostics) {
 			body += formatDiagnostics(details.diagnostics, expanded, uiTheme, (fp: string) =>
@@ -980,7 +1038,6 @@ function renderSingleFileResult(
 		// Diff lines self-wrap with a continuation gutter; pre-wrap to the frame's
 		// inner width so renderOutputBlock's generic wrap is a no-op. Edit frames
 		// use a flush left border because code-frame gutters already provide padding.
-		const innerWidth = Math.max(1, width - 2);
 		const bodyLines = body.length > 0 ? body.split("\n").flatMap(line => wrapEditRendererLine(line, innerWidth)) : [];
 		while (bodyLines.length > 0 && bodyLines[0].trim() === "") bodyLines.shift();
 

@@ -471,6 +471,7 @@ export class StatusLineComponent implements Component {
 			contextLine: settings.get("statusLine.contextLine"),
 		};
 	}
+
 	#gitEnabled(): boolean {
 		return settings.get("git.enabled");
 	}
@@ -1837,8 +1838,7 @@ export class StatusLineComponent implements Component {
 			ctx.contextPercent !== undefined &&
 			ctx.contextWindow > 0 &&
 			(hasContextSegment(leftSegIds) || hasContextSegment(rightSegIds)) &&
-			hasNonContextSegment(leftSegIds) &&
-			hasNonContextSegment(rightSegIds);
+			(hasNonContextSegment(leftSegIds) || hasNonContextSegment(rightSegIds));
 		if (embedContext) {
 			removeContextSegments(leftParts, leftSegIds);
 			removeContextSegments(rightParts, rightSegIds);
@@ -1974,7 +1974,7 @@ export class StatusLineComponent implements Component {
 		const rightGroup = renderGroup(right, "right");
 		if (!leftGroup && !rightGroup) return "";
 
-		if (topFillWidth === 0 || left.length === 0 || right.length === 0) {
+		if (topFillWidth === 0 || (plain && (left.length === 0 || right.length === 0))) {
 			return leftGroup + (leftGroup && rightGroup ? " " : "") + rightGroup;
 		}
 
@@ -1983,6 +1983,10 @@ export class StatusLineComponent implements Component {
 			// Standalone composers: no gauge line between the groups, just air.
 			return leftGroup + padding(gapWidth) + rightGroup;
 		}
+		// Box layout: with one group absent (an unnamed session hides
+		// `session_name`, emptying the default preset's right group) the gauge
+		// runs to the border edge instead of disappearing, so embedded context
+		// labels don't fall back to a context chip until the session is titled.
 		return leftGroup + this.#buildContextGaugeFill(gapWidth, ctx, effectiveSettings, embedContext) + rightGroup;
 	}
 
@@ -1991,9 +1995,9 @@ export class StatusLineComponent implements Component {
 	 * by `statusLine.contextLine`:
 	 * - `off`: solid accent line (no context feedback).
 	 * - `percentage`: used portion in accent, remainder in the border color.
-	 * - `annotated` (default): percentage plus preset-aware markers where
+	 * - `annotated` : percentage plus preset-aware markers where
 	 *   speculative compaction starts and where auto-compaction fires.
-	 * - `embedded`: annotated markers plus percentage/window labels absorbed
+	 * - `embedded` (default): annotated markers plus percentage/window labels absorbed
 	 *   from configured context segments.
 	 */
 	#buildContextGaugeFill(
@@ -2009,7 +2013,7 @@ export class StatusLineComponent implements Component {
 			: undefined;
 		const usedColor = getSessionAccentAnsi(accentHex) ?? theme.getFgAnsi("borderAccent");
 		const horizontal = theme.boxRound.horizontal;
-		const mode = effectiveSettings.contextLine ?? "annotated";
+		const mode = effectiveSettings.contextLine ?? "embedded";
 		const pct = ctx.contextPercent;
 		if (mode === "off" || pct === null || pct === undefined) {
 			return `\x1b[49m${usedColor}${horizontal.repeat(gapWidth)}\x1b[39m`;
@@ -2193,7 +2197,6 @@ export class StatusLineComponent implements Component {
 		}
 		return content;
 	}
-
 	/**
 	 * Status bar lines for a composer layout, rendered through the real
 	 * pipeline — the single source for the /settings appearance preview.

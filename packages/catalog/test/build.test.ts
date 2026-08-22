@@ -120,6 +120,39 @@ describe("buildModel", () => {
 		expect(model.compat.strictResponsesPairing).toBe(false);
 		expect(model.compat.openRouterRouting).toEqual({ only: ["anthropic"], order: ["anthropic"] });
 	});
+	it("materializes glyph-tokenization eligibility for Anthropic-compatible wire models", () => {
+		const anthropic = buildModel({
+			id: "claude-opus-4-8",
+			name: "Some Model",
+			api: "anthropic-messages",
+			provider: "anthropic-compatible",
+			baseUrl: "https://api.example.com/v1",
+			reasoning: false,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 128_000,
+			maxTokens: 8_192,
+		});
+
+		expect(anthropic.requiresGlyphTokenization).toBe(true);
+		expect(buildModel(completionsSpec()).requiresGlyphTokenization).toBe(false);
+		expect(buildModel({ ...completionsSpec(), id: "claude-opus-4-8" }).requiresGlyphTokenization).toBe(true);
+		expect(
+			buildModel({
+				id: "other-model",
+				name: "Other Model",
+				api: "anthropic-messages",
+				provider: "anthropic-compatible",
+				baseUrl: "https://api.example.com/v1",
+				reasoning: false,
+				input: ["text"],
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+				contextWindow: 128_000,
+				maxTokens: 8_192,
+			}).requiresGlyphTokenization,
+		).toBe(false);
+		expect(getBundledModel("anthropic", "claude-opus-4-8").requiresGlyphTokenization).toBe(true);
+	});
 
 	it("loads bundled OpenRouter models with resolved compat", () => {
 		const model = getBundledModel<"openrouter">("openrouter", "anthropic/claude-sonnet-4");

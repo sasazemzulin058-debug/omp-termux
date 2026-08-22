@@ -1,6 +1,13 @@
 # Changelog
 
-## [Unreleased]
+## [18.0.0] - 2026-08-22
+
+### Fixed
+
+- Fixed Anthropic Claude tool calls containing provider-visible private-use icon glyphs by reversibly tokenizing glyphs at the wire boundary and rejecting model-invented or unresolved glyph tokens before execution.
+- Fixed agent identity confusion after session handoffs by clarifying context framing and ensuring successor instances seamlessly resume existing execution plans.
+
+## [17.4.1] - 2026-08-21
 
 ### Fixed
 

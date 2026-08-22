@@ -529,6 +529,28 @@ describe("editToolRenderer", () => {
 		expect(rendered).toContain("960 more lines");
 	});
 
+	it("bounds a completed collapsed diff by rendered rows", async () => {
+		const uiTheme = await getUiTheme();
+		const tail = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789".repeat(4);
+		const diff = Array.from({ length: 12 }, (_, index) => {
+			const line = index + 1;
+			return `-${line}|ROW_${line.toString().padStart(2, "0")}=${tail}\n+${line}|ROW_${line.toString().padStart(2, "0")}=changed-${tail}`;
+		}).join("\n");
+		const component = editToolRenderer.renderResult(
+			{
+				content: [{ type: "text", text: "Updated long-lines.txt" }],
+				details: { diff, op: "update" },
+			},
+			{ expanded: false, isPartial: false, renderContext: { renderDiff } },
+			uiTheme,
+			{ file_path: "long-lines.txt" },
+		);
+
+		const lines = component.render(120).map(line => Bun.stripANSI(line));
+		expect(lines).toHaveLength(43);
+		expect(lines.join("\n")).toContain("more lines");
+	});
+
 	it("renders completed edit gutters without inherited frame padding", async () => {
 		const uiTheme = await getUiTheme();
 		const component = editToolRenderer.renderResult(

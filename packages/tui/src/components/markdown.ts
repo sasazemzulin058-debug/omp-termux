@@ -1166,6 +1166,15 @@ export interface DefaultTextStyle {
 }
 
 /**
+ * Stateful incremental code highlighter carrying parser state across pushes.
+ * Produced per streaming fence by {@link MarkdownTheme.createHighlightStream}.
+ */
+export interface HighlightStreamSession {
+	/** Highlight the next chunk and advance parser state. */
+	push(chunk: string): string;
+}
+
+/**
  * Theme functions for markdown elements.
  * Each function takes text and returns styled text with ANSI codes.
  */
@@ -1185,6 +1194,14 @@ export interface MarkdownTheme {
 	strikethrough: (text: string) => string;
 	underline: (text: string) => string;
 	highlightCode?: (code: string, lang?: string) => string[];
+	/**
+	 * Create a stateful incremental highlighter for one streaming code fence.
+	 * `push` receives newline-terminated complete lines (only the final push
+	 * may omit the trailing newline) and must return highlighted ANSI text for
+	 * exactly the pushed chunk, byte-identical to highlighting the concatenated
+	 * text through `highlightCode`. Return null when `lang` is unsupported.
+	 */
+	createHighlightStream?: (lang?: string) => HighlightStreamSession | null;
 	/**
 	 * Resolve a mermaid ASCII rendering by fenced block source text.
 	 * Return null to fall back to fenced code rendering.
@@ -1455,10 +1472,21 @@ interface StreamPrefixLineCache extends RenderSignature {
 	lines: readonly string[];
 	tables: readonly TableRenderSpec[];
 }
-interface StreamingDiffLineCache extends RenderSignature {
+interface StreamingHighlightCache extends RenderSignature {
 	lang: string | undefined;
 	text: string;
 	lines: readonly string[];
+	stream: HighlightStreamSession;
+}
+
+/**
+ * Split a highlight-stream push result (newline-terminated lines) into
+ * per-line strings, dropping the empty tail produced by the final newline.
+ */
+function splitPushedHighlightLines(pushed: string): string[] {
+	const lines = pushed.split("\n");
+	lines.pop();
+	return lines;
 }
 
 interface TableLayoutLock {
@@ -1532,11 +1560,14 @@ export class Markdown
 	// True while #renderStreamingContentLines renders the frozen token range:
 	// frozen code blocks highlight even in transient mode so their bytes match
 	// the finalized render (they render once into the prefix line cache, so
-	// the FFI cost is amortized). The volatile tail normally stays
-	// unhighlighted; streaming diff fences line-highlight completed rows so
-	// semantic colors reach native scrollback before rows leave the viewport.
+	// the FFI cost is amortized). In the volatile tail, an open fence
+	// incrementally highlights its completed lines through a stateful
+	// highlight stream (falling back to per-line highlighting for diff-family
+	// fences when the theme lacks one) so semantic colors reach native
+	// scrollback before rows leave the viewport; only the trailing partial
+	// line stays unhighlighted.
 	#renderingFrozenPrefix = false;
-	#streamingDiffLineCache?: StreamingDiffLineCache;
+	#streamingHighlightCache?: StreamingHighlightCache;
 	#activeRenderSignature?: RenderSignature;
 	// Streaming tables may grow naturally while wholly repaintable. Once any
 	// physical row of a table enters native scrollback, its current column widths
@@ -1548,9 +1579,19 @@ export class Markdown
 	#activeTableRenderSpecs?: TableRenderSpec[];
 
 	#ignoreTight = false;
+	// Width-independent mutation counter for the width-epoch leading-stability
+	// checks (getNativeScrollbackWidthEpochRevision): a Markdown that precedes an
+	// epoch source (startup changelog before the transcript, a thinking block
+	// before the streaming answer) would otherwise be validated by comparing
+	// width-dependent row counts, which conflates reflow with mutation and fails
+	// resolution on every width change. Bumped by every content-shape mutation.
+	#widthEpochRevision = 0;
 
 	setIgnoreTight(ignore: boolean): this {
-		if (this.#ignoreTight !== ignore) this.#clearTableLayouts();
+		if (this.#ignoreTight !== ignore) {
+			this.#clearTableLayouts();
+			this.#widthEpochRevision++;
+		}
 		this.#ignoreTight = ignore;
 		this.invalidate();
 		return this;
@@ -1591,8 +1632,13 @@ export class Markdown
 			this.#streamPrefixLineCache = undefined;
 			this.#settledExposedText = undefined;
 		}
+		this.#widthEpochRevision++;
 		this.invalidate();
 		return true;
+	}
+
+	getNativeScrollbackWidthEpochRevision(): number {
+		return this.#widthEpochRevision;
 	}
 
 	invalidate(): void {
@@ -1608,6 +1654,7 @@ export class Markdown
 		const next = value === true;
 		if (this.#transientRenderCache === next) return;
 		this.#transientRenderCache = next;
+		this.#widthEpochRevision++;
 		this.invalidate();
 	}
 
@@ -2137,17 +2184,15 @@ export class Markdown
 		const bodyLines: RenderedLine[] = [];
 		const tokenText = "text" in token && typeof token.text === "string" ? token.text : "";
 		const lang = "lang" in token && typeof token.lang === "string" ? token.lang : undefined;
-		const normalizedLang = lang?.toLowerCase();
-		const canStreamDiff =
-			this.transientRenderCache &&
-			!this.#renderingFrozenPrefix &&
-			this.#theme.highlightCode &&
-			(normalizedLang === "diff" || normalizedLang === "patch" || normalizedLang === "udiff");
 		const addBodyLine = (line: string): void => {
 			bodyLines.push(renderedLine(literalCode ? line : codeIndent + line, literalCode));
 		};
 
-		if (this.#theme.highlightCode && (!this.transientRenderCache || this.#renderingFrozenPrefix)) {
+		const streaming = this.transientRenderCache && !this.#renderingFrozenPrefix;
+		if (this.#theme.highlightCode && (!streaming || this.#codeTokenHasClosingFence(token))) {
+			// Finalized content — or a fence that closed mid-stream, which
+			// highlights through the same whole-block call the finalized render
+			// uses so rows entering native scrollback byte-match it.
 			const highlightedLines = this.#theme.highlightCode(tokenText, lang);
 			for (const hlLine of highlightedLines) {
 				addBodyLine(hlLine);
@@ -2155,18 +2200,18 @@ export class Markdown
 			return bodyLines;
 		}
 
-		if (canStreamDiff) {
-			const closedFence = this.#codeTokenHasClosingFence(token);
+		if (streaming && this.#theme.highlightCode) {
+			// Open fence: highlight completed lines incrementally so semantic
+			// colors reach native scrollback before rows leave the viewport;
+			// only the trailing partial line stays unhighlighted.
 			const lineEnd = tokenText.lastIndexOf("\n");
-			if (closedFence || lineEnd >= 0) {
-				const completedText = closedFence ? tokenText : tokenText.slice(0, lineEnd);
-				for (const hlLine of this.#highlightStreamingDiffLines(completedText, lang)) {
+			const completedLines = lineEnd >= 0 ? this.#highlightStreamingLines(tokenText.slice(0, lineEnd), lang) : null;
+			if (completedLines) {
+				for (const hlLine of completedLines) {
 					addBodyLine(hlLine);
 				}
-				if (!closedFence) {
-					for (const codeLine of tokenText.slice(lineEnd + 1).split("\n")) {
-						addBodyLine(this.#theme.codeBlock(codeLine));
-					}
+				for (const codeLine of tokenText.slice(lineEnd + 1).split("\n")) {
+					addBodyLine(this.#theme.codeBlock(codeLine));
 				}
 				return bodyLines;
 			}
@@ -2209,11 +2254,17 @@ export class Markdown
 		return false;
 	}
 
-	#highlightStreamingDiffLines(completedText: string, lang: string | undefined): readonly string[] {
-		const highlightCode = this.#theme.highlightCode;
-		if (!highlightCode) return [];
+	/**
+	 * Highlight the completed (newline-terminated) prefix of a streaming code
+	 * fence. Uses a stateful per-fence highlight stream so each render pushes
+	 * only the newly completed lines, with output byte-identical to the
+	 * whole-block `highlightCode` the finalized render performs. Returns null
+	 * when no stream is available for `lang` (caller falls back to plain
+	 * code-block styling).
+	 */
+	#highlightStreamingLines(completedText: string, lang: string | undefined): readonly string[] | null {
 		const signature = this.#activeRenderSignature;
-		const cache = this.#streamingDiffLineCache;
+		const cache = this.#streamingHighlightCache;
 		if (
 			signature &&
 			cache &&
@@ -2233,23 +2284,47 @@ export class Markdown
 			cache.headingProbe === signature.headingProbe
 		) {
 			if (completedText.length === cache.text.length) return cache.lines;
-			const lines = cache.lines.slice();
+			// Invariant: the stream has consumed `cache.text + "\n"`, so pushing
+			// the added lines with a trailing newline advances it to
+			// `completedText + "\n"` — every fed line stays newline-terminated.
 			const addedText = completedText.slice(cache.text.length + 1);
-			for (const codeLine of addedText.split("\n")) {
-				lines.push(...highlightCode(codeLine, lang));
-			}
-			this.#streamingDiffLineCache = { ...signature, lang, text: completedText, lines };
+			const lines = cache.lines.concat(splitPushedHighlightLines(cache.stream.push(`${addedText}\n`)));
+			this.#streamingHighlightCache = { ...signature, lang, text: completedText, lines, stream: cache.stream };
 			return lines;
 		}
 
-		const lines: string[] = [];
-		for (const codeLine of completedText.split("\n")) {
-			lines.push(...highlightCode(codeLine, lang));
-		}
+		const stream = this.#createHighlightStream(lang);
+		if (!stream) return null;
+		const lines = splitPushedHighlightLines(stream.push(`${completedText}\n`));
 		if (signature) {
-			this.#streamingDiffLineCache = { ...signature, lang, text: completedText, lines };
+			this.#streamingHighlightCache = { ...signature, lang, text: completedText, lines, stream };
 		}
 		return lines;
+	}
+
+	/**
+	 * Resolve a highlight stream for `lang`. Prefers the theme's stateful
+	 * factory; without one, emulates a stream via per-line `highlightCode` for
+	 * diff-family fences only — that grammar is line-local, so per-line output
+	 * matches the whole-block render (other grammars carry cross-line state
+	 * and would diverge).
+	 */
+	#createHighlightStream(lang: string | undefined): HighlightStreamSession | null {
+		const factory = this.#theme.createHighlightStream;
+		if (factory) return factory(lang);
+		const highlightCode = this.#theme.highlightCode;
+		if (!highlightCode) return null;
+		const normalizedLang = lang?.toLowerCase();
+		if (normalizedLang !== "diff" && normalizedLang !== "patch" && normalizedLang !== "udiff") return null;
+		return {
+			push: chunk => {
+				const lines = chunk.split("\n");
+				const trailing = lines.pop() ?? "";
+				let out = "";
+				for (const line of lines) out += `${highlightCode(line, lang).join("\n")}\n`;
+				return trailing ? out + highlightCode(trailing, lang).join("\n") : out;
+			},
+		};
 	}
 
 	#renderEmptyPaddingLines(signature: RenderSignature): string[] {

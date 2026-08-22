@@ -133,7 +133,7 @@ describe("streaming edit preview height (stable, full tail window)", () => {
 	// Real TUI + virtual terminal harness: drives the component through the
 	// actual differential renderer so native scrollback (not just the in-memory
 	// component height) is exercised. Mirrors makeComponent's construction but
-	// swaps the stub for a live TUI wired to a ghostty-backed terminal and the
+	// swaps the stub for a live TUI wired to a kitty-vt-backed terminal and the
 	// drainable scheduler in place of wall-clock frame timers.
 	function makeTuiComponent(): {
 		component: ToolExecutionComponent;

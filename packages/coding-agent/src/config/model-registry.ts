@@ -26,6 +26,7 @@ import { getBundledModels, getBundledProviders } from "@oh-my-pi/pi-catalog/mode
 import {
 	googleAntigravityModelManagerOptions,
 	googleGeminiCliModelManagerOptions,
+	isCredentialScopedModelCacheProvider,
 	openaiCodexModelManagerOptions,
 	PROVIDER_DESCRIPTORS,
 	resolveModelCacheProviderId,
@@ -189,6 +190,7 @@ export class ModelRegistry {
 	#cacheDbPath?: string;
 	#suppressedSelectors: Map<string, number> = new Map();
 	#backgroundRefresh?: Promise<void>;
+	#credentialScopedCacheHydration?: Promise<void>;
 	#policyReapply?: Promise<void>;
 	#lastDiscoveryWarnings: Map<string, string> = new Map();
 	// Runtime extension model overlays — persist across refresh() cycles so that
@@ -285,6 +287,34 @@ export class ModelRegistry {
 		this.#reloadStaticModels();
 		this.#suppressedSelectors.clear();
 		await this.#refreshRuntimeDiscoveries(strategy);
+	}
+
+	/**
+	 * Hydrate credential-scoped built-in catalogs from their exact cache rows.
+	 *
+	 * The synchronous constructor cannot resolve credentials, so session startup
+	 * awaits this local-only, best-effort pass before validating model selectors.
+	 */
+	async hydrateCredentialScopedModelCaches(): Promise<void> {
+		if (!this.#credentialScopedCacheHydration) {
+			const providerIds = new Set<string>();
+			for (const providerId of STARTUP_MODEL_CACHE_PROVIDER_IDS) {
+				if (isCredentialScopedModelCacheProvider(providerId)) providerIds.add(providerId);
+			}
+			this.#credentialScopedCacheHydration = this.#refreshRuntimeDiscoveries("offline", providerIds).catch(error => {
+				logger.debug("credential-scoped model cache hydration failed", {
+					error: error instanceof Error ? error.message : String(error),
+				});
+			});
+		}
+		const hydration = this.#credentialScopedCacheHydration;
+		try {
+			await hydration;
+		} finally {
+			if (this.#credentialScopedCacheHydration === hydration) {
+				this.#credentialScopedCacheHydration = undefined;
+			}
+		}
 	}
 
 	/**
@@ -755,7 +785,7 @@ export class ModelRegistry {
 		const cachedModels: Model<Api>[] = [];
 		const authoritativeFreshProviders = new Set<string>();
 		for (const providerId of STARTUP_MODEL_CACHE_PROVIDER_IDS) {
-			if (configuredDiscoveryProviders.has(providerId)) {
+			if (configuredDiscoveryProviders.has(providerId) || isCredentialScopedModelCacheProvider(providerId)) {
 				continue;
 			}
 			const cacheProviderId = this.#resolveStartupModelCacheProviderId(providerId);

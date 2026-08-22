@@ -115,6 +115,7 @@ describe("Editor component", () => {
 			},
 		});
 		editor.onAutocompleteUpdate = resolveAutocompleteUpdated;
+		editor.setAutocompleteMaxVisible(5);
 		editor.handleInput("/");
 		const textRevision = editor.getNativeScrollbackWidthEpochRevision();
 
@@ -498,10 +499,10 @@ describe("Editor component", () => {
 			expect(editor.render(80).some(line => line.includes(CURSOR_MARKER))).toBe(true);
 		});
 
-		it("wraps long slash-command descriptions instead of dropping the tail", async () => {
+		it("caps wrapped slash-command descriptions at two rows with an ellipsis", async () => {
 			const editor = new Editor(defaultEditorTheme);
 			const longDescription =
-				"Plan and execute non-trivial architectural improvements to the codebase. Use this skill when you need to refactor existing systems.";
+				"Plan and execute non-trivial architectural improvements to the codebase. Use this skill when you need to refactor existing systems and it keeps rambling on far past what two popup rows can hold.";
 			editor.setAutocompleteProvider(
 				new CombinedAutocompleteProvider(
 					[{ name: "improve-codebase-architecture", description: longDescription }],
@@ -516,8 +517,13 @@ describe("Editor component", () => {
 			await autocompleteUpdated;
 
 			const rendered = editor.render(80).map(line => stripVTControlCharacters(line));
-			expect(rendered.some(line => line.includes("improve-codebase-architecture"))).toBe(true);
-			expect(rendered.join("\n")).toContain("refactor existing systems.");
+			const commandRowIndex = rendered.findIndex(line => line.includes("improve-codebase-architecture"));
+			expect(commandRowIndex).not.toBe(-1);
+			// Wrapped continuation is capped at one extra row ending in an ellipsis.
+			const popupRows = rendered.slice(commandRowIndex);
+			expect(popupRows.length).toBe(2);
+			expect(popupRows[1]).toContain("…");
+			expect(rendered.join("\n")).not.toContain("rambling");
 		});
 
 		it("triggers file-reference autocomplete when typing at-sign", async () => {

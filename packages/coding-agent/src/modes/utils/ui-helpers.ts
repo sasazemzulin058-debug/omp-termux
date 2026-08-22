@@ -735,6 +735,84 @@ export class UiHelpers {
 		this.ctx.ui.requestRender();
 	}
 
+	/**
+	 * Fast-path history rewind (esc-esc branch, /tree rewind to an ancestor):
+	 * drop the rendered components at/after `message` in place instead of the
+	 * destructive clear-scrollback replay. Rows already committed to native
+	 * scrollback are immutable, so the drop is expressible only while every
+	 * affected block is still wholly inside the visible window; returns false
+	 * when the caller must fall back to
+	 * `renderInitialMessages({ clearTerminalHistory: true })`.
+	 *
+	 * Callers must have already rewound the session so that `message` and
+	 * everything after it are no longer part of the view session's transcript.
+	 */
+	truncateTranscriptFromMessage(message: AgentMessage): boolean {
+		if (!this.ctx.initialChatRendered || this.ctx.focusedAgentId || this.ctx.viewSession.isStreaming) return false;
+		// In-flight blocks route future events into their components; a rewind
+		// with any of them live takes the full-replay path instead.
+		if (
+			this.ctx.pendingTools.size > 0 ||
+			this.ctx.pendingBashComponents.length > 0 ||
+			this.ctx.pendingPythonComponents.length > 0
+		) {
+			return false;
+		}
+		const chat = this.ctx.chatContainer;
+		const cut = this.ctx.transcriptMessageComponents.get(message);
+		if (!cut) return false;
+		const index = chat.children.indexOf(cut);
+		if (index < 0) return false;
+		// Every dropped block must still be uncommitted: removing rows already on
+		// the tape is an interior deletion of committed history the render engine
+		// cannot express (see TranscriptContainer.isBlockUncommitted).
+		for (let i = index; i < chat.children.length; i++) {
+			if (!chat.isBlockUncommitted(chat.children[i]!)) return false;
+		}
+		// Ground truth for the surviving prefix. The cut message still present
+		// means the session was not actually rewound past it — bail before
+		// mutating anything.
+		const context = this.ctx.viewSession.buildTranscriptSessionContext({
+			collapseCompactedHistory: settings.get("display.collapseCompacted"),
+		});
+		for (const remaining of context.messages) {
+			if (remaining === message) return false;
+		}
+		const dropped = chat.children.slice(index);
+		for (let i = dropped.length - 1; i >= 0; i--) {
+			const child = dropped[i]!;
+			chat.removeChild(child);
+			child.dispose?.();
+		}
+		// Prune the settled-component cache to the surviving messages — dropped
+		// entries stay strongly reachable through the session tree and would
+		// otherwise pin their components' layout caches (same rationale as
+		// rebuildChatFromMessages).
+		const retained = new WeakMap<AgentMessage, Component>();
+		for (const remaining of context.messages) {
+			const component = this.ctx.transcriptMessageComponents.get(remaining);
+			if (component) retained.set(remaining, component);
+		}
+		this.ctx.transcriptMessageComponents = retained;
+		// Reseed the cache-invalidation baseline from the surviving transcript
+		// (mirrors the replay path's billed-usage rule).
+		let baseline: Usage | undefined;
+		for (let i = context.messages.length - 1; i >= 0; i--) {
+			const candidate = context.messages[i]!;
+			if (candidate.role !== "assistant") continue;
+			const usage = candidate.usage;
+			if (usage.cacheRead + usage.cacheWrite + usage.input > 0) {
+				baseline = usage;
+				break;
+			}
+		}
+		this.ctx.lastAssistantUsage = baseline;
+		this.ctx.statusLine.invalidate();
+		this.ctx.updateEditorBorderColor();
+		this.ctx.ui.requestRender();
+		return true;
+	}
+
 	async renderInitialMessages(options: RenderInitialMessagesOptions = {}): Promise<void> {
 		// Build against a detached container. Incremental construction still yields
 		// to terminal input, while paints keep using the complete visible transcript

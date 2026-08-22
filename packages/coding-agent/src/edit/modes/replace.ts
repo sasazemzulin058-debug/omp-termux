@@ -324,33 +324,58 @@ function findExactMatchOutcome(
 /** Compute Levenshtein distance between two strings */
 export function levenshteinDistance(a: string, b: string): number {
 	if (a === b) return 0;
-	const aLen = a.length;
-	const bLen = b.length;
-	if (aLen === 0) return bLen;
-	if (bLen === 0) return aLen;
 
-	let prev = new Array<number>(bLen + 1);
-	let curr = new Array<number>(bLen + 1);
-	for (let j = 0; j <= bLen; j++) {
-		prev[j] = j;
+	let start = 0;
+	const sharedLimit = Math.min(a.length, b.length);
+	while (start < sharedLimit && a.charCodeAt(start) === b.charCodeAt(start)) start++;
+
+	let aEnd = a.length;
+	let bEnd = b.length;
+	while (aEnd > start && bEnd > start && a.charCodeAt(aEnd - 1) === b.charCodeAt(bEnd - 1)) {
+		aEnd--;
+		bEnd--;
 	}
 
-	for (let i = 1; i <= aLen; i++) {
-		curr[0] = i;
-		const aCode = a.charCodeAt(i - 1);
-		for (let j = 1; j <= bLen; j++) {
-			const cost = aCode === b.charCodeAt(j - 1) ? 0 : 1;
-			const deletion = prev[j] + 1;
-			const insertion = curr[j - 1] + 1;
-			const substitution = prev[j - 1] + cost;
-			curr[j] = Math.min(deletion, insertion, substitution);
+	let aLength = aEnd - start;
+	let bLength = bEnd - start;
+	if (aLength === 0) return bLength;
+	if (bLength === 0) return aLength;
+
+	// Keep the row on the shorter string: one packed allocation and one
+	// in-place update replace two boxed-number arrays.
+	if (bLength > aLength) {
+		const text = a;
+		a = b;
+		b = text;
+		const length = aLength;
+		aLength = bLength;
+		bLength = length;
+	}
+
+	const row = new Uint32Array(bLength + 1);
+	for (let column = 1; column <= bLength; column++) row[column] = column;
+
+	for (let line = 1; line <= aLength; line++) {
+		let diagonal = row[0];
+		row[0] = line;
+		const aCode = a.charCodeAt(start + line - 1);
+		for (let column = 1; column <= bLength; column++) {
+			const above = row[column];
+			if (aCode === b.charCodeAt(start + column - 1)) {
+				row[column] = diagonal;
+			} else {
+				const deletion = above + 1;
+				const insertion = row[column - 1] + 1;
+				const substitution = diagonal + 1;
+				let distance = deletion < insertion ? deletion : insertion;
+				if (substitution < distance) distance = substitution;
+				row[column] = distance;
+			}
+			diagonal = above;
 		}
-		const tmp = prev;
-		prev = curr;
-		curr = tmp;
 	}
 
-	return prev[bLen];
+	return row[bLength];
 }
 
 /** Compute similarity score between two strings (0 to 1) */

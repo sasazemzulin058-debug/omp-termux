@@ -520,6 +520,8 @@ async function streamLinesFromFile(
 	};
 }
 
+const IMAGE_ATTACHMENT_URI_REGEX = /^attachment:\/\/[1-9]\d*$/;
+
 // Maximum image file size (20MB) - larger images will be rejected to prevent OOM during serialization
 const MAX_IMAGE_SIZE = MAX_IMAGE_INPUT_BYTES;
 
@@ -1075,6 +1077,18 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 		let { path: readPath } = params;
 		if (readPath.startsWith("file://")) {
 			readPath = expandPath(readPath);
+		}
+
+		if (IMAGE_ATTACHMENT_URI_REGEX.test(readPath)) {
+			const attachments = this.session.getImageAttachments?.() ?? [];
+			const attachment = attachments.find(entry => entry.uri === readPath);
+			if (!attachment) {
+				const availableUris = attachments.map(entry => entry.uri).join(", ") || "none";
+				throw new ToolError(
+					`Could not resolve image attachment '${readPath}'. Available attachment URIs: ${availableUris}. Use one of the listed attachment URIs, or attach an image first when none are available.`,
+				);
+			}
+			readPath = attachment.sourcePath;
 		}
 
 		const conflictUri = parseConflictUri(readPath);

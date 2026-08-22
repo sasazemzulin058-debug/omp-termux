@@ -6,6 +6,7 @@ import { Effort, type FetchImpl } from "@oh-my-pi/pi-ai";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { writeModelCache } from "@oh-my-pi/pi-catalog/model-cache";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
+import { resolveModelCacheProviderId } from "@oh-my-pi/pi-catalog/provider-models";
 import { parseArgs } from "@oh-my-pi/pi-coding-agent/cli/args";
 import { ModelRegistry, type ProviderConfigInput } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { getModelMatchPreferences, resolveModelScope } from "@oh-my-pi/pi-coding-agent/config/model-resolver";
@@ -181,6 +182,126 @@ describe("createAgentSession deferred model pattern resolution", () => {
 		} finally {
 			await session.dispose();
 		}
+	});
+
+	test("hydrates credential-scoped model caches before fallback validation", async () => {
+		const authStorage = createInMemoryAuthStorage();
+		authStoragesToClose.push(authStorage);
+		const providers = [
+			{ id: "opencode-go", apiKey: "go-test-key", baseUrl: "https://opencode.ai/zen/go/v1" },
+			{ id: "opencode-zen", apiKey: "zen-test-key", baseUrl: "https://opencode.ai/zen/v1" },
+			{ id: "github-copilot", apiKey: "copilot-test-key", baseUrl: "https://api.githubcopilot.com" },
+		];
+		authStorage.setRuntimeApiKey("openai", "openai-test-key");
+		const modelsPath = path.join(tempDir, "models.yml");
+		const fallbackSelectors: string[] = [];
+		for (const provider of providers) {
+			authStorage.setRuntimeApiKey(provider.id, provider.apiKey);
+			const cachedModel = buildModel({
+				id: "discovered-only-model",
+				name: "Discovered Only Model",
+				api: "openai-responses",
+				provider: provider.id,
+				baseUrl: provider.baseUrl,
+				reasoning: false,
+				input: ["text"],
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+				contextWindow: 128_000,
+				maxTokens: 16_384,
+			});
+			writeModelCache(
+				resolveModelCacheProviderId(provider.id, { apiKey: provider.apiKey }),
+				Date.now(),
+				[cachedModel],
+				true,
+				"",
+				path.join(tempDir, "models.db"),
+			);
+			fallbackSelectors.push(`${provider.id}/${cachedModel.id}`);
+		}
+		const modelRegistry = new ModelRegistry(authStorage, modelsPath);
+		const settings = Settings.isolated({
+			"retry.fallbackChains": { default: fallbackSelectors },
+		});
+
+		const { session } = await createAgentSession({
+			cwd: tempDir,
+			agentDir: tempDir,
+			authStorage,
+			modelRegistry,
+			settings,
+			sessionManager: SessionManager.inMemory(),
+			disableExtensionDiscovery: true,
+			extensions: [],
+			skills: [],
+			contextFiles: [],
+			promptTemplates: [],
+			slashCommands: [],
+			enableMCP: false,
+			enableLsp: false,
+			skipPythonPreflight: true,
+			rules: [],
+			preloadedCustomToolPaths: [],
+			toolNames: ["read"],
+			modelPattern: "openai/gpt-4o-mini",
+		});
+
+		try {
+			expect(session.configWarnings.filter(warning => warning.includes("discovered-only-model"))).toEqual([]);
+		} finally {
+			await session.dispose();
+		}
+	});
+
+	test("rehydrates credential-scoped caches after credentials change", async () => {
+		const authStorage = createInMemoryAuthStorage();
+		authStoragesToClose.push(authStorage);
+		const provider = "opencode-go";
+		const baseUrl = "https://opencode.ai/zen/go/v1";
+		const cacheDbPath = path.join(tempDir, "models.db");
+		const firstModel = buildModel({
+			id: "first-credential-model",
+			name: "First Credential Model",
+			api: "openai-responses",
+			provider,
+			baseUrl,
+			reasoning: false,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 128_000,
+			maxTokens: 16_384,
+		});
+		authStorage.setRuntimeApiKey(provider, "first-key");
+		writeModelCache(
+			resolveModelCacheProviderId(provider, { apiKey: "first-key" }),
+			Date.now(),
+			[firstModel],
+			true,
+			"",
+			cacheDbPath,
+		);
+		const modelRegistry = new ModelRegistry(authStorage, path.join(tempDir, "models.yml"));
+
+		await modelRegistry.hydrateCredentialScopedModelCaches();
+		expect(modelRegistry.find(provider, firstModel.id)).toBeDefined();
+
+		const secondModel = buildModel({
+			...firstModel,
+			id: "second-credential-model",
+			name: "Second Credential Model",
+		});
+		authStorage.setRuntimeApiKey(provider, "second-key");
+		writeModelCache(
+			resolveModelCacheProviderId(provider, { apiKey: "second-key" }),
+			Date.now(),
+			[secondModel],
+			true,
+			"",
+			cacheDbPath,
+		);
+
+		await modelRegistry.hydrateCredentialScopedModelCaches();
+		expect(modelRegistry.find(provider, secondModel.id)).toBeDefined();
 	});
 
 	test("does not silently fallback when explicit modelPattern is unresolved", async () => {

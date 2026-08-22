@@ -2,6 +2,32 @@
 
 ## [Unreleased]
 
+## [18.0.0] - 2026-08-22
+
+### Added
+
+- Added reversible private-use glyph tokenization for Claude-compatible provider requests, including prompt notices, streamed response decoding, and safe handling of unresolved model-authored glyph tokens.
+
+## [17.4.3] - 2026-08-21
+
+### Fixed
+
+- Fixed completed Anthropic turns remaining busy when the provider sent `message_stop` but kept the SSE connection open, which stranded tool execution and queued steering until timeout.
+
+## [17.4.2] - 2026-08-21
+
+### Added
+
+- Image content blocks accept an optional `url` mirror: providers whose APIs fetch remote images (Anthropic url sources, OpenAI/xAI Responses and Chat Completions `image_url`, Google `fileData`) send the URL instead of the inline base64 payload.
+
+### Fixed
+
+- Fixed Cursor thinking-effort selection being cosmetic: collapsed effort-routed families (GPT-5.6 Luna/Sol/Terra, Grok 4.5/4.6) now send the effort-routed wire model id instead of always pinning the `-none` off tier ([#9246](https://github.com/can1357/oh-my-pi/issues/9246)).
+- Fixed OAuth preflight refresh stranding a peer-rotated credential: when a concurrent process rotated a rotating-refresh-token grant (e.g. Anthropic) during preflight, the resolve pass skipped the freshly reloaded row and failed the request with no credentials for single-account setups ([#9194](https://github.com/can1357/oh-my-pi/issues/9194)).
+- Fixed Cursor reasoning-sibling models (e.g. `gpt-5.4-mini-low`, `gpt-5.6-sol-xhigh`) failing with `resource_exhausted` (errorId 528384): the per-effort GPT slug is now split into its base model id plus a `{ id: "reasoning", value: <effort> }` request parameter, matching the official `cursor-agent` wire shape, instead of sending the sibling slug as the wire model id with no parameters ([#9164](https://github.com/can1357/oh-my-pi/issues/9164)).
+
+## [17.4.1] - 2026-08-21
+
 ### Added
 
 - Added Codex Responses support for Code Mode, preserving tool modes and passing tool namespace metadata during sessions.

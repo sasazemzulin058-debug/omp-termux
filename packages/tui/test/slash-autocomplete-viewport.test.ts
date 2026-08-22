@@ -52,6 +52,7 @@ describe("slash command autocomplete with unknown native viewport state", () => 
 		const root = new Container();
 		root.addChild({ invalidate() {}, render: () => ["chat-0", "chat-1", "chat-2", "chat-3", "chat-4", "chat-5"] });
 		const editor = new Editor(defaultEditorTheme);
+		editor.viewportRowsProvider = () => term.rows;
 		editor.setAutocompleteProvider(new SlashProvider());
 		editor.onAutocompleteUpdate = () => tui.requestRender();
 		root.addChild(editor);
@@ -90,6 +91,7 @@ describe("slash command autocomplete with unknown native viewport state", () => 
 			});
 			const editor = new Editor(defaultEditorTheme);
 			let submitted: string | undefined;
+			editor.viewportRowsProvider = () => term.rows;
 			editor.setAutocompleteProvider(new SlashProvider());
 			editor.onAutocompleteUpdate = () => {
 				tui?.requestRender();
@@ -125,7 +127,6 @@ describe("slash command autocomplete with unknown native viewport state", () => 
 				"  stats",
 				"  stop",
 				"",
-				"",
 			]);
 
 			term.sendInput("\r");
@@ -145,7 +146,6 @@ describe("slash command autocomplete with unknown native viewport state", () => 
 				"chat-6",
 				"+--------------------------------------+",
 				"+- |                                  -+",
-				"",
 				"",
 				"",
 				"",
@@ -170,6 +170,7 @@ describe("slash command autocomplete with unknown native viewport state", () => 
 		const transcript = { invalidate() {}, render: () => transcriptLines() };
 		root.addChild(transcript);
 		const editor = new Editor(defaultEditorTheme);
+		editor.viewportRowsProvider = () => term.rows;
 		editor.setAutocompleteProvider(new SlashProvider());
 		editor.onAutocompleteUpdate = () => tui.requestRender();
 		root.addChild(editor);

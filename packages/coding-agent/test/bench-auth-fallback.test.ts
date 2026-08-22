@@ -183,7 +183,7 @@ describe("bench empty-output guard", () => {
 		const run = summary.models[0].results[0];
 		expect(run.ok).toBe(false);
 		if (!run.ok) expect(run.error).toContain("no output");
-		expect(summary.models[0].average).toBeNull();
+		expect(summary.models[0].stats).toBeNull();
 	});
 });
 

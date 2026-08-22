@@ -27,6 +27,7 @@ import {
 import { interceptUnhandledRejections } from "@oh-my-pi/pi-utils/postmortem";
 import { setProcessName } from "@oh-my-pi/pi-utils/process-name";
 import { declareWorkerHostEntry, installWorkerInbox, isWorkerHostSelector } from "@oh-my-pi/pi-utils/worker-host";
+import { BLOB_BROKER_WORKER_ARG } from "./blob-broker/protocol";
 import { installProfileAlias, resolveProfileAliasCommandFromProcess } from "./cli/profile-alias";
 import { extractProfileFlags } from "./cli/profile-bootstrap";
 import { startJsEvalProcess } from "./eval/js/process-entry";
@@ -100,6 +101,7 @@ async function runSmokeTest(): Promise<void> {
 	// Other smoke dependencies stay lazy so normal CLI startup does not load their worker clients.
 	const { smokeTestDaemonBroker } = await import("./launch/client");
 	const { smokeTestLspMux } = await import("./lsp/mux/daemon");
+	const { smokeTestBlobBroker } = await import("./blob-broker/daemon");
 	const { smokeTestTerminalOutputWorker } = await import("./launch/terminal-output-worker-client");
 	await smokeTestSyncWorker();
 
@@ -123,6 +125,7 @@ async function runSmokeTest(): Promise<void> {
 	await smokeTestMnemopiEmbedWorker();
 	await smokeTestDaemonBroker();
 	await smokeTestLspMux();
+	await smokeTestBlobBroker();
 	await smokeTestTerminalOutputWorker();
 	process.stdout.write("smoke-test: ok\n");
 }
@@ -227,6 +230,11 @@ async function runWorkerEntrypoint(arg: string | undefined): Promise<boolean> {
 	if (arg === LSP_MUX_WORKER_ARG) {
 		const { startLspMuxFromEnvironment } = await import("./lsp/mux/server");
 		await startLspMuxFromEnvironment();
+		return true;
+	}
+	if (arg === BLOB_BROKER_WORKER_ARG) {
+		const { startBlobBrokerFromEnvironment } = await import("./blob-broker/server");
+		await startBlobBrokerFromEnvironment();
 		return true;
 	}
 	return false;
@@ -408,19 +416,38 @@ export async function runCli(argv: string[]): Promise<void> {
 		process.stdout.write(formatLicenseOutput());
 		return;
 	}
-	const [{ run }, { commands, resolveCliArgv }] = await Promise.all([
-		import("@oh-my-pi/pi-utils/cli"),
-		import("./cli-commands"),
-	]);
-	// --help and --version are handled by run() directly; --license returned above.
-	// Everything else that isn't a known subcommand routes to "launch".
-	const resolved = resolveCliArgv(resolvedArgv);
-	if ("error" in resolved) {
-		process.stderr.write(`error: ${resolved.error}\n`);
-		process.exitCode = 1;
-		return;
+	let stopStartupComposer: (() => void) | undefined;
+	if (
+		!process.env.PI_TIMING &&
+		process.stdin.isTTY === true &&
+		process.stdout.isTTY === true &&
+		(resolvedArgv.length === 0 || (resolvedArgv.length === 1 && resolvedArgv[0] === "--no-session"))
+	) {
+		// Intentional exception to the static-import convention: this latency boundary
+		// keeps the TUI graph out of worker, subcommand, help, and version launches.
+		// Loading it statically would erase the measured cold-start improvement.
+		const { beginStartupComposer, stopPendingStartupComposer } = await import("./modes/startup-composer");
+		beginStartupComposer({ version: VERSION });
+		stopStartupComposer = stopPendingStartupComposer;
 	}
-	return run({ bin: APP_NAME, version: VERSION, argv: resolved.argv, commands, metadataHelp: showHelp });
+
+	try {
+		const [{ run }, { commands, resolveCliArgv }] = await Promise.all([
+			import("@oh-my-pi/pi-utils/cli"),
+			import("./cli-commands"),
+		]);
+		// --help and --version are handled by run() directly; --license returned above.
+		// Everything else that isn't a known subcommand routes to "launch".
+		const resolved = resolveCliArgv(resolvedArgv);
+		if ("error" in resolved) {
+			process.stderr.write(`error: ${resolved.error}\n`);
+			process.exitCode = 1;
+			return;
+		}
+		await run({ bin: APP_NAME, version: VERSION, argv: resolved.argv, commands, metadataHelp: showHelp });
+	} finally {
+		stopStartupComposer?.();
+	}
 }
 
 // Floating call instead of top-level await: TLA forces `--bytecode` (CJS

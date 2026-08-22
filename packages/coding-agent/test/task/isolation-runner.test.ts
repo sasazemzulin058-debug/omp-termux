@@ -3,6 +3,7 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
+import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import * as executorModule from "@oh-my-pi/pi-coding-agent/task/executor";
 import {
 	applyEligibleNestedPatches,
@@ -204,6 +205,78 @@ describe("runIsolatedSubprocess", () => {
 		await Promise.resolve();
 		await Promise.resolve();
 		expect(cleanupSpy).toHaveBeenCalledTimes(1);
+	});
+
+	it("observes real child usage before fallible isolation cleanup", async () => {
+		const childResult = result({
+			exitCode: 1,
+			error: "agent failed",
+			usage: {
+				input: 9_000,
+				output: 1_234,
+				cacheRead: 8_000,
+				cacheWrite: 7_000,
+				totalTokens: 25_234,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+		});
+		const sessionManager = SessionManager.inMemory();
+		sessionManager.beginTurnBudget(100_000, true);
+		vi.spyOn(worktreeModule, "ensureIsolation").mockResolvedValue({
+			mergedDir: "/repo/isolated",
+			backend: natives.IsoBackendKind.Rcopy,
+			fellBack: false,
+			fallbackReason: null,
+		});
+		vi.spyOn(executorModule, "runSubprocess").mockResolvedValue(childResult);
+		vi.spyOn(worktreeModule, "cleanupIsolation").mockRejectedValue(new Error("cleanup failed"));
+		const onSubprocessResult = vi.fn((child: SingleResult) => {
+			sessionManager.recordEvalSubagentOutput(child.usage?.output ?? 0);
+		});
+
+		await expect(
+			runIsolatedSubprocess({
+				baseOptions: {
+					cwd: "/repo",
+					agent: {
+						name: "task",
+						description: "Task agent",
+						systemPrompt: "test",
+						source: "bundled",
+					},
+					task: "Do work",
+					index: 0,
+					id: "UsageAccounting",
+				},
+				context: {
+					repoRoot: "/repo",
+					baseline: {
+						root: {
+							repoRoot: "/repo",
+							headCommit: "base",
+							staged: "",
+							unstaged: "",
+							untracked: [],
+							untrackedPatch: "",
+						},
+						nested: [],
+					},
+				},
+				preferredBackend: undefined,
+				agentId: "UsageAccounting",
+				mergeMode: "patch",
+				artifactsDir: "/artifacts",
+				buildFailureResult: error => result({ exitCode: 1, error: String(error) }),
+				onSubprocessResult,
+			}),
+		).rejects.toThrow("cleanup failed");
+
+		expect(onSubprocessResult).toHaveBeenCalledTimes(1);
+		expect(sessionManager.getTurnBudget()).toEqual({
+			total: 100_000,
+			spent: 1_234,
+			hard: true,
+		});
 	});
 });
 

@@ -2589,6 +2589,35 @@ describe("ACP agent", () => {
 		await Bun.sleep(0);
 	});
 
+	it("settles the prompt turn when a force residual prompt resolves locally (#9206)", async () => {
+		const harness = await createHarness();
+		const created = await harness.agent.newSession({ cwd: harness.cwdA, mcpServers: [] });
+		const session = harness.findSession(created.sessionId)!;
+
+		// The residual prompt (e.g. an extension/custom-TS command) is handled
+		// locally: no agent turn starts, so `prompt()` returns false and no
+		// `agent_end` ever fires. The ACP turn must be settled by the trailing
+		// `#finishPrompt`, or the `session/prompt` request never resolves.
+		session.prompt = async (text: string): Promise<boolean> => {
+			session.promptCalls.push(text);
+			return false;
+		};
+
+		const response = await harness.agent.prompt({
+			sessionId: created.sessionId,
+			messageId: "00000000-0000-4000-8000-000000000009",
+			prompt: [{ type: "text", text: "/force bash /local-command" }],
+		} as PromptRequest);
+
+		expectAcpStructure(zPromptResponse, response);
+		expect(response.stopReason).toBe("end_turn");
+		expect(session.forcedToolChoice).toBe("bash");
+		expect(session.promptCalls).toEqual(["/local-command"]);
+
+		harness.abortController.abort();
+		await Bun.sleep(0);
+	});
+
 	it("installs the tool UI context when form elicitation is available", async () => {
 		const harness = await createHarness({ clientCapabilities: { elicitation: { form: {} } } });
 		const session = await harness.agent.newSession({ cwd: harness.cwdA, mcpServers: [] });

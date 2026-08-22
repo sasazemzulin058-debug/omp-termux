@@ -32,6 +32,8 @@ type FakeEditor = {
 	setText(text: string): void;
 	getText(): string;
 	getExpandedText(): string;
+	setCollapsedText(text: string): void;
+	composerChips(): unknown[];
 	addToHistory(text: string): void;
 	setActionKeys(action: string, keys: string[]): void;
 	setCustomKeyHandler(key: string, handler: () => void): void;
@@ -125,6 +127,12 @@ async function createContext() {
 		},
 		getExpandedText() {
 			return editorText;
+		},
+		setCollapsedText(text: string) {
+			editorText = text;
+		},
+		composerChips() {
+			return [];
 		},
 		addToHistory: vi.fn(),
 		pasteText(text: string) {

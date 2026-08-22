@@ -126,6 +126,8 @@ export type ImageAttachmentEntry = {
 	label: string;
 	uri: string;
 	image: ImageContent;
+	/** Existing content-addressed file path containing the original image bytes. */
+	sourcePath: string;
 };
 
 /**

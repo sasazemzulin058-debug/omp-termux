@@ -117,6 +117,12 @@ export interface TUIOptions {
 export interface TUIStartOptions {
 	/** Clear saved native scrollback before the first paint. */
 	clearScrollback?: boolean;
+	/**
+	 * Paint without owning stdin: the terminal stays in cooked mode (kernel
+	 * echo + line editing at the hardware cursor) until {@link TUI.enableInput}
+	 * switches to raw input and replays the kernel-buffered keystrokes.
+	 */
+	deferInput?: boolean;
 }
 
 const DEFAULT_RENDER_SCHEDULER: RenderScheduler = {
@@ -373,6 +379,27 @@ export interface RenderRequestOptions {
 	/** Clear terminal scrollback for intentional transcript replacement. */
 	clearScrollback?: boolean;
 }
+
+/**
+ * What a settled in-place width resize (multiplexer pane or an in-place-latched
+ * direct terminal) does to native scrollback, which the host rewrapped at the
+ * old width:
+ * - `append`: replay the transcript at the current width below the old-wrap
+ *   history — one fresh copy per settled resize, nothing destroyed.
+ * - `rebuild`: clear native history first (ED3) and replay — history holds the
+ *   transcript exactly once at the current width. Requires a host that honors
+ *   an inner ED3 (tmux does; GNU screen ignores it, degrading to `append`),
+ *   and erases pre-session pane history.
+ * - `preserve`: repaint the viewport only — zero history growth; scrollback
+ *   keeps the old-width wrap until content next scrolls off.
+ *
+ * The raw engine defaults to `preserve` (append-only native scrollback, the
+ * engine's baseline contract); `PI_TUI_RESIZE_SCROLLBACK` overrides that
+ * initial value. The coding agent applies its `tui.resizeScrollback` setting
+ * (default `append`) on top at startup, so interactive sessions refresh
+ * stale-width history out of the box.
+ */
+export type ResizeScrollbackMode = "rebuild" | "append" | "preserve";
 
 /** Type guard to check if a component implements Focusable */
 export function isFocusable(component: Component | null): component is Component & Focusable {
@@ -720,12 +747,18 @@ export class Container
 		}
 		for (let leadingIndex = 0; leadingIndex < marker.leading.length; leadingIndex++) {
 			const captured = marker.leading[leadingIndex]!;
-			const currentRows = this.#memoChildLines[leadingIndex]!;
+			// Resolution runs only inside a width epoch, where a leading child's
+			// physical row count legitimately changes with the new wrap — comparing
+			// it to the captured count conflates reflow with mutation and fails
+			// resolution for every wrapping revisionless child. Identity plus the
+			// width-independent revision (when the component reports one) is the
+			// stability proof; a revisionless leading child that mutated in the
+			// settle window degrades to the accepted stale-history tradeoff, the
+			// same as any off-window mutation of committed rows.
 			if (
 				this.#memoChildren[leadingIndex] !== captured.component ||
-				(captured.revision === undefined
-					? currentRows.length !== captured.rowCount
-					: getNativeScrollbackWidthEpochRevision(captured.component) !== captured.revision)
+				(captured.revision !== undefined &&
+					getNativeScrollbackWidthEpochRevision(captured.component) !== captured.revision)
 			) {
 				return undefined;
 			}
@@ -1207,6 +1240,18 @@ export class TUI extends Container {
 	 * feels dead to the user and no longer justifies further CPU savings.
 	 */
 	static readonly #MAX_ADAPTIVE_RENDER_MS = 200;
+	/**
+	 * Output backpressure gate. While the terminal still owes more than this
+	 * many bytes, composing another frame would only queue a stale paint
+	 * behind the backlog — and once the kernel PTY buffer is full, handing the
+	 * runtime more bytes degrades into thread-blocking writes. Defer the
+	 * render (keeping its forced/clear-scrollback intent) and retry shortly;
+	 * the eventual frame composes the latest component state, so a slow
+	 * terminal receives only fresh frames instead of every intermediate one.
+	 */
+	static readonly #MAX_PENDING_OUTPUT_BYTES = 256 * 1024;
+	/** Retry cadence while the output backlog gate is holding renders back. */
+	static readonly #OUTPUT_BACKLOG_RETRY_MS = 10;
 	#inputRenderGraceUntilMs = 0;
 	// Pane-reflow settle window for tmux/screen/zellij. The host process gets
 	// SIGWINCH (and `process.stdout` already reports the new geometry) before
@@ -1373,6 +1418,20 @@ export class TUI extends Container {
 	#hasEverRendered = false;
 	#scrollbackRebuildEnabled =
 		Bun.env.PI_TUI_SCROLLBACK_REBUILD === "1" || Bun.env.PI_TUI_SCROLLBACK_REBUILD === "true";
+	#resizeScrollbackMode: ResizeScrollbackMode = TUI.#initialResizeScrollbackMode();
+	static #initialResizeScrollbackMode(): ResizeScrollbackMode {
+		const raw = Bun.env.PI_TUI_RESIZE_SCROLLBACK;
+		return raw === "rebuild" || raw === "preserve" || raw === "append" ? raw : "preserve";
+	}
+	// A width epoch settled while a visible overlay froze commits, so the
+	// resize-scrollback refresh could not run. Consumed by the first uncovered
+	// authoritative normal-screen render so the stale old-width history is
+	// repaired even if no further resize arrives. Any full paint clears it,
+	// including one that fires while an overlay is still visible (session
+	// replace, divergence rebuild): a full paint re-emits the committed prefix
+	// from the recomposed current-width frame, which is exactly the refresh
+	// this latch is waiting for — it supersedes the pending replay.
+	#resizeScrollbackReplayPending = false;
 	// Set by the terminal resize callback; consumed by the next render. A resize
 	// event invalidates the committed screen even when the dimensions net out
 	// unchanged by render time (e.g. a 6→4→6 round trip coalesced into one frame
@@ -1421,6 +1480,8 @@ export class TUI extends Container {
 	// {@link #resizeRepaintsInPlace} routes resizes through the in-place path.
 	#altToggleResizesInPlace = false;
 	#stopped = false;
+	/** True between a `deferInput` start() and enableInput(). */
+	#inputDeferred = false;
 	// Always-on event-loop lag probe. The high default threshold keeps it quiet;
 	// it only logs `ui.loop-blocked` (with the current loop phase) when a frame
 	// budget is genuinely starved. Armed in start(), disarmed in stop().
@@ -1551,11 +1612,17 @@ export class TUI extends Container {
 		for (let index = 0; index < marker.leading.length; index++) {
 			const captured = marker.leading[index]!;
 			const current = this.#frameSegments[index];
+			// Width epoch context: a leading root child's row count legitimately
+			// changes with the new wrap (the startup banner and warning texts wrap
+			// differently per width), so a captured-vs-current row count comparison
+			// conflates reflow with mutation and forces the conservative replay on
+			// every width change. Identity plus the width-independent revision
+			// (when reported) proves stability; a revisionless leading child that
+			// mutated inside the settle window degrades to the accepted
+			// stale-history tradeoff instead of failing resolution.
 			if (
 				current?.component !== captured.component ||
-				(captured.revision === undefined
-					? current.rowCount !== captured.rowCount
-					: current.widthEpochRevision !== captured.revision)
+				(captured.revision !== undefined && current.widthEpochRevision !== captured.revision)
 			) {
 				return undefined;
 			}
@@ -1973,6 +2040,22 @@ export class TUI extends Container {
 		this.#scrollbackRebuildEnabled = enabled;
 	}
 
+	/**
+	 * Get how a settled in-place width resize refreshes native scrollback.
+	 */
+	getResizeScrollback(): ResizeScrollbackMode {
+		return this.#resizeScrollbackMode;
+	}
+
+	/**
+	 * Set how a settled in-place width resize refreshes native scrollback
+	 * (see {@link ResizeScrollbackMode}; engine default `preserve` — the coding
+	 * agent applies its `tui.resizeScrollback` setting, default `append`).
+	 */
+	setResizeScrollback(mode: ResizeScrollbackMode): void {
+		this.#resizeScrollbackMode = mode;
+	}
+
 	getShowHardwareCursor(): boolean {
 		return this.#showHardwareCursor;
 	}
@@ -2134,6 +2217,7 @@ export class TUI extends Container {
 
 	start(options?: TUIStartOptions): void {
 		this.#stopped = false;
+		this.#inputDeferred = options?.deferInput === true;
 		this.#watchdog.start();
 		this.#ghosttyInitialImageDelayDone = false;
 		this.#ghosttyImageReadyAtMs = this.#renderScheduler.now() + TUI.#GHOSTTY_INITIAL_IMAGE_DELAY_MS;
@@ -2216,6 +2300,7 @@ export class TUI extends Container {
 				});
 			},
 			() => this.stop(),
+			{ deferInput: this.#inputDeferred },
 		);
 		if (this.#stopped) return;
 		for (const listener of this.#startListeners) {
@@ -2227,9 +2312,24 @@ export class TUI extends Container {
 		}
 		this.terminal.hideCursor();
 		this.#recordHardwareCursorHidden();
+		if (!this.#inputDeferred) {
+			this.#querySixelSupport();
+			this.#queryCellSize();
+		}
+		this.requestRender(true, { clearScrollback: options?.clearScrollback === true });
+	}
+	/**
+	 * Take ownership of stdin after a `deferInput` start: raw mode, input
+	 * handlers, and the response-eliciting capability probes start() skipped.
+	 * Keystrokes typed in cooked mode meanwhile arrive through the normal input
+	 * path. Idempotent; no-op when input was never deferred.
+	 */
+	enableInput(): void {
+		if (!this.#inputDeferred || this.#stopped) return;
+		this.#inputDeferred = false;
+		this.terminal.enableInput?.();
 		this.#querySixelSupport();
 		this.#queryCellSize();
-		this.requestRender(true, { clearScrollback: options?.clearScrollback === true });
 	}
 
 	addStartListener(listener: StartListener): () => void {
@@ -2925,6 +3025,18 @@ export class TUI extends Container {
 		}
 	}
 
+	#runScheduledRender = (): void => {
+		this.#renderTimer = undefined;
+		if (this.#stopped || !this.#renderRequested) {
+			return;
+		}
+		this.#renderRequested = false;
+		this.#executeRender();
+		if (this.#renderRequested) {
+			this.#scheduleRender();
+		}
+	};
+
 	#scheduleRender(): void {
 		if (this.#stopped || this.#renderTimer || !this.#renderRequested) {
 			return;
@@ -2949,17 +3061,7 @@ export class TUI extends Container {
 		const adaptiveDelay = Math.max(0, adaptiveFloor - elapsed);
 		const inputGraceDelay = Math.max(0, this.#inputRenderGraceUntilMs - now);
 		const delay = Math.max(cadenceDelay, adaptiveDelay, inputGraceDelay);
-		this.#renderTimer = this.#renderScheduler.scheduleRender(() => {
-			this.#renderTimer = undefined;
-			if (this.#stopped || !this.#renderRequested) {
-				return;
-			}
-			this.#renderRequested = false;
-			this.#executeRender();
-			if (this.#renderRequested) {
-				this.#scheduleRender();
-			}
-		}, delay);
+		this.#renderTimer = this.#renderScheduler.scheduleRender(this.#runScheduledRender, delay);
 	}
 
 	/**
@@ -2968,10 +3070,27 @@ export class TUI extends Container {
 	 * reads it re-entrantly) and compute the cost once the paint returns.
 	 */
 	#executeRender(): void {
+		if (this.#deferRenderForOutputBacklog()) return;
 		const start = this.#renderScheduler.now();
 		this.#lastRenderAt = start;
 		this.#doRender();
 		this.#lastFrameCostMs = this.#renderScheduler.now() - start;
+	}
+	/**
+	 * True when the frame was deferred because the terminal's output backlog
+	 * exceeds {@link TUI.#MAX_PENDING_OUTPUT_BYTES}. Re-arms a retry render;
+	 * one-shot paint intents (`#clearScrollbackOnNextRender`,
+	 * `#forceViewportRepaintOnNextRender`) survive untouched for it.
+	 */
+	#deferRenderForOutputBacklog(): boolean {
+		const pending = this.terminal.pendingOutputBytes;
+		if (pending === undefined || pending <= TUI.#MAX_PENDING_OUTPUT_BYTES) return false;
+		this.#renderRequested = true;
+		this.#renderTimer ??= this.#renderScheduler.scheduleRender(
+			this.#runScheduledRender,
+			TUI.#OUTPUT_BACKLOG_RETRY_MS,
+		);
+		return true;
 	}
 
 	#handleInput(data: string): void {
@@ -3762,6 +3881,13 @@ export class TUI extends Container {
 		if (widthEpochReset && hasVisibleOverlay && this.#widthEpochOverlayBoundary === undefined) {
 			this.#widthEpochOverlayBoundary = capturedWidthEpochBoundary;
 		}
+		// A width epoch settled while an overlay covered the transcript: the
+		// scrollback refresh cannot run now (overlays freeze commits), and no
+		// second width resize may ever come. Latch it and consume it on the
+		// first uncovered authoritative normal-screen render.
+		if (widthEpochReset && hasVisibleOverlay && this.#resizeScrollbackMode !== "preserve") {
+			this.#resizeScrollbackReplayPending = true;
+		}
 		const replayUnresolvedOverlayFrame = widthEpochReset && this.#widthEpochOverlayReplayPending;
 		const replayUnresolvedWidthEpoch =
 			replayUnresolvedOverlayFrame ||
@@ -3795,7 +3921,21 @@ export class TUI extends Container {
 			!geometryChanged &&
 			!isMultiplexerSession() &&
 			(committedRowsResynced || frameLength <= this.#committedRows);
-		const fullPaint = firstPaint || replaceRequested || geometryRebuild || divergenceRebuild;
+		// A settled in-place width resize left native history wrapped at the old
+		// width (the host rewraps its own scrollback; long lines stay shredded at
+		// the old boundaries). Unless the mode is `preserve`, refresh it with one
+		// full paint of the recomposed current-width frame: `append` leaves the
+		// old-wrap copy above (one fresh copy per settled resize, never loss);
+		// `rebuild` clears native history first so it holds the transcript
+		// exactly once. Epochs settled under a visible overlay keep the deferred
+		// bounded path for that frame and consume the latched refresh here once
+		// the overlay closes.
+		const resizeScrollbackReplay =
+			(widthEpochReset || this.#resizeScrollbackReplayPending) &&
+			!hasVisibleOverlay &&
+			this.#resizeScrollbackMode !== "preserve";
+		const fullPaint =
+			firstPaint || replaceRequested || geometryRebuild || divergenceRebuild || resizeScrollbackReplay;
 		// Height-only mux resizes move rows between the pane's scrollback and its
 		// grid. A shrink with a full grid pushes the grid-top rows into pane
 		// scrollback without a commit; a grow pulls the scrollback tail back into
@@ -3969,7 +4109,10 @@ export class TUI extends Container {
 		const intent: RenderIntent = fullPaint
 			? {
 					kind: "fullPaint",
-					clearScrollback: divergenceRebuild || ((replaceRequested || geometryRebuild) && !isMultiplexerSession()),
+					clearScrollback:
+						divergenceRebuild ||
+						(resizeScrollbackReplay && this.#resizeScrollbackMode === "rebuild") ||
+						((replaceRequested || geometryRebuild) && !isMultiplexerSession()),
 				}
 			: { kind: "update", chunkTo, windowTop };
 		this.#logRedraw(intent, frameLength, height);
@@ -3997,7 +4140,15 @@ export class TUI extends Container {
 		// re-emission. Width epochs retain an opaque native-row ledger, so close
 		// the old placement-coordinate epoch with its captured seam on reset and
 		// use the current-width commit seam calculated below thereafter.
-		if (widthEpochReset) {
+		// An `append` scrollback replay is exactly such a reset: the old-width
+		// attach rows must not be compared against the current-width commit seam,
+		// so the coordinate epoch transitions here and the full paint re-anchors
+		// placements at current-width rows (archived cells keep their identity
+		// and advance their placement id on the next emit). Only the ED3
+		// `rebuild` replay skips this: the clear destroys every placement cell
+		// and the emitter restarts the epochs via `resetPlacementEpochs()`, same
+		// as a direct-terminal geometry rebuild.
+		if (widthEpochReset && !(intent.kind === "fullPaint" && intent.clearScrollback)) {
 			this.#imageBudget.observeCommitWatermark(placementEpochWatermark);
 			this.#imageBudget.beginPlacementCoordinateEpoch();
 		} else if (intent.kind === "fullPaint" || this.#widthEpochBaselineRows === undefined) {
@@ -4013,7 +4164,9 @@ export class TUI extends Container {
 				cursorTrackingLineCount,
 				boundConptyPaint: !unboundedConptyPaint,
 				leadingSequence: deferredAltExit,
-				copyScreenToScrollback: true,
+				// A width-epoch replay must not push the invalidated old-width
+				// viewport into native history on terminals that support it.
+				copyScreenToScrollback: !resizeScrollbackReplay,
 			});
 			this.#pendingAltExit = "";
 			this.#committedPrefix = rawFrame.slice(0, chunkTo);
@@ -4025,6 +4178,7 @@ export class TUI extends Container {
 			this.#widthEpochOverlayReplayPending = false;
 			this.#widthEpochOverlayBoundary = undefined;
 			this.#widthEpochCommittedPrefix = undefined;
+			this.#resizeScrollbackReplayPending = false;
 			this.#publishCommittedRows();
 			if (!firstPaint && frameLength > height) this.#armPostFullPaintSettle();
 			return;

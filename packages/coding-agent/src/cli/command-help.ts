@@ -15,7 +15,8 @@ export const authGatewayHelp = {
 } satisfies CommandMetadata;
 
 export const benchHelp = {
-	description: "Benchmark models with the same prompt: time-to-first-token and generation throughput (tokens/s)",
+	description:
+		"Benchmark models: TTFT/prefill vs decode throughput with p50/p95, across chat, prefill, generation, and prompt-cache workloads",
 } satisfies CommandMetadata;
 
 export const browserRelayHelp = {
@@ -56,6 +57,10 @@ export const grievancesHelp = {
 	description: "View, clean, or push reported tool issues (auto-QA grievances)",
 } satisfies CommandMetadata;
 
+export const imagesHelp = {
+	description: "Inspect, diagnose, probe, and purge image publication backends",
+} satisfies CommandMetadata;
+
 export const installHelp = {
 	description: "Install or link an extension package (alias of `plugin install`/`plugin link`)",
 } satisfies CommandMetadata;
@@ -72,6 +77,9 @@ export const psHelp = {
 
 export const readHelp = {
 	description: "Show what the read tool will return for a path, URL, or internal URI",
+} satisfies CommandMetadata;
+export const renderHelp = {
+	description: "Draw a session's entire thread through the production transcript pipeline (with repaint timing)",
 } satisfies CommandMetadata;
 
 export const sayHelp = {

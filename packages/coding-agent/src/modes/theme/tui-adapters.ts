@@ -1,5 +1,6 @@
 import {
 	type HighlightColors as NativeHighlightColors,
+	HighlightStream as NativeHighlightStream,
 	highlightCode as nativeHighlightCode,
 	supportsLanguage as nativeSupportsLanguage,
 } from "@oh-my-pi/pi-natives";
@@ -7,6 +8,7 @@ import type { EditorTheme, MarkdownTheme, SelectListTheme, SettingsListTheme, Sy
 import chalk from "@oh-my-pi/pi-utils/chalk";
 import { LRUCache } from "@oh-my-pi/pi-utils/lru";
 import { resolveMermaidAscii } from "./mermaid-cache";
+import type { SlashCommandIconName } from "./symbols";
 import { theme } from "./theme";
 import type { Theme } from "./theme-class";
 
@@ -56,6 +58,7 @@ const highlightCache = new LRUCache<string, string>({ max: HIGHLIGHT_CACHE_MAX }
 let highlightCacheTheme: Theme | undefined;
 
 function highlightCached(code: string, validLang: string | undefined, highlightTheme: Theme): string | null {
+	if (validLang === undefined) return code;
 	if (highlightCacheTheme !== highlightTheme) {
 		highlightCache.clear();
 		highlightCacheTheme = highlightTheme;
@@ -193,6 +196,11 @@ export function getMarkdownTheme(): MarkdownTheme {
 			if (highlighted !== null) return highlighted.split("\n");
 			return code.split("\n").map(line => theme.fg("mdCodeBlock", line));
 		},
+		createHighlightStream: (lang?: string) => {
+			const validLang = lang && nativeSupportsLanguage(lang) ? lang : undefined;
+			if (!validLang) return null;
+			return new NativeHighlightStream(validLang, getHighlightColors(theme));
+		},
 	};
 	cachedMarkdownTheme = markdownTheme;
 	cachedMarkdownThemeRef = theme;
@@ -210,6 +218,7 @@ export function getSelectListTheme(): SelectListTheme {
 			scrollInfo: (text: string) => text,
 			noMatch: (text: string) => text,
 			symbols: getSymbolTheme(),
+			icon: (text: string) => text,
 			hovered: (text: string) => text,
 		};
 	}
@@ -220,8 +229,20 @@ export function getSelectListTheme(): SelectListTheme {
 		scrollInfo: (text: string) => theme.fg("muted", text),
 		noMatch: (text: string) => theme.fg("muted", text),
 		symbols: getSymbolTheme(),
+		icon: (text: string) => theme.fg("muted", text),
 		hovered: (text: string) => theme.bg("selectedBg", text),
 	};
+}
+/**
+ * Resolve the autocomplete type-indicator glyph for a slash command.
+ * Returns `undefined` when no theme is initialized or the active preset is
+ * ASCII (shared `icon.*` glyphs have ASCII forms, but a partially lettered
+ * icon column reads as noise), which collapses the column entirely.
+ */
+export function getSlashCommandTypeIcon(name: SlashCommandIconName): string | undefined {
+	if (typeof theme === "undefined" || theme.getSymbolPreset() === "ascii") return undefined;
+	const icon = theme.cmd[name];
+	return icon.length > 0 ? icon : undefined;
 }
 
 export function getEditorTheme(): EditorTheme {

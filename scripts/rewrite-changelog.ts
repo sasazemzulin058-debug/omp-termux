@@ -101,13 +101,19 @@ async function openModel(modelSpec: string): Promise<RewriteModel> {
 	const model = getBundledModel(provider as GeneratedProvider, modelId);
 	if (!model) throw new Error(`unknown model "${modelSpec}" (not in bundled catalog)`);
 	const storage = await discoverAuthStorage({ sourceLabel: "rewrite-changelog" });
-	const apiKey = await storage.getApiKey(provider);
-	if (!apiKey) {
-		throw new Error(
-			`no credentials for provider "${provider}" via ${storage.sourceLabel ?? "auth storage"} (check broker or run \`omp login\`)`,
-		);
+	try {
+		const apiKey = await storage.getApiKey(provider);
+		if (!apiKey) {
+			throw new Error(
+				`no credentials for provider "${provider}" via ${storage.sourceLabel ?? "auth storage"} (check broker or run \`omp login\`)`,
+			);
+		}
+		return { model, apiKey, spec: modelSpec };
+	} finally {
+		// Broker-backed storage runs a background SSE/long-poll loop that keeps
+		// the event loop alive; release it once the key is captured.
+		storage.close();
 	}
-	return { model, apiKey, spec: modelSpec };
 }
 
 // --------------------------------------------------------------------------

@@ -2838,9 +2838,9 @@ class StressDriver {
 	): void {
 		if (!this.#scenario.uniqueContent) return;
 		// All comparisons run with non-spacing marks stripped: the virtual
-		// terminal drops them on input (ghostty-web 0.4 margin-cluster crash
-		// workaround), so buffer readback and frame/tape rows would otherwise
-		// never collide on marked rows.
+		// terminal's cell snapshots expose at most two combining marks per cell
+		// (kitty-vt-wasm's 8-word ABI), so buffer readback and frame/tape rows
+		// would otherwise never collide on heavily marked rows.
 		const strip = (line: string): string => line.replace(NONSPACING_MARKS, "");
 		// Accumulate even when the check below is skipped (scrolled/overlay): the
 		// frame's legitimate duplicates commit to scrollback regardless of where
@@ -2994,13 +2994,11 @@ export function multiplexerHistoryPrefixChanged(
 	return !sameLines(beforeFrame.slice(0, sharedHistoryRows), afterFrame.slice(0, sharedHistoryRows));
 }
 
-// ghostty-web's cell-grid text extraction can migrate or merge Unicode
-// non-spacing marks across neighboring cells for combining-heavy scripts
-// (Arabic harakat), so a byte-exact round trip through the virtual terminal is
-// not achievable for those rows (the engine paints them verbatim; see the
-// WIDTH notes in docs/tui-core-renderer.md). Fall back to comparing with
-// non-spacing marks stripped — row count, order, and all spacing content stay
-// exact.
+// The virtual terminal's cell snapshots expose at most two combining marks
+// per cell (kitty-vt-wasm's 8-word ABI), so a byte-exact round trip is not
+// achievable for combining-heavy scripts (Arabic harakat; see the WIDTH notes
+// in docs/tui-core-renderer.md). Fall back to comparing with non-spacing
+// marks stripped — row count, order, and all spacing content stay exact.
 const NONSPACING_MARKS = /\p{Mn}/gu;
 function sameLinesAllowingMarkDrift(left: readonly string[], right: readonly string[]): boolean {
 	if (sameLines(left, right)) return true;

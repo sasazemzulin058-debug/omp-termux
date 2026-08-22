@@ -986,7 +986,18 @@ export class AcpAgent implements Agent {
 		});
 		if (builtinResult !== false) {
 			if ("prompt" in builtinResult) {
-				await record.session.prompt(builtinResult.prompt, { images });
+				const residualBaseline = new Set(record.extensionUserMessageTasks);
+				const residualAgentInvoked = await record.session.prompt(builtinResult.prompt, { images });
+				// A residual prompt can itself resolve locally (extension command,
+				// custom-TS command, file prompt template). No agent turn means no
+				// `agent_end`, so the prompt turn must be settled here — same pairing
+				// as the plain-prompt `!agentInvoked` path below — or the ACP
+				// `session/prompt` request never resolves (#9206).
+				if (!residualAgentInvoked) {
+					await this.#waitForExtensionUserMessages(record, residualBaseline);
+					await this.#waitForPromptEventHandlers(record);
+					this.#finishPrompt(record, { stopReason: "end_turn" });
+				}
 				return;
 			}
 			const promptTurn = record.promptTurn;

@@ -310,6 +310,21 @@ describe("TodoTool operations", () => {
 		expect(parsedA?.blocker).toBe("x");
 	});
 
+	it("parses checklist items with backslash-escaped brackets from /todo edit", () => {
+		// Editors/serializers (e.g. content pasted from a markdown renderer) escape
+		// `[` and `]`; the line still renders as a checkbox, so it must parse rather
+		// than error out and drop the user's edits (issue #9188).
+		const md = ["# Todos", "* \\[x] first", "- \\[ \\] second", "+ \\[/\\] third"].join("\n");
+		const { phases, errors } = markdownToPhases(md);
+		expect(errors).toEqual([]);
+		const tasks = phases[0]?.tasks ?? [];
+		expect(tasks).toEqual([
+			{ content: "first", status: "completed" },
+			{ content: "second", status: "pending" },
+			{ content: "third", status: "in_progress" },
+		]);
+	});
+
 	it("normalizes a multi-line blocker reason so the markdown round-trip survives", async () => {
 		const tool = new TodoTool(createSession());
 		await tool.execute("call-1", { op: "init", list: [{ phase: "Work", items: ["a"] }] });

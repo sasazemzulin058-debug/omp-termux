@@ -223,8 +223,12 @@ describe("probeCdpStatus", () => {
 			const status = await probeCdpStatus(`http://127.0.0.1:${cdp.port}/json/version`, { timeoutMs: 1500 });
 			expect(status).toBe(200);
 		} finally {
-			process.env.HTTP_PROXY = saved.HTTP_PROXY;
-			process.env.http_proxy = saved.http_proxy;
+			// Bun's fetch never unlearns a deleted proxy var: `delete process.env.X`
+			// (or assigning undefined) leaves the proxy active process-wide, silently
+			// routing every later fetch in the suite to the stopped proxy port. Only
+			// assignment flushes it, so write "" first, then restore the JS view.
+			process.env.HTTP_PROXY = saved.HTTP_PROXY ?? "";
+			process.env.http_proxy = saved.http_proxy ?? "";
 			if (saved.HTTP_PROXY === undefined) delete process.env.HTTP_PROXY;
 			if (saved.http_proxy === undefined) delete process.env.http_proxy;
 			await cdp.stop(true);

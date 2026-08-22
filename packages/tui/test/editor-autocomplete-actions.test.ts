@@ -21,6 +21,12 @@ function onceAutocompleteUpdate(editor: Editor): Promise<void> {
 	};
 	return promise;
 }
+/** Resolve once the popup is open, driven by autocomplete update events (no wall-clock waits). */
+async function untilAutocompleteShown(editor: Editor): Promise<void> {
+	while (!editor.isShowingAutocomplete()) {
+		await onceAutocompleteUpdate(editor);
+	}
+}
 
 class HashActionProvider implements AutocompleteProvider {
 	async getSuggestions(
@@ -274,6 +280,46 @@ describe("Editor Enter handler sync slash completion", () => {
 		expect(editor.getText()).toBe(`${prose}/`);
 		expect(editor.isShowingAutocomplete()).toBe(true);
 	}
+
+	it("expands the /skill: namespace row with Tab and chains into the skill list", async () => {
+		const editor = createSkillEditor();
+
+		editor.handleInput("/");
+		await Promise.resolve();
+		expect(editor.isShowingAutocomplete()).toBe(true);
+
+		// The collapsed namespace row is the top selection on a bare "/".
+		editor.handleInput("\t");
+		expect(editor.getText()).toBe("/skill:");
+
+		// The chained re-trigger reopens the popup with the individual skills.
+		await untilAutocompleteShown(editor);
+
+		editor.handleInput("\t");
+		expect(editor.getText()).toBe("/skill:security-scan ");
+	});
+
+	it("expands the /skill: namespace row on Enter instead of submitting", async () => {
+		const editor = createSkillEditor();
+		let submitted: string | undefined;
+		editor.onSubmit = text => {
+			submitted = text;
+		};
+
+		editor.handleInput("/");
+		await Promise.resolve();
+		expect(editor.isShowingAutocomplete()).toBe(true);
+
+		editor.handleInput("\r");
+
+		expect(submitted).toBeUndefined();
+		expect(editor.getText()).toBe("/skill:");
+
+		await untilAutocompleteShown(editor);
+
+		editor.handleInput("\r");
+		expect(submitted?.trimEnd()).toBe("/skill:security-scan");
+	});
 
 	it("accepts a bare mid-prompt skill slash with Tab without replacing prose", async () => {
 		const editor = createSkillEditor();

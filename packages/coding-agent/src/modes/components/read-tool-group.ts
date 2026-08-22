@@ -345,6 +345,11 @@ export class ReadToolGroupComponent extends Container implements ToolExecutionHa
 	// Forced terminal even with a still-pending entry: the turn ended (abort or
 	// completion) so no late result is coming. Set via `seal()`.
 	#sealed = false;
+	// Post-finalize mutation counter (FinalizableBlock.getTranscriptBlockVersion):
+	// a finalized group can still change — a late read result landing after the
+	// run broke, seal(), or an expansion toggle — and the transcript's
+	// width-epoch resolution and committed-render bypass must observe it.
+	#blockVersion = 0;
 
 	constructor(options: ReadToolGroupOptions = {}) {
 		super();
@@ -386,7 +391,12 @@ export class ReadToolGroupComponent extends Container implements ToolExecutionHa
 	 * region instead of lingering on a pending preview until the next thaw.
 	 */
 	seal(): void {
+		if (!this.#sealed) this.#blockVersion++;
 		this.#sealed = true;
+	}
+
+	getTranscriptBlockVersion(): number {
+		return this.#blockVersion;
 	}
 
 	updateArgs(args: ReadRenderArgs, toolCallId?: string): void {
@@ -437,6 +447,7 @@ export class ReadToolGroupComponent extends Container implements ToolExecutionHa
 		const entry = this.#entries.get(toolCallId);
 		if (!entry) return;
 		if (isPartial) return;
+		this.#blockVersion++;
 		const details = result.details as ReadToolResultDetails | undefined;
 		const suffixResolution = getSuffixResolution(details);
 		const displayPaths = getDisplayReadTargets(details);
@@ -497,6 +508,7 @@ export class ReadToolGroupComponent extends Container implements ToolExecutionHa
 	}
 
 	setExpanded(expanded: boolean): void {
+		if (this.#expanded !== expanded) this.#blockVersion++;
 		this.#expanded = expanded;
 		this.#updateDisplay();
 	}

@@ -30,7 +30,6 @@ import {
 	sloppyVariant,
 	splitSloppySections,
 } from "./sloppy";
-
 import { pruneOversizedEditSnapshots } from "./snapshot-details";
 import { EDIT_MODE_STRATEGIES } from "./streaming";
 
@@ -522,7 +521,7 @@ export class EditTool implements AgentTool<TInput> {
 	}
 
 	#getModeDefinition(): EditModeDefinition {
-		return {
+		const definitions = {
 			patch: {
 				description: () => prompt.render(patchDescription),
 				parameters: patchEditSchema,
@@ -679,7 +678,7 @@ export class EditTool implements AgentTool<TInput> {
 					// `[path]` headers open per-file sections; the first line MUST be one.
 					const sections = splitSloppySections(input);
 					if (sections.length === 0) {
-						throw new Error("Missing `[path]` header: the payload's first line must be `[relative/path.ts]`.");
+						throw new Error("Missing file header: start the payload with `§relative/path.ts`.");
 					}
 					const resolved: SloppySection[] = [];
 					for (const section of sections) {
@@ -740,6 +739,7 @@ export class EditTool implements AgentTool<TInput> {
 					return executeSinglePathEntries(targetPath, runs, batchRequest, onUpdate, tool.session.cwd, signal);
 				},
 			},
-		}[this.mode];
+		};
+		return definitions[this.mode];
 	}
 }

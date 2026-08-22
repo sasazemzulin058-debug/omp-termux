@@ -10,7 +10,7 @@ import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { getThemeByName } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
 import { createAgentSession } from "@oh-my-pi/pi-coding-agent/sdk";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
-import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
+import type { ImageAttachmentEntry, ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { InspectImageTool } from "@oh-my-pi/pi-coding-agent/tools/inspect-image";
 import { inspectImageToolRenderer } from "@oh-my-pi/pi-coding-agent/tools/inspect-image-renderer";
 import { toolRenderers } from "@oh-my-pi/pi-coding-agent/tools/renderers";
@@ -49,7 +49,7 @@ interface CreateSessionOptions {
 	availableModels?: Model<"openai-responses">[];
 	activeModel?: Model<"openai-responses">;
 	configureVisionRole?: boolean;
-	imageAttachments?: { label: string; uri: string; image: ImageContent }[];
+	imageAttachments?: ImageAttachmentEntry[];
 }
 
 interface CompleteSimpleStub {
@@ -226,7 +226,9 @@ describe("InspectImageTool", () => {
 		const missingCwd = path.join(testDir, "missing-cwd");
 		const tool = new InspectImageTool(
 			createSession(missingCwd, visionModel, "test-key", Settings.isolated({ "images.autoResize": false }), {
-				imageAttachments: [{ label: "Image #1", uri: "attachment://1", image }],
+				imageAttachments: [
+					{ label: "Image #1", uri: "attachment://1", image, sourcePath: path.join(testDir, "pasted-image.png") },
+				],
 			}),
 			stub.fn,
 		);
@@ -250,9 +252,9 @@ describe("InspectImageTool", () => {
 	it("resolves bracketed labels and attachment URIs deterministically", async () => {
 		const first: ImageContent = { type: "image", data: TINY_PNG_BASE64, mimeType: "image/png" };
 		const second: ImageContent = { type: "image", data: TINY_PNG_BASE64, mimeType: "image/png" };
-		const attachments = [
-			{ label: "Image #1", uri: "attachment://1", image: first },
-			{ label: "Image #2", uri: "attachment://2", image: second },
+		const attachments: ImageAttachmentEntry[] = [
+			{ label: "Image #1", uri: "attachment://1", image: first, sourcePath: path.join(testDir, "first.png") },
+			{ label: "Image #2", uri: "attachment://2", image: second, sourcePath: path.join(testDir, "second.png") },
 		];
 
 		const bracketStub = createCompleteSimpleSuccessStub("First");
@@ -284,7 +286,14 @@ describe("InspectImageTool", () => {
 		const stub = createCompleteSimpleForbiddenStub();
 		const tool = new InspectImageTool(
 			createSession(testDir, visionModel, "test-key", Settings.isolated(), {
-				imageAttachments: [{ label: "Image #1", uri: "attachment://1", image }],
+				imageAttachments: [
+					{
+						label: "Image #1",
+						uri: "attachment://1",
+						image,
+						sourcePath: path.join(testDir, "missing-label-source.png"),
+					},
+				],
 			}),
 			stub.fn,
 		);
@@ -329,9 +338,12 @@ describe("InspectImageTool", () => {
 				const tool = session.getToolByName("inspect_image");
 				expect(tool).toBeDefined();
 				const wiredToolSession = (tool as unknown as { session?: ToolSession }).session;
-				expect(wiredToolSession?.getImageAttachments?.()).toEqual([
-					{ label: "Image #1", uri: "attachment://1", image },
-				]);
+				const attachments = wiredToolSession?.getImageAttachments?.();
+				const sourcePath = attachments?.[0]?.sourcePath;
+				if (!sourcePath) {
+					throw new Error("Expected attachment sourcePath to be populated");
+				}
+				expect(attachments).toEqual([{ label: "Image #1", uri: "attachment://1", image, sourcePath }]);
 			} finally {
 				await session.dispose();
 			}

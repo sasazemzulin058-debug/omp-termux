@@ -47,6 +47,7 @@ pub mod live;
 pub mod pdf;
 pub mod sixel;
 pub mod snapcompact;
+pub mod spelling;
 pub mod utok;
 pub use pi_ast::language;
 
@@ -63,6 +64,7 @@ pub mod task;
 pub(crate) mod testing;
 pub mod text;
 pub mod tokens;
+pub mod tty_writer;
 pub(crate) mod utils;
 pub mod vectors;
 pub mod workspace;
@@ -260,7 +262,7 @@ fn create_windows_napi_tokio_runtime() -> Option<tokio::runtime::Runtime> {
 /// MUST stay in sync with `VERSION_SENTINEL_EXPORT` in
 /// `packages/natives/native/index.js` (which derives the name from
 /// `package.json#version`).
-#[napi(js_name = "__piNativesV17_4_0")]
+#[napi(js_name = "__piNativesV18_0_0")]
 pub const fn pi_natives_version_sentinel() {}
 
 /// Native module entry point: install crash diagnostics before any tool can

@@ -16,6 +16,7 @@ import type { ModelSpec } from "@oh-my-pi/pi-catalog/types";
 import {
 	ANTIGRAVITY_VARIANT_COLLAPSE_TABLE,
 	CURSOR_VARIANT_COLLAPSE_TABLE,
+	collapseBuiltModelVariants,
 	collapseEffortVariants,
 	collapseEffortVariantsAcrossProviders,
 	DEVIN_VARIANT_COLLAPSE_TABLE,
@@ -61,6 +62,22 @@ function pairSpec(
 		cost: { input: 1, output: 2, cacheRead: 0.1, cacheWrite: 0 },
 		contextWindow: 128_000,
 		maxTokens: 8_192,
+		...overrides,
+	};
+}
+
+function cursorMemberSpec(id: string, overrides: Partial<ModelSpec<"cursor-agent">> = {}): ModelSpec<"cursor-agent"> {
+	return {
+		id,
+		name: id,
+		api: "cursor-agent",
+		provider: "cursor",
+		baseUrl: "https://api2.cursor.sh",
+		reasoning: false,
+		input: ["text"],
+		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+		contextWindow: 200_000,
+		maxTokens: 64_000,
 		...overrides,
 	};
 }
@@ -658,23 +675,6 @@ describe("Devin tier routing", () => {
 });
 
 describe("Cursor Grok tier routing (issue #8803)", () => {
-	function cursorMemberSpec(id: string): ModelSpec<"cursor-agent"> {
-		return {
-			id,
-			name: id,
-			api: "cursor-agent",
-			provider: "cursor",
-			baseUrl: "https://api2.cursor.sh",
-			// Live GetUsableModels + bundled references mark these reasoning:false;
-			// collapse must still recognize the effort ladder.
-			reasoning: false,
-			input: ["text"],
-			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-			contextWindow: 200_000,
-			maxTokens: 64_000,
-		};
-	}
-
 	const RAW_SIBLINGS = [
 		"cursor-grok-4.5-high",
 		"cursor-grok-4.5-high-fast",
@@ -693,7 +693,10 @@ describe("Cursor Grok tier routing (issue #8803)", () => {
 	];
 
 	it("collapses the 14 effort siblings into four logical models, split by the -fast lane", () => {
-		const collapsed = collapseEffortVariants(RAW_SIBLINGS.map(cursorMemberSpec), CURSOR_VARIANT_COLLAPSE_TABLE);
+		const collapsed = collapseEffortVariants(
+			RAW_SIBLINGS.map(id => cursorMemberSpec(id)),
+			CURSOR_VARIANT_COLLAPSE_TABLE,
+		);
 		expect(collapsed.map(model => model.id).sort()).toEqual([
 			"cursor-grok-4.5",
 			"cursor-grok-4.5-fast",
@@ -712,7 +715,10 @@ describe("Cursor Grok tier routing (issue #8803)", () => {
 	});
 
 	it("routes each user effort onto the live sibling wire id per service-tier lane", () => {
-		const collapsed = collapseEffortVariants(RAW_SIBLINGS.map(cursorMemberSpec), CURSOR_VARIANT_COLLAPSE_TABLE);
+		const collapsed = collapseEffortVariants(
+			RAW_SIBLINGS.map(id => cursorMemberSpec(id)),
+			CURSOR_VARIANT_COLLAPSE_TABLE,
+		);
 		const model = (id: string) => {
 			const found = collapsed.find(m => m.id === id);
 			if (!found) throw new Error(`${id} did not collapse`);
@@ -729,23 +735,6 @@ describe("Cursor Grok tier routing (issue #8803)", () => {
 });
 
 describe("Cursor GPT-5.6 tier routing (issue #9025)", () => {
-	function cursorMemberSpec(id: string): ModelSpec<"cursor-agent"> {
-		return {
-			id,
-			name: id,
-			api: "cursor-agent",
-			provider: "cursor",
-			baseUrl: "https://api2.cursor.sh",
-			// Live GetUsableModels marks these reasoning:false; the effort route
-			// must still promote the collapsed family to reasoning.
-			reasoning: false,
-			input: ["text"],
-			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-			contextWindow: 200_000,
-			maxTokens: 64_000,
-		};
-	}
-
 	const TIERS = ["none", "low", "medium", "high", "xhigh", "max"];
 	const RAW_SIBLINGS = ["luna", "sol", "terra"].flatMap(variant =>
 		TIERS.flatMap(tier => [`gpt-5.6-${variant}-${tier}`, `gpt-5.6-${variant}-${tier}-fast`]),
@@ -753,7 +742,10 @@ describe("Cursor GPT-5.6 tier routing (issue #9025)", () => {
 
 	it("collapses the 36 effort siblings into six logical models, split by the -fast lane", () => {
 		expect(RAW_SIBLINGS).toHaveLength(36);
-		const collapsed = collapseEffortVariants(RAW_SIBLINGS.map(cursorMemberSpec), CURSOR_VARIANT_COLLAPSE_TABLE);
+		const collapsed = collapseEffortVariants(
+			RAW_SIBLINGS.map(id => cursorMemberSpec(id)),
+			CURSOR_VARIANT_COLLAPSE_TABLE,
+		);
 		expect(collapsed.map(model => model.id).sort()).toEqual([
 			"gpt-5.6-luna",
 			"gpt-5.6-luna-fast",
@@ -773,7 +765,10 @@ describe("Cursor GPT-5.6 tier routing (issue #9025)", () => {
 	});
 
 	it("routes each user effort onto the live sibling wire id per service-tier lane", () => {
-		const collapsed = collapseEffortVariants(RAW_SIBLINGS.map(cursorMemberSpec), CURSOR_VARIANT_COLLAPSE_TABLE);
+		const collapsed = collapseEffortVariants(
+			RAW_SIBLINGS.map(id => cursorMemberSpec(id)),
+			CURSOR_VARIANT_COLLAPSE_TABLE,
+		);
 		const model = (id: string) => {
 			const found = collapsed.find(m => m.id === id);
 			if (!found) throw new Error(`${id} did not collapse`);
@@ -787,6 +782,156 @@ describe("Cursor GPT-5.6 tier routing (issue #9025)", () => {
 		// The -fast lane is a distinct SKU routing onto its own sibling ids.
 		expect(resolveWireModelId(model("gpt-5.6-terra-fast"), Effort.High)).toBe("gpt-5.6-terra-high-fast");
 		expect(resolveWireModelId(model("gpt-5.6-terra-fast"), Effort.XHigh)).toBe("gpt-5.6-terra-xhigh-fast");
+	});
+});
+
+describe("Cursor generic tier routing (issue #9237)", () => {
+	const TIERS = ["none", "minimal", "low", "medium", "high", "xhigh", "max"];
+
+	it("collapses live pure-effort siblings into logical standard and fast lanes", () => {
+		const raw = TIERS.flatMap(tier => [
+			cursorMemberSpec(`gpt-5.5-${tier}`, { name: `GPT-5.5 ${tier}` }),
+			cursorMemberSpec(`gpt-5.5-${tier}-fast`, { name: `GPT-5.5 ${tier} Fast` }),
+		]);
+		const collapsed = collapseEffortVariantsAcrossProviders(raw);
+		expect(collapsed.map(model => model.id).sort()).toEqual(["gpt-5.5", "gpt-5.5-fast"]);
+
+		const standard = collapsed.find(model => model.id === "gpt-5.5");
+		const fast = collapsed.find(model => model.id === "gpt-5.5-fast");
+		if (!standard || !fast) throw new Error("GPT-5.5 lanes did not collapse");
+		expect(standard.name).toBe("GPT-5.5");
+		expect(fast.name).toBe("GPT-5.5 Fast");
+		expect(standard.thinking?.efforts).toEqual([
+			Effort.Minimal,
+			Effort.Low,
+			Effort.Medium,
+			Effort.High,
+			Effort.XHigh,
+			Effort.Max,
+		]);
+		expect(resolveWireModelId(buildModel(standard), undefined)).toBe("gpt-5.5-none");
+		expect(resolveWireModelId(buildModel(standard), Effort.XHigh)).toBe("gpt-5.5-xhigh");
+		expect(resolveWireModelId(buildModel(fast), Effort.Max)).toBe("gpt-5.5-max-fast");
+	});
+
+	it("maps Cursor's extra-high suffix to xhigh", () => {
+		const raw = ["none", "low", "extra-high"].map(tier =>
+			cursorMemberSpec(`gpt-5.5-${tier}`, { name: `GPT-5.5 ${tier}` }),
+		);
+		const collapsed = collapseEffortVariantsAcrossProviders(raw);
+
+		expect(collapsed.map(model => model.id)).toEqual(["gpt-5.5"]);
+		const model = collapsed[0];
+		if (!model) throw new Error("GPT-5.5 did not collapse");
+		expect(model.thinking?.efforts).toEqual([Effort.Low, Effort.XHigh]);
+		expect(resolveWireModelId(buildModel(model), Effort.XHigh)).toBe("gpt-5.5-extra-high");
+	});
+
+	it("keeps a reference-backed base and its existing thinking ladders intact", () => {
+		const raw = [
+			cursorMemberSpec("gpt-5.2", {
+				reasoning: true,
+				contextWindow: 400_000,
+				thinking: { mode: "effort", efforts: [Effort.Low, Effort.Medium, Effort.High, Effort.XHigh] },
+			}),
+			cursorMemberSpec("gpt-5.2-low", { contextWindow: 400_000 }),
+			cursorMemberSpec("gpt-5.2-high", {
+				reasoning: true,
+				contextWindow: 400_000,
+				thinking: { mode: "effort", efforts: [Effort.Low, Effort.Medium, Effort.High, Effort.XHigh] },
+			}),
+		];
+		const collapsed = collapseEffortVariantsAcrossProviders(raw);
+
+		expect(collapsed.map(model => model.id)).toEqual(raw.map(model => model.id));
+		expect(collapsed[0]?.thinking?.efforts).toEqual([Effort.Low, Effort.Medium, Effort.High, Effort.XHigh]);
+		expect(collapsed[0]?.contextWindow).toBe(400_000);
+	});
+
+	it("keeps tier-looking siblings separate when their context SKUs differ", () => {
+		const raw = [
+			cursorMemberSpec("gemini-3.6-flash-low", { contextWindow: 200_000 }),
+			cursorMemberSpec("gemini-3.6-flash-high", { contextWindow: 1_000_000 }),
+		];
+
+		expect(collapseEffortVariantsAcrossProviders(raw).map(model => model.id)).toEqual(raw.map(model => model.id));
+	});
+
+	it("keeps Cursor max-mode SKUs out of effort-only families", () => {
+		const raw = [
+			cursorMemberSpec("gemini-3.7-flash-low", { cursorMaxMode: false }),
+			cursorMemberSpec("gemini-3.7-flash-max", { cursorMaxMode: true }),
+		];
+
+		expect(collapseEffortVariantsAcrossProviders(raw).map(model => model.id)).toEqual(raw.map(model => model.id));
+	});
+
+	it("does not treat product -max or split -thinking names as effort-only families", () => {
+		const ids = [
+			"gpt-5.1-codex-low",
+			"gpt-5.1-codex-max",
+			"gpt-5.1-codex-max-high",
+			"gpt-5.1-codex-max-xhigh",
+			"claude-opus-5-low",
+			"claude-opus-5-medium",
+			"claude-opus-5-high",
+			"claude-opus-5-thinking-xhigh",
+			"claude-opus-5-thinking-max",
+		];
+
+		expect(collapseEffortVariantsAcrossProviders(ids.map(id => cursorMemberSpec(id))).map(model => model.id)).toEqual(
+			ids,
+		);
+	});
+
+	it("dedupes live tiers beside matching collapsed static rows", () => {
+		const raw = ["low", "high"].flatMap(tier => [
+			buildModel(cursorMemberSpec(`review-merged-9237-${tier}`)),
+			buildModel(cursorMemberSpec(`review-merged-9237-${tier}-fast`)),
+		]);
+		const staticModels = collapseBuiltModelVariants(raw);
+		const merged = collapseBuiltModelVariants([...staticModels, ...raw]);
+
+		expect(merged.map(model => model.id).sort()).toEqual(["review-merged-9237", "review-merged-9237-fast"]);
+		const standard = merged.find(model => model.id === "review-merged-9237");
+		if (!standard) throw new Error("Standard merged family did not collapse");
+		expect(resolveWireModelId(standard, Effort.High)).toBe("review-merged-9237-high");
+	});
+
+	it("retargets internal model references whose destination tier collapses", () => {
+		const sourceOverrides = {
+			contextPromotionTarget: "cursor/review-promotion-target-low",
+			compactionModel: "review-promotion-target-high",
+		};
+		const collapsed = collapseEffortVariantsAcrossProviders([
+			cursorMemberSpec("review-promotion-target-low"),
+			cursorMemberSpec("review-promotion-target-high"),
+			cursorMemberSpec("review-promotion-source-none", sourceOverrides),
+			cursorMemberSpec("review-promotion-source-high", sourceOverrides),
+		]);
+		const source = collapsed.find(model => model.id === "review-promotion-source");
+
+		expect(source?.contextPromotionTarget).toBe("cursor/review-promotion-target");
+		expect(source?.compactionModel).toBe("review-promotion-target");
+	});
+
+	it("preserves references to live tiers after an earlier family becomes unsafe", () => {
+		collapseEffortVariantsAcrossProviders([
+			cursorMemberSpec("review-changing-target-low"),
+			cursorMemberSpec("review-changing-target-high"),
+		]);
+		const collapsed = collapseEffortVariantsAcrossProviders([
+			cursorMemberSpec("review-changing-target-low", { contextWindow: 200_000 }),
+			cursorMemberSpec("review-changing-target-high", { contextWindow: 1_000_000 }),
+			cursorMemberSpec("review-changing-source", {
+				contextPromotionTarget: "cursor/review-changing-target-low",
+				compactionModel: "review-changing-target-high",
+			}),
+		]);
+		const source = collapsed.find(model => model.id === "review-changing-source");
+
+		expect(source?.contextPromotionTarget).toBe("cursor/review-changing-target-low");
+		expect(source?.compactionModel).toBe("review-changing-target-high");
 	});
 });
 
@@ -814,6 +959,32 @@ describe("variant aliases", () => {
 		expect(sources).toContain("gemini-3.5-flash-low");
 		expect(sources).toContain("gemini-3-flash");
 		expect(getVariantAliasSources("openai", "gpt-4o")).toEqual([]);
+	});
+
+	it("registers selector aliases for dynamically collapsed Cursor tier families", () => {
+		const ids = [
+			"review-model-9237-low",
+			"review-model-9237-high",
+			"review-model-9237-low-fast",
+			"review-model-9237-high-fast",
+		];
+		const collapsed = collapseEffortVariantsAcrossProviders(ids.map(id => cursorMemberSpec(id)));
+		expect(collapsed.map(model => model.id).sort()).toEqual(["review-model-9237", "review-model-9237-fast"]);
+
+		expect(resolveVariantAlias("cursor", "review-model-9237-high")).toBe("review-model-9237");
+		expect(resolveVariantAlias("CURSOR", "review-model-9237-low-fast")).toBe("review-model-9237-fast");
+		expect(resolveBareVariantAlias("review-model-9237-high")).toEqual({
+			id: "review-model-9237",
+			providers: ["cursor"],
+		});
+		expect(getVariantAliasSources("cursor", "review-model-9237")).toEqual([
+			"review-model-9237-low",
+			"review-model-9237-high",
+		]);
+		expect(getVariantAliasSources("cursor", "review-model-9237-fast")).toEqual([
+			"review-model-9237-low-fast",
+			"review-model-9237-high-fast",
+		]);
 	});
 
 	it("scopes collapsed-spec detection to routing and hand-table families", () => {

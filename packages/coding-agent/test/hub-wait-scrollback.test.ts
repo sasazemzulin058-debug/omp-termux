@@ -216,6 +216,68 @@ describe("hub wait poll never sprays duplicate job rows into scrollback", () => 
 		}
 	}, 30_000);
 
+	test("content landing below a live poll still reaches scrollback", async () => {
+		// Regression: a displaceable poll pinned the commit ceiling, so every
+		// row the turn streamed below it scrolled past the window without ever
+		// committing — invisible to scrollback while the poll lived, lost
+		// permanently on exit. An interior poll must stop gating the ceiling;
+		// its committed rows then force-seal it (next poll stacks, never
+		// retracts committed history).
+		const rows = 12;
+		stubStdoutRows(rows);
+		const term = new VirtualTerminal(80, rows);
+		const scheduler = makeDrainableScheduler();
+		const tui = new TUI(term, undefined, { renderScheduler: scheduler });
+		tui.setScrollbackRebuild(false);
+		const transcript = new TranscriptContainer();
+		transcript.addChild(
+			new StaticBlock(Array.from({ length: 20 }, (_, i) => `history-line-${String(i).padStart(2, "0")}`)),
+		);
+		const hub = new ToolExecutionComponent(
+			"hub",
+			{ op: "wait", timeoutMs: 600_000 },
+			{ liveRegion: transcript },
+			undefined,
+			tui,
+			process.cwd(),
+		);
+		transcript.addChild(hub);
+		tui.addChild(transcript);
+		tui.addChild(new Footer(4));
+
+		try {
+			hub.updateResult(waitPartial(0), true);
+			tui.start();
+			scheduler.flush();
+			await term.flush();
+			expect(hub.isDisplaceableBlock()).toBe(true);
+
+			// The turn continues below the still-displaceable poll.
+			transcript.addChild(
+				new StaticBlock(Array.from({ length: 30 }, (_, i) => `report-line-${String(i).padStart(2, "0")}`)),
+			);
+			term.scrollLines(1000);
+			tui.requestRender();
+			scheduler.flush();
+			await term.flush();
+
+			// Rows that scrolled past the window are on the tape, exactly once.
+			const buffer = plainScrollBuffer(term);
+			expect(buffer.join("\n")).toContain("report-line-00");
+			expect(buffer.filter(line => line.includes("report-line-05")).length).toBe(1);
+
+			// The poll's committed rows force-seal it on the next frame.
+			tui.requestRender();
+			scheduler.flush();
+			await term.flush();
+			expect(hub.isDisplaceableBlock()).toBe(false);
+		} finally {
+			hub.stopAnimation();
+			tui.stop();
+			await term.flush();
+		}
+	}, 30_000);
+
 	test("does not smear when an unpinned live predecessor sits above the wait", async () => {
 		const rows = 12;
 		stubStdoutRows(rows);
