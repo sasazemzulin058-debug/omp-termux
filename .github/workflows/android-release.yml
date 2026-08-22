@@ -251,11 +251,11 @@ jobs:
           test -s termux-bundle/cli.js
           test -s termux-bundle/node_modules/@oh-my-pi/pi-natives/native/pi_natives.android-arm64.node
 
-          # Official stable Bun only; no source build or npm/apt fallback.
+          # Android ARM64 Bun cannot execute on x86_64 GitHub runners; URL,
+          # manifest version, SHA256, and ELF architecture verify asset identity.
           test -x /tmp/bun-extract/bun
           cp /tmp/bun-extract/bun termux-bundle/bun
           chmod +x termux-bundle/bun
-          termux-bundle/bun --version | grep -F "${BUN_VERSION}"
           test -x termux-bundle/bun
 
           tar -czf omp-termux.tar.gz -C termux-bundle .
