@@ -1,5 +1,6 @@
 import { getProjectDir, logger } from "@oh-my-pi/pi-utils";
 import {
+	type AutocompleteItem,
 	type AutocompleteProvider,
 	findLeadingSlashCommandStart,
 	findTrailingSlashCommandStart,
@@ -461,6 +462,7 @@ export interface EditorTextAssistProvider {
 }
 
 type HistoryCursorAnchor = "start" | "end";
+type AutocompleteRequest = { kind: "regular"; explicitTab: boolean } | { kind: "force" };
 
 export class Editor implements Component, Focusable {
 	#state: EditorState = {
@@ -468,9 +470,6 @@ export class Editor implements Component, Focusable {
 		cursorLine: 0,
 		cursorCol: 0,
 	};
-	#widthEpochText = "";
-	#widthEpochRevision = 0;
-
 	/** Focusable interface - set by TUI when focus changes */
 	focused: boolean = false;
 
@@ -529,6 +528,10 @@ export class Editor implements Component, Focusable {
 		| undefined;
 	#autocompletePrefix: string = "";
 	#autocompleteRequestId: number = 0;
+	#autocompletePendingRequest: AutocompleteRequest | undefined;
+	#autocompleteRequestRunning = false;
+	#autocompleteAbortController: AbortController | undefined;
+	#autocompleteWaiters: Array<() => void> = [];
 	#autocompleteMaxVisible: number = 10;
 	onAutocompleteUpdate?: () => void;
 	/** Called after an async text-assist result mutates the document outside an input event, so hosts can schedule a repaint. */
@@ -586,9 +589,6 @@ export class Editor implements Component, Focusable {
 	// per-event rebuilds down to one per rendered frame (see #4145).
 	#topBorderContent?: EditorTopBorder;
 	#topBorderProvider?: (availableWidth: number) => EditorTopBorder | undefined;
-	#topBorderProviderWidth: number | undefined;
-	#topBorderProviderSignature: string | undefined;
-	#topBorderProviderRevision: number | undefined;
 	#borderVisible = true;
 	#borderStyle: EditorBorderStyle = "box";
 	constructor(theme: EditorTheme) {
@@ -608,7 +608,6 @@ export class Editor implements Component, Focusable {
 	/** Install prose assistance without changing command/file autocomplete. */
 	setTextAssistProvider(provider: EditorTextAssistProvider | undefined): void {
 		this.#textAssistProvider = provider;
-		this.#widthEpochRevision++;
 	}
 
 	/**
@@ -624,7 +623,6 @@ export class Editor implements Component, Focusable {
 		if (this.#topBorderContent?.content === content?.content && this.#topBorderContent?.width === content?.width)
 			return;
 		this.#topBorderContent = content;
-		this.#widthEpochRevision++;
 	}
 
 	/**
@@ -635,16 +633,10 @@ export class Editor implements Component, Focusable {
 	 * Use this when the top border derives from state that mutates far faster
 	 * than the render cadence (session events, streaming, subagent updates).
 	 * The TUI already throttles renders, so a provider is invoked exactly once
-	 * per frame and does no work between paints. Return a logical `revision` to
-	 * distinguish concurrent status mutations from pure width reflow.
-	 */
+	 * per frame and does no work between paints. 	 */
 	setTopBorderProvider(provider: ((availableWidth: number) => EditorTopBorder | undefined) | undefined): void {
 		if (this.#topBorderProvider === provider) return;
 		this.#topBorderProvider = provider;
-		this.#topBorderProviderWidth = undefined;
-		this.#topBorderProviderSignature = undefined;
-		this.#topBorderProviderRevision = undefined;
-		this.#widthEpochRevision++;
 	}
 
 	/**
@@ -653,7 +645,6 @@ export class Editor implements Component, Focusable {
 	setBorderVisible(borderVisible: boolean): void {
 		if (this.#borderVisible === borderVisible) return;
 		this.#borderVisible = borderVisible;
-		this.#widthEpochRevision++;
 	}
 
 	setPromptGutter(promptGutter: string | undefined): void {
@@ -666,7 +657,6 @@ export class Editor implements Component, Focusable {
 	setBorderStyle(style: EditorBorderStyle): void {
 		if (this.#borderStyle === style) return;
 		this.#borderStyle = style;
-		this.#widthEpochRevision++;
 	}
 
 	/** True while the autocomplete/slash-command menu is open below the editor. */
@@ -690,14 +680,12 @@ export class Editor implements Component, Focusable {
 	setUseTerminalCursor(useTerminalCursor: boolean): void {
 		if (this.#useTerminalCursor === useTerminalCursor) return;
 		this.#useTerminalCursor = useTerminalCursor;
-		this.#widthEpochRevision++;
 	}
 
 	/** Render a dedicated bottom border so terminal-local IME preedit cannot shift editor chrome. */
 	setImeSafeCursorLayout(enabled: boolean): void {
 		if (this.#imeSafeCursorLayout === enabled) return;
 		this.#imeSafeCursorLayout = enabled;
-		this.#widthEpochRevision++;
 	}
 
 	getUseTerminalCursor(): boolean {
@@ -707,7 +695,6 @@ export class Editor implements Component, Focusable {
 	setMaxHeight(maxHeight: number | undefined): void {
 		if (this.#maxHeight === maxHeight) return;
 		this.#maxHeight = maxHeight;
-		this.#widthEpochRevision++;
 		// Don't reset scrollOffset — #updateScrollOffset will clamp it on next render
 	}
 
@@ -730,11 +717,11 @@ export class Editor implements Component, Focusable {
 			this.#autocompleteMaxVisible = newMaxVisible;
 			if (this.#autocompleteState !== null) {
 				this.#autocompleteList?.setMaxVisible(newMaxVisible);
-				this.#widthEpochRevision++;
 			}
 		}
 	}
 
+	/** Loads persistent prompts for navigation and enables future persistence. */
 	setHistoryStorage(storage: HistoryStorage): void {
 		this.#historyStorage = storage;
 		const recent = storage.getRecent(100);
@@ -749,19 +736,20 @@ export class Editor implements Component, Focusable {
 	addToHistory(text: string): void {
 		const trimmed = text.trim();
 		if (!trimmed) return;
-		// Don't add consecutive duplicates
-		if (this.#history.length > 0 && this.#history[0] === trimmed) return;
-		this.#history.unshift(trimmed);
-		// Limit history size
-		if (this.#history.length > 100) {
-			this.#history.pop();
-		}
 
 		const stor = this.#historyStorage;
 		if (stor) {
 			stor.add(trimmed, getProjectDir()).catch(error => {
 				logger.error("HistoryStorage add failed", { error: String(error) });
 			});
+		}
+
+		// Don't add consecutive duplicates
+		if (this.#history.length > 0 && this.#history[0] === trimmed) return;
+		this.#history.unshift(trimmed);
+		// Limit history size
+		if (this.#history.length > 100) {
+			this.#history.pop();
 		}
 	}
 
@@ -1051,28 +1039,13 @@ export class Editor implements Component, Focusable {
 		}
 
 		// Resolve the custom top-border content once per frame; the style decides
-		// how (and whether) to draw it. Provider caching stays editor-owned so
-		// per-event rebuilds keep coalescing to one per painted frame.
+		// how (and whether) to draw it. Provider evaluation stays editor-owned,
+		// coalescing per-event rebuilds to one per painted frame.
 		const topFillWidth = Math.max(0, width - borderWidth * 2);
 		let topBorder: EditorTopBorder | undefined;
 		if (style.statusAttachment !== "none") {
 			if (this.#topBorderProvider) {
-				const previousWidth = this.#topBorderProviderWidth;
 				topBorder = this.#topBorderProvider(topFillWidth);
-				const signature = topBorder ? `${topBorder.width}\0${topBorder.content}` : "";
-				const revision = topBorder?.revision;
-				if (
-					(previousWidth !== undefined &&
-						revision !== undefined &&
-						this.#topBorderProviderRevision !== undefined &&
-						revision !== this.#topBorderProviderRevision) ||
-					(previousWidth === topFillWidth && signature !== this.#topBorderProviderSignature)
-				) {
-					this.#widthEpochRevision++;
-				}
-				this.#topBorderProviderWidth = topFillWidth;
-				this.#topBorderProviderSignature = signature;
-				this.#topBorderProviderRevision = revision;
 			} else {
 				topBorder = this.#topBorderContent;
 			}
@@ -1323,6 +1296,11 @@ export class Editor implements Component, Focusable {
 		// lookup instead of re-parsing `data` per probe (~35 probes per key).
 		const parsedKey = parseKey(data);
 		const canonical = parsedKey === undefined ? undefined : canonicalKeyId(parsedKey);
+		// Input wins over a pending provider lookup. The next completable edit
+		// queues one fresh request after the stale request acknowledges abort.
+		if (this.#autocompleteRequestRunning && this.#autocompleteState === null) {
+			this.#invalidateAutocompleteRequests();
+		}
 
 		// Handle character jump mode (awaiting next character to jump to)
 		if (this.#jumpMode !== null) {
@@ -1424,7 +1402,6 @@ export class Editor implements Component, Focusable {
 					kb.matchesCanonical(canonical, "tui.select.pageDown")
 				) {
 					this.#autocompleteList.handleInput(data);
-					this.#widthEpochRevision++;
 					this.onAutocompleteUpdate?.();
 					return;
 				}
@@ -1878,15 +1855,6 @@ export class Editor implements Component, Focusable {
 
 	getText(): string {
 		return this.#state.lines.join("\n");
-	}
-
-	getNativeScrollbackWidthEpochRevision(): number {
-		const text = this.getText();
-		if (text !== this.#widthEpochText) {
-			this.#widthEpochText = text;
-			this.#widthEpochRevision++;
-		}
-		return this.#widthEpochRevision;
 	}
 
 	/** Whether the buffer text equals `value`, without `getText()`'s full join —
@@ -3417,39 +3385,18 @@ export class Editor implements Component, Focusable {
 
 	async #tryTriggerAutocomplete(explicitTab: boolean = false): Promise<void> {
 		if (!this.#autocompleteProvider) return;
-		// Check if we should trigger file completion on Tab
-		if (explicitTab) {
-			const shouldTrigger =
-				!this.#autocompleteProvider.shouldTriggerFileCompletion ||
-				this.#autocompleteProvider.shouldTriggerFileCompletion(
-					this.#state.lines,
-					this.#state.cursorLine,
-					this.#state.cursorCol,
-				);
-			if (!shouldTrigger) {
-				return;
-			}
+		if (
+			explicitTab &&
+			this.#autocompleteProvider.shouldTriggerFileCompletion &&
+			!this.#autocompleteProvider.shouldTriggerFileCompletion(
+				this.#state.lines,
+				this.#state.cursorLine,
+				this.#state.cursorCol,
+			)
+		) {
+			return;
 		}
-
-		const requestId = ++this.#autocompleteRequestId;
-
-		const suggestions = await this.#autocompleteProvider.getSuggestions(
-			this.#state.lines,
-			this.#state.cursorLine,
-			this.#state.cursorCol,
-		);
-		if (requestId !== this.#autocompleteRequestId) return;
-
-		if (suggestions && Array.isArray(suggestions.items) && suggestions.items.length > 0) {
-			this.#autocompletePrefix = suggestions.prefix;
-			this.#autocompleteList = this.#createAutocompleteList(suggestions.prefix, suggestions.items);
-			this.#autocompleteState = "regular";
-			this.#widthEpochRevision++;
-			this.onAutocompleteUpdate?.();
-		} else {
-			this.#cancelAutocomplete();
-			this.onAutocompleteUpdate?.();
-		}
+		await this.#queueAutocompleteRequest({ kind: "regular", explicitTab });
 	}
 	#createAutocompleteList(
 		prefix: string,
@@ -3519,7 +3466,6 @@ export class Editor implements Component, Focusable {
 			cursorOffset:
 				replacements.line === this.#state.cursorLine ? Math.max(0, this.#state.cursorCol - replacements.endCol) : 0,
 		};
-		this.#widthEpochRevision++;
 		this.onAutocompleteUpdate?.();
 	}
 
@@ -3551,44 +3497,21 @@ export class Editor implements Component, Focusable {
 
 	async #forceFileAutocomplete(): Promise<void> {
 		if (!this.#autocompleteProvider) return;
-
-		// File-aware providers expose getForceFileSuggestions; slash-only ones fall back to regular completion.
-		const getForceFileSuggestions = this.#autocompleteProvider.getForceFileSuggestions;
-		if (typeof getForceFileSuggestions !== "function") {
+		if (typeof this.#autocompleteProvider.getForceFileSuggestions !== "function") {
 			await this.#tryTriggerAutocomplete(true);
 			return;
 		}
-
-		const requestId = ++this.#autocompleteRequestId;
-		const suggestions = await getForceFileSuggestions.call(
-			this.#autocompleteProvider,
-			this.#state.lines,
-			this.#state.cursorLine,
-			this.#state.cursorCol,
-		);
-		if (requestId !== this.#autocompleteRequestId) return;
-
-		if (suggestions && Array.isArray(suggestions.items) && suggestions.items.length > 0) {
-			this.#autocompletePrefix = suggestions.prefix;
-			this.#autocompleteList = this.#createAutocompleteList(suggestions.prefix, suggestions.items);
-			this.#autocompleteState = "force";
-			this.#widthEpochRevision++;
-			this.onAutocompleteUpdate?.();
-		} else {
-			this.#cancelAutocomplete();
-			this.onAutocompleteUpdate?.();
-		}
+		await this.#queueAutocompleteRequest({ kind: "force" });
 	}
 
 	#cancelAutocomplete(notifyCancel: boolean = false): void {
 		const wasAutocompleting = this.#autocompleteState !== null;
 		this.#clearAutocompleteTimeout();
-		this.#autocompleteRequestId += 1;
+		this.#invalidateAutocompleteRequests();
 		this.#autocompleteState = null;
 		this.#autocompleteList = undefined;
 		this.#textAssistReplacement = undefined;
 		this.#autocompletePrefix = "";
-		if (wasAutocompleting) this.#widthEpochRevision++;
 		if (notifyCancel && wasAutocompleting) {
 			this.onAutocompleteCancel?.();
 		}
@@ -3599,34 +3522,97 @@ export class Editor implements Component, Focusable {
 	}
 
 	async #updateAutocomplete(): Promise<void> {
-		if (!this.#autocompleteState || !this.#autocompleteProvider) return;
-		if (this.#autocompleteState === "assist") return;
-
-		// In force mode, use forceFileAutocomplete to get suggestions
+		if (!this.#autocompleteState || !this.#autocompleteProvider || this.#autocompleteState === "assist") return;
 		if (this.#autocompleteState === "force") {
-			this.#forceFileAutocomplete();
+			await this.#forceFileAutocomplete();
+			return;
+		}
+		await this.#queueAutocompleteRequest({ kind: "regular", explicitTab: false });
+	}
+
+	#queueAutocompleteRequest(request: AutocompleteRequest): Promise<void> {
+		const waiter = Promise.withResolvers<void>();
+		this.#autocompleteWaiters.push(waiter.resolve);
+		this.#autocompletePendingRequest = request;
+		this.#autocompleteRequestId++;
+		this.#autocompleteAbortController?.abort();
+		if (!this.#autocompleteRequestRunning) void this.#drainAutocompleteRequests();
+		return waiter.promise;
+	}
+
+	async #drainAutocompleteRequests(): Promise<void> {
+		if (this.#autocompleteRequestRunning) return;
+		this.#autocompleteRequestRunning = true;
+		try {
+			while (this.#autocompletePendingRequest) {
+				const request = this.#autocompletePendingRequest;
+				this.#autocompletePendingRequest = undefined;
+				const requestId = this.#autocompleteRequestId;
+				const controller = new AbortController();
+				this.#autocompleteAbortController = controller;
+				await this.#runAutocompleteRequest(request, requestId, controller.signal);
+				if (this.#autocompleteAbortController === controller) {
+					this.#autocompleteAbortController = undefined;
+				}
+			}
+		} finally {
+			this.#autocompleteRequestRunning = false;
+			const waiters = this.#autocompleteWaiters.splice(0);
+			for (const resolve of waiters) resolve();
+		}
+	}
+
+	async #runAutocompleteRequest(request: AutocompleteRequest, requestId: number, signal: AbortSignal): Promise<void> {
+		const provider = this.#autocompleteProvider;
+		if (!provider) return;
+		const lines = [...this.#state.lines];
+		const cursorLine = this.#state.cursorLine;
+		const cursorCol = this.#state.cursorCol;
+		let suggestions: { items: AutocompleteItem[]; prefix: string } | null;
+		try {
+			if (request.kind === "force") {
+				const getForceFileSuggestions = provider.getForceFileSuggestions;
+				if (!getForceFileSuggestions) return;
+				suggestions = await getForceFileSuggestions.call(provider, lines, cursorLine, cursorCol, signal);
+			} else {
+				suggestions = await provider.getSuggestions(lines, cursorLine, cursorCol, signal);
+			}
+		} catch (error) {
+			if (!signal.aborted && requestId === this.#autocompleteRequestId) {
+				logger.debug("Autocomplete provider failed", { error: String(error) });
+				this.#cancelAutocomplete();
+				this.onAutocompleteUpdate?.();
+			}
+			return;
+		}
+		if (
+			signal.aborted ||
+			requestId !== this.#autocompleteRequestId ||
+			cursorLine !== this.#state.cursorLine ||
+			cursorCol !== this.#state.cursorCol ||
+			lines.length !== this.#state.lines.length ||
+			lines.some((line, index) => line !== this.#state.lines[index])
+		) {
 			return;
 		}
 
-		const requestId = ++this.#autocompleteRequestId;
-
-		const suggestions = await this.#autocompleteProvider.getSuggestions(
-			this.#state.lines,
-			this.#state.cursorLine,
-			this.#state.cursorCol,
-		);
-		if (requestId !== this.#autocompleteRequestId) return;
-
 		if (suggestions && Array.isArray(suggestions.items) && suggestions.items.length > 0) {
 			this.#autocompletePrefix = suggestions.prefix;
-			// Always create new SelectList to ensure update
 			this.#autocompleteList = this.#createAutocompleteList(suggestions.prefix, suggestions.items);
-			this.#widthEpochRevision++;
+			this.#autocompleteState = request.kind === "force" ? "force" : "regular";
 			this.onAutocompleteUpdate?.();
-		} else {
-			this.#cancelAutocomplete();
-			this.onAutocompleteUpdate?.();
+			return;
 		}
+		this.#cancelAutocomplete();
+		this.onAutocompleteUpdate?.();
+	}
+
+	#invalidateAutocompleteRequests(): void {
+		this.#autocompletePendingRequest = undefined;
+		this.#autocompleteRequestId++;
+		this.#autocompleteAbortController?.abort();
+		const waiters = this.#autocompleteWaiters.splice(0);
+		for (const resolve of waiters) resolve();
 	}
 
 	#debouncedUpdateAutocomplete(): void {
@@ -3634,7 +3620,7 @@ export class Editor implements Component, Focusable {
 			clearTimeout(this.#autocompleteTimeout);
 		}
 		this.#autocompleteTimeout = setTimeout(() => {
-			this.#updateAutocomplete();
+			void this.#updateAutocomplete();
 			this.#autocompleteTimeout = undefined;
 		}, 100);
 	}

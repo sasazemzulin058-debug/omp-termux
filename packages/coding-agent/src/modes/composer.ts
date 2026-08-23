@@ -5,10 +5,14 @@ import {
 	type ResizeScrollbackMode,
 	Spacer,
 	type Terminal,
+	type TerminalFramePlan,
+	type TerminalFrameProvider,
 	TUI,
 	type TUIOptions,
+	type ViewportSize,
 } from "@oh-my-pi/pi-tui";
 import { CustomEditor } from "./components/custom-editor";
+import { type AnimationFrame, TranscriptContainer } from "./components/transcript-container";
 import { type LspServerInfo, type RecentSession, WelcomeComponent } from "./components/welcome";
 import { getEditorTheme, initThemeSync, theme } from "./theme/theme";
 
@@ -20,7 +24,6 @@ export interface ComposerPreferences {
 	readonly composerShape: string;
 	readonly showHardwareCursor: boolean;
 	readonly maxInlineImages: number;
-	readonly scrollbackRebuild: boolean;
 	readonly resizeScrollback: ResizeScrollbackMode;
 	readonly imeSafeCursor: boolean;
 	readonly autocompleteMaxVisible: number;
@@ -35,8 +38,7 @@ export const COMPOSER_DEFAULTS: ComposerPreferences = {
 	composerShape: "box",
 	showHardwareCursor: true,
 	maxInlineImages: 8,
-	scrollbackRebuild: false,
-	resizeScrollback: "append",
+	resizeScrollback: "rebuild",
 	imeSafeCursor: false,
 	autocompleteMaxVisible: 10,
 	spellingTypoDetection: true,
@@ -94,7 +96,7 @@ class StatusHost implements Component {
  * It owns the terminal, welcome header, and editor; InteractiveMode later supplies authoritative
  * data and mounts the session-aware runtime children without replacing the visible header.
  */
-export class Composer {
+export class Composer implements TerminalFrameProvider {
 	/** Terminal renderer shared with InteractiveMode after adoption. */
 	readonly ui: TUI;
 	#editor: CustomEditor;
@@ -114,6 +116,20 @@ export class Composer {
 	#headerAfter: readonly Component[] = [];
 	#runtimeChildren: readonly Component[] = [];
 	#runtimeMounted = false;
+	// Composer-owned history id space. Transcript batch ids restart across
+	// container clears/swaps; the composer translates them into one monotonic
+	// sequence the terminal's accepted-id watermark can trust.
+	#nextHistoryId = 1;
+	#offeredHistory:
+		| {
+				id: number;
+				rows: readonly string[];
+				source: "header" | { transcript: TranscriptContainer; transcriptId: number };
+		  }
+		| undefined;
+	// The welcome header retires to terminal history exactly once, after the
+	// intro settles; until then it renders as mutable viewport chrome.
+	#headerRetired = false;
 	#lastInterruptAt = 0;
 	#started = false;
 	#stopped = false;
@@ -131,8 +147,8 @@ export class Composer {
 			this.#preferences.showHardwareCursor,
 			options.tuiOptions,
 		);
+		this.ui.setFrameProvider(this);
 		this.ui.setMaxInlineImages(this.#preferences.maxInlineImages);
-		this.ui.setScrollbackRebuild(this.#preferences.scrollbackRebuild);
 		this.ui.setResizeScrollback(this.#preferences.resizeScrollback);
 
 		this.#editor = new CustomEditor(getEditorTheme());
@@ -155,7 +171,7 @@ export class Composer {
 		this.editor.setActionKeys("app.exit", ["ctrl+d"]);
 		this.editor.onClear = () => this.#handleInterrupt();
 		this.editor.onExit = () => this.#requestExit(0);
-		this.editor.setShimmerRepaintHandler(() => this.ui.requestDirectWrite(this.editor));
+		this.editor.setShimmerRepaintHandler(() => this.ui.requestComponentRender(this.editor));
 
 		if (!this.#preferences.quiet) this.#ensureWelcome();
 		this.#rebuildHeader();
@@ -164,6 +180,109 @@ export class Composer {
 		this.ui.addChild(this.editor);
 		this.ui.addChild(this.#statusHost);
 		this.ui.setFocus(this.editor);
+	}
+	/** Compose the bounded mutable viewport and the next ordered history append. */
+	renderFrame(viewport: ViewportSize): TerminalFramePlan {
+		if (!this.#started || this.#stopped) return { viewport: [] };
+		const width = Math.max(1, viewport.columns);
+		const rows = Math.max(0, viewport.rows);
+		const roots = this.#runtimeMounted
+			? [...this.#runtimeChildren, this.#statusHost]
+			: [this.#header, this.#bootstrapInputGap, this.editor, this.#statusHost];
+		const transcriptIndex = roots.findIndex(root => root instanceof TranscriptContainer);
+		if (transcriptIndex < 0) {
+			return { viewport: this.#renderRoots(roots, width).slice(-rows) };
+		}
+		const transcript = roots[transcriptIndex] as TranscriptContainer;
+		const preRoots = this.#renderRoots(roots.slice(0, transcriptIndex), width);
+		const after = this.#renderRoots(roots.slice(transcriptIndex + 1), width);
+		// Offer history under capacity pressure only: blocks stay live (and keep
+		// reflowing to the current width) while the screen has room. A batch
+		// leaves the mutable viewport in the same frame it is appended, so its
+		// rows are never painted twice.
+		const history = this.#offerHistory(transcript, width, rows, preRoots.length + after.length);
+		const headerVisible = !this.#headerRetired && this.#offeredHistory?.source !== "header";
+		const headerRows = headerVisible ? this.#header.render(width) : [];
+		const before = [...headerRows, ...preRoots];
+		const now = performance.now();
+		const frame: AnimationFrame = { now, tick: Math.floor(now / 80) };
+		const active = transcript.renderViewport(width, Math.max(0, rows - before.length - after.length), frame);
+		const composed = [...before, ...active, ...after];
+		return {
+			history,
+			viewport: composed.length <= rows ? composed : composed.slice(-rows),
+		};
+	}
+
+	/** Retire an accepted terminal history batch (header, then transcript prefixes). */
+	acknowledgeHistory(id: number): void {
+		const offered = this.#offeredHistory;
+		if (offered === undefined || offered.id !== id) return;
+		if (offered.source === "header") this.#headerRetired = true;
+		else offered.source.transcript.acknowledgeFinalizedBatch(offered.source.transcriptId);
+		this.#offeredHistory = undefined;
+	}
+
+	/** Render the semantic transcript tail while the terminal borrows its resize buffer. */
+	renderResizeFrame(viewport: ViewportSize): readonly string[] {
+		if (!this.#started || this.#stopped) return [];
+		const width = Math.max(1, viewport.columns);
+		const rows = Math.max(0, viewport.rows);
+		const tail = this.#runtimeMounted
+			? this.#renderRoots([...this.#runtimeChildren, this.#statusHost], width)
+			: this.#renderRoots([this.#bootstrapInputGap, this.editor, this.#statusHost], width);
+		const rendered = [...this.#header.render(width), ...(this.#headerRetired ? [""] : []), ...tail];
+		return rendered.length <= rows ? rendered : rendered.slice(rendered.length - rows);
+	}
+
+	/** Re-offer the complete finalized prefix after a display reset or resize replay. */
+	resetHistory(): void {
+		this.#offeredHistory = undefined;
+		this.#headerRetired = false;
+		for (const child of this.#runtimeChildren) {
+			if (child instanceof TranscriptContainer) child.resetRetirement();
+		}
+	}
+
+	/** Header retires first, then finalized transcript prefixes, one batch at a time. */
+	#offerHistory(
+		transcript: TranscriptContainer,
+		width: number,
+		rows: number,
+		chromeRows: number,
+	): { id: number; rows: readonly string[] } | undefined {
+		if (this.#offeredHistory !== undefined) {
+			return { id: this.#offeredHistory.id, rows: this.#offeredHistory.rows };
+		}
+		if (!this.#headerRetired) {
+			const welcome = this.#welcome;
+			if (welcome !== undefined && !welcome.isTranscriptBlockFinalized()) return undefined;
+			// The header stays live viewport chrome until the screen fills; then it
+			// retires first so transcript prefixes can follow in order.
+			const headerRows = this.#header.render(width).length;
+			const liveRows = transcript.liveRowCount(width);
+			if (headerRows + chromeRows + liveRows <= rows) return undefined;
+			this.#offeredHistory = {
+				id: this.#nextHistoryId++,
+				rows: [...this.#header.render(width), ""],
+				source: "header",
+			};
+			return { id: this.#offeredHistory.id, rows: this.#offeredHistory.rows };
+		}
+		const batch = transcript.peekFinalizedBatch(width, Math.max(0, rows - chromeRows));
+		if (batch === undefined) return undefined;
+		this.#offeredHistory = {
+			id: this.#nextHistoryId++,
+			rows: batch.rows,
+			source: { transcript, transcriptId: batch.id },
+		};
+		return { id: this.#offeredHistory.id, rows: this.#offeredHistory.rows };
+	}
+
+	#renderRoots(roots: readonly Component[], width: number): string[] {
+		const rows: string[] = [];
+		for (const root of roots) rows.push(...root.render(width));
+		return rows;
 	}
 
 	/** Live editor whose draft survives startup and session adoption. */
@@ -208,8 +327,7 @@ export class Composer {
 		this.ui.setShowHardwareCursor(this.#preferences.showHardwareCursor);
 		this.editor.setUseTerminalCursor(this.ui.getShowHardwareCursor());
 		this.ui.setMaxInlineImages(this.#preferences.maxInlineImages);
-		this.ui.setScrollbackRebuild(this.#preferences.scrollbackRebuild);
-		this.ui.setResizeScrollback(this.#preferences.resizeScrollback);
+		if (update.resizeScrollback !== undefined) this.ui.setResizeScrollback(update.resizeScrollback);
 		this.editor.setImeSafeCursorLayout(this.#preferences.imeSafeCursor);
 		this.editor.setAutocompleteMaxVisible(this.#preferences.autocompleteMaxVisible);
 		this.editor.setSpellingFeatures({

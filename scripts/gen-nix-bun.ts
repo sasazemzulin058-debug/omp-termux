@@ -28,7 +28,7 @@ export function normalizeLockfileVersion(contents: string): string {
 			`bun.lock is lockfileVersion ${version}, which changes content (scoped overrides) and cannot be downgraded for bun2nix`,
 		);
 	}
-	return contents.slice(0, stamp.index) + `${stamp[1]}1${stamp[3]}` + contents.slice(stamp.index + stamp[0].length);
+	return `${contents.slice(0, stamp.index)}${stamp[1]}1${stamp[3]}${contents.slice(stamp.index + stamp[0].length)}`;
 }
 
 /** Rewrite `bun.lock` in place when Bun 1.4+ stamped it lockfileVersion 2. */

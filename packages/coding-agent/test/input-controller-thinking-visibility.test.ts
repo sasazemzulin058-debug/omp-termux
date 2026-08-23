@@ -15,7 +15,7 @@ describe("InputController thinking visibility", () => {
 		const loadingIndicator = { kind: "loading" };
 		const assistant = createAssistant();
 		const setHideThinkingBlock = assistant.setHideThinkingBlock as Mock<(hidden: boolean) => void>;
-		const resetDisplay = vi.fn();
+		const requestRender = vi.fn();
 		const clear = vi.fn();
 		const addChild = vi.fn();
 		const rebuildChatFromMessages = vi.fn();
@@ -33,7 +33,7 @@ describe("InputController thinking visibility", () => {
 			streamingMessage: undefined,
 			rebuildChatFromMessages,
 			showStatus,
-			ui: { resetDisplay },
+			ui: { requestRender },
 		} as unknown as InteractiveModeContext;
 
 		new InputController(ctx).toggleThinkingBlockVisibility();
@@ -46,7 +46,7 @@ describe("InputController thinking visibility", () => {
 		expect(addChild).not.toHaveBeenCalled();
 		expect(rebuildChatFromMessages).not.toHaveBeenCalled();
 		expect(setHideThinkingBlock).toHaveBeenCalledWith(true);
-		expect(resetDisplay).toHaveBeenCalledTimes(1);
+		expect(requestRender).toHaveBeenCalledTimes(1);
 		expect(showStatus).toHaveBeenCalledWith("Thinking blocks: hidden");
 	});
 
@@ -58,7 +58,7 @@ describe("InputController thinking visibility", () => {
 		const setHideThinkingBlock = assistant.setHideThinkingBlock as Mock<(hidden: boolean) => void>;
 		const set = vi.fn();
 		const showStatus = vi.fn();
-		const resetDisplay = vi.fn();
+		const requestRender = vi.fn();
 		const ctx = {
 			hideThinkingBlock: false,
 			effectiveHideThinkingBlock: true, // thinking is off → effective is true
@@ -68,7 +68,7 @@ describe("InputController thinking visibility", () => {
 			streamingComponent: undefined,
 			streamingMessage: undefined,
 			showStatus,
-			ui: { resetDisplay },
+			ui: { requestRender },
 		} as unknown as InteractiveModeContext;
 
 		new InputController(ctx).toggleThinkingBlockVisibility();
@@ -77,7 +77,7 @@ describe("InputController thinking visibility", () => {
 		expect(ctx.hideThinkingBlock).toBe(false);
 		expect(set).not.toHaveBeenCalled();
 		expect(setHideThinkingBlock).not.toHaveBeenCalled();
-		expect(resetDisplay).not.toHaveBeenCalled();
+		expect(requestRender).not.toHaveBeenCalled();
 		expect(showStatus).toHaveBeenCalledWith("Thinking is off — enable thinking to show blocks");
 	});
 
@@ -86,7 +86,7 @@ describe("InputController thinking visibility", () => {
 		const setHideThinkingBlock = assistant.setHideThinkingBlock as Mock<(hidden: boolean) => void>;
 		const set = vi.fn();
 		const showStatus = vi.fn();
-		const resetDisplay = vi.fn();
+		const requestRender = vi.fn();
 		const ctx = {
 			hideThinkingBlock: false,
 			effectiveHideThinkingBlock: false,
@@ -97,7 +97,7 @@ describe("InputController thinking visibility", () => {
 			streamingComponent: undefined,
 			streamingMessage: undefined,
 			showStatus,
-			ui: { resetDisplay },
+			ui: { requestRender },
 		} as unknown as InteractiveModeContext;
 
 		new InputController(ctx).toggleThinkingBlockVisibility();
@@ -105,7 +105,7 @@ describe("InputController thinking visibility", () => {
 		expect(ctx.hideThinkingBlock).toBe(true);
 		expect(set).toHaveBeenCalledWith("hideThinkingBlock", true);
 		expect(setHideThinkingBlock).toHaveBeenCalledWith(true);
-		expect(resetDisplay).toHaveBeenCalledTimes(1);
+		expect(requestRender).toHaveBeenCalledTimes(1);
 		expect(showStatus).toHaveBeenCalledWith("Thinking blocks: hidden");
 	});
 
@@ -114,7 +114,7 @@ describe("InputController thinking visibility", () => {
 		const setHideThinkingBlock = assistant.setHideThinkingBlock as Mock<(hidden: boolean) => void>;
 		const set = vi.fn();
 		const showStatus = vi.fn();
-		const resetDisplay = vi.fn();
+		const requestRender = vi.fn();
 		const ctx = {
 			hideThinkingBlock: false,
 			effectiveHideThinkingBlock: true,
@@ -125,7 +125,7 @@ describe("InputController thinking visibility", () => {
 			streamingComponent: undefined,
 			streamingMessage: undefined,
 			showStatus,
-			ui: { resetDisplay },
+			ui: { requestRender },
 		} as unknown as InteractiveModeContext;
 
 		new InputController(ctx).toggleThinkingBlockVisibility();
@@ -133,7 +133,7 @@ describe("InputController thinking visibility", () => {
 		expect(ctx.hideThinkingBlock).toBe(false);
 		expect(set).not.toHaveBeenCalled();
 		expect(setHideThinkingBlock).not.toHaveBeenCalled();
-		expect(resetDisplay).not.toHaveBeenCalled();
+		expect(requestRender).not.toHaveBeenCalled();
 		expect(showStatus).toHaveBeenCalledWith("Thinking is off — enable thinking to show blocks");
 	});
 
@@ -146,7 +146,7 @@ describe("InputController thinking visibility", () => {
 		const setHideThinkingBlock = assistant.setHideThinkingBlock as Mock<(hidden: boolean) => void>;
 		const set = vi.fn();
 		const showStatus = vi.fn();
-		const resetDisplay = vi.fn();
+		const requestRender = vi.fn();
 		const ctx = {
 			hideThinkingBlock: true,
 			effectiveHideThinkingBlock: true, // thinking is off → effective is true
@@ -156,7 +156,7 @@ describe("InputController thinking visibility", () => {
 			streamingComponent: undefined,
 			streamingMessage: undefined,
 			showStatus,
-			ui: { resetDisplay },
+			ui: { requestRender },
 		} as unknown as InteractiveModeContext;
 
 		new InputController(ctx).toggleThinkingBlockVisibility();
@@ -165,7 +165,7 @@ describe("InputController thinking visibility", () => {
 		expect(ctx.hideThinkingBlock).toBe(true);
 		expect(set).not.toHaveBeenCalled();
 		expect(setHideThinkingBlock).not.toHaveBeenCalled();
-		expect(resetDisplay).not.toHaveBeenCalled();
+		expect(requestRender).not.toHaveBeenCalled();
 		expect(showStatus).toHaveBeenCalledWith("Thinking is off — enable thinking to show blocks");
 	});
 });

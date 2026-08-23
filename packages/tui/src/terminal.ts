@@ -231,6 +231,20 @@ function registerPostmortemTerminalRestore(): void {
 export function setAltScreenActive(active: boolean): void {
 	altScreenActive = active;
 }
+/**
+ * Route an out-of-band escape sequence (e.g. an OSC title update) through the
+ * active terminal's output path. While a TUI owns stdout, frame paints go
+ * through the off-thread write pump and can split across multiple write(2)
+ * calls; a direct main-thread `process.stdout.write` can land between two of
+ * them — mid escape sequence — and the host terminal then prints the payload
+ * as literal text at the cursor position. Returns false when no terminal has
+ * started, in which case the caller owns stdout and may write directly.
+ */
+export function writeThroughActiveTerminal(data: string): boolean {
+	if (!activeTerminal) return false;
+	activeTerminal.write(data);
+	return true;
+}
 
 const stdoutErrorHandlers = new Set<(err: Error) => void>();
 let stdoutErrorListenerInstalled = false;

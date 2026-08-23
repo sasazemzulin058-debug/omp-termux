@@ -3819,7 +3819,13 @@ describe("lsp regressions", () => {
 						srv.exit(0);
 					}
 				});
-				const config: ServerConfig = { command: "roslyn-language-server", fileTypes: [".cs"], rootMarkers: [] };
+				const settings = { csharp: { analysis: { backgroundScope: "fullSolution" } } };
+				const config: ServerConfig = {
+					command: "roslyn-language-server",
+					fileTypes: [".cs"],
+					rootMarkers: [],
+					settings,
+				};
 				vi.spyOn(lspConfig, "loadConfig").mockReturnValue({
 					servers: { csharp: config },
 					idleTimeoutMs: undefined,
@@ -3830,6 +3836,10 @@ describe("lsp regressions", () => {
 
 				expect(sawRustReload).toBe(false);
 				expect(textResult(result)).toContain("Reloaded csharp");
+				const configurationMessages = server.received.filter(
+					message => message.method === "workspace/didChangeConfiguration",
+				);
+				expect(configurationMessages.at(-1)?.params).toEqual({ settings });
 				expect(server.killed).toBe(false);
 			} finally {
 				vi.restoreAllMocks();

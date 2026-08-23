@@ -1788,6 +1788,68 @@ describe("ModelRegistry", () => {
 		});
 	});
 
+	describe("amazon-bedrock guardrails", () => {
+		let guardrailOverride: ModelRegistry;
+		beforeAll(() => {
+			guardrailOverride = readonlyRegistry({
+				providers: {
+					"amazon-bedrock": {
+						guardrailIdentifier: "arn:aws:bedrock:eu-west-2:123456789012:guardrail/abcd1234",
+						guardrailVersion: "1",
+						guardrailTrace: "enabled",
+					},
+					"custom-bedrock": {
+						baseUrl: "https://bedrock-runtime.us-east-1.amazonaws.com",
+						apiKey: "TEST_KEY",
+						api: "bedrock-converse-stream",
+						guardrailIdentifier: "arn:aws:bedrock:eu-west-2:123456789012:guardrail/abcd1234",
+						guardrailVersion: "1",
+						guardrailTrace: "enabled",
+						models: [
+							{
+								id: "custom-bedrock-model",
+								name: "Custom Bedrock Model",
+								reasoning: false,
+								input: ["text"],
+								cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+								contextWindow: 128000,
+								maxTokens: 4096,
+							},
+						],
+					},
+				},
+			});
+		});
+
+		test("guardrail provider config applies to built-in bedrock models", () => {
+			const models = getModelsForProvider(guardrailOverride, "amazon-bedrock");
+			expect(models.length).toBeGreaterThan(0);
+			for (const model of models) {
+				expect(model.guardrailIdentifier).toBe("arn:aws:bedrock:eu-west-2:123456789012:guardrail/abcd1234");
+				expect(model.guardrailVersion).toBe("1");
+				expect(model.guardrailTrace).toBe("enabled");
+			}
+		});
+
+		test("guardrail provider config applies to a non-bundled Bedrock model", () => {
+			const model = guardrailOverride.find("custom-bedrock", "custom-bedrock-model");
+			expect(model).toBeDefined();
+			expect(model?.guardrailIdentifier).toBe("arn:aws:bedrock:eu-west-2:123456789012:guardrail/abcd1234");
+			expect(model?.guardrailVersion).toBe("1");
+			expect(model?.guardrailTrace).toBe("enabled");
+		});
+
+		test("guardrail fields are absent on built-in bedrock models without override", () => {
+			const models = getModelsForProvider(sharedBuiltin, "amazon-bedrock");
+			expect(models.length).toBeGreaterThan(0);
+			for (const model of models) {
+				expect(model.guardrailIdentifier).toBeUndefined();
+				expect(model.guardrailVersion).toBeUndefined();
+				expect(model.guardrailTrace).toBeUndefined();
+			}
+		});
+	});
+
 	describe("provider auth: oauth", () => {
 		// isOAuth is baked onto each model at construction/refresh, so building the
 		// fixtures (and their offline refresh) in beforeAll on one dedicated auth

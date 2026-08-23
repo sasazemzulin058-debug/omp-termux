@@ -834,6 +834,14 @@ export function encodeKittyPlacementLine(options: {
 export function encodeKittyDeleteImage(imageId: number): string {
 	return wrapTmuxPassthroughIfNeeded(`\x1b_Ga=d,d=I,i=${imageId},q=2\x1b\\`);
 }
+/**
+ * Delete every Kitty image and placement in the terminal. Used only by an
+ * explicit destructive display reset: text erases leave untracked placements
+ * painted, so per-image bookkeeping cannot guarantee a clean viewport.
+ */
+export function encodeKittyDeleteAllImages(): string {
+	return wrapTmuxPassthroughIfNeeded("\x1b_Ga=d,d=A,q=2\x1b\\");
+}
 
 /**
  * Delete a single placement of an image (`d=i`, lowercase): removes its cells

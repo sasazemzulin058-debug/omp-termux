@@ -9,7 +9,7 @@ One rewrite form per operation:
 - Block: MATCH lines, `»`, REWRITE lines stating the final text — for moves and large restructures. Empty REWRITE deletes the whole MATCH.
 
 In MATCH: `…` = gap/capture — stays on its line between fragments, spans lines at line end. No markers → REWRITE replaces the whole MATCH.
-In REWRITE or a desired side: `…` re-emits captured gaps in order — one MATCH gap each; a `…` with no MATCH gap left to claim is written to the file as a literal `…`.
+In REWRITE or a desired side: `…` re-emits captured gaps in order — one MATCH gap each; a `…` with no MATCH gap left to claim mid-line is written as a literal `…`, and alone on its line is an error (context elision — type the lines out).
 
 Move code by deleting it where it is (MATCH + `»` + empty REWRITE, or `⟪old lines│⟫`) and re-stating it with `＋` lines at its destination.
 </ops>

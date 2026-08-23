@@ -27,6 +27,50 @@ async function untilAutocompleteShown(editor: Editor): Promise<void> {
 		await onceAutocompleteUpdate(editor);
 	}
 }
+describe("Editor async autocomplete scheduling", () => {
+	it("keeps only the latest request queued while the provider is busy", async () => {
+		const requests: Array<{
+			text: string;
+			signal: AbortSignal | undefined;
+			result: PromiseWithResolvers<{ items: AutocompleteItem[]; prefix: string } | null>;
+		}> = [];
+		const secondStarted = Promise.withResolvers<void>();
+		const editor = new Editor(defaultEditorTheme);
+		editor.setAutocompleteProvider({
+			getSuggestions(lines, cursorLine, cursorCol, signal) {
+				const result = Promise.withResolvers<{ items: AutocompleteItem[]; prefix: string } | null>();
+				requests.push({
+					text: (lines[cursorLine] ?? "").slice(0, cursorCol),
+					signal,
+					result,
+				});
+				if (requests.length === 2) secondStarted.resolve();
+				return result.promise;
+			},
+			applyCompletion(lines, cursorLine, cursorCol) {
+				return { lines, cursorLine, cursorCol };
+			},
+		});
+
+		for (const char of "@abcd") editor.handleInput(char);
+
+		expect(requests).toHaveLength(1);
+		expect(requests[0]?.signal?.aborted).toBeTrue();
+		requests[0]?.result.resolve(null);
+		await secondStarted.promise;
+		expect(requests).toHaveLength(2);
+		expect(requests[1]?.text).toBe("@abcd");
+		expect(requests[1]?.signal?.aborted).toBeFalse();
+
+		const updated = onceAutocompleteUpdate(editor);
+		requests[1]?.result.resolve({
+			items: [{ label: "abcde.ts", value: "abcde.ts" }],
+			prefix: "@abcd",
+		});
+		await updated;
+		expect(editor.isShowingAutocomplete()).toBeTrue();
+	});
+});
 
 class HashActionProvider implements AutocompleteProvider {
 	async getSuggestions(
@@ -572,10 +616,7 @@ describe("Editor Enter handler sync slash completion", () => {
 
 		editor.setText("see /tmp");
 		editor.handleInput("\t");
-		await Promise.resolve();
-		await Promise.resolve();
-		await Promise.resolve();
-		await Promise.resolve();
+		await untilAutocompleteShown(editor);
 
 		expect(forceFileCalls).toBe(1);
 		expect(editor.isShowingAutocomplete()).toBe(true);

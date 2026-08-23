@@ -117,6 +117,19 @@ describe("applyGlyphCodec", () => {
 		expect(JSON.stringify(codec.context)).not.toContain("<glyph-tokens>");
 	});
 
+	it("normalizes a bare-string systemPrompt from legacy extensions instead of crashing", () => {
+		const glyph = "\ue0a0";
+		// legacy earendil-works extensions type Context.systemPrompt as `string`
+		const context = { systemPrompt: `classify ${glyph}`, messages: [] } as unknown as Context;
+		const codec = applyGlyphCodec(context);
+
+		expect(codec.active).toBe(true);
+		expect(Array.isArray(codec.context.systemPrompt)).toBe(true);
+		const [encoded] = codec.context.systemPrompt ?? [];
+		expect(encoded).toContain("⟦Ue0a0⟧");
+		expect(decodeGlyphText(encoded ?? "")).toContain(`classify ${glyph}`);
+	});
+
 	it("makes a branded reapplication inert", () => {
 		const first = applyGlyphCodec({ messages: [{ role: "user", content: "\ue0a0", timestamp: 1 }] });
 		const second = applyGlyphCodec(first.context);

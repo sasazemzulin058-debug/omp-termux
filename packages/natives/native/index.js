@@ -1,4 +1,5 @@
 import { loadNative } from "./loader-state.js";
+import { adaptDesktopSession } from "./desktop-adapter.js";
 
 /**
  * Native addon entrypoint.
@@ -26,7 +27,7 @@ function _unsupported(name) {
 // classes
 export const AudioCapture = nativeBindings.AudioCapture ?? _unsupported("AudioCapture");
 export const AudioPlayback = nativeBindings.AudioPlayback ?? _unsupported("AudioPlayback");
-export const DesktopSession = nativeBindings.DesktopSession;
+export const DesktopSession = adaptDesktopSession(nativeBindings.DesktopSession);
 export const FileLock = nativeBindings.FileLock;
 export const HighlightStream = nativeBindings.HighlightStream;
 export const LiveWebRtcPeer = nativeBindings.LiveWebRtcPeer ?? _unsupported("LiveWebRtcPeer");
@@ -39,7 +40,7 @@ export const TtyWriter = nativeBindings.TtyWriter;
 
 // functions
 export const __ompInstallTokioRuntime = nativeBindings.__ompInstallTokioRuntime;
-export const __piNativesV18_0_0 = nativeBindings.__piNativesV18_0_0;
+export const __piNativesV18_0_1 = nativeBindings.__piNativesV18_0_1;
 export const astEdit = nativeBindings.astEdit;
 export const astGrep = nativeBindings.astGrep;
 export const astMatch = nativeBindings.astMatch;

@@ -62,7 +62,11 @@ export function applyGlyphCodec(context: Context): GlyphCodec {
 	let tools = context.tools;
 	let messages = context.messages;
 
-	const sourceSystemPrompt = context.systemPrompt;
+	// Context.systemPrompt is typed string[], but legacy (earendil-works)
+	// extensions pass a bare string; provider paths tolerate it via
+	// normalizeSystemPrompts, so normalize here before iterating.
+	const rawSystemPrompt = context.systemPrompt;
+	const sourceSystemPrompt = typeof rawSystemPrompt === "string" ? [rawSystemPrompt] : rawSystemPrompt;
 	if (sourceSystemPrompt !== undefined) {
 		let output = sourceSystemPrompt;
 		for (const [index, prompt] of sourceSystemPrompt.entries()) {

@@ -109,7 +109,7 @@ mod platform {
 			)
 		};
 		let mut ranges = Vec::new();
-		for result in results.iter() {
+		for result in &results {
 			let range = result.range();
 			if range.length == 0 || range.location >= NS_NOT_FOUND {
 				continue;
@@ -133,7 +133,11 @@ mod platform {
 	/// Language macOS identifies for a word range, honoring automatic language
 	/// identification. Falls back to the shared checker's current language when
 	/// detection is inconclusive (issue #9334).
-	fn word_language(checker: &NSSpellChecker, text: &NSString, range: NSRange) -> Retained<NSString> {
+	fn word_language(
+		checker: &NSSpellChecker,
+		text: &NSString,
+		range: NSRange,
+	) -> Retained<NSString> {
 		checker
 			.languageForWordRange_inString_orthography(range, text, None)
 			.unwrap_or_else(|| checker.language())
@@ -173,10 +177,7 @@ mod platform {
 		let range = ns_range(start, length)?;
 		let language = word_language(&checker, &text, range);
 		let value = checker.correctionForWordRange_inString_language_inSpellDocumentWithTag(
-			range,
-			&text,
-			&language,
-			0,
+			range, &text, &language, 0,
 		);
 		Ok(value.map(|value| value.to_string()))
 	}

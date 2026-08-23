@@ -649,6 +649,89 @@ describe("TurnRecovery replay-unsafe output classification", () => {
 		});
 	});
 
+	describe("premature stream close after resolved tool calls", () => {
+		const completionsClose = "OpenAI completions stream closed before a finish_reason was received";
+		const responsesClose = "OpenAI responses stream closed before a terminal response event was received";
+
+		function gatewayMessage(content: AssistantMessage["content"], errorMessage: string): AssistantMessage {
+			const message = makeMessage(content, model);
+			message.provider = "opencode-go";
+			message.errorMessage = errorMessage;
+			// Production persists the Transient flag that ProviderResponseError(kind:
+			// "incomplete-stream") attaches; the bare message text classifies as 0.
+			message.errorId = AIError.create(AIError.Flag.Transient);
+			return message;
+		}
+
+		function recoveryForClose(message: AssistantMessage, tail: readonly AgentMessage[]): TurnRecovery {
+			return new TurnRecovery(createHost(model, modelRegistry, { messages: [message as AgentMessage, ...tail] }));
+		}
+
+		it("continues a premature completions close after a resolved tool call", () => {
+			const message = gatewayMessage(
+				[{ type: "toolCall", id: "call-1", name: "bash", arguments: { command: "pwd" } }],
+				completionsClose,
+			);
+			const recovery = recoveryForClose(message, [
+				{
+					role: "toolResult",
+					toolCallId: "call-1",
+					toolName: "bash",
+					content: [{ type: "text", text: "Tool call was not executed." }],
+					isError: true,
+					details: { __synthetic: true, source: "assistant_stop_error", executed: false },
+					timestamp: Date.now(),
+				},
+			]);
+			expect(recovery.classifyResolvedInterruptedToolTurn(message)).toBe("stream-stall");
+		});
+
+		it("continues a premature responses close after a resolved tool call", () => {
+			const message = gatewayMessage(
+				[{ type: "toolCall", id: "call-1", name: "bash", arguments: { command: "pwd" } }],
+				responsesClose,
+			);
+			const recovery = recoveryForClose(message, [
+				{
+					role: "toolResult",
+					toolCallId: "call-1",
+					toolName: "bash",
+					content: [{ type: "text", text: "Tool call was not executed." }],
+					isError: true,
+					details: { __synthetic: true, source: "assistant_stop_error", executed: false },
+					timestamp: Date.now(),
+				},
+			]);
+			expect(recovery.classifyResolvedInterruptedToolTurn(message)).toBe("stream-stall");
+		});
+
+		it("does not continue a premature close whose tool call has no result", () => {
+			const message = gatewayMessage(
+				[{ type: "toolCall", id: "call-1", name: "bash", arguments: { command: "pwd" } }],
+				completionsClose,
+			);
+			expect(recoveryForClose(message, []).classifyResolvedInterruptedToolTurn(message)).toBeUndefined();
+		});
+
+		it("does not continue an unrelated provider error", () => {
+			const message = gatewayMessage(
+				[{ type: "toolCall", id: "call-1", name: "bash", arguments: { command: "pwd" } }],
+				"Provider returned 500 boom",
+			);
+			const recovery = recoveryForClose(message, [
+				{
+					role: "toolResult",
+					toolCallId: "call-1",
+					toolName: "bash",
+					content: [{ type: "text", text: "/workspace" }],
+					isError: false,
+					timestamp: Date.now(),
+				},
+			]);
+			expect(recovery.classifyResolvedInterruptedToolTurn(message)).toBeUndefined();
+		});
+	});
+
 	it("maps an ephemeral fallback hop to the default chain instead of a shared later-listed role", () => {
 		const vision = getBundledModel("openai", "gpt-4o-mini");
 		if (!vision) throw new Error("Expected bundled model gpt-4o-mini");

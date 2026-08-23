@@ -86,8 +86,11 @@ export class MacOSSpellingProvider implements EditorTextAssistProvider {
 	#cacheGeneration = 0;
 	#typoCache = new Map<string, readonly native.SpellingRange[]>();
 	#typoInFlight = new Map<string, Promise<readonly native.SpellingRange[]>>();
+	#automaticTypoActive = false;
+	#automaticTypoQueue = new Map<string, string>();
 	#completionCache = new Map<string, string | null>();
-	#completionInFlight = new Set<string>();
+	#completionActiveKey: string | undefined;
+	#completionQueued: { key: string; line: string; start: number; prefix: string } | undefined;
 	#sourceText = "";
 	#sourceMask = "";
 	#sourceLineOffsets: number[] = [];
@@ -128,9 +131,10 @@ export class MacOSSpellingProvider implements EditorTextAssistProvider {
 		}
 		const ranges = this.#typoCache.get(text);
 		if (!ranges) {
-			void this.#loadTypoRanges(text);
+			this.#scheduleTypoRanges(text, `${context.line}:${context.startCol}`);
 			return decorate(text);
 		}
+		this.#automaticTypoQueue.delete(`${context.line}:${context.startCol}`);
 		if (ranges.length === 0) return decorate(text);
 		let rendered = "";
 		let cursor = 0;
@@ -255,6 +259,34 @@ export class MacOSSpellingProvider implements EditorTextAssistProvider {
 		);
 		return request;
 	}
+	#scheduleTypoRanges(text: string, lane: string): void {
+		if (this.#typoCache.has(text) || this.#typoInFlight.has(text)) return;
+		if (this.#automaticTypoActive) {
+			this.#automaticTypoQueue.set(lane, text);
+			return;
+		}
+		this.#startTypoRanges(text);
+	}
+
+	#startTypoRanges(text: string): void {
+		this.#automaticTypoActive = true;
+		const request = this.#loadTypoRanges(text);
+		const finished = (): void => {
+			this.#automaticTypoActive = false;
+			this.#drainTypoRanges();
+		};
+		void request.then(finished, finished);
+	}
+
+	#drainTypoRanges(): void {
+		if (this.#automaticTypoActive) return;
+		for (const [lane, text] of this.#automaticTypoQueue) {
+			this.#automaticTypoQueue.delete(lane);
+			if (this.#typoCache.has(text) || this.#typoInFlight.has(text)) continue;
+			this.#startTypoRanges(text);
+			return;
+		}
+	}
 
 	async #fetchTypoRanges(text: string, generation: number): Promise<readonly native.SpellingRange[]> {
 		let checked: readonly native.SpellingRange[];
@@ -279,10 +311,26 @@ export class MacOSSpellingProvider implements EditorTextAssistProvider {
 	}
 
 	#scheduleWordCompletion(key: string, line: string, start: number, prefix: string): void {
-		if (this.#completionInFlight.has(key)) return;
-		this.#completionInFlight.add(key);
+		if (this.#completionActiveKey === key || this.#completionQueued?.key === key) return;
+		if (this.#completionActiveKey !== undefined) {
+			this.#completionQueued = { key, line, start, prefix };
+			return;
+		}
+		this.#startWordCompletion(key, line, start, prefix);
+	}
+	#startWordCompletion(key: string, line: string, start: number, prefix: string): void {
+		this.#completionActiveKey = key;
 		const generation = this.#cacheGeneration;
-		void this.#fetchWordCompletion(key, line, start, prefix, generation);
+		const request = this.#fetchWordCompletion(key, line, start, prefix, generation);
+		const finished = (): void => {
+			if (this.#completionActiveKey === key) this.#completionActiveKey = undefined;
+			const queued = this.#completionQueued;
+			this.#completionQueued = undefined;
+			if (queued && this.#available && this.#features.autocomplete && !this.#completionCache.has(queued.key)) {
+				this.#startWordCompletion(queued.key, queued.line, queued.start, queued.prefix);
+			}
+		};
+		void request.then(finished, finished);
 	}
 
 	async #fetchWordCompletion(
@@ -306,11 +354,9 @@ export class MacOSSpellingProvider implements EditorTextAssistProvider {
 			if (this.#completionCache.size >= CACHE_LIMIT) this.#completionCache.clear();
 			this.#completionCache.set(key, suffix);
 			// A null suffix means no ghost text; the current paint is already right.
-			if (suffix !== null) this.onUpdate?.();
+			if (suffix !== null && this.#completionQueued === undefined) this.onUpdate?.();
 		} catch (error) {
 			this.#disable(error);
-		} finally {
-			if (generation === this.#cacheGeneration) this.#completionInFlight.delete(key);
 		}
 	}
 
@@ -346,8 +392,9 @@ export class MacOSSpellingProvider implements EditorTextAssistProvider {
 		this.#cacheGeneration++;
 		this.#typoCache.clear();
 		this.#typoInFlight.clear();
+		this.#automaticTypoQueue.clear();
 		this.#completionCache.clear();
-		this.#completionInFlight.clear();
+		this.#completionQueued = undefined;
 	}
 
 	#disable(error: unknown): void {

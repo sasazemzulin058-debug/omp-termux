@@ -262,6 +262,8 @@ export interface ToolSession {
 	getToolContext?: () => AgentToolContext | undefined;
 	/** Names currently authorized for invocation through the eval bridge. */
 	getEvalBridgeToolNames?: () => readonly string[];
+	/** Direct partition of the active Code Mode surface; undefined when Code Mode is inactive. */
+	getCodeModeDirectToolNames?: () => readonly string[] | undefined;
 	/** Return whether a built-in tool is active in this turn's tool set. */
 	isToolActive?: (name: string) => boolean;
 	/** Update the active built-in tool predicate when a session changes tools mid-run. */

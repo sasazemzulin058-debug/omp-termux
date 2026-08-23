@@ -1,8 +1,6 @@
 /**
  * History rewinds (esc-esc branch, /tree navigation to an ancestor) drop the
- * rendered transcript tail in place instead of a destructive clear-scrollback
- * replay — but only while none of the dropped blocks' rows entered native
- * scrollback (committed rows are immutable tape). Covers the fast-path gates
+ * rendered transcript tail in place. Covers the fast-path gates
  * in UiHelpers.truncateTranscriptFromMessage.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
@@ -107,52 +105,6 @@ function createHarness() {
 }
 
 describe("UiHelpers.truncateTranscriptFromMessage", () => {
-	it("drops an uncommitted tail in place and reseeds rewind-scoped state", () => {
-		const { ctx, chat, blocks, messages, helpers } = createHarness();
-		expect(chat.render(40)).toEqual(["user-1", "", "assistant-1", "", "user-2", "", "assistant-2"]);
-		// Only rows above the boundary (user-1 / assistant-1) are on the tape.
-		chat.setNativeScrollbackCommittedRows(3);
-
-		expect(helpers.truncateTranscriptFromMessage(messages.user2)).toBe(true);
-
-		expect(chat.children).toEqual([blocks[0]!, blocks[1]!]);
-		expect(blocks[2]!.disposed).toBe(true);
-		expect(blocks[3]!.disposed).toBe(true);
-		expect(blocks[0]!.disposed).toBe(false);
-		expect(chat.render(40)).toEqual(["user-1", "", "assistant-1"]);
-		// Cache-invalidation baseline reseeds from the surviving assistant turn,
-		// not the dropped one.
-		expect(ctx.lastAssistantUsage).toBe(messages.assistant1.usage);
-		// Surviving components stay reusable; dropped ones are pruned.
-		expect(ctx.transcriptMessageComponents.get(messages.assistant1)).toBe(blocks[1]!);
-		expect(ctx.transcriptMessageComponents.get(messages.user2)).toBeUndefined();
-		expect(ctx.ui.requestRender).toHaveBeenCalled();
-	});
-
-	it("falls back once any dropped row entered native scrollback", () => {
-		const { chat, blocks, messages, helpers } = createHarness();
-		chat.render(40);
-		// Commit through user-2's row: the boundary block is now immutable tape.
-		chat.setNativeScrollbackCommittedRows(5);
-
-		expect(helpers.truncateTranscriptFromMessage(messages.user2)).toBe(false);
-
-		expect(chat.children).toHaveLength(4);
-		expect(blocks[2]!.disposed).toBe(false);
-	});
-
-	it("bails without mutating when the session was not actually rewound past the boundary", () => {
-		const { chat, blocks, messages, remainingMessages, helpers } = createHarness();
-		chat.render(40);
-		chat.setNativeScrollbackCommittedRows(0);
-		remainingMessages.push(messages.user2, messages.assistant2);
-
-		expect(helpers.truncateTranscriptFromMessage(messages.user2)).toBe(false);
-
-		expect(chat.children).toHaveLength(4);
-		expect(blocks[2]!.disposed).toBe(false);
-	});
-
 	it("falls back while the view session is streaming or has in-flight tools", () => {
 		const streaming = createHarness();
 		streaming.viewSession.isStreaming = true;

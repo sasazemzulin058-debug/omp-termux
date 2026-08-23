@@ -19,7 +19,6 @@ import type {
 	Component,
 	EditorTheme,
 	LoaderMessageColorFn,
-	NativeScrollbackLiveRegion,
 	OverlayHandle,
 	SlashCommand,
 } from "@oh-my-pi/pi-tui";
@@ -79,6 +78,7 @@ import type {
 } from "../extensibility/extensions";
 import type { CompactOptions } from "../extensibility/extensions/types";
 import type { Skill } from "../extensibility/skills";
+import type { FileSlashCommand } from "../extensibility/slash-commands";
 import { loadSlashCommands } from "../extensibility/slash-commands";
 import type { Goal, GoalModeState } from "../goals/state";
 import { copyLocalArtifacts, resolveLocalUrlToPath } from "../internal-urls";
@@ -94,6 +94,7 @@ import {
 import { humanizePlanTitle, type PlanApprovalDetails, resolvePlanTitle } from "../plan-mode/approved-plan";
 import { resolvePlanModelTransition } from "../plan-mode/model-transition";
 import guidedGoalInterviewPrompt from "../prompts/goals/guided-goal-interview.md" with { type: "text" };
+import planFilenamePrompt from "../prompts/system/plan-filename.md" with { type: "text" };
 import planModeApprovedPrompt from "../prompts/system/plan-mode-approved.md" with { type: "text" };
 import planModeCompactInstructionsPrompt from "../prompts/system/plan-mode-compact-instructions.md" with {
 	type: "text",
@@ -122,12 +123,13 @@ import { agentTypeBadge, formatTaskId } from "../task/render";
 import type { ConfiguredThinkingLevel } from "../thinking";
 import { tinyTitleClient } from "../tiny/title-client";
 import type { LspStartupServerInfo } from "../tools";
-import { normalizeLocalScheme } from "../tools/path-utils";
-import { formatMoreItems, replaceTabs, TRUNCATE_LENGTHS, truncateToWidth } from "../tools/render-utils";
+import { normalizeLocalScheme, resolveToCwd } from "../tools/path-utils";
+import { formatMoreItems, replaceTabs, shortenPath, TRUNCATE_LENGTHS, truncateToWidth } from "../tools/render-utils";
 import { setAutoQaConsentHandler } from "../tools/report-tool-issue";
 import {
 	formatPhaseDisplayName,
 	isClosedTodo,
+	nextActionableTask,
 	selectCollapsedTodos,
 	setActiveTodoDescriptionsProvider,
 	todoMatchesAnyDescription,
@@ -167,6 +169,7 @@ import type { HookEditorComponent } from "./components/hook-editor";
 import type { HookInputComponent } from "./components/hook-input";
 import type { HookSelectorComponent, HookSelectorSlider } from "./components/hook-selector";
 import { type PlanReviewAnnotationState, PlanReviewOverlay } from "./components/plan-review-overlay";
+import { PlanSaveOverlay, type PlanSaveOverlayResult } from "./components/plan-save-overlay";
 import { StatusLineComponent } from "./components/status-line";
 import { stopSharedSpinnerTicker, type ToolExecutionHandle } from "./components/tool-execution";
 import { TranscriptContainer } from "./components/transcript-container";
@@ -340,6 +343,37 @@ type GoalSubcommand = "set" | "show" | "pause" | "resume" | "drop" | "budget";
 const GOAL_SUBCOMMANDS = new Set<GoalSubcommand>(["set", "show", "pause", "resume", "drop", "budget"]);
 const PLAN_KEEP_CONTEXT_OPTION_INDEX = 2;
 const PLAN_KEEP_CONTEXT_DISABLE_THRESHOLD_PERCENT = 95;
+const PLAN_SAVE_AND_QUIT_OPTION = "Save and quit";
+const PLAN_SAVE_TITLE_LINE_LIMIT = 6;
+
+const PLAN_SAVE_STEM_MAX_LENGTH = 32;
+const PLAN_FILENAME_SYSTEM_PROMPT = prompt.render(planFilenamePrompt);
+/** Suggested save filename for an approved plan: `<TOPIC>_PLAN.md` from the
+ *  tiny-model topic (e.g. `PYO3_METHODS_PLAN.md`), trimmed to a word boundary
+ *  when a verbose fallback title sneaks through. */
+export function planSaveFileName(title: string): string {
+	let stem = title
+		.normalize("NFC")
+		.replace(/[^\p{L}\p{N}]+/gu, "_")
+		.replace(/_+/g, "_")
+		.replace(/^_+|_+$/g, "")
+		.toUpperCase();
+	if (stem.length > PLAN_SAVE_STEM_MAX_LENGTH) {
+		const cut = stem.lastIndexOf("_", PLAN_SAVE_STEM_MAX_LENGTH);
+		stem = cut > 0 ? stem.slice(0, cut) : stem.slice(0, PLAN_SAVE_STEM_MAX_LENGTH);
+	}
+	if (!stem || stem === "PLAN") return "PLAN.md";
+	return `${stem.endsWith("_PLAN") ? stem : `${stem}_PLAN`}.md`;
+}
+
+function planSaveTitleExcerpt(planContent: string): string {
+	return planContent
+		.split(/\r?\n/)
+		.map(line => line.trim())
+		.filter(Boolean)
+		.slice(0, PLAN_SAVE_TITLE_LINE_LIMIT)
+		.join("\n");
+}
 
 function parseGoalSubcommand(args: string): { sub: GoalSubcommand | undefined; rest: string } {
 	const trimmed = args.trim();
@@ -396,22 +430,35 @@ export interface InteractiveModeOptions {
 	initialMessages?: string[];
 }
 
-/**
- * Anchored live-region container for the HUD/status rows between the transcript
- * and the editor (working loader, todo + subagent HUDs, transient notification
- * panels). While it has content every row is live: it reports a seam at 0 and
- * pins that live region so the engine never commits these anchored,
- * rebuilt-in-place rows to native scrollback — otherwise stale duplicates pile
- * up above the live copy on short terminals once the loader sits below a tall HUD. The transcript's own seam,
- * when present, sits higher and wins (topmost-seam merge in TUI.render).
- */
-class AnchoredLiveContainer extends Container implements NativeScrollbackLiveRegion {
-	getNativeScrollbackLiveRegionStart(): number | undefined {
-		return this.children.length > 0 ? 0 : undefined;
+export const TODO_COMPACT_TERMINAL_ROWS_THRESHOLD = 18;
+
+/** Holds mutable HUD and editor-adjacent chrome outside transcript history. */
+class AnchoredLiveContainer extends Container {}
+
+class TodoHudContainer extends AnchoredLiveContainer {
+	constructor(private readonly mode: InteractiveMode) {
+		super();
 	}
 
-	isNativeScrollbackLiveRegionPinned(): boolean {
-		return true;
+	override render(width: number): readonly string[] {
+		if (this.mode.isCompactTodoMode()) {
+			return [];
+		}
+		return super.render(width);
+	}
+}
+
+class StatusHudContainer extends AnchoredLiveContainer {
+	constructor(private readonly mode: InteractiveMode) {
+		super();
+	}
+
+	override render(width: number): readonly string[] {
+		const childLines = super.render(width);
+		if (!this.mode.isCompactTodoMode()) {
+			return childLines;
+		}
+		return this.mode.renderCompactStatusLine(width, childLines);
 	}
 }
 
@@ -796,7 +843,6 @@ export class InteractiveMode implements InteractiveModeContext {
 			composerShape: settings.get("composer.shape") ?? "box",
 			showHardwareCursor: settings.get("showHardwareCursor"),
 			maxInlineImages: settings.get("tui.maxInlineImages"),
-			scrollbackRebuild: settings.get("tui.scrollbackRebuild"),
 			resizeScrollback: settings.get("tui.resizeScrollback"),
 			imeSafeCursor: settings.get("tui.imeSafeCursor"),
 			autocompleteMaxVisible: settings.get("autocompleteMaxVisible"),
@@ -861,8 +907,6 @@ export class InteractiveMode implements InteractiveModeContext {
 		// A cold-start composer already owns the terminal. Reuse it so input
 		// buffered during startup remains in the same editor instance.
 		this.ui.setMaxInlineImages(settings.get("tui.maxInlineImages"));
-		this.ui.setScrollbackRebuild(settings.get("tui.scrollbackRebuild"));
-		this.ui.setResizeScrollback(settings.get("tui.resizeScrollback"));
 		this.ui.setShowHardwareCursor(settings.get("showHardwareCursor"));
 		// OSC 66 text-sizing is Kitty-only; resolve the setting against the terminal's
 		// capability (`TERMINAL.supportsTextSizing` defaults on for Kitty) so it stays off
@@ -870,8 +914,8 @@ export class InteractiveMode implements InteractiveModeContext {
 		setTerminalTextSizing(settings.get("tui.textSizing") && TERMINAL.supportsTextSizing);
 		this.chatContainer = new TranscriptContainer();
 		this.pendingMessagesContainer = new AnchoredLiveContainer();
-		this.statusContainer = new AnchoredLiveContainer();
-		this.todoContainer = new AnchoredLiveContainer();
+		this.statusContainer = new StatusHudContainer(this);
+		this.todoContainer = new TodoHudContainer(this);
 		this.subagentContainer = new AnchoredLiveContainer();
 		this.btwContainer = new AnchoredLiveContainer();
 		this.omfgContainer = new AnchoredLiveContainer();
@@ -879,7 +923,6 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.errorBannerContainer = new AnchoredLiveContainer();
 		this.modelCycleContainer = new AnchoredLiveContainer();
 		this.deferredCommandContainer = new AnchoredLiveContainer();
-		this.ui.enableScopedInputRender(this.editor);
 		this.editor.setUseTerminalCursor(this.ui.getShowHardwareCursor());
 		this.editor.setImeSafeCursorLayout(settings.get("tui.imeSafeCursor"));
 		this.editor.setAutocompleteMaxVisible(settings.get("autocompleteMaxVisible"));
@@ -891,17 +934,10 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.editor.onAutocompleteUpdate = () => {
 			this.ui.requestRender();
 		};
-		this.editor.setShimmerRepaintHandler(() => this.ui.requestDirectWrite(this.editor));
+		this.editor.setShimmerRepaintHandler(() => this.ui.requestComponentRender(this.editor));
 		this.#syncEditorMaxHeight();
-		// Sync editor geometry only; never request a render here. This listener is
-		// registered before ProcessTerminal's own stdout "resize" listener (added in
-		// tui.start()), so it runs first on every SIGWINCH. The TUI's resize path
-		// already owns the repaint on every route (viewport fast path + settle,
-		// multiplexer debounce, alt-overlay repaint) and its settled render picks up
-		// the new editor max height. Requesting an ordinary render here additionally
-		// marked every resize as "render pending" (TUI hasPendingRender), which forced
-		// the multiplexer width epoch's conservative full-transcript replay — one
-		// duplicated transcript copy in pane history per tmux width change.
+		// Sync editor geometry only. TUI owns the alternate-buffer drag paint and
+		// settled normal-buffer repaint for each SIGWINCH.
 		this.#resizeHandler = () => {
 			this.#syncEditorMaxHeight();
 		};
@@ -1086,21 +1122,22 @@ export class InteractiveMode implements InteractiveModeContext {
 			"InteractiveMode.init:slashCommands",
 			this.refreshSlashCommandState.bind(this),
 			getProjectDir(),
+			this.session.slashCommands,
 		);
 
 		// Get current model info for welcome screen
 		const modelName = this.session.model?.name ?? "Unknown";
 		const providerName = this.session.model?.provider ?? "Unknown";
 
-		// Get recent sessions
-		const recentSessions = await logger.time("InteractiveMode.init:recentSessions", () =>
-			getRecentSessions(this.sessionManager.getSessionDir()).then(sessions =>
-				sessions.map(s => ({
-					name: s.name,
-					timeAgo: s.timeAgo,
-				})),
-			),
-		);
+		// Prepaint started this scan before the runtime module graph loaded. Only
+		// scan here when no startup composer exists (non-TTY/embedded hosts) or
+		// its best-effort load failed.
+		const recentSessions = await logger.time("InteractiveMode.init:recentSessions", async () => {
+			const preloaded = await options.recentSessions;
+			if (preloaded) return preloaded;
+			const sessions = await getRecentSessions(this.sessionManager.getSessionDir());
+			return sessions.map(s => ({ name: s.name, timeAgo: s.timeAgo }));
+		});
 		const startupQuiet = settings.get("startup.quiet");
 		this.composer.setPreferences({ quiet: startupQuiet });
 		this.composer.updateWelcome({
@@ -1179,7 +1216,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		setActiveTodoDescriptionsProvider(() => this.#getActiveSubagentDescriptions());
 
 		// Load initial todos
-		await this.#loadTodoList();
+		await logger.time("InteractiveMode.init:todos", () => this.#loadTodoList());
 
 		if (process.platform === "darwin" && TERMINAL.id === "wezterm" && !isInsideTerminalMultiplexer()) {
 			this.#eventBusUnsubscribers.push(startMacOSAppearanceReprobeFallback(this.ui.terminal));
@@ -1219,7 +1256,10 @@ export class InteractiveMode implements InteractiveModeContext {
 		);
 		this.#syncEditorMaxHeight();
 		this.isInitialized = true;
-		this.ui.requestRender(true);
+		// The startup composer is already visible. Commit the complete runtime
+		// tree before session_start hooks/reconciliation continue; renderNow keeps
+		// TUI's multiplexer, output-backlog, and image safety gates.
+		this.ui.renderNow();
 
 		// Prewarm the local tiny-title worker off the submit hot path: spawn it
 		// now, idle and unref'd, so the first submit reuses a live subprocess
@@ -1235,7 +1275,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		});
 
 		// Initialize hooks with TUI-based UI context
-		await this.initHooksAndCustomTools();
+		await logger.time("InteractiveMode.init:hooks", () => this.initHooksAndCustomTools());
 
 		// Restore mode from session (e.g. plan mode on resume)
 		this.session.setSessionBeforeSwitchReconciler?.(async () => {
@@ -1243,7 +1283,7 @@ export class InteractiveMode implements InteractiveModeContext {
 			await this.#quiesceVibeForSessionSwitch();
 		});
 		this.session.setSessionSwitchReconciler?.(() => this.#reconcileModeFromSession({ preserveActiveGoal: true }));
-		await this.#reconcileModeFromSession();
+		await logger.time("InteractiveMode.init:reconcileMode", () => this.#reconcileModeFromSession());
 
 		// Brand-new sessions optionally start in plan mode when the user has made it
 		// the startup default. "Brand-new" means the resolved branch carries no
@@ -1266,7 +1306,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		// One-shot: consumeDraft removes the sidecar after read so the next
 		// resume does not re-restore the same text.
 		try {
-			const draft = await this.sessionManager.consumeDraft();
+			const draft = await logger.time("InteractiveMode.init:draft", () => this.sessionManager.consumeDraft());
 			if (draft && !this.editor.getText()) {
 				this.editor.setText(draft);
 				this.updateEditorBorderColor();
@@ -1317,14 +1357,13 @@ export class InteractiveMode implements InteractiveModeContext {
 				this.ui.invalidate();
 				this.updateEditorBorderColor();
 				if (event.ephemeral || isInsideTerminalMultiplexer()) {
-					// Theme previews and multiplexer panes cannot safely replace native
-					// scrollback: previews must stay non-destructive, and multiplexers
-					// suppress ED3 so a forced replay would duplicate transcript history.
+					// Theme previews and multiplexer panes use a non-destructive viewport
+					// repaint rather than replacing already emitted history.
 					this.ui.requestRender();
 					return;
 				}
-				// Rows already committed to native scrollback are immutable; replay them
-				// after a theme swap so a reader scrolled up sees the same palette.
+				// Rebuild history after a theme swap so a reader scrolled up sees the
+				// same palette.
 				this.ui.requestRender(true, { clearScrollback: true });
 			}),
 		);
@@ -1402,9 +1441,11 @@ export class InteractiveMode implements InteractiveModeContext {
 	}
 
 	/** Reload slash commands and autocomplete for the provided working directory. */
-	async refreshSlashCommandState(cwd?: string): Promise<void> {
+	async refreshSlashCommandState(cwd?: string, preloaded?: ReadonlyArray<FileSlashCommand>): Promise<void> {
 		const basePath = cwd ?? this.sessionManager.getCwd();
-		const fileCommands = await loadSlashCommands({ cwd: basePath });
+		// Session construction already ran slash-command discovery for this cwd;
+		// init passes that result through instead of re-walking the providers.
+		const fileCommands = preloaded ? [...preloaded] : await loadSlashCommands({ cwd: basePath });
 		this.fileSlashCommands = new Set(fileCommands.map(cmd => cmd.name));
 		const promptIcon = getSlashCommandTypeIcon("prompt");
 		const fileSlashCommands: SlashCommand[] = fileCommands.map(cmd => ({
@@ -1862,7 +1903,8 @@ export class InteractiveMode implements InteractiveModeContext {
 			this.editor.imageLinks = undefined;
 		}
 		this.ensureLoadingAnimation();
-		this.ui.requestRender();
+		if (this.composer.started) this.ui.renderNow();
+		else this.ui.requestRender(true);
 		return submission;
 	}
 
@@ -2508,6 +2550,73 @@ export class InteractiveMode implements InteractiveModeContext {
 		lines.push(` ${theme.fg("accent", tail.slice(0, tailFilled))}${theme.fg("dim", tail.slice(tailFilled))}`);
 		this.todoContainer.addChild(new Text(lines.join("\n"), 1, 0));
 	}
+
+	isCompactTodoMode(): boolean {
+		const rows = this.ui?.terminal?.rows ?? process.stdout.rows ?? 24;
+		return rows < TODO_COMPACT_TERMINAL_ROWS_THRESHOLD;
+	}
+
+	renderCompactStatusLine(width: number, childLines: readonly string[]): readonly string[] {
+		const phases = this.todoPhases.filter(phase => phase.tasks.length > 0);
+		if (phases.length === 0) return childLines;
+
+		const activeDescs = this.#getActiveSubagentDescriptions();
+		const isMatched = (todo: TodoItem): boolean =>
+			activeDescs.length > 0 && todoMatchesAnyDescription(todo.content, activeDescs);
+
+		const totalTasks = phases.reduce((sum, phase) => sum + phase.tasks.length, 0);
+		const closedTasks = phases.reduce((sum, phase) => sum + phase.tasks.filter(isClosedTodo).length, 0);
+		const activeTask = nextActionableTask(phases);
+
+		const header = `${theme.bold(theme.fg("accent", "TODO"))} ${theme.fg("dim", `${closedTasks}/${totalTasks}`)}`;
+		const taskStr = activeTask
+			? this.#formatTodoLine(activeTask, "", isMatched(activeTask))
+			: theme.fg("success", `${theme.checkbox.checked} done`);
+		const rightLine = `${header} ${theme.fg("dim", "·")} ${taskStr}`;
+
+		const rightPad = " ";
+		const rightWidth = visibleWidth(rightLine) + 1;
+
+		let leftLine = "";
+		if (childLines.length > 0) {
+			leftLine = childLines[childLines.length - 1] ?? "";
+		}
+
+		const leftWidth = visibleWidth(leftLine);
+		const minGap = 2;
+
+		let combinedLine: string;
+		if (leftWidth === 0) {
+			if (rightWidth <= width) {
+				const gap = Math.max(0, width - rightWidth);
+				combinedLine = " ".repeat(gap) + rightLine + rightPad;
+			} else {
+				const maxRight = Math.max(4, width - 1);
+				const truncatedRight = truncateToWidth(rightLine, maxRight);
+				const gap = Math.max(0, width - visibleWidth(truncatedRight) - 1);
+				combinedLine = " ".repeat(gap) + truncatedRight + rightPad;
+			}
+		} else {
+			if (leftWidth + minGap + rightWidth <= width) {
+				const gap = width - leftWidth - rightWidth;
+				combinedLine = leftLine + " ".repeat(gap) + rightLine + rightPad;
+			} else {
+				const maxRight = Math.min(rightWidth, Math.max(10, Math.floor(width * 0.45)));
+				const truncatedRight = truncateToWidth(rightLine, maxRight);
+				const truncatedRightWidth = visibleWidth(truncatedRight) + 1;
+				const availableLeft = Math.max(4, width - truncatedRightWidth - minGap);
+				const truncatedLeft = truncateToWidth(leftLine, availableLeft);
+				const gap = Math.max(minGap, width - visibleWidth(truncatedLeft) - truncatedRightWidth);
+				combinedLine = truncatedLeft + " ".repeat(gap) + truncatedRight + rightPad;
+			}
+		}
+
+		const leadingLines = childLines.length > 1 ? childLines.slice(0, -1) : [""];
+		return [...leadingLines, combinedLine];
+	}
+
+	/**
+	 * Anchored HUD of in-flight subagents, mirroring the Todos block above the
 
 	/**
 	 * Anchored HUD of in-flight subagents, mirroring the Todos block above the
@@ -3311,6 +3420,82 @@ export class InteractiveMode implements InteractiveModeContext {
 		} catch (error) {
 			this.showWarning(
 				`Failed to copy plan to clipboard: ${error instanceof Error ? error.message : String(error)}`,
+			);
+		}
+	}
+
+	async #promptPlanSavePath(planContent: string, title: string): Promise<string | undefined> {
+		let suggestedPath = planSaveFileName(title);
+		let overlay: PlanSaveOverlay | undefined;
+		const excerpt = planSaveTitleExcerpt(planContent);
+		if (excerpt) {
+			void this.session
+				.generateTitle(excerpt, PLAN_FILENAME_SYSTEM_PROMPT)
+				.then(generatedTitle => {
+					if (!generatedTitle) return;
+					suggestedPath = planSaveFileName(generatedTitle);
+					overlay?.setSuggestedPath(suggestedPath);
+					this.ui.requestRender();
+				})
+				.catch(error => {
+					logger.debug("plan-save: filename generation failed", {
+						error: error instanceof Error ? error.message : String(error),
+					});
+				});
+		}
+		try {
+			const result = await this.showHookCustom<PlanSaveOverlayResult | undefined>(
+				(_tui, _theme, _keybindings, done) => {
+					overlay = new PlanSaveOverlay(suggestedPath, done);
+					return overlay;
+				},
+				{ overlay: true },
+			);
+			return result?.path;
+		} finally {
+			overlay = undefined;
+		}
+	}
+
+	async #savePlanAndQuit(planContent: string, title: string, annotationStateKey: string): Promise<void> {
+		const selectedPath = await this.#promptPlanSavePath(planContent, title);
+		if (!selectedPath) return;
+
+		let destination: string;
+		try {
+			destination = resolveToCwd(selectedPath, this.sessionManager.getCwd());
+		} catch (error) {
+			this.showError(`Invalid plan save path: ${error instanceof Error ? error.message : String(error)}`);
+			return;
+		}
+		try {
+			await Bun.write(destination, planContent);
+		} catch (error) {
+			this.showError(
+				`Failed to save plan to ${shortenPath(destination)}: ${error instanceof Error ? error.message : String(error)}`,
+			);
+			return;
+		}
+		try {
+			await this.#exitPlanMode({ silent: true });
+		} catch (error) {
+			this.showError(
+				`Saved plan to ${shortenPath(destination)}, but could not exit plan mode: ${
+					error instanceof Error ? error.message : String(error)
+				}`,
+			);
+			return;
+		}
+
+		this.#planReviewAnnotationState.delete(annotationStateKey);
+		try {
+			await this.handleClearCommand();
+			this.showStatus(`Saved plan to ${shortenPath(destination)}.`);
+		} catch (error) {
+			this.showError(
+				`Saved plan to ${shortenPath(destination)}, but could not start a new session: ${
+					error instanceof Error ? error.message : String(error)
+				}`,
 			);
 		}
 	}
@@ -4173,7 +4358,13 @@ export class InteractiveMode implements InteractiveModeContext {
 		const choice = await this.showPlanReview(
 			planContent,
 			"Plan mode - next step",
-			["Approve and execute", "Approve and compact context", keepContextLabel, "Refine plan"],
+			[
+				"Approve and execute",
+				"Approve and compact context",
+				keepContextLabel,
+				"Refine plan",
+				PLAN_SAVE_AND_QUIT_OPTION,
+			],
 			{
 				helpText,
 				onExternalEditor: () => void this.#openPlanInExternalEditor(planFilePath),
@@ -4197,6 +4388,21 @@ export class InteractiveMode implements InteractiveModeContext {
 			this.#hidePlanReview();
 			this.ui.requestRender();
 		};
+
+		if (choice === PLAN_SAVE_AND_QUIT_OPTION) {
+			closePlanReview();
+			try {
+				const latestPlanContent = editedContent ?? (await this.#readPlanFile(planFilePath));
+				if (latestPlanContent === null) {
+					this.showError(`Plan file not found at ${planFilePath}`);
+					return;
+				}
+				await this.#savePlanAndQuit(latestPlanContent, details.title, annotationStateKey);
+			} catch (error) {
+				this.showError(`Failed to save plan: ${error instanceof Error ? error.message : String(error)}`);
+			}
+			return;
+		}
 
 		if (choice === "Approve and execute" || choice === "Approve and compact context" || choice === keepContextLabel) {
 			try {
@@ -4476,8 +4682,6 @@ export class InteractiveMode implements InteractiveModeContext {
 		const nextEditor = factory
 			? factory(this.ui, getEditorTheme(), this.keybindings)
 			: new CustomEditor(getEditorTheme());
-		if (!factory) this.ui.enableScopedInputRender(nextEditor);
-
 		nextEditor.setUseTerminalCursor(this.ui.getShowHardwareCursor());
 		nextEditor.setImeSafeCursorLayout(this.settings.get("tui.imeSafeCursor"));
 		nextEditor.setAutocompleteMaxVisible(this.settings.get("autocompleteMaxVisible"));
@@ -4495,7 +4699,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		nextEditor.onAutocompleteUpdate = () => {
 			this.ui.requestRender();
 		};
-		nextEditor.setShimmerRepaintHandler(() => this.ui.requestDirectWrite(nextEditor));
+		nextEditor.setShimmerRepaintHandler(() => this.ui.requestComponentRender(nextEditor));
 		this.editor = nextEditor;
 		this.composer.setEditor(nextEditor);
 		this.syncComposerShape();
@@ -4540,11 +4744,10 @@ export class InteractiveMode implements InteractiveModeContext {
 	 *
 	 * The deferral is acknowledged in {@link deferredCommandContainer}, an
 	 * anchored container above the editor. Nothing is mounted into the
-	 * transcript: a mid-turn transcript mount re-renders rows below the growing
-	 * live block and duplicates them in native scrollback (issues #4806/#6767),
+	 * transcript: a mid-turn mount changes the active frame while streaming,
 	 * which is why the earlier `showStatus` acknowledgment was reverted. An
-	 * anchored container is cleared and rebuilt in place, so it costs no
-	 * scrollback rows — the same reason the ctrl+p role-cycle track lives there.
+	 * anchored container is cleared and rebuilt in place without adding history
+	 * rows — the same reason the ctrl+p role-cycle track lives there.
 	 */
 	presentCommandOutput(content: Component | readonly Component[]): void {
 		if (!this.session.isStreaming) {
@@ -4842,7 +5045,6 @@ export class InteractiveMode implements InteractiveModeContext {
 	addMessageToChat(
 		message: AgentMessage,
 		options?: {
-			populateHistory?: boolean;
 			imageLinks?: readonly (string | undefined)[];
 			reuseSettledComponent?: boolean;
 		},

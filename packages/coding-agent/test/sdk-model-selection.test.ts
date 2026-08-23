@@ -184,6 +184,69 @@ describe("createAgentSession deferred model pattern resolution", () => {
 		}
 	});
 
+	test("defers online runtime discovery until the UI starts it after first paint", async () => {
+		const authStorage = createInMemoryAuthStorage();
+		authStoragesToClose.push(authStorage);
+		authStorage.setRuntimeApiKey("anthropic", "anthropic-test-key");
+		const modelRegistry = new ModelRegistry(authStorage, path.join(tempDir, "models.yml"));
+		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
+		if (!model) throw new Error("missing bundled startup model");
+		let fetches = 0;
+		const extension: ExtensionFactory = pi => {
+			pi.registerProvider("deferred-runtime-provider", {
+				baseUrl: "https://runtime.example.com/v1",
+				apiKey: "RUNTIME_KEY",
+				api: "openai-completions",
+				fetchDynamicModels: async () => {
+					fetches += 1;
+					return [
+						{
+							id: "deferred-runtime-model",
+							name: "Deferred Runtime Model",
+							reasoning: false,
+							input: ["text"],
+							cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+							contextWindow: 128_000,
+							maxTokens: 8192,
+						},
+					];
+				},
+			});
+		};
+
+		const result = await createAgentSession({
+			cwd: tempDir,
+			agentDir: tempDir,
+			authStorage,
+			modelRegistry,
+			model,
+			sessionManager: SessionManager.inMemory(),
+			disableExtensionDiscovery: true,
+			extensions: [extension],
+			skills: [],
+			contextFiles: [],
+			promptTemplates: [],
+			slashCommands: [],
+			enableMCP: false,
+			enableLsp: false,
+			skipPythonPreflight: true,
+			rules: [],
+			preloadedCustomToolPaths: [],
+			toolNames: ["read"],
+			hasUI: true,
+		});
+
+		try {
+			expect(fetches).toBe(0);
+			expect(result.startBackgroundModelDiscovery).toBeDefined();
+			await result.startBackgroundModelDiscovery?.();
+			expect(fetches).toBe(1);
+			expect(modelRegistry.find("deferred-runtime-provider", "deferred-runtime-model")).toBeDefined();
+		} finally {
+			await result.session.dispose();
+		}
+	});
+
 	test("hydrates credential-scoped model caches before fallback validation", async () => {
 		const authStorage = createInMemoryAuthStorage();
 		authStoragesToClose.push(authStorage);
@@ -1179,6 +1242,50 @@ describe("createAgentSession deferred model pattern resolution", () => {
 			expect(session.model?.provider).toBe("openai-codex");
 			expect(session.model?.id).toBe("gpt-5.6-sol");
 			expect(session.model?.contextWindow).toBe(272_000);
+		} finally {
+			await session.dispose();
+		}
+	});
+
+	test("loads model overrides from the supplied agent directory", async () => {
+		await Bun.write(
+			path.join(tempDir, "models.yml"),
+			[
+				"providers:",
+				"  openai-codex:",
+				"    modelOverrides:",
+				"      gpt-5.6-sol:",
+				"        contextWindow: 123456",
+			].join("\n"),
+		);
+		const authStorage = createInMemoryAuthStorage();
+		authStoragesToClose.push(authStorage);
+		authStorage.setRuntimeApiKey("openai-codex", "codex-oauth-token");
+
+		const { session } = await createAgentSession({
+			cwd: tempDir,
+			agentDir: tempDir,
+			authStorage,
+			settings: Settings.isolated({ extendedContext: true }),
+			sessionManager: SessionManager.inMemory(),
+			disableExtensionDiscovery: true,
+			skills: [],
+			contextFiles: [],
+			promptTemplates: [],
+			slashCommands: [],
+			enableMCP: false,
+			enableLsp: false,
+			skipPythonPreflight: true,
+			rules: [],
+			preloadedCustomToolPaths: [],
+			toolNames: ["read"],
+			modelPattern: "openai-codex/gpt-5.6-sol",
+		});
+
+		try {
+			expect(session.model?.provider).toBe("openai-codex");
+			expect(session.model?.id).toBe("gpt-5.6-sol");
+			expect(session.model?.contextWindow).toBe(123_456);
 		} finally {
 			await session.dispose();
 		}

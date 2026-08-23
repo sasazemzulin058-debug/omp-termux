@@ -1,4 +1,4 @@
-import { isUnexpectedSocketCloseMessage } from "@oh-my-pi/pi-utils";
+import { isUnexpectedSocketCloseMessage } from "@oh-my-pi/pi-utils/fetch-retry";
 import type { Api, AssistantMessage } from "../types";
 import { AwsCredentialsError } from "./aws";
 import {
@@ -631,14 +631,16 @@ export function classifyMessage(message: {
 	model?: string;
 	errorId?: number;
 	errorMessage?: string;
+	errorClassificationMessage?: string;
 	errorStatus?: number;
 }): number {
 	const existingId = message.errorId;
 	const currentStatus = message.errorStatus ?? statusFromId(existingId);
-	const textId = classifyText(message.errorMessage, currentStatus, message.api, message.provider, message.model);
+	const classificationMessage = message.errorClassificationMessage ?? message.errorMessage;
+	const textId = classifyText(classificationMessage, currentStatus, message.api, message.provider, message.model);
 
 	let kinds = ((existingId ?? 0) | textId) & KIND_MASK;
-	if (message.errorMessage && LLAMA_CPP_TOOL_CALL_PARSE_PATTERN.test(message.errorMessage)) {
+	if (classificationMessage && LLAMA_CPP_TOOL_CALL_PARSE_PATTERN.test(classificationMessage)) {
 		// Deterministic local-model tool-call JSON parse failure: HTTP 500 is misleading
 		// because the same prompt reproduces the same malformed output, so the agent-level
 		// auto-retry would loop. Strip Transient so the recovery message surfaces immediately.

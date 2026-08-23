@@ -583,7 +583,7 @@ function getExtensionParseCacheDb(): Database | null {
 		const db = new Database(cachePath, { create: true });
 		db.run("PRAGMA busy_timeout = 50");
 		db.run(
-			"CREATE TABLE IF NOT EXISTS extension_parse_cache (cache_key TEXT PRIMARY KEY, source_type TEXT NOT NULL, references TEXT NOT NULL, commonjs_named_exports TEXT NOT NULL, commonjs_reexport_specifiers TEXT NOT NULL)",
+			"CREATE TABLE IF NOT EXISTS extension_parse_cache (cache_key TEXT PRIMARY KEY, source_type TEXT NOT NULL, [references] TEXT NOT NULL, commonjs_named_exports TEXT NOT NULL, commonjs_reexport_specifiers TEXT NOT NULL)",
 		);
 		extensionParseCacheDb = db;
 		return db;
@@ -637,7 +637,7 @@ function writeExtensionSourceAnalysis(cacheKey: string, analysis: ExtensionSourc
 			const db = getExtensionParseCacheDb();
 			if (!db) return;
 			db.run(
-				"INSERT OR REPLACE INTO extension_parse_cache (cache_key, source_type, references, commonjs_named_exports, commonjs_reexport_specifiers) VALUES (?, ?, ?, ?, ?)",
+				"INSERT OR REPLACE INTO extension_parse_cache (cache_key, source_type, [references], commonjs_named_exports, commonjs_reexport_specifiers) VALUES (?, ?, ?, ?, ?)",
 				[
 					cacheKey,
 					analysis.sourceType,
@@ -668,7 +668,7 @@ function getExtensionSourceAnalysis(source: string, importerPath: string): Exten
 	try {
 		const row = db
 			?.query<ExtensionParseCacheRow, [string]>(
-				"SELECT source_type, references, commonjs_named_exports, commonjs_reexport_specifiers FROM extension_parse_cache WHERE cache_key = ?",
+				"SELECT source_type, [references], commonjs_named_exports, commonjs_reexport_specifiers FROM extension_parse_cache WHERE cache_key = ?",
 			)
 			.get(cacheKey);
 		if (row) {
@@ -1620,6 +1620,20 @@ async function isCommonJsModulePath(
 		sourceType ?? getExtensionSourceAnalysis(await Bun.file(modulePath).text(), modulePath).sourceType;
 	if (parsedSourceType === "module") {
 		return false;
+	}
+	if (parsedSourceType === "script") {
+		const ast = parseExtensionSource(await Bun.file(modulePath).text(), modulePath);
+		const hasUnshadowedCommonJsSyntax = collectScopedAstNodes(
+			ast,
+			node => node.type === "CallExpression" || node.type === "MemberExpression",
+		).some(({ node, scope }) => {
+			if (isGlobalRequireCall(node, scope)) return true;
+			if (node.type !== "MemberExpression") return false;
+			return isUnshadowedExportsTarget(node, scope) || isUnshadowedExportsTarget(asAstNode(node.object), scope);
+		});
+		if (hasUnshadowedCommonJsSyntax) {
+			return true;
+		}
 	}
 	if (inheritedKind) {
 		return inheritedKind === "commonjs";

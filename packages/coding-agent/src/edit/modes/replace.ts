@@ -13,6 +13,7 @@ import { routeWriteThroughBridge } from "../../tools/acp-bridge";
 import { invalidateFsScanAfterWrite } from "../../tools/fs-cache-invalidation";
 import { outputMeta } from "../../tools/output-meta";
 import { enforcePlanModeWrite, resolvePlanPath } from "../../tools/plan-mode-guard";
+import type { AppliedEditObserver } from "../blackbox";
 import { generateDiffString, replaceText } from "../diff";
 import {
 	countLeadingWhitespace,
@@ -1115,6 +1116,8 @@ export interface ExecuteReplaceOptions {
 	fuzzyThreshold: number;
 	writethrough: WritethroughCallback;
 	beginDeferredDiagnosticsForPath: (path: string) => WritethroughDeferredHandle;
+	/** Observes a committed content transition before result snapshots are pruned. */
+	onApplied?: AppliedEditObserver;
 }
 
 export async function executeReplace(
@@ -1130,6 +1133,7 @@ export async function executeReplace(
 		fuzzyThreshold,
 		writethrough,
 		beginDeferredDiagnosticsForPath,
+		onApplied,
 	} = options;
 	const { old_string, new_string, replace_all } = params;
 
@@ -1192,6 +1196,7 @@ export async function executeReplace(
 	}
 
 	const diffResult = generateDiffString(normalizedContent, result.content, undefined, { path });
+	await onApplied?.({ path: absolutePath, prev: rawContent, next: finalContent });
 	const resultText =
 		result.count > 1
 			? `Successfully replaced ${result.count} occurrences in ${path}.`

@@ -2594,6 +2594,16 @@ function openCodeModelManagerOptions(
 		];
 		return hints.includes("openai-responses") ? "openai-responses" : undefined;
 	};
+	const resolveApi = (id: string, defaultApi: Api): Api => {
+		const base = openCodeBaseModelId(id);
+		return (
+			apiOverrides[id] ??
+			(base ? apiOverrides[base] : undefined) ??
+			references.get(id)?.api ??
+			fallbackApi(id, base) ??
+			defaultApi
+		);
+	};
 	return {
 		providerId,
 		cacheProviderId: resolveModelCacheProviderId(providerId, { apiKey, baseUrl: discoveryBaseUrl }),
@@ -2604,6 +2614,18 @@ function openCodeModelManagerOptions(
 		// completions after the pin shipped). Sibling-catalog drift is bounded
 		// by the 2h cache TTL instead.
 		dropCachedModelIdsOnStaticMismatch: Object.keys(apiOverrides),
+		modelsDev: {
+			fetch: () => fetchWellKnownModels(config?.fetch),
+			map: payload => {
+				if (!isRecord(payload)) return [];
+				return mapModelsDevToModels(payload, OPENCODE_MODELS_DEV_DESCRIPTORS)
+					.filter(model => model.provider === providerId)
+					.map(model => {
+						const api = resolveApi(model.id, "openai-completions");
+						return { ...model, api, baseUrl: openCodeBaseUrlForApi(api, basePath) };
+					});
+			},
+		},
 		...(apiKey && {
 			fetchDynamicModels: () =>
 				fetchOpenAICompatibleModels<Api>({
@@ -2614,16 +2636,9 @@ function openCodeModelManagerOptions(
 					mapModel: (entry, defaults) => {
 						const reference = references.get(defaults.id);
 						const name = toModelName(entry.name, reference?.name ?? defaults.name);
-						const base = openCodeBaseModelId(defaults.id);
-						// Pins win over bundled references (stale bundled routes
-						// must not stick), and a base-id pin covers its billing
-						// variants; the responses fallback covers gateway-first ids.
-						const api =
-							apiOverrides[defaults.id] ??
-							(base ? apiOverrides[base] : undefined) ??
-							reference?.api ??
-							fallbackApi(defaults.id, base) ??
-							defaults.api;
+						// Pins and bundled routing hints win over the metadata-only
+						// stencil fallback; the fallback never selects a transport.
+						const api = resolveApi(defaults.id, defaults.api);
 						const baseUrl = openCodeBaseUrlForApi(api, basePath);
 						if (isMuseSparkModelId(defaults.id)) {
 							// Gateway lists these as bare ids with no capability
@@ -6255,6 +6270,29 @@ const MODELS_DEV_PROVIDER_DESCRIPTORS_GOOGLE_VERTEX: readonly ModelsDevProviderD
 	}),
 ];
 
+const OPENCODE_MODELS_DEV_DESCRIPTORS: readonly ModelsDevProviderDescriptor[] = [
+	openAiCompletionsDescriptor("opencode", "opencode-zen", "https://opencode.ai/zen/v1", {
+		filterModel: filterActiveToolCallModels,
+		resolveApi: (modelId, raw) =>
+			resolveApiByRules(
+				modelId,
+				raw,
+				OPENCODE_ZEN_API_RESOLUTION.rules,
+				OPENCODE_ZEN_API_RESOLUTION.defaultResolution,
+			),
+	}),
+	openAiCompletionsDescriptor("opencode-go", "opencode-go", "https://opencode.ai/zen/go/v1", {
+		filterModel: filterActiveToolCallModels,
+		resolveApi: (modelId, raw) =>
+			resolveApiByRules(
+				modelId,
+				raw,
+				OPENCODE_GO_API_RESOLUTION.rules,
+				OPENCODE_GO_API_RESOLUTION.defaultResolution,
+			),
+	}),
+];
+
 const MODELS_DEV_PROVIDER_DESCRIPTORS_SPECIALIZED: readonly ModelsDevProviderDescriptor[] = [
 	// --- Azure OpenAI ---
 	// OpenAI-family models hosted on Azure, served via the Responses API. baseUrl
@@ -6276,28 +6314,8 @@ const MODELS_DEV_PROVIDER_DESCRIPTORS_SPECIALIZED: readonly ModelsDevProviderDes
 	),
 	// --- Mistral ---
 	openAiCompletionsDescriptor("mistral", "mistral", "https://api.mistral.ai/v1"),
-	// --- OpenCode Zen ---
-	openAiCompletionsDescriptor("opencode", "opencode-zen", "https://opencode.ai/zen/v1", {
-		filterModel: filterActiveToolCallModels,
-		resolveApi: (modelId, raw) =>
-			resolveApiByRules(
-				modelId,
-				raw,
-				OPENCODE_ZEN_API_RESOLUTION.rules,
-				OPENCODE_ZEN_API_RESOLUTION.defaultResolution,
-			),
-	}),
-	// --- OpenCode Go ---
-	openAiCompletionsDescriptor("opencode-go", "opencode-go", "https://opencode.ai/zen/go/v1", {
-		filterModel: filterActiveToolCallModels,
-		resolveApi: (modelId, raw) =>
-			resolveApiByRules(
-				modelId,
-				raw,
-				OPENCODE_GO_API_RESOLUTION.rules,
-				OPENCODE_GO_API_RESOLUTION.defaultResolution,
-			),
-	}),
+	// --- OpenCode Zen / Go ---
+	...OPENCODE_MODELS_DEV_DESCRIPTORS,
 	// --- GitHub Copilot ---
 	openAiCompletionsDescriptor("github-copilot", "github-copilot", COPILOT_BASE_URL, {
 		defaultContextWindow: 128000,

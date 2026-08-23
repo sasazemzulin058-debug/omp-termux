@@ -24,12 +24,29 @@ import { CELL_U32, CellFlags, KittyTerminal, loadModuleSync } from "kitty-vt-was
 // allocator and grid state stay isolated across tests.
 const kittyModule = loadModuleSync(Bun.resolveSync("kitty-vt-wasm/kitty-vt.wasm", import.meta.dir));
 
-function createEngine(columns: number, rows: number, scrollback: number): KittyTerminal {
+function createEngine(
+	columns: number,
+	rows: number,
+	scrollback: number,
+	onReply?: (data: string) => void,
+): KittyTerminal {
 	return KittyTerminal.createSync({
 		columns,
 		rows,
 		scrollback,
 		wasm: kittyModule,
+		// Forward cursor-position reports (CSI row;col R) to the application like
+		// a real terminal answering DSR 6n; TUI's post-resize anchor probe relies
+		// on the round trip. Other query replies stay swallowed: tests assert on
+		// grid state, and unsolicited capability responses would leak into the
+		// focused component as junk keystrokes.
+		onOutput: onReply
+			? bytes => {
+					const reply = new TextDecoder().decode(bytes);
+					const match = reply.match(/\x1b\[\d+;\d+R/);
+					if (match) onReply(match[0]);
+				}
+			: undefined,
 		// Swallow host events (title, bell, engine log lines); tests read the
 		// grid, and the default log fallback would console.error into test
 		// output.
@@ -89,7 +106,11 @@ export class VirtualTerminal implements Terminal {
 		this.#columns = columns;
 		this.#rows = rows;
 		this.#scrollbackCap = scrollback ?? DEFAULT_SCROLLBACK_LINES;
-		this.#term = createEngine(columns, rows, this.#scrollbackCap);
+		this.#term = createEngine(columns, rows, this.#scrollbackCap, reply => {
+			// Deliver asynchronously like a real PTY read loop; a synchronous
+			// callback would re-enter the TUI mid-write.
+			queueMicrotask(() => this.#inputHandler?.(reply));
+		});
 	}
 
 	// --- Terminal interface --------------------------------------------------
@@ -398,7 +419,9 @@ export class VirtualTerminal implements Terminal {
 
 	#recreate(): void {
 		this.#term.dispose();
-		this.#term = createEngine(this.#columns, this.#rows, this.#scrollbackCap);
+		this.#term = createEngine(this.#columns, this.#rows, this.#scrollbackCap, reply => {
+			queueMicrotask(() => this.#inputHandler?.(reply));
+		});
 		this.#pendingEngineResize = false;
 		this.#viewportY = 0;
 		this.#historyTextCache.length = 0; // fresh engine: prior scrollback is gone

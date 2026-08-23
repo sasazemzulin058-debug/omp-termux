@@ -174,6 +174,54 @@ describe("macOS spelling feature gates", () => {
 		expect(autocorrectWord).not.toHaveBeenCalled();
 		expect(spellingGuesses).not.toHaveBeenCalled();
 	});
+	it("coalesces superseded automatic work while the spelling backend is busy", async () => {
+		const typoRequests: Array<{
+			text: string;
+			result: PromiseWithResolvers<readonly { start: number; length: number }[]>;
+		}> = [];
+		const completionRequests: Array<{ text: string; result: PromiseWithResolvers<readonly string[]> }> = [];
+		const secondTypoStarted = Promise.withResolvers<void>();
+		const secondCompletionStarted = Promise.withResolvers<void>();
+		const provider = new MacOSSpellingProvider(
+			backend({
+				checkSpelling: text => {
+					const result = Promise.withResolvers<readonly { start: number; length: number }[]>();
+					typoRequests.push({ text, result });
+					if (typoRequests.length === 2) secondTypoStarted.resolve();
+					return result.promise;
+				},
+				completeWord: text => {
+					const result = Promise.withResolvers<readonly string[]>();
+					completionRequests.push({ text, result });
+					if (completionRequests.length === 2) secondCompletionStarted.resolve();
+					return result.promise;
+				},
+			}),
+		);
+		provider.setFeatures({ typoDetection: true, autocomplete: true, autocorrect: false });
+		const updated = Promise.withResolvers<void>();
+		const onUpdate = mock(() => updated.resolve());
+		provider.onUpdate = onUpdate;
+
+		for (const text of ["he", "hel", "hell", "hello"]) {
+			provider.decorateTypos(text, decorationContext(text));
+			provider.getWordCompletion([text], 0, text.length);
+		}
+
+		expect(typoRequests.map(request => request.text)).toEqual(["he"]);
+		expect(completionRequests.map(request => request.text)).toEqual(["he"]);
+		typoRequests[0]?.result.resolve([]);
+		completionRequests[0]?.result.resolve(["hero"]);
+		await Promise.all([secondTypoStarted.promise, secondCompletionStarted.promise]);
+		expect(typoRequests.map(request => request.text)).toEqual(["he", "hello"]);
+		expect(completionRequests.map(request => request.text)).toEqual(["he", "hello"]);
+		expect(onUpdate).not.toHaveBeenCalled();
+
+		typoRequests[1]?.result.resolve([]);
+		completionRequests[1]?.result.resolve(["helloing"]);
+		await updated.promise;
+		expect(onUpdate).toHaveBeenCalledTimes(1);
+	});
 
 	it("disables all spelling work after an asynchronous backend rejection", async () => {
 		const failure = Promise.withResolvers<readonly { start: number; length: number }[]>();

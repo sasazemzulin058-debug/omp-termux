@@ -76,6 +76,11 @@ const USAGE_PREFLIGHT_BLOCKED_PREFIX = "Usage preflight blocked:";
 const STREAM_STALL_ERROR_RE = /stream stall/i;
 const HTTP2_STREAM_RESET_ERROR_RE =
 	/stream closed with error code\s+nghttp2_(?:internal_error|refused_stream)|nghttp2_(?:internal_error|refused_stream)|HTTP2(?:StreamReset|RefusedStream)/i;
+// Gateway closes the SSE stream mid-generation without a terminal chunk
+// (openai-completions "finish_reason", openai/azure responses "terminal
+// response event"). Same transport-failure class as the stall/reset entries:
+// retriable, and eligible for preserved-turn continuation on resolved tool turns.
+const PREMATURE_STREAM_CLOSE_ERROR_RE = /stream closed before a (?:finish_reason|terminal response event)/i;
 const IMMUTABLE_ANTHROPIC_THINKING_ERROR_PATTERN =
 	/messages\.\d+\.content\.\d+.*\b(?:thinking|redacted_thinking)\b.*\blatest assistant message cannot be modified\b/is;
 
@@ -1148,10 +1153,11 @@ export class TurnRecovery {
 	}
 
 	/**
-	 * Classify a reasonless abort, idle stream stall, or HTTP/2 stream reset whose
-	 * emitted tool calls all have results. The failed assistant/tool-result pair
-	 * stays in context so continuation cannot replay completed side effects;
-	 * synthetic results tell the next turn that an unexecuted call must be reissued.
+	 * Classify a reasonless abort, idle stream stall, HTTP/2 stream reset, or
+	 * premature stream close whose emitted tool calls all have results. The failed
+	 * assistant/tool-result pair stays in context so continuation cannot replay
+	 * completed side effects; synthetic results tell the next turn that an
+	 * unexecuted call must be reissued.
 	 */
 	classifyResolvedInterruptedToolTurn(message: AssistantMessage): "reasonless-abort" | "stream-stall" | undefined {
 		const id = this.#classifyRetryMessage(message);
@@ -1173,7 +1179,18 @@ export class TurnRecovery {
 			!this.#host.abortInProgress() &&
 			!this.#host.isDisposed() &&
 			!this.#host.streamingEditAbortTriggered();
-		if (!reasonlessAbort && !streamStall && !transportReset) return undefined;
+		// A premature gateway close (no finish_reason/terminal event) is the same
+		// transport-failure class as the stall/reset cases: mid-generation death.
+		// Preserved-turn continuation lets the retry resume after the partial
+		// output instead of surfacing the error or replaying rendered content.
+		const prematureClose =
+			message.stopReason === "error" &&
+			PREMATURE_STREAM_CLOSE_ERROR_RE.test(errorMessage) &&
+			AIError.retriable(id) &&
+			!this.#host.abortInProgress() &&
+			!this.#host.isDisposed() &&
+			!this.#host.streamingEditAbortTriggered();
+		if (!reasonlessAbort && !streamStall && !transportReset && !prematureClose) return undefined;
 		if (reasonlessAbort && genericAbort) message.errorId = AIError.create(AIError.Flag.Abort);
 
 		// Idle stall and HTTP/2 RST both close the Cursor Connect stream:

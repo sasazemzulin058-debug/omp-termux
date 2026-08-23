@@ -292,6 +292,16 @@ export const getModelsConfigSchemaBundle = once(() => {
 		"modelOverrides?": { "[string]": ModelOverrideSchema },
 		"disableStrictTools?": "boolean",
 		/**
+		 * Amazon Bedrock Guardrail id or ARN attached to every Converse request under
+		 * this provider. Required by accounts that gate `bedrock:InvokeModel*` on the
+		 * `bedrock:GuardrailIdentifier` condition key.
+		 */
+		"guardrailIdentifier?": "string",
+		/** Bedrock guardrail version (defaults to `"DRAFT"` when a guardrail is set). */
+		"guardrailVersion?": "string",
+		/** Bedrock guardrail trace verbosity. */
+		"guardrailTrace?": '"enabled" | "disabled" | "enabled_full"',
+		/**
 		 * Streaming transport override. When set to `"pi-native"`, omp dispatches
 		 * every model under this provider via the auth-gateway's
 		 * `POST /v1/pi/stream` endpoint instead of the per-provider SDK. The

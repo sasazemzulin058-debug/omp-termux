@@ -8,6 +8,7 @@ import { routeWriteThroughBridge } from "../tools/acp-bridge";
 import { invalidateFsScanAfterWrite } from "../tools/fs-cache-invalidation";
 import { outputMeta } from "../tools/output-meta";
 import { enforcePlanModeWrite, resolvePlanPath } from "../tools/plan-mode-guard";
+import type { AppliedEditObserver } from "./blackbox";
 import { type DiffError, type DiffResult, generateDiffString } from "./diff";
 import { levenshteinDistance } from "./modes/replace";
 import { detectLineEnding, normalizeToLF, normalizeUnicode, restoreLineEndings, stripBom } from "./normalize";
@@ -228,7 +229,17 @@ export function applySloppy(content: string, input: string, context: SloppyApply
 	try {
 		return apply(content, input, context);
 	} catch (error) {
-		if (error instanceof Error) throw new Error(toSloppyVoice(error.message));
+		if (error instanceof Error) {
+			const lines = toSloppyVoice(error.message).split("\n");
+			for (let index = 0; index + 1 < lines.length; index++) {
+				if (!lines[index].startsWith("Copy-ready corrected payload")) continue;
+				const opener = lines[index + 1];
+				if (opener === SECTION_OPENER || opener === `${SECTION_OPENER}*`) {
+					lines[index + 1] = `${opener}${context.path}`;
+				}
+			}
+			throw new Error(lines.join("\n"));
+		}
 		throw error;
 	}
 }
@@ -428,6 +439,11 @@ function recoverMissingSeparator(
 	lines: string[],
 	content: string,
 ): { patternText: string; rewrite: string } | undefined {
+	// A unified-diff-shaped body is a foreign dialect, not a forgotten `»`:
+	// splitting it at a matching context prefix splices the collapsed remainder
+	// after the prefix, leaving the real block in place (duplication) and
+	// writing diff context gaps literally. Let the diff reinterpretation own it.
+	if (isDiffShaped(lines.join("\n"))) return undefined;
 	const candidates: Array<{ patternText: string; rewrite: string }> = [];
 	for (let split = 1; split < lines.length; split++) {
 		let remainderStart = split;
@@ -438,6 +454,9 @@ function recoverMissingSeparator(
 		// A gap-only remainder is context elision, never final text; adopting it
 		// as the rewrite would write literal `…` into the file.
 		if (patternText.length < 4 || rewrite.replaceAll(GAP, "").trim() === "") continue;
+		// Same for any whole line that is only gaps: a recovered rewrite is never
+		// authored final text, so a `…` line in it means elided context.
+		if (rewrite.split("\n").some(line => line.trim() !== "" && line.trim().replaceAll(GAP, "") === "")) continue;
 		const matches = exactOccurrences(content, patternText);
 		if (matches.length !== 1) continue;
 		const throughFirstRewriteLine = normalizeBlock(lines.slice(0, remainderStart + 1), false);
@@ -551,10 +570,59 @@ function validateSelectionMarkers(pattern: string, operationNumber: number): voi
 	);
 }
 
-function parseInlinePattern(pattern: string, operationNumber: number): { patternText: string; replacements: string[] } {
+/**
+ * Resolve a selection whose content contains the divider character itself
+ * (box-drawing code). A trailing divider reads as a deletion of the content
+ * before it with the inner dividers literal; an odd count splits at the
+ * middle divider (a symmetric replacement keeps equal literals on each
+ * side); an even count reads as a deletion of the whole selected text. A
+ * wrong guess still fails loud downstream: the resolved old side must match
+ * the file.
+ */
+function resolveLiteralDividers(
+	selected: string,
+	operationNumber: number,
+): { old: string; desired: string; note: string } {
+	const dividers: number[] = [];
+	for (
+		let at = selected.indexOf(SELECT_DIVIDER);
+		at !== -1;
+		at = selected.indexOf(SELECT_DIVIDER, at + SELECT_DIVIDER.length)
+	) {
+		dividers.push(at);
+	}
+	const advice = `Selections containing literal ${SELECT_DIVIDER} are ambiguous; state those lines with a ${REWRITE_HEADER} block rewrite instead.`;
+	const last = dividers[dividers.length - 1];
+	if (last + SELECT_DIVIDER.length === selected.length) {
+		return {
+			old: selected.slice(0, last),
+			desired: "",
+			note: `Note: operation ${operationNumber}'s selection contained ${dividers.length} ${SELECT_DIVIDER} characters and ended with one; it was read as a deletion of the selected text with the inner ${SELECT_DIVIDER}s literal. ${advice}`,
+		};
+	}
+	if (dividers.length % 2 === 1) {
+		const middle = dividers[(dividers.length - 1) / 2];
+		return {
+			old: selected.slice(0, middle),
+			desired: selected.slice(middle + SELECT_DIVIDER.length),
+			note: `Note: operation ${operationNumber}'s selection contained ${dividers.length} ${SELECT_DIVIDER} characters; the middle one was read as the divider and the others as literal text. ${advice}`,
+		};
+	}
+	return {
+		old: selected,
+		desired: "",
+		note: `Note: operation ${operationNumber}'s selection contained ${dividers.length} ${SELECT_DIVIDER} characters with no unambiguous divider; it was read as a deletion of the selected text. ${advice}`,
+	};
+}
+
+function parseInlinePattern(
+	pattern: string,
+	operationNumber: number,
+): { patternText: string; replacements: string[]; notes: string[] } {
 	validateSelectionMarkers(pattern, operationNumber);
 	let patternText = "";
 	const replacements: string[] = [];
+	const notes: string[] = [];
 	let sawBare = false;
 	let sawInline = false;
 
@@ -583,12 +651,16 @@ function parseInlinePattern(pattern: string, operationNumber: number): { pattern
 			sawBare = true;
 			patternText += pattern.slice(index, close + SELECT_CLOSE.length);
 		} else {
-			if (selected.indexOf(SELECT_DIVIDER, divider + SELECT_DIVIDER.length) !== -1) {
-				throw new Error(`Operation ${operationNumber} selection has multiple ${SELECT_DIVIDER} delimiters.`);
-			}
 			sawInline = true;
-			patternText += `${SELECT_OPEN}${selected.slice(0, divider)}${SELECT_CLOSE}`;
-			replacements.push(selected.slice(divider + SELECT_DIVIDER.length));
+			if (selected.indexOf(SELECT_DIVIDER, divider + SELECT_DIVIDER.length) === -1) {
+				patternText += `${SELECT_OPEN}${selected.slice(0, divider)}${SELECT_CLOSE}`;
+				replacements.push(selected.slice(divider + SELECT_DIVIDER.length));
+			} else {
+				const resolved = resolveLiteralDividers(selected, operationNumber);
+				patternText += `${SELECT_OPEN}${resolved.old}${SELECT_CLOSE}`;
+				replacements.push(resolved.desired);
+				notes.push(resolved.note);
+			}
 		}
 		index = close + SELECT_CLOSE.length;
 	}
@@ -598,8 +670,7 @@ function parseInlinePattern(pattern: string, operationNumber: number): { pattern
 			`Operation ${operationNumber} mixes inline and bare selections. Use ${SELECT_OPEN}old${SELECT_DIVIDER}new${SELECT_CLOSE} for every selection, or use a ${REWRITE_HEADER} rewrite for all bare selections.`,
 		);
 	}
-	if (!sawInline) throw new Error(`Operation ${operationNumber} needs an inline selection.`);
-	return { patternText, replacements };
+	return { patternText, replacements, notes };
 }
 
 /**
@@ -681,11 +752,17 @@ function recoverMixedRewriteForms(
 	const mixedForms = `Note: operation ${operationNumber} combined ${SELECT_OPEN}current${SELECT_DIVIDER}desired${SELECT_CLOSE} replacements with a ${REWRITE_HEADER} REWRITE`;
 	if (rewriteIsRedundant) {
 		const operation = createOperation(sourcePatternText, "", all, operationNumber, false);
-		operation.recoveryNote = `${mixedForms}; the REWRITE only restated the inline result and was ignored. Use one form per operation.`;
+		operation.recoveryNote = [
+			...inline.notes,
+			`${mixedForms}; the REWRITE only restated the inline result and was ignored. Use one form per operation.`,
+		].join("\n");
 		return operation;
 	}
 	const operation = createOperation(currentText, rewriteText, all, operationNumber, true);
-	operation.recoveryNote = `${mixedForms}; the ${REWRITE_HEADER} REWRITE was applied as the final text for the match. Use one form per operation.`;
+	operation.recoveryNote = [
+		...inline.notes,
+		`${mixedForms}; the ${REWRITE_HEADER} REWRITE was applied as the final text for the match. Use one form per operation.`,
+	].join("\n");
 	return operation;
 }
 
@@ -712,6 +789,37 @@ function embedBareDesired(patternText: string): string {
 }
 
 /** True when any line is a `＋`-prefixed add line (optionally indented). */
+/**
+ * A legacy bare selection whose one-line REWRITE restates the whole
+ * selection-bearing line (echoing the text before the selection) means "this
+ * line becomes the REWRITE": substituting the full restated line into just
+ * the selected span would duplicate the line's prefix and suffix around it.
+ * Returns the pattern with the selection expanded to cover the whole line,
+ * or undefined when the shape does not match.
+ */
+function expandEchoedLineSelection(patternText: string, rewriteText: string): string | undefined {
+	const rewriteLines = rewriteText.split("\n").filter(line => line.trim() !== "");
+	if (rewriteLines.length !== 1) return undefined;
+	const lines = patternText.split("\n");
+	const index = lines.findIndex(line => line.includes(SELECT_OPEN));
+	if (index === -1) return undefined;
+	const line = lines[index];
+	if (line.includes(GAP)) return undefined;
+	const open = line.indexOf(SELECT_OPEN);
+	const close = line.indexOf(SELECT_CLOSE, open + SELECT_OPEN.length);
+	if (close === -1) return undefined;
+	if (line.indexOf(SELECT_OPEN, open + SELECT_OPEN.length) !== -1) return undefined;
+	if (lines.some((entry, at) => at !== index && entry.includes(SELECT_OPEN))) return undefined;
+	const prefix = line.slice(0, open);
+	const suffix = line.slice(close + SELECT_CLOSE.length);
+	if (prefix.trim() === "" || suffix.includes(SELECT_CLOSE)) return undefined;
+	const selected = line.slice(open + SELECT_OPEN.length, close);
+	if (selected.includes(SELECT_DIVIDER)) return undefined;
+	if (!normalizeText(rewriteLines[0]).text.startsWith(normalizeText(prefix).text)) return undefined;
+	lines[index] = SELECT_OPEN + prefix + selected + suffix + SELECT_CLOSE;
+	return lines.join("\n");
+}
+
 function hasAddLines(patternText: string): boolean {
 	if (!patternText.includes(ADD_LINE)) return false;
 	return patternText.split("\n").some(line => {
@@ -752,6 +860,51 @@ function isNearVariant(anchor: string, added: string): boolean {
  * on its own line inserts that line at its position; a run of consecutive add
  * lines becomes one multi-line insert so the lines land in authored order.
  */
+const LITERAL_OPEN = "\u0000V8LITOPEN\u0000";
+const LITERAL_CLOSE = "\u0000V8LITCLOSE\u0000";
+const LITERAL_DIVIDER = "\u0000V8LITDIV\u0000";
+
+/**
+ * Hide selection-marker glyphs inside verbatim add-line content so selection
+ * parsing cannot mistake them for structure. Add lines are final text by
+ * contract; a payload editing code that itself contains the markers (tests,
+ * docs, this file) is otherwise unparseable and unrecoverable.
+ */
+function encodeLiteralMarkers(text: string): string {
+	return text
+		.replaceAll(SELECT_OPEN, LITERAL_OPEN)
+		.replaceAll(SELECT_CLOSE, LITERAL_CLOSE)
+		.replaceAll(SELECT_DIVIDER, LITERAL_DIVIDER);
+}
+
+/** Restore marker glyphs hidden by {@link encodeLiteralMarkers}. */
+function decodeLiteralMarkers(text: string): string {
+	return text
+		.replaceAll(LITERAL_OPEN, SELECT_OPEN)
+		.replaceAll(LITERAL_CLOSE, SELECT_CLOSE)
+		.replaceAll(LITERAL_DIVIDER, SELECT_DIVIDER);
+}
+
+/**
+ * Anchor an add run to the line above by wrapping that line's trailing plain
+ * segment as a same-text replacement that appends the added lines. Used when
+ * the line below the run is a gap: a zero-width insertion prefixed onto the
+ * gap line rides the gap's expansion and splices at the post-gap anchor,
+ * often mid-line, instead of directly under its authored position.
+ */
+function wrapTrailingAnchor(out: string[], added: string[]): boolean {
+	if (out.length === 0) return false;
+	const previous = out[out.length - 1];
+	const close = previous.lastIndexOf(SELECT_CLOSE);
+	const head = close === -1 ? "" : previous.slice(0, close + SELECT_CLOSE.length);
+	const tail = close === -1 ? previous : previous.slice(close + SELECT_CLOSE.length);
+	if (tail.trim() === "" || tail.includes(GAP) || tail.includes(SELECT_DIVIDER) || tail.includes(SELECT_OPEN)) {
+		return false;
+	}
+	out[out.length - 1] = `${head}${SELECT_OPEN}${tail}${SELECT_DIVIDER}${tail}\n${added.join("\n")}${SELECT_CLOSE}`;
+	return true;
+}
+
 function embedAddLines(patternText: string): string {
 	if (!hasAddLines(patternText)) return patternText;
 	const lines = patternText.split("\n");
@@ -762,7 +915,7 @@ function embedAddLines(patternText: string): string {
 			const line = lines[index];
 			const indent = line.match(/^[ \t]*/u)?.[0] ?? "";
 			if (!line.startsWith(ADD_LINE, indent.length)) break;
-			added.push(indent + line.slice(indent.length + ADD_LINE.length));
+			added.push(encodeLiteralMarkers(indent + line.slice(indent.length + ADD_LINE.length)));
 			index++;
 		}
 		if (added.length === 0) {
@@ -774,11 +927,18 @@ function embedAddLines(patternText: string): string {
 			out[out.length - 1] = `${SELECT_OPEN}${anchor}${SELECT_DIVIDER}${added[0]}${SELECT_CLOSE}`;
 			index--;
 		} else {
-			const insertion = `${SELECT_OPEN}${SELECT_DIVIDER}${added.join("\n")}\n${SELECT_CLOSE}`;
-			if (index < lines.length) {
-				out.push(insertion + lines[index]);
+			const next = index < lines.length ? lines[index] : undefined;
+			// Blank lines between the add run and a gap don't anchor anything;
+			// look through them so the run still binds to the line above.
+			let lookahead = index;
+			while (lookahead < lines.length && lines[lookahead].trim() === "") lookahead++;
+			const gapBelow = lookahead < lines.length && lines[lookahead].trim() === GAP;
+			if (next !== undefined && gapBelow && wrapTrailingAnchor(out, added)) {
+				out.push(next);
+			} else if (next !== undefined) {
+				out.push(`${SELECT_OPEN}${SELECT_DIVIDER}${added.join("\n")}\n${SELECT_CLOSE}${next}`);
 			} else {
-				out.push(insertion);
+				out.push(`${SELECT_OPEN}${SELECT_DIVIDER}${added.join("\n")}\n${SELECT_CLOSE}`);
 				index--;
 			}
 		}
@@ -864,12 +1024,14 @@ function createOperation(
 			if (tail?.index !== undefined) {
 				const remainder = inline.patternText.slice(0, tail.index);
 				if (normalizeText(remainder).text !== "") {
-					return {
+					const wholeDeletion: Operation = {
 						patternText: remainder,
 						sourcePatternText,
 						rewrite: { kind: "explicit", text: "" },
 						all,
 					};
+					if (inline.notes.length > 0) wholeDeletion.recoveryNote = inline.notes.join("\n");
+					return wholeDeletion;
 				}
 			}
 		}
@@ -879,17 +1041,32 @@ function createOperation(
 				`${REWRITE_HEADER}${reference[1]} is valid only inside an inline replacement or REWRITE, never MATCH.`,
 			);
 		}
-		return {
+		const operation: Operation = {
 			patternText: relocateSelectionLines(inline.patternText),
 			sourcePatternText,
 			rewrite: { kind: "inline", replacements: inline.replacements },
 			all,
 		};
+		if (inline.notes.length > 0) operation.recoveryNote = inline.notes.join("\n");
+		return operation;
 	}
 
 	const reference = patternReference(sourcePatternText);
 	if (reference) {
 		throw new Error(`${REWRITE_HEADER}${reference[1]} is valid only in REWRITE, never MATCH.`);
+	}
+	if (rewriteText.trim() !== "") {
+		const echoed = expandEchoedLineSelection(sourcePatternText, rewriteText);
+		if (echoed !== undefined) {
+			const operation: Operation = {
+				patternText: echoed,
+				sourcePatternText,
+				rewrite: { kind: "explicit", text: rewriteText },
+				all,
+			};
+			operation.recoveryNote = `Note: operation ${operationNumber}'s REWRITE restated the whole selection-bearing line, so the full line was replaced. A REWRITE after a bare selection replaces only the selected span; state just the span's new text, or select the whole line.`;
+			return operation;
+		}
 	}
 	return {
 		patternText: sourcePatternText,
@@ -920,7 +1097,7 @@ function parseOperations(input: string, content: string): Operation[] {
 	let rewriteLines: string[] = [];
 	let referenceSeparator: string | undefined;
 
-	const finish = () => {
+	const finish = (endIndex: number) => {
 		const sourcePatternText = normalizeBlock(patternLines, false);
 		const rewriteText = normalizeBlock(rewriteLines, true);
 		if (referenceSeparator !== undefined && rewriteText.trim() === "") {
@@ -928,8 +1105,14 @@ function parseOperations(input: string, content: string): Operation[] {
 			// after a legacy MATCH the final text is missing — hand back a
 			// fill-in skeleton instead of echoing the broken payload.
 			if (!hasInlineSelection(sourcePatternText)) {
+				const correctedLines = [...lines];
+				const separatorIndex = correctedLines.findLastIndex(
+					(line, index) => index < endIndex && line.trim() === referenceSeparator,
+				);
+				correctedLines[separatorIndex] = REWRITE_HEADER;
+				correctedLines.splice(endIndex, 0, "<final text>");
 				throw new Error(
-					`${referenceSeparator} after MATCH reads as the ${REWRITE_HEADER} separator, leaving REWRITE empty.\nCopy-ready corrected payload (fill in the final text):\n${OPENER}${allMatches ? "*" : ""}\n${sourcePatternText}\n${REWRITE_HEADER}\n<final text>`,
+					`${referenceSeparator} after MATCH reads as the ${REWRITE_HEADER} separator, leaving REWRITE empty.\nCopy-ready corrected payload (fill in the final text):\n${correctedLines.join("\n")}`,
 				);
 			}
 			operations.push(createOperation(sourcePatternText, "", allMatches, operations.length + 1, false));
@@ -938,7 +1121,7 @@ function parseOperations(input: string, content: string): Operation[] {
 		operations.push(createOperation(sourcePatternText, rewriteText, allMatches, operations.length + 1, true));
 	};
 	const pendingSeparatorErrors = new Map<number, string>();
-	const finishPattern = () => {
+	const finishPattern = (endIndex: number) => {
 		const sourcePatternText = normalizeBlock(patternLines, false);
 		if (
 			hasInlineSelection(sourcePatternText) ||
@@ -1031,10 +1214,25 @@ function parseOperations(input: string, content: string): Operation[] {
 					return;
 				}
 			} catch {
-				// No block resembles the desired text; keep the fail-closed error.
+				// Fall through to closest-block replacement.
+			}
+			// Stated text is not present verbatim: apply it over the closest
+			// block when exactly one same-line-count window is decisively
+			// similar (an exact block scores 0 and is never adopted here);
+			// otherwise keep the fail-closed error.
+			const closest = closestDesiredBlock(content, sourcePatternText);
+			if (closest !== undefined) {
+				operations.push({
+					patternText: closest,
+					sourcePatternText,
+					rewrite: { kind: "explicit", text: sourcePatternText },
+					all: false,
+					recoveryNote: `Note: operation ${operations.length + 1} stated desired text without markers; the closest matching block was replaced with it. Mark changes explicitly with ${SELECT_OPEN}old${SELECT_DIVIDER}new${SELECT_CLOSE}.`,
+				});
+				return;
 			}
 		}
-		const needsSeparator = `Operation ${operations.length + 1} needs ${REWRITE_HEADER}. Retry:\n${OPENER}\n${patternLines.join("\n")}\n${REWRITE_HEADER}\n<new text>`;
+		const needsSeparator = `Operation ${operations.length + 1} needs ${REWRITE_HEADER}.\nCopy-ready corrected payload (fill in the new text):\n${[...lines.slice(0, endIndex), REWRITE_HEADER, "<new text>", ...lines.slice(endIndex)].join("\n")}`;
 		// A multiline pattern-only block may be the delete half of a move; assume
 		// deletion now, justified post-parse only when another op re-emits it.
 		const normalizedPattern = normalizeText(sourcePatternText).text;
@@ -1106,7 +1304,7 @@ function parseOperations(input: string, content: string): Operation[] {
 				referenceSeparator = trimmed;
 			} else if (parsedOpener !== false) {
 				// A doubled opener produced an empty operation; drop it as noise.
-				if (patternLines.some(entry => entry.trim() !== "")) finishPattern();
+				if (patternLines.some(entry => entry.trim() !== "")) finishPattern(index);
 				allMatches = parsedOpener === 0;
 				patternLines = [];
 				rewriteLines = [];
@@ -1118,7 +1316,7 @@ function parseOperations(input: string, content: string): Operation[] {
 		}
 
 		if (parsedOpener !== false) {
-			finish();
+			finish(index);
 			allMatches = parsedOpener === 0;
 			patternLines = [];
 			rewriteLines = [];
@@ -1144,8 +1342,8 @@ function parseOperations(input: string, content: string): Operation[] {
 		}
 	}
 
-	if (state === "rewrite") finish();
-	else if (state === "pattern") finishPattern();
+	if (state === "rewrite") finish(lines.length);
+	else if (state === "pattern") finishPattern(lines.length);
 	if (operations.length === 0) throw new Error(`Empty patch. Start with ${OPENER}.`);
 	for (let index = 0; index < operations.length; index++) {
 		const operationRewrite = operations[index].rewrite;
@@ -1750,7 +1948,7 @@ function renderInlinePattern(patternText: string, replacements: string[]): strin
 			continue;
 		}
 		const close = patternText.indexOf(SELECT_CLOSE, index + character.length);
-		rendered += `${patternText.slice(index, close)}${SELECT_DIVIDER}${replacements[replacementIndex] ?? ""}${SELECT_CLOSE}`;
+		rendered += `${patternText.slice(index, close)}${SELECT_DIVIDER}${decodeLiteralMarkers(replacements[replacementIndex] ?? "")}${SELECT_CLOSE}`;
 		replacementIndex++;
 		index = close + SELECT_CLOSE.length;
 	}
@@ -1885,6 +2083,61 @@ function closestFragment(
 		}
 	}
 	return { text: best.text, offset: best.offset };
+}
+
+/**
+ * Current form of a marker-less desired-text block: the same-line-count
+ * window most similar to the stated text, accepted only when it is close
+ * enough to be that block's current form (Levenshtein over normalized text)
+ * and decisively better than every non-overlapping runner-up. `undefined`
+ * keeps the fail-closed `needs »` error.
+ */
+function closestDesiredBlock(content: string, statedText: string): string | undefined {
+	const statedNormalized = normalizeText(statedText).text;
+	if (statedNormalized.length < 12 || statedNormalized.length > 1000) return undefined;
+	const statedLineCount = statedText.split("\n").length;
+	const lines = content.split("\n");
+	if (lines.length < statedLineCount) return undefined;
+	const scores: number[] = [];
+	let best: { index: number; score: number } | undefined;
+	for (let index = 0; index + statedLineCount <= lines.length; index++) {
+		const windowNormalized = normalizeText(lines.slice(index, index + statedLineCount).join("\n")).text;
+		const maxLength = Math.max(1, statedNormalized.length, windowNormalized.length);
+		if (windowNormalized === statedNormalized) {
+			scores.push(0);
+			best = { index, score: 0 };
+			continue;
+		}
+		// A pure head/tail truncation or extension is an echoed anchor (a
+		// dropped `;`, a clipped line), not a stated edit of that block.
+		const affixEcho =
+			statedNormalized.startsWith(windowNormalized) ||
+			windowNormalized.startsWith(statedNormalized) ||
+			statedNormalized.endsWith(windowNormalized) ||
+			windowNormalized.endsWith(statedNormalized);
+		// A length gap already forces the score past the acceptance bound.
+		if (
+			windowNormalized === "" ||
+			affixEcho ||
+			Math.abs(windowNormalized.length - statedNormalized.length) / maxLength > 0.35
+		) {
+			scores.push(1);
+			continue;
+		}
+		const score = levenshteinDistance(statedNormalized, windowNormalized) / maxLength;
+		scores.push(score);
+		if (best === undefined || score < best.score) best = { index, score };
+	}
+	// score 0 means an exact block `locate` already handles; never adopt it here.
+	if (best === undefined || best.score === 0 || best.score > 0.35) return undefined;
+	for (let index = 0; index < scores.length; index++) {
+		if (Math.abs(index - best.index) < statedLineCount) continue;
+		if (scores[index] - best.score < 0.1) return undefined;
+	}
+	const text = lines.slice(best.index, best.index + statedLineCount).join("\n");
+	const markers = [SELECT_OPEN, SELECT_CLOSE, SELECT_DIVIDER, GAP, ADD_LINE, REWRITE_HEADER, OPENER, SECTION_OPENER];
+	if (markers.some(marker => text.includes(marker))) return undefined;
+	return text;
 }
 
 function numberedPreview(content: string, offset: number): string {
@@ -2319,8 +2572,34 @@ function renderRewrite(
 	for (let index = 0; index < rewrite.length; ) {
 		const gapMarker = rewrite.startsWith(GAP, index) ? GAP : undefined;
 		if (gapMarker) {
-			marked += markerIndex < sentinels.length ? sentinels[markerIndex] : gapMarker;
-			markerIndex++;
+			const lineStart = rewrite.lastIndexOf("\n", index - 1) + 1;
+			const nextNewline = rewrite.indexOf("\n", index);
+			const lineEnd = nextNewline === -1 ? rewrite.length : nextNewline;
+			const line = rewrite.slice(lineStart, lineEnd);
+			if (markerIndex >= sentinels.length) {
+				// An unclaimed gap alone on its line is context elision, never final
+				// text; writing it verbatim splices a literal `…` into the file.
+				if (line.trim() === GAP) {
+					throw new Error(
+						`Operation ${operationNumber} REWRITE has a whole-line ${GAP} with no MATCH gap to re-emit. REWRITE is final text written verbatim: type the elided lines out, or add a matching ${GAP} gap to MATCH. To write a literal ${GAP} line, use the write tool.`,
+					);
+				}
+				marked += gapMarker;
+				markerIndex++;
+			} else {
+				const capture = captures[selectedCaptureIndices[markerIndex]] ?? "";
+				const openEnded = line.trim() === GAP || rewrite.slice(index + gapMarker.length, lineEnd).trim() === "";
+				if (capture.includes("\n") && !openEnded) {
+					// A mid-line gap with text after it on the same line cannot
+					// re-emit a multi-line capture: it is literal final text (an
+					// ellipsis inside a string), not a gap back-reference. The
+					// capture stays available for later gaps.
+					marked += gapMarker;
+				} else {
+					marked += sentinels[markerIndex];
+					markerIndex++;
+				}
+			}
 			index += gapMarker.length;
 			continue;
 		}
@@ -2330,7 +2609,7 @@ function renderRewrite(
 		marked += character;
 		index += character.length;
 	}
-	if (markerIndex === 0 || sentinels.length === 0) return marked;
+	if (markerIndex === 0 || sentinels.length === 0) return decodeLiteralMarkers(marked);
 	let rendered = marked;
 	for (let index = 0; index < sentinels.length; index++) {
 		const sentinel = sentinels[index];
@@ -2339,7 +2618,7 @@ function renderRewrite(
 		if (sentinelAt === -1) continue;
 		rendered = rendered.slice(0, sentinelAt) + capture + rendered.slice(sentinelAt + sentinel.length);
 	}
-	return rendered;
+	return decodeLiteralMarkers(rendered);
 }
 
 function alignBoundaryEchoes(content: string, candidate: Candidate, replacement: string): string {
@@ -2908,14 +3187,22 @@ function trailingSelectionCandidate(patternText: string): string | undefined {
  * lone `+` run becomes add lines, `@@` becomes a gap, and diff file headers
  * drop. Returns candidates with and without the diff context-space stripped.
  */
+function isDiffShaped(patternText: string): boolean {
+	if (patternText.includes(SELECT_OPEN) || patternText.includes(ADD_LINE)) return false;
+	const lines = patternText.split("\n");
+	if (!lines.some(line => /^-(?!--)/u.test(line))) return false;
+	return (
+		lines.some(line => /^\+(?!\+\+)/u.test(line)) ||
+		lines.some(line => line.trim().startsWith("@@")) ||
+		lines.some(line => /^ \S/u.test(line))
+	);
+}
+
 function diffShapedCandidates(patternText: string): string[] {
+	if (!isDiffShaped(patternText)) return [];
 	const lines = patternText.split("\n");
 	const isMinus = (line: string) => /^-(?!--)/u.test(line);
 	const isPlus = (line: string) => /^\+(?!\+\+)/u.test(line);
-	const hasHunk = lines.some(line => line.trim().startsWith("@@"));
-	const hasSpacedContext = lines.some(line => /^ \S/u.test(line));
-	if (!lines.some(isMinus) || !(lines.some(isPlus) || hasHunk || hasSpacedContext)) return [];
-	if (patternText.includes(SELECT_OPEN) || patternText.includes(ADD_LINE)) return [];
 	const build = (stripContextSpace: boolean): string => {
 		const out: string[] = [];
 		for (let index = 0; index < lines.length; index++) {
@@ -3543,6 +3830,8 @@ export interface ExecuteSloppyOptions {
 	batchRequest?: LspBatchRequest;
 	writethrough: WritethroughCallback;
 	beginDeferredDiagnosticsForPath: (path: string) => WritethroughDeferredHandle;
+	/** Observes a committed content transition before result snapshots are pruned. */
+	onApplied?: AppliedEditObserver;
 }
 
 interface PreparedSloppySection {
@@ -3566,7 +3855,8 @@ interface PreparedSloppySection {
 export async function executeSloppy(
 	options: ExecuteSloppyOptions,
 ): Promise<AgentToolResult<EditToolDetails, SloppyParams>> {
-	const { session, sections, signal, batchRequest, writethrough, beginDeferredDiagnosticsForPath } = options;
+	const { session, sections, signal, batchRequest, writethrough, beginDeferredDiagnosticsForPath, onApplied } =
+		options;
 	const multiFile = sections.length > 1;
 
 	// Phase 1 — preflight every section in memory; nothing is written unless all succeed.
@@ -3647,6 +3937,7 @@ export async function executeSloppy(
 		}
 
 		const diffResult = generateDiffString(entry.normalizedContent, entry.newContent, undefined, { path: entry.path });
+		await onApplied?.({ path: entry.absolutePath, prev: entry.rawContent, next: finalContent });
 		const meta = outputMeta()
 			.diagnostics(diagnostics?.summary ?? "", diagnostics?.messages ?? [])
 			.get();

@@ -127,14 +127,20 @@ export function estimateToolSchemaTokens(
 ): number {
 	const fragments: string[] = [];
 	for (const tool of tools) {
-		fragments.push(tool.name, tool.description ?? "");
+		// Extension-supplied tools may carry a non-string name/description or a
+		// parameters value whose wire schema stringifies to `undefined` (e.g. a
+		// callable schema that escaped normalization). A non-string fragment is
+		// fatal inside the native tokenizer, so only real strings are counted.
+		if (typeof tool.name === "string") fragments.push(tool.name);
+		if (typeof tool.description === "string") fragments.push(tool.description);
 		try {
 			const wireTool: AiTool = {
 				name: tool.name,
 				description: tool.description,
 				parameters: tool.parameters as AiTool["parameters"],
 			};
-			fragments.push(JSON.stringify(toolWireSchema(wireTool) ?? {}));
+			const wireJson = JSON.stringify(toolWireSchema(wireTool) ?? {});
+			if (typeof wireJson === "string") fragments.push(wireJson);
 		} catch {
 			// Schema may contain functions or cycles; ignore.
 		}

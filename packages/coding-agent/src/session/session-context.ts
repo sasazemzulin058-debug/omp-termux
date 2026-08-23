@@ -451,6 +451,13 @@ export function buildSessionContext(
 					appendMessage(entry);
 				}
 			}
+		} else if (compaction.providerReplayThroughEntryId) {
+			const replayThroughIdx = path.findIndex(entry => entry.id === compaction.providerReplayThroughEntryId);
+			if (replayThroughIdx >= 0 && replayThroughIdx < compactionIdx) {
+				for (let i = replayThroughIdx + 1; i < compactionIdx; i++) {
+					appendMessage(path[i]);
+				}
+			}
 		}
 
 		// Display transcript: emit the summary at the chronological compaction

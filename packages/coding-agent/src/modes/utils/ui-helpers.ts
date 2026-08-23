@@ -97,7 +97,6 @@ type QueuedMessages = {
 	followUp: string[];
 };
 type AddMessageOptions = {
-	populateHistory?: boolean;
 	imageLinks?: readonly (string | undefined)[];
 	reuseSettledComponent?: boolean;
 };
@@ -290,9 +289,6 @@ export class UiHelpers {
 						this.ctx.transcriptMessageComponents.set(message, userComponent);
 					}
 					this.ctx.chatContainer.addChild(userComponent);
-					if (options?.populateHistory && message.role === "user" && !isSynthetic) {
-						this.ctx.editor.addToHistory(textContent);
-					}
 				}
 				break;
 			}
@@ -419,11 +415,11 @@ export class UiHelpers {
 			if (
 				nextToolName === "hub" &&
 				previous.isDisplaceableBlock() &&
-				this.ctx.chatContainer.isBlockUncommitted(previous)
+				this.ctx.chatContainer.canRemoveBlock(previous)
 			) {
 				this.ctx.chatContainer.removeChild(previous);
 			}
-			// Sealing freezes the block and stops the waiting-poll spinner that
+			// Sealing finalizes the block and stops the waiting-poll spinner that
 			// updateResult armed.
 			previous.seal();
 		};
@@ -437,7 +433,7 @@ export class UiHelpers {
 			}
 			if (previous.canBeDisplacedBy(nextToolName)) {
 				todoSnapshot = null;
-				if (this.ctx.chatContainer.isBlockUncommitted(previous)) {
+				if (this.ctx.chatContainer.canRemoveBlock(previous)) {
 					this.ctx.chatContainer.removeChild(previous);
 				}
 				previous.seal();
@@ -479,10 +475,8 @@ export class UiHelpers {
 				}
 				const hasVisibleAssistantContent = assistantHasVisibleContent(message);
 				if (hasVisibleAssistantContent) {
-					// Rebuild reconstructs immutable history; seal (not finalize) so the
-					// group freezes even if a read's result was never persisted —
-					// finalize alone keeps a pending entry live and would stop the whole
-					// transcript below it from committing to native scrollback.
+					// Rebuild reconstructs immutable history; seal (not finalize) because
+					// a pending entry otherwise keeps the group active indefinitely.
 					readGroup?.seal();
 					readGroup = null;
 				}
@@ -573,7 +567,6 @@ export class UiHelpers {
 							showImages: settings.get("terminal.showImages"),
 							editFuzzyThreshold: settings.get("edit.fuzzyThreshold"),
 							editAllowFuzzy: settings.get("edit.fuzzyMatch"),
-							liveRegion: this.ctx.chatContainer,
 						},
 						tool,
 						this.ctx.ui,
@@ -686,23 +679,22 @@ export class UiHelpers {
 				if (message.role === "user") resolveWaitingPoll();
 				if (message.role === "user") resolveTodoSnapshot();
 				// All other messages use standard rendering
-				this.ctx.addMessageToChat(message, options);
+				this.ctx.addMessageToChat(message, { reuseSettledComponent: options.reuseSettledComponents });
 			}
 		}
 		flushPendingUsage();
 
 		// The trailing read run has no following break to close it; seal so the
-		// rebuilt group freezes (even with a never-persisted result) and commits to
-		// native scrollback like every other historical block.
+		// rebuilt group can retire as history even with a never-persisted result.
 		readGroup?.seal();
-		// A trailing waiting poll is final history on rebuild; seal it so it
-		// freezes (and its spinner timer stops) like every other block.
+		// A trailing waiting poll is final history on rebuild; seal it and stop
+		// its spinner timer.
 		resolveWaitingPoll();
 		// A trailing todo snapshot is live state, not history: when the rebuild
 		// runs mid-turn (settings overlay close, focus attach during streaming),
 		// hand it back to the controller so a follow-up `todo` update keeps
 		// displacing instead of stacking. Idle rebuilds (resume / compaction)
-		// fall through to the seal path so the snapshot freezes as history.
+		// fall through to the seal path so the snapshot retires as history.
 		if (todoSnapshot && this.ctx.viewSession.isStreaming) {
 			this.ctx.eventController?.inheritDisplaceableTodo(todoSnapshot);
 			todoSnapshot = null;
@@ -717,14 +709,17 @@ export class UiHelpers {
 		// the live event stream routes `tool_execution_update`/`_end` into the
 		// rebuilt components instead of dropping the result; their args are final,
 		// so mark them complete. Idle rebuilds have no result coming: seal so the
-		// blocks freeze as history instead of pinning the live region, then clear
-		// so reconstructed historical components never leak into live tracking.
+		// blocks can retire as history, then clear them so reconstructed historical
+		// components never leak into active tracking.
 		// (`rebuildChatFromMessages` builds its context WITHOUT dangling calls and
 		// restores its own preserved live components afterwards — for that caller
 		// the map is empty here either way.)
 		if (this.ctx.viewSession.isStreaming) {
 			for (const [toolCallId, component] of this.ctx.pendingTools) {
 				component.setArgsComplete(toolCallId);
+				if (this.ctx.eventController?.hasToolExecutionStarted(toolCallId)) {
+					component.setExecutionStarted(toolCallId);
+				}
 			}
 		} else {
 			for (const component of this.ctx.pendingTools.values()) {
@@ -767,7 +762,7 @@ export class UiHelpers {
 		// the tape is an interior deletion of committed history the render engine
 		// cannot express (see TranscriptContainer.isBlockUncommitted).
 		for (let i = index; i < chat.children.length; i++) {
-			if (!chat.isBlockUncommitted(chat.children[i]!)) return false;
+			if (!chat.canRemoveBlock(chat.children[i]!)) return false;
 		}
 		// Ground truth for the surviving prefix. The cut message still present
 		// means the session was not actually rewound past it — bail before
@@ -848,10 +843,6 @@ export class UiHelpers {
 		let replayEntryCount = this.ctx.viewSession.sessionManager.getEntries().length;
 		const renderOptions = {
 			updateFooter: true,
-			// A dirty replay may restart from a newer context. Populate history
-			// once from the stable context below instead of duplicating it on
-			// every attempt.
-			populateHistory: false,
 		};
 		let committed = false;
 		let replayAttempts = 0;
@@ -913,14 +904,6 @@ export class UiHelpers {
 				}
 			}
 			committed = true;
-
-			if (!this.ctx.focusedAgentId) {
-				for (const message of context.messages) {
-					if (message.role !== "user" || message.synthetic) continue;
-					const text = this.getUserMessageText(message);
-					if (text) this.ctx.editor.addToHistory(text);
-				}
-			}
 
 			// Show compaction info if session was compacted.
 			const allEntries = this.ctx.viewSession.sessionManager.getEntries();

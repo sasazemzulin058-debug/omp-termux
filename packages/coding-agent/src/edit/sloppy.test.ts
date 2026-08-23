@@ -48,6 +48,72 @@ describe("sloppy v8", () => {
 		);
 	});
 
+	test("splits a selection containing literal dividers at the middle divider", () => {
+		const content = 'row("│ a │", x);\n';
+		const notes: string[] = [];
+		const input = inlineOperation('row(⟪"│ a │", x│"│ b │", y⟫);');
+
+		expect(variant.apply(content, input, { path: "box.ts", notes })).toBe('row("│ b │", y);\n');
+		expect(notes.join("\n")).toMatch(/middle one was read as the divider/);
+	});
+
+	test("reads a trailing divider as deletion when the selection contains literal dividers", () => {
+		const content = 'a();\ndraw("│");\nb();\n';
+		const notes: string[] = [];
+		const input = inlineOperation('⟪draw("│");\n│⟫');
+
+		expect(variant.apply(content, input, { path: "box.ts", notes })).toBe("a();\nb();\n");
+		expect(notes.join("\n")).toMatch(/read as a deletion of the selected text with the inner/);
+	});
+
+	test("reads an even divider count without a trailing divider as deletion of the selection", () => {
+		const content = 't("x│y│z");\nkeep();\n';
+		const notes: string[] = [];
+		const input = inlineOperation('t("⟪x│y│z⟫");');
+
+		expect(variant.apply(content, input, { path: "box.ts", notes })).toBe('t("");\nkeep();\n');
+		expect(notes.join("\n")).toMatch(/no unambiguous divider/);
+	});
+
+	test("anchors an add run above a gap to its preceding line", () => {
+		const content = "use std::{\n\tfs,\n\titer,\n};\n\nfn main() {\n\trun();\n}\n";
+		const input = inlineOperation("\tfs,\n＋\tio,\n…\nfn main() {");
+
+		expect(variant.apply(content, input, context)).toBe(
+			"use std::{\n\tfs,\n\tio,\n\titer,\n};\n\nfn main() {\n\trun();\n}\n",
+		);
+	});
+
+	test("replaces the whole line when a bare selection's REWRITE restates it", () => {
+		const content = "  screen = [y -> Blank],  \\* viewport\nnext();\n";
+		const notes: string[] = [];
+		const input = operation(
+			"  screen = [y -> ⟪Blank⟫],  \\* viewport",
+			"  screen = [y -> IF y = 1 THEN SRow ELSE Blank],  \\* row 1 is shell",
+		);
+
+		expect(variant.apply(content, input, { path: "spec.tla", notes })).toBe(
+			"  screen = [y -> IF y = 1 THEN SRow ELSE Blank],  \\* row 1 is shell\nnext();\n",
+		);
+		expect(notes.join("\n")).toMatch(/restated the whole selection-bearing line/);
+	});
+
+	test("keeps a mid-line ellipsis in REWRITE literal when the capture is multi-line", () => {
+		const content = "function f() {\n  a();\n  b();\n}\n";
+		// biome-ignore lint/suspicious/noTemplateCurlyInString: test fixture contains template literal
+		const input = operation("function f() {\n…\n}", "function f() {\n  return `${x}[… ]${y}`;\n}");
+
+		// biome-ignore lint/suspicious/noTemplateCurlyInString: test fixture contains template literal
+		expect(variant.apply(content, input, context)).toBe("function f() {\n  return `${x}[… ]${y}`;\n}\n");
+	});
+
+	test("applies add lines containing literal selection markers verbatim", () => {
+		const content = "run();\ndone();\n";
+		const input = inlineOperation("run();\n＋const sel = '⟪a│b⟫';");
+
+		expect(variant.apply(content, input, context)).toBe("run();\nconst sel = '⟪a│b⟫';\ndone();\n");
+	});
+
 	test("inserts an add line after its anchor", () => {
 		const content = "anyhow = { workspace = true }\nitertools = { workspace = true }\ntokio = { workspace = true }\n";
 		const input = inlineOperation("itertools = { workspace = true }\n＋jiff = { workspace = true }");
@@ -301,14 +367,22 @@ describe("sloppy v8", () => {
 		);
 	});
 
-	test("fails closed on a marker-less op that already matches the file", () => {
-		// A restated unchanged line asserts nothing; the merged dialect keeps the
-		// fail-closed separator diagnosis instead of silently skipping.
-		const content = "keep();\nconst limit = options.limit;\n";
+	test("returns the complete atomic payload when a marker-less operation needs a rewrite", () => {
+		const content = "const a = 1;\nkeep();\n";
+		const input = "§\nconst a = ⟪1│2⟫;\n§\nkeep();";
+		let message = "";
 
-		expect(() =>
-			applySloppy(content, "§\nkeep();\n§\nconst limit = options⟪.│?.⟫limit;", { path: "i.ts", notes: [] }),
-		).toThrow(/needs »/);
+		try {
+			applySloppy(content, input, { path: "i.ts", notes: [] });
+		} catch (error) {
+			message = error instanceof Error ? error.message : String(error);
+		}
+
+		expect(message).toContain("Operation 2 needs ».");
+		expect(message.match(/Copy-ready corrected payload/g)).toHaveLength(1);
+		expect(message).toContain(
+			"Copy-ready corrected payload (fill in the new text):\n§i.ts\nconst a = ⟪1│2⟫;\n§\nkeep();\n»\n<new text>",
+		);
 	});
 
 	test("collapses back-to-back duplicates when desired text matches both copies", () => {
@@ -340,12 +414,47 @@ describe("sloppy v8", () => {
 		);
 	});
 
-	test("rejects marker-less desired text instead of inferring indentation", () => {
+	test("applies marker-less desired text over its closest near-match block", () => {
 		const content = "    if (!entryRow)\n      throw invalid();\n";
+		const notes: string[] = [];
 
-		expect(() =>
-			applySloppy(content, "§\n    if (entryRow)\n      throw invalid();", { path: "i.ts", notes: [] }),
-		).toThrow(/needs »/);
+		expect(applySloppy(content, "§\n    if (entryRow)\n      throw invalid();", { path: "i.ts", notes })).toBe(
+			"    if (entryRow)\n      throw invalid();\n",
+		);
+		expect(notes.join("\n")).toMatch(/closest matching block was replaced/);
+	});
+
+	test("applies a marker-less desired import line over its near-match", () => {
+		// Regression: a stated desired line (one token added) bounced with a
+		// fill-in "needs »" payload instead of replacing the existing line.
+		const content = [
+			'import { parseMCPToolName } from "../mcp";',
+			'import type { ToolRenderer } from "./renderers";',
+			"",
+			"run();",
+			"",
+		].join("\n");
+		const notes: string[] = [];
+		const input = '§\nimport type { ToolActivitySummary, ToolRenderer } from "./renderers";';
+
+		expect(applySloppy(content, input, { path: "xdev.ts", notes })).toBe(
+			[
+				'import { parseMCPToolName } from "../mcp";',
+				'import type { ToolActivitySummary, ToolRenderer } from "./renderers";',
+				"",
+				"run();",
+				"",
+			].join("\n"),
+		);
+		expect(notes.join("\n")).toMatch(/closest matching block was replaced/);
+	});
+
+	test("keeps the fail-closed error when no block resembles the stated text", () => {
+		const content = "const a = 1;\nkeep();\n";
+
+		expect(() => applySloppy(content, "§\nawait fetchRemoteConfig(session);", { path: "i.ts", notes: [] })).toThrow(
+			/needs »/,
+		);
 	});
 
 	test("collapses a duplicated block stated once as mono desired text", () => {
@@ -376,6 +485,55 @@ describe("sloppy v8", () => {
 		const input = [M.open, " alpha();", "+inserted();", "@@", "-gamma();", "+delta();"].join("\n");
 
 		expect(variant.apply(content, input, context)).toBe("alpha();\ninserted();\nbeta();\ndelta();\n");
+	});
+	test("keeps a diff-shaped body away from missing-separator recovery", () => {
+		// Regression: a uniquely matching context prefix let missing-» recovery
+		// adopt the collapsed remainder as a rewrite — deleting the prefix,
+		// writing the diff context gap `…` into the file literally, and leaving
+		// the original block in place as a duplicate.
+		const content = [
+			"fn load() {",
+			"\tlet mut items = Vec::new();",
+			"\tfor entry in dir {",
+			"\t\tlet parsed = entry.parse();",
+			"\t\titems.push(parsed);",
+			"\t}",
+			"\titems.sort();",
+			"\tOk(items)",
+			"}",
+			"",
+		].join("\n");
+		const input = [
+			M.open,
+			"fn load() {",
+			"-\tlet mut items = Vec::new();",
+			"+\tlet mut items = Vec::new();",
+			"\tfor entry in dir {",
+			M.gap,
+			"-\t\titems.push(parsed);",
+			"+\t\titems.push((entry.name(), parsed));",
+			"\t}",
+			"-\titems.sort();",
+			"-\tOk(items)",
+			"+\titems.sort_by_key(|(name, _)| name.clone());",
+			"+\tOk(items.into_iter().map(|(_, item)| item).collect())",
+			"}",
+		].join("\n");
+
+		expect(variant.apply(content, input, context)).toBe(
+			[
+				"fn load() {",
+				"\tlet mut items = Vec::new();",
+				"\tfor entry in dir {",
+				"\t\tlet parsed = entry.parse();",
+				"\t\titems.push((entry.name(), parsed));",
+				"\t}",
+				"\titems.sort_by_key(|(name, _)| name.clone());",
+				"\tOk(items.into_iter().map(|(_, item)| item).collect())",
+				"}",
+				"",
+			].join("\n"),
+		);
 	});
 
 	test("clamps a bare desired selection at line end to its own line", () => {
@@ -1002,6 +1160,16 @@ describe("sloppy v8", () => {
 		expect(variant.apply(content, operation(pattern, rewrite), context)).toBe(
 			"if (newA) {\n  keep();\n  return newB;\n}\n",
 		);
+	});
+
+	test("fails closed on a whole-line rewrite gap when the pattern captured none", () => {
+		// Regression: an explicit » rewrite with `…` context elision against a
+		// gapless MATCH wrote literal `…` lines into the file and duplicated the
+		// blocks the gaps had elided.
+		const content = "use std::time::Duration;\n\nfn combined() {}\n";
+		const input = operation("use std::time::Duration;", "use std::{sync::Arc, time::Duration};\n…\nfn combined() {}");
+
+		expect(() => variant.apply(content, input, context)).toThrow(/whole-line … with no MATCH gap to re-emit/);
 	});
 
 	test("fails closed when a multi-selection rewrite proves neither interpretation", () => {
@@ -1844,11 +2012,15 @@ describe("sloppy v8", () => {
 		expect(() => variant.apply(content, input, context)).toThrow(new RegExp(`needs ${esc(M.put)}`));
 	});
 
-	test("keeps an omitted separator error when the prefix match is ambiguous", () => {
+	test("applies an omitted-separator block over its unique same-shape window", () => {
 		const content = "const value = oldValue;\nconst value = oldValue;\n";
 		const input = `${M.open}\nconst value = oldValue;\nconst value = newValue;`;
+		const notes: string[] = [];
 
-		expect(() => variant.apply(content, input, context)).toThrow(new RegExp(`needs ${esc(M.put)}`));
+		expect(variant.apply(content, input, { path: context.path, notes })).toBe(
+			"const value = oldValue;\nconst value = newValue;\n",
+		);
+		expect(notes.join("\n")).toMatch(/closest matching block was replaced/);
 	});
 
 	test("treats empty double selection markers as an insertion point", () => {

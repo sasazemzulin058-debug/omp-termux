@@ -129,6 +129,20 @@ Provider HTTP fetches resolve proxies in this order after applying `NO_PROXY` / 
 
 Provider proxy lookups are cached for the process lifetime. Localhost targets bypass the provider fetch wrapper.
 
+Scope differs between the two `PI_PROXY` forms:
+
+- `PI_PROXY` is installed on the process-wide `fetch` at CLI startup, so it also
+  covers requests made outside the provider fetch wrapper — OAuth token refresh
+  and login, usage probes, model discovery. Without that, a region-blocked token
+  endpoint returns `403 Request not allowed` on refresh even though the stream
+  itself is proxied.
+- `PI_PROXY_<PROVIDER>` applies only to that provider's requests, and overrides
+  `PI_PROXY` for them. It does not cover the non-provider-scoped calls above; set
+  `PI_PROXY` too if the provider blocks your region.
+
+Loopback, link-local, private-range (`10/8`, `172.16/12`, `192.168/16`), and
+`NO_PROXY` targets always bypass, so local model servers and MCP hosts stay direct.
+
 ### Anthropic Foundry Gateway (Azure / enterprise proxy)
 
 When `CLAUDE_CODE_USE_FOUNDRY` is enabled, Anthropic requests switch to Foundry mode:
@@ -281,6 +295,7 @@ therefore completes through the paste-code path.
 | `PI_CODEX_WEBSOCKET`                        | `1`/`true` enables websocket transport preference                                                                                                                                                             |
 | `PI_CODEX_RESPONSES_LITE`                   | `1`/`true` forces Responses Lite; `0`/`false` forces the standard Responses body; unset uses the model catalog default                                                                                        |
 | `PI_OPENAI_STATEFUL`                        | Overrides the stateful-chaining default for the platform OpenAI Responses API (`previous_response_id`, forces `store: true`): on by default against api.openai.com, off elsewhere                             |
+| `PI_CODEX_ZSTD`                             | `0`/`false` disables zstd compression of request bodies sent to the official Codex API (enabled by default)                                                                                                   |
 | `PI_CODEX_WEBSOCKET_IDLE_TIMEOUT_MS`        | Positive integer override (default `300000`)                                                                                                                                                                  |
 | `PI_CODEX_WEBSOCKET_FIRST_EVENT_TIMEOUT_MS` | First-event timeout override (default `300000`)                                                                                                                                                               |
 | `PI_CODEX_WEBSOCKET_PING_INTERVAL_MS`       | Ping interval override (default `10000`)                                                                                                                                                                      |
@@ -320,6 +335,10 @@ therefore completes through the paste-code path.
 | `PERPLEXITY_API_KEY`                                | Perplexity search provider API-key mode                                   |
 | `PERPLEXITY_COOKIES`                                | Perplexity cookie-auth search mode                                        |
 | `PI_PERPLEXITY_RESPONSES`                           | `1` selects the Perplexity Responses endpoint instead of Chat Completions |
+| `PI_PERPLEXITY_MODEL`                               | Perplexity consumer-subscription model preference (default `experimental`) |
+| `PI_PERPLEXITY_API_MODEL`                           | Perplexity direct API model override (default `sonar-pro`)                |
+| `FIRECRAWL_BASE_URL`                                | Firecrawl search endpoint override (`FIRECRAWL_API_URL` is a fallback alias) |
+| `GOOGLE_GEMINI_BASE_URL`                            | Gemini search endpoint override; must be a valid absolute HTTP(S) URL     |
 | `TAVILY_API_KEY`                                    | Tavily search provider                                                    |
 | `ZAI_API_KEY`                                       | z.ai search provider (also checks stored OAuth in `agent.db`)             |
 | `OPENAI_API_KEY` / Codex OAuth in DB                | Codex search provider availability/auth                                   |
@@ -431,6 +450,10 @@ Python subprocess filtering denies common API keys and allows safe base variable
 | `PI_DISABLE_UUTILS_BUILTINS` | Non-empty except `0`/`false` disables the bash tool's uutils built-ins; `shell.env.PI_DISABLE_UUTILS_BUILTINS` wins                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
 | `OMP_NO_WEBP`                | `1` or `true` (case-insensitive) disables WebP in image-resize format selection                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
 | `MNEMOPI_EMBEDDING_MODEL`    | Embedding-model override for mnemopi memory configuration when no explicit override is supplied                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
+| `PI_AUTO_QA`                 | Boolean flag with highest precedence for the automatic tool-issue report injection/recording (`dev.autoqa` setting is consulted next); `0`/`false` disables, `1`/`true` forces on                                                                                                                                                                                                                                                                                                                                                                                          |
+| `PI_AUTO_QA_PUSH`            | `1`/`true` bypasses the consent dialog and forces tool-issue push recording in headless/non-interactive environments                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
+| `PI_AUTO_QA_PUSH_URL`        | Endpoint override for auto QA grievance push; wins over the `dev.autoqaPush.endpoint` setting                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
+| `PI_BROWSER_RELAY`           | `0`/`1` kill switch for the browser relay; overrides the `browser.relay` setting (relay auto-starts when the browser tool needs it)                                                                                                                                                                                                                                                                                                                                                                                                                                        |
 
 ### Hindsight memory backend
 
@@ -481,6 +504,8 @@ These affect where coding-agent stores data and which process-local settings ove
 | `OMP_AUTORESEARCH_DB_DIR`                           | Directory override for per-project autoresearch DB and project-artifact roots                                              |
 | `XDG_DATA_HOME`, `XDG_STATE_HOME`, `XDG_CACHE_HOME` | On macOS/Linux, redirect corresponding OMP paths only when the target `omp` root (or named-profile root) already exists    |
 | `PWD`                                               | Used when matching canonical current working directory in path helpers                                                     |
+| `OMP_WORKTREE_DIR`                                  | Agent-managed worktrees directory override (default `~/.omp/wt`); must be absolute or `~`-relative, relative paths are ignored; wins over the `worktree.base` setting                      |
+| `OMP_GITHUB_CACHE_DB`                               | Overrides the GitHub view cache database path (default `~/.omp/cache/github-cache.db`)                                                                                                     |
 
 ---
 
