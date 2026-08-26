@@ -132,7 +132,8 @@ def webrtc(text):
     return text
 
 def update_cli(text):
-    marker = "export async function runUpdateCommand(opts: { force: boolean; check: boolean }): Promise<void> {\n\tconsole.log(chalk.dim(`Current version: ${VERSION}`));\n"
+    if "Self-update is disabled on Android" in text:
+        return text
     guard = '''\tconsole.log(chalk.dim(`Current version: ${VERSION}`));
 
 \t// Android/Termux: self-update downloads desktop binaries; block early.
@@ -146,9 +147,24 @@ def update_cli(text):
 \t\treturn;
 \t}
 '''
-    if "Self-update is disabled on Android" in text:
-        return text
-    return once(text, marker, "export async function runUpdateCommand(opts: { force: boolean; check: boolean }): Promise<void> {\n" + guard, "update-cli.ts")
+    # Upstream v18.0.6+ adds optional channel param — try new marker first
+    marker_new = "export async function runUpdateCommand(opts: {\n\tforce: boolean;\n\tcheck: boolean;\n\tchannel?: UpdateChannel;\n}): Promise<void> {\n\tconsole.log(chalk.dim(`Current version: ${VERSION}`));\n"
+    if marker_new in text:
+        if text.count(marker_new) != 1:
+            raise SystemExit(f"overlay marker mismatch: update-cli.ts: {marker_new[:80]!r}")
+        return text.replace(marker_new, "export async function runUpdateCommand(opts: {\n\tforce: boolean;\n\tcheck: boolean;\n\tchannel?: UpdateChannel;\n}): Promise<void> {\n" + guard, 1)
+    marker_old = "export async function runUpdateCommand(opts: { force: boolean; check: boolean }): Promise<void> {\n\tconsole.log(chalk.dim(`Current version: ${VERSION}`));\n"
+    if marker_old in text:
+        return once(text, marker_old, "export async function runUpdateCommand(opts: { force: boolean; check: boolean }): Promise<void> {\n" + guard, "update-cli.ts")
+    # Fallback: flexible insertion after first console.log inside runUpdateCommand
+    func_idx = text.find("export async function runUpdateCommand")
+    if func_idx != -1:
+        log = "\tconsole.log(chalk.dim(`Current version: ${VERSION}`));\n"
+        log_idx = text.find(log, func_idx)
+        if log_idx != -1:
+            # guard already contains the log line — replace single log with guard
+            return text[:log_idx] + guard + text[log_idx + len(log):]
+    raise SystemExit(f"overlay marker mismatch: update-cli.ts: 'export async function runUpdateCommand...'")
 
 def native_index(text):
     stub = '''
