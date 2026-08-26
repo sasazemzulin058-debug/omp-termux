@@ -55,6 +55,9 @@ jobs:
             ~/.cargo/registry/cache
             ~/.cargo/git/db
             target
+          key: android-rust-${{ runner.os }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            android-rust-${{ runner.os }}-
       - name: Install Android NDK
         id: ndk
         uses: nttld/setup-ndk@v1
