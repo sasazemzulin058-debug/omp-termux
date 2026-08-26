@@ -129,17 +129,19 @@ export class MacOSSpellingProvider implements EditorTextAssistProvider {
 		if (!this.#sourceRangeIsProse(context, context.startCol, context.startCol + text.length)) {
 			return decorate(text);
 		}
-		const ranges = this.#typoCache.get(text);
-		if (!ranges) {
-			this.#scheduleTypoRanges(text, `${context.line}:${context.startCol}`);
-			return decorate(text);
-		}
+		const ranges = this.#typoCache.get(text) ?? this.#projectTypoRanges(text);
+		if (!this.#typoCache.has(text)) this.#scheduleTypoRanges(text, `${context.line}:${context.startCol}`);
+		if (!ranges) return decorate(text);
 		this.#automaticTypoQueue.delete(`${context.line}:${context.startCol}`);
 		if (ranges.length === 0) return decorate(text);
 		let rendered = "";
 		let cursor = 0;
 		for (const range of ranges) {
 			const end = range.start + range.length;
+			// Overlapping or out-of-bounds ranges (stale native data, edit projection)
+			// must never re-emit already-rendered text: that doubles it on screen and
+			// desyncs the rendered width from the measured width (cursor drift).
+			if (range.start < cursor || end > text.length) continue;
 			if (!this.#sourceRangeIsProse(context, context.startCol + range.start, context.startCol + end)) {
 				continue;
 			}
@@ -259,6 +261,38 @@ export class MacOSSpellingProvider implements EditorTextAssistProvider {
 		);
 		return request;
 	}
+	#projectTypoRanges(text: string): readonly native.SpellingRange[] | undefined {
+		let projected: native.SpellingRange[] | undefined;
+		let matchLength = -1;
+		for (const [previous, ranges] of this.#typoCache) {
+			let prefix = 0;
+			while (prefix < previous.length && prefix < text.length && previous[prefix] === text[prefix]) prefix++;
+			let suffix = 0;
+			while (suffix < previous.length - prefix && suffix < text.length - prefix) {
+				const previousCharacter = previous[previous.length - suffix - 1];
+				const nextCharacter = text[text.length - suffix - 1];
+				if (previousCharacter === undefined || nextCharacter === undefined || previousCharacter !== nextCharacter)
+					break;
+				suffix++;
+			}
+			if (prefix + suffix < previous.length - 1 || prefix + suffix <= matchLength) continue;
+			const oldChangeEnd = previous.length - suffix;
+			const newChangeEnd = text.length - suffix;
+			const delta = text.length - previous.length;
+			projected = ranges.map(range => {
+				const end = range.start + range.length;
+				if (end <= prefix) return range;
+				if (range.start >= oldChangeEnd) return { start: range.start + delta, length: range.length };
+				return {
+					start: Math.min(range.start, prefix),
+					length: Math.max(end + delta, newChangeEnd) - Math.min(range.start, prefix),
+				};
+			});
+			matchLength = prefix + suffix;
+		}
+		return projected;
+	}
+
 	#scheduleTypoRanges(text: string, lane: string): void {
 		if (this.#typoCache.has(text) || this.#typoInFlight.has(text)) return;
 		if (this.#automaticTypoActive) {
@@ -297,16 +331,14 @@ export class MacOSSpellingProvider implements EditorTextAssistProvider {
 			return [];
 		}
 		if (generation !== this.#cacheGeneration || !this.#available) return [];
-
 		const masked = maskNonProse(text);
 		const ranges = checked
 			.filter(range => isProseWord(text, masked, range.start, range.start + range.length))
 			.toSorted((left, right) => left.start - right.start);
+		const hadProjectedRanges = (this.#projectTypoRanges(text)?.length ?? 0) > 0;
 		if (this.#typoCache.size >= CACHE_LIMIT) this.#typoCache.clear();
 		this.#typoCache.set(text, ranges);
-		// An empty result leaves the already-undecorated render correct; only a
-		// range that will add undercurls is worth a repaint.
-		if (ranges.length > 0) this.onUpdate?.();
+		if (ranges.length > 0 || hadProjectedRanges) this.onUpdate?.();
 		return ranges;
 	}
 

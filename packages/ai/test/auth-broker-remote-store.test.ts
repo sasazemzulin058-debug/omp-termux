@@ -193,6 +193,32 @@ describe("RemoteAuthCredentialStore SSE integration", () => {
 		});
 	});
 
+	test("background sync parks after the idle window and resumes on the next store use", async () => {
+		const client = new AuthBrokerClient({ url: handle!.url, token });
+		const openSpy = vi.spyOn(client, "openSnapshotStream");
+		remote = new RemoteAuthCredentialStore({ client, backgroundIdleMs: 150 });
+
+		// Stream opens immediately (construction counts as activity).
+		await waitUntil(() => openSpy.mock.calls.length === 1);
+		const firstSignal = openSpy.mock.calls[0]![0]!.signal!;
+
+		// Idle window elapses with no foreground use: the in-flight SSE request
+		// is aborted without close(). A leaked store would otherwise hold this
+		// connection forever and pin the process (the git-tui hang).
+		await waitUntil(() => firstSignal.aborted);
+
+		// Parked: no reconnect attempts while the store stays unused.
+		// Real delay on purpose: the idle watchdog runs on real unref'd timers
+		// against a live SSE server, so fake timers cannot drive this path.
+		await Bun.sleep(300);
+		expect(openSpy.mock.calls.length).toBe(1);
+
+		// Any foreground use wakes the loop and re-establishes the stream.
+		remote.listAuthCredentials();
+		await waitUntil(() => openSpy.mock.calls.length === 2);
+		expect(openSpy.mock.calls[1]![0]!.signal!.aborted).toBe(false);
+	});
+
 	test("calls onSnapshot for broker snapshots but not the constructor snapshot", async () => {
 		const client = new AuthBrokerClient({ url: handle!.url, token });
 		const initialResult = await client.fetchSnapshot();

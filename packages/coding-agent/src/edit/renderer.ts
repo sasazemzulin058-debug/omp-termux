@@ -171,10 +171,6 @@ export interface EditRenderContext {
 
 const EDIT_STREAMING_PREVIEW_LINES = 12;
 
-function plainDiffRender(diffText: string): string {
-	return diffText;
-}
-
 /**
  * Lazily grown per-file preview cache slots: the file count of a streaming
  * multi-file patch is discovered mid-stream, so a fixed-size array would
@@ -487,7 +483,7 @@ function formatStreamingDiff(
 			// which would make every streaming update scale with the complete diff.
 			rendered += `${uiTheme.fg("dim", "… (content above)")}\n`;
 		}
-		rendered += renderDiffColored(tail.content, { filePath: rawPath });
+		rendered += renderDiffColored(tail.content, { filePath: rawPath, theme: uiTheme });
 		return rendered;
 	});
 	// The animated glyph rides this trailing line — inside the transcript's
@@ -798,9 +794,9 @@ function wrapEditRendererLine(line: string, width: number): string[] {
 	// Gutter shapes produced by formatCodeFrameLine: "-315│", " 313│", "+322│",
 	// plus the deduplicated forms "   +│" and "    │" whose repeated line number
 	// renderDiff blanked (single-line replacement pairs and insert-then-context
-	// runs) — all │-separated. ASCII "|" gutters exist only in raw canonical
-	// diff rows passed through by the plain fallback ("-42|old", " 42|ctx"),
-	// which always carry a marker column ("+"/"-"/space) and a line number. So
+	// runs) — all │-separated. ASCII "|" gutters may arrive from injected
+	// renderers that preserve raw canonical rows; those always carry a marker
+	// column ("+"/"-"/space) and a line number. So
 	// the number is optional for "│", while "|" requires the full canonical
 	// shape; anything else (a body line merely starting with "|", error text
 	// like "123|…") is not a diff row and wraps generically.
@@ -992,6 +988,9 @@ function renderSingleFileResult(
 		return renderInlineEditRow(uiTheme, { op, rename, rawPath, linkPath, pending: false });
 	}
 
+	const renderFallbackDiff = (diffText: string, diffOptions?: { filePath?: string }): string =>
+		renderDiffColored(diffText, { filePath: diffOptions?.filePath, theme: uiTheme });
+
 	let diffSectionRenderDiffFn: ((t: string, o?: { filePath?: string }) => string) | undefined;
 	const diffSectionCache = createRenderedStringCache();
 	const renderedDiffCache = createRenderedStringCache();
@@ -1005,7 +1004,7 @@ function renderSingleFileResult(
 		// for an empty-diff delete/move/no-op result mislabels the card. Fall
 		// back to the preview only when no details exist yet.
 		const editDiffPreview = details ? undefined : renderContext?.editDiffPreview;
-		const renderDiffFn = renderContext?.renderDiff ?? plainDiffRender;
+		const renderDiffFn = renderContext?.renderDiff ?? renderFallbackDiff;
 
 		if (diffSectionRenderDiffFn !== renderDiffFn) {
 			diffSectionRenderDiffFn = renderDiffFn;

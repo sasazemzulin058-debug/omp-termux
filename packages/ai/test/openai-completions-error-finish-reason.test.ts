@@ -197,3 +197,62 @@ describe("premature stream closure", () => {
 		expect(result.content).toEqual([{ type: "text", text: "Hi" }]);
 	}, 10_000);
 });
+
+describe("uppercase finish_reason", () => {
+	// Some OpenAI-compatible gateways fronting Gemini backends emit the native
+	// uppercase reasons (`STOP`, `MAX_TOKENS`) instead of the lowercase OpenAI
+	// contract values. `mapStopReason` must fold case and map `MAX_TOKENS` to
+	// `length`, not surface a clean completion as an error.
+	it("maps STOP to a clean stop", async () => {
+		const fetchMock = createSseFetch([
+			completionChunk({ choices: [{ index: 0, delta: { role: "assistant", content: "Hel" } }] }),
+			completionChunk({ choices: [{ index: 0, delta: {}, finish_reason: "STOP" }] }),
+			"[DONE]",
+		]);
+
+		const result = await streamOpenAICompletions(completionsModel, baseContext(), {
+			apiKey: "test-key",
+			fetch: fetchMock,
+		}).result();
+
+		expect(result.stopReason).toBe("stop");
+		expect(result.errorMessage).toBeUndefined();
+	}, 10_000);
+
+	it("maps MAX_TOKENS to length", async () => {
+		const fetchMock = createSseFetch([
+			completionChunk({ choices: [{ index: 0, delta: { role: "assistant", content: "Hel" } }] }),
+			completionChunk({ choices: [{ index: 0, delta: {}, finish_reason: "MAX_TOKENS" }] }),
+			"[DONE]",
+		]);
+
+		const result = await streamOpenAICompletions(completionsModel, baseContext(), {
+			apiKey: "test-key",
+			fetch: fetchMock,
+		}).result();
+
+		expect(result.stopReason).toBe("length");
+		expect(result.errorMessage).toBeUndefined();
+	}, 10_000);
+});
+
+describe("non-string finish_reason", () => {
+	// A malformed provider SSE can put a non-string `finish_reason` on the
+	// chunk. Folding case must not throw on it — it falls through to the
+	// unknown-reason error path with the original value surfaced.
+	it("falls through to an error instead of throwing", async () => {
+		const fetchMock = createSseFetch([
+			completionChunk({ choices: [{ index: 0, delta: { role: "assistant", content: "Hel" } }] }),
+			completionChunk({ choices: [{ index: 0, delta: {}, finish_reason: 42 }] }),
+			"[DONE]",
+		]);
+
+		const result = await streamOpenAICompletions(completionsModel, baseContext(), {
+			apiKey: "test-key",
+			fetch: fetchMock,
+		}).result();
+
+		expect(result.stopReason).toBe("error");
+		expect(result.errorMessage).toBe("Provider finish_reason: 42");
+	}, 10_000);
+});

@@ -207,7 +207,12 @@ export async function runIsolatedSubprocess(opts: IsolatedRunOptions): Promise<S
 			},
 		});
 		opts.onSubprocessResult?.(result);
-		if (deferredCleanup) return result;
+		// A successful result cannot be captured while deferred owner jobs or
+		// shutdown hooks may still write the worktree. Failed runs skip capture,
+		// so their cleanup remains asynchronous.
+		if (deferredCleanup && result.exitCode === 0) {
+			await deferredCleanup;
+		}
 		if (opts.mergeMode === "branch" && result.exitCode === 0) {
 			try {
 				const commitResult = await commitToBranch(

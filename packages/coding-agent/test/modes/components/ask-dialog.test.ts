@@ -227,6 +227,48 @@ describe("AskDialogComponent", () => {
 		expect(onSubmit.mock.calls[0][0].results[0].selectedOptions).toEqual(["Option A"]);
 	});
 
+	it("multi-select: intrinsic Recommended suffix visibly follows selection state", () => {
+		const onSubmit = vi.fn();
+		const component = new AskDialogComponent(
+			[
+				{
+					id: "target",
+					question: "Choose multiple?",
+					options: [{ label: "Generic MLE loop (Recommended)" }, { label: "Amazon-style (LPs)" }],
+					multi: true,
+				},
+			],
+			{ onSubmit, onCancel: vi.fn(), onPrompt: vi.fn() },
+		);
+
+		component.handleInput(SPACE);
+		expect(render(component)).toContain("❯ ☑ Generic MLE loop (Recommended)");
+
+		component.handleInput(SPACE);
+		expect(render(component)).toContain("❯ ☐ Generic MLE loop (Recommended)");
+
+		component.handleInput(SPACE);
+		component.handleInput(ENTER);
+		expect(onSubmit.mock.calls[0][0].results[0].selectedOptions).toEqual(["Generic MLE loop (Recommended)"]);
+	});
+
+	it("renders an intrinsic Recommended suffix only once for the recommended option", () => {
+		const component = new AskDialogComponent(
+			[
+				{
+					id: "target",
+					question: "Choose one?",
+					options: [{ label: "Generic MLE loop (Recommended)" }, { label: "Amazon-style (LPs)" }],
+					recommended: 0,
+				},
+			],
+			{ onSubmit: vi.fn(), onCancel: vi.fn(), onPrompt: vi.fn() },
+		);
+
+		expect(render(component)).toContain("Generic MLE loop (Recommended)");
+		expect(render(component)).not.toContain("Generic MLE loop (Recommended) (Recommended)");
+	});
+
 	it("tab-state persistence: answer question 0, Tab forward, Tab back, answer still present", () => {
 		const onSubmit = vi.fn();
 		const onCancel = vi.fn();

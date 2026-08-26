@@ -147,6 +147,8 @@ export const BUILTIN_SESSION_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 		subcommands: [
 			{ name: "edit", description: "Open todos in $EDITOR (Markdown round-trip)" },
 			{ name: "copy", description: "Copy todos as Markdown to clipboard" },
+			{ name: "expand", description: "Show every phase and task in the HUD" },
+			{ name: "collapse", description: "Restore the bounded HUD preview" },
 			{ name: "export", description: "Write todos as Markdown to a file (default: TODO.md)", usage: "[<path>]" },
 			{ name: "import", description: "Replace todos from a Markdown file (default: TODO.md)", usage: "[<path>]" },
 			{
@@ -456,6 +458,17 @@ export const BUILTIN_SESSION_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 		description: "Open the agents hub (per-agent model, prewalk, and advisor)",
 		handleTui: (_command, runtime) => {
 			runtime.ctx.showAgentsDashboard();
+			runtime.ctx.editor.setText("");
+		},
+	},
+	{
+		name: "git",
+		icon: "branch",
+		description: "Open the git UI (split diff viewer, staging, commit composer)",
+		inlineHint: "[revision]",
+		allowArgs: true,
+		handleTui: (command, runtime) => {
+			runtime.ctx.showGitUi(command.args.trim() || undefined);
 			runtime.ctx.editor.setText("");
 		},
 	},

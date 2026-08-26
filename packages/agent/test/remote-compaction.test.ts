@@ -1927,7 +1927,9 @@ describe("compact() remote compaction failure handling", () => {
 		const remote = getCompactionV2PreserveData(result.preserveData);
 		expect(remote?.usedTokens).toBe(55);
 		expect(remote?.replacementHistory.at(-1)).toEqual(compactionItem);
-		expect(result.summary).toContain("Remote compaction preserved provider-native history");
+		expect(result.summary).toBe(
+			"Remote compaction preserved provider-native history for this session. Compaction processed 55 input tokens.",
+		);
 		expect(completeSpy).not.toHaveBeenCalled();
 	});
 

@@ -152,3 +152,29 @@ describe("/collab slash command QR code rendering", () => {
 		expect(component.render(10).join("\n")).toContain("QR code hidden");
 	});
 });
+
+describe("CollabQrCodeComponent transcript height clipping", () => {
+	it("renders the full half-block symbol when the viewport allocates enough rows", () => {
+		const component = new CollabQrCodeComponent("https://my.omp.sh/#clip-test");
+		const full = component.render(120);
+		expect(full.length).toBeGreaterThan(8);
+		expect(full.join("\n")).toMatch(/\x1b\[(?:47|40)m/);
+
+		component.setTranscriptAllocation(full.length);
+		expect(component.render(120)).toEqual(full);
+	});
+
+	it("does not render a quiet-zone white line when the transcript clips to one row", () => {
+		const component = new CollabQrCodeComponent("https://my.omp.sh/#clip-test");
+		const full = component.render(120);
+		const first = full[0] ?? "";
+		expect(first).toMatch(/\x1b\[(?:47|40)m/);
+
+		component.setTranscriptAllocation(1);
+		const clipped = component.render(120);
+		expect(clipped).toHaveLength(1);
+		expect(clipped[0]).toContain("QR code hidden");
+		expect(clipped[0]).toContain("viewport height 1");
+		expect(clipped[0]).not.toMatch(/\x1b\[(?:47|40)m/);
+	});
+});

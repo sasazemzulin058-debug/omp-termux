@@ -208,6 +208,8 @@ export class ModelRegistry {
 	#suppressedSelectors: Map<string, number> = new Map();
 	#backgroundRefresh?: Promise<void>;
 	#credentialScopedCacheHydration?: Promise<void>;
+	#configuredDiscoveryInFlight: Map<DiscoveryProviderConfig, Map<ModelRefreshStrategy, Promise<Model<Api>[]>>> =
+		new Map();
 	#policyReapply?: Promise<void>;
 	#lastDiscoveryWarnings: Map<string, string> = new Map();
 	// Runtime extension model overlays — persist across refresh() cycles so that
@@ -418,6 +420,25 @@ export class ModelRegistry {
 		if (otherRuntimeProviderIds.size > 0) {
 			await this.#refreshRuntimeDiscoveries("online-if-uncached", otherRuntimeProviderIds);
 		}
+	}
+
+	/**
+	 * Refresh only the named discovery-backed providers, leaving every other
+	 * provider's discovered models and any in-flight runtime discovery untouched.
+	 *
+	 * Unlike {@link refreshProvider}, this does no static reload and never
+	 * re-fetches the other runtime managers, so restoring a saved
+	 * discovery-backed model (e.g. on `omp --resume`) cannot wait on — or
+	 * duplicate — an unrelated provider's network/OAuth work. Ids that are not
+	 * configured discovery providers are ignored by the underlying filter.
+	 */
+	async refreshDiscoverableProviders(
+		providerIds: Iterable<string>,
+		strategy: ModelRefreshStrategy = "online-if-uncached",
+	): Promise<void> {
+		const filter = new Set(providerIds);
+		if (filter.size === 0) return;
+		await this.#refreshRuntimeDiscoveries(strategy, filter);
 	}
 
 	/**
@@ -1233,14 +1254,21 @@ export class ModelRegistry {
 		).filter(provider => !disabledProviders.has(provider.provider));
 		const configuredDiscoveriesPromise =
 			selectedDiscoverableProviders.length === 0
-				? Promise.resolve<Model<Api>[]>([])
+				? Promise.resolve<{ provider: DiscoveryProviderConfig; models: Model<Api>[] }[]>([])
 				: Promise.all(
-						selectedDiscoverableProviders.map(provider => this.#discoverProviderModels(provider, strategy)),
-					).then(results => results.flat());
-		const [configuredDiscovered, builtInDiscovery] = await Promise.all([
+						selectedDiscoverableProviders.map(async provider => ({
+							provider,
+							models: await this.#discoverProviderModelsCoalesced(provider, strategy),
+						})),
+					);
+		const [configuredDiscoveryResults, builtInDiscovery] = await Promise.all([
 			configuredDiscoveriesPromise,
 			this.#discoverBuiltInProviderModels(strategy, providerFilter),
 		]);
+		const currentDiscoverableProviders = new Set(this.#discoverableProviders);
+		const configuredDiscovered = configuredDiscoveryResults
+			.filter(result => currentDiscoverableProviders.has(result.provider))
+			.flatMap(result => result.models);
 		const discovered = [...configuredDiscovered, ...builtInDiscovery.models];
 		if (discovered.length === 0 && builtInDiscovery.authoritativeProviders.size === 0) {
 			return;
@@ -1291,6 +1319,32 @@ export class ModelRegistry {
 			this.#applyRuntimeProviderOverrides(withProviderGuardrails),
 		);
 		this.#models = this.#applyRuntimeModelModifiers(this.#unprojectedModels);
+	}
+
+	/**
+	 * Share a configured provider's discovery request between concurrent full
+	 * and provider-scoped refreshes using the same cache/network strategy.
+	 */
+	#discoverProviderModelsCoalesced(
+		providerConfig: DiscoveryProviderConfig,
+		strategy: ModelRefreshStrategy,
+	): Promise<Model<Api>[]> {
+		let providerInFlight = this.#configuredDiscoveryInFlight.get(providerConfig);
+		const inFlight = providerInFlight?.get(strategy);
+		if (inFlight) return inFlight;
+
+		providerInFlight ??= new Map();
+		const discovery = this.#discoverProviderModels(providerConfig, strategy).finally(() => {
+			if (providerInFlight.get(strategy) === discovery) {
+				providerInFlight.delete(strategy);
+				if (providerInFlight.size === 0) {
+					this.#configuredDiscoveryInFlight.delete(providerConfig);
+				}
+			}
+		});
+		providerInFlight.set(strategy, discovery);
+		this.#configuredDiscoveryInFlight.set(providerConfig, providerInFlight);
+		return discovery;
 	}
 
 	#configuredDiscoveryCacheProviderId(providerConfig: DiscoveryProviderConfig): string {
@@ -1819,9 +1873,12 @@ export class ModelRegistry {
 			// Extended context off: cap models with a premium long-context price
 			// tier (e.g. GPT-5.6 bills 2x input above 272K) at the standard-pricing
 			// threshold so compaction fires before a request crosses into the tier.
-			// Explicit per-model `contextWindow` overrides reapply later in
-			// composition and win over this cap.
-			if (!extendedContext) {
+			// xai-oauth carries public xAI prices only for API-equivalent stats;
+			// SuperGrok requests remain subscription-backed, so its estimated tier
+			// must not constrain the runtime context window. Explicit per-model
+			// `contextWindow` overrides reapply later in composition and win over
+			// this cap.
+			if (!extendedContext && model.provider !== "xai-oauth") {
 				const threshold = model.cost.longContext?.inputThreshold;
 				if (threshold !== undefined && model.contextWindow !== null && model.contextWindow > threshold) {
 					model = applyModelOverride(model, { contextWindow: threshold });

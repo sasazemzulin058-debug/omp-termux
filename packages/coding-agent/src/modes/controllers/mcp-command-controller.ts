@@ -1630,7 +1630,14 @@ export class MCPCommandController {
 			this.ctx.ui.requestRender();
 		});
 		try {
-			const found = await this.#resolveServerForAuth(name);
+			// Race the config read against Esc: a slow/stuck `#resolveServerForAuth()`
+			// (e.g. config on a network FS) must surface cancellation immediately
+			// via the catch branch below, not stay suspended until the read settles.
+			const found = await raceAbortSignal(
+				this.#resolveServerForAuth(name),
+				abortController.signal,
+				() => new DOMException("Aborted", "AbortError"),
+			);
 
 			if (!found) {
 				this.ctx.mcpTestEscapeHandlers.delete(handleEscape);

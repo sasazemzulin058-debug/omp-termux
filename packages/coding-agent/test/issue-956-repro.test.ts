@@ -351,6 +351,52 @@ describe("interactive /mcp test", () => {
 		expect(mcpTestEscapeHandlers).toHaveLength(0);
 	});
 
+	it("cancels while the awaited lookup is still pending", async () => {
+		// The config read never settles (e.g. config on a stuck network FS).
+		const { promise: lookup } = Promise.withResolvers<{
+			mcpServers: Record<string, { type: string; command: string; args: string[] }>;
+		}>();
+		vi.spyOn(mcpConfigWriter, "readMCPConfigFile").mockReturnValue(lookup as never);
+		const presentCommandOutput = vi.fn();
+		const showStatus = vi.fn();
+		const mcpTestEscapeHandlers = new Set<() => void>();
+		const controller = new MCPCommandController({
+			mcpTestEscapeHandlers,
+			chatContainer: { addChild: vi.fn() },
+			present: vi.fn(),
+			presentCommandOutput,
+			ui: { requestRender: vi.fn() },
+			editor: {},
+			showError: vi.fn(),
+			showStatus,
+			session: { refreshMCPTools: vi.fn() },
+			mcpManager: {
+				getServerConfig: vi.fn(() => undefined),
+				getSource: vi.fn(() => undefined),
+				prepareConfig: vi.fn(async config => config),
+				getConnectionStatus: vi.fn(() => "connected"),
+			},
+		} as never);
+
+		const pending = controller.handle("/mcp test github");
+		expect(mcpTestEscapeHandlers).toHaveLength(1);
+
+		// Esc lands during the stuck read; consume like InputController does.
+		for (const handler of [...mcpTestEscapeHandlers]) {
+			mcpTestEscapeHandlers.delete(handler);
+			handler();
+		}
+
+		// The command must settle now, while the read is STILL pending — the
+		// lookup is never resolved. Racing the abort signal makes `handle`
+		// resolve; the old post-lookup check would hang until the read settled.
+		await pending;
+
+		expect(presentCommandOutput).not.toHaveBeenCalled();
+		expect(showStatus).toHaveBeenCalledWith(`Cancelled MCP test for "github"`);
+		expect(mcpTestEscapeHandlers).toHaveLength(0);
+	});
+
 	it("claims Esc ownership before the awaited server lookup", async () => {
 		const connection = {
 			name: "github",

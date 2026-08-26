@@ -2,6 +2,28 @@
 
 ## [Unreleased]
 
+## [18.0.6] - 2026-08-26
+
+### Added
+
+- Added conventional commit generation with support for dependency, security, configuration, UX, and infrastructure commit types, plus configurable caching and large-diff analysis behavior.
+
+## [18.0.5] - 2026-08-25
+
+### Added
+
+- Added `stableStringifyJson` for deterministic serialization of nested JSON-shaped data.
+
+### Fixed
+
+- Fixed managed Chrome-for-Testing installation failures when extracting the trusted browser download.
+
+## [18.0.4] - 2026-08-24
+
+### Added
+
+- Exported `getAvatarCacheDir` to resolve the avatar cache directory path.
+
 ## [18.0.1] - 2026-08-23
 
 ### Fixed

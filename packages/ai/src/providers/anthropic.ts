@@ -54,7 +54,7 @@ import {
 	kStreamingLastParseLen,
 	kStreamingPartialJson,
 } from "../utils/block-symbols";
-import { withEmptyCompletionRetry } from "../utils/empty-completion-retry";
+import { withReplaySafeStreamRetry } from "../utils/empty-completion-retry";
 import { AssistantMessageEventStream } from "../utils/event-stream";
 import { isFoundryEnabled } from "../utils/foundry";
 import { finalizeErrorMessage, type RawHttpRequestDump } from "../utils/http-inspector";
@@ -2873,14 +2873,13 @@ const streamAnthropicOnce = (
 };
 
 /**
- * Public entry: wrap the single-attempt streamer with bounded empty-completion
- * retries (a benign terminal stop carrying no content/usage would otherwise
- * stall the agent loop). The inner attempt keeps its own provider-failure retry
- * loop; this layer only re-issues a fresh request on an empty success. Shared
- * with the OpenAI-completions provider via `withEmptyCompletionRetry`.
+ * Public entry: retry benign empty completions before they reach the agent
+ * loop. The inner attempt owns Anthropic provider-failure retries.
  */
 export const streamAnthropic: StreamFunction<"anthropic-messages"> = (model, context, options) =>
-	withEmptyCompletionRetry(model, context, options, streamAnthropicOnce);
+	withReplaySafeStreamRetry(model, context, options, streamAnthropicOnce, {
+		retryEmptyCompletion: true,
+	});
 
 export type AnthropicSystemBlock = {
 	type: "text";

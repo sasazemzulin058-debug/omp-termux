@@ -391,3 +391,21 @@ describe("renderYieldSchema", () => {
 		expect(rendered).not.toContain("Your terminal `yield` MUST use exactly this shape");
 	});
 });
+
+describe("subagent peer roster prompt", () => {
+	const templatePath = path.resolve(import.meta.dir, "../src/prompts/system/subagent-system-prompt.md");
+
+	test("documents parked archaeology and revival when a live roster is present", async () => {
+		const templateSource = await fs.readFile(templatePath, "utf-8");
+		const rendered = prompt.render(templateSource, {
+			agent: "test-agent",
+			ircSelfId: "Child",
+			ircPeers: "- `LiveWorker` — task (sub, running)\n1 parked peer(s) omitted.",
+		});
+		expect(rendered).toContain("LiveWorker");
+		expect(rendered).toContain('status:"parked"');
+		expect(rendered).toContain("history://");
+		expect(rendered).toContain("agent://");
+		expect(rendered).toContain("never parked names");
+	});
+});

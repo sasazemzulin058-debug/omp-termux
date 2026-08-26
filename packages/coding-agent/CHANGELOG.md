@@ -2,6 +2,159 @@
 
 ## [Unreleased]
 
+## [18.0.6] - 2026-08-26
+
+### Added
+
+- Added fast, cached conventional commit message generation to the git TUI and `omp commit --legacy`, including automatic handling of whitespace-only changes, clearer commit scopes, and improved grammar and tense in generated summaries.
+- The git TUI sidebar now supports collapsing and expanding the Unstaged and Staged sections, with keyboard shortcuts to stage or unstage an entire section.
+- Long streaming thinking and reasoning output now continues into terminal scrollback during a turn instead of remaining clipped to the viewport.
+
+### Changed
+
+- `omp commit --legacy` now uses the same conventional commit message generation as the git TUI.
+- The git TUI sidebar now groups new files separately from tracked changes in the Unstaged section, while Staged and commit file lists use a unified status-based view.
+- Improved resilience when streaming output changes during rendering, preventing incomplete blocks from causing further display updates to fail.
+
+### Fixed
+
+- Commit-message generation errors in the git TUI now remain visible in the status bar instead of disappearing and returning to an idle state.
+- Fixed `omp update` leaving standalone Windows binaries on the old version when stale Bun launcher metadata was present, and preserved launchers installed by a newer concurrent update during binary repair ([#9806](https://github.com/can1357/oh-my-pi/issues/9806)).
+- Quitting `omp git` during commit-message generation now exits cleanly without leaving the process running.
+
+## [18.0.5] - 2026-08-25
+
+### Added
+
+- Added append-only transcript declarations and stable-row APIs for components with immutable history prefixes.
+- Added the `:img` read selector to rasterize local SVG and SVGZ files for vision input.
+- Added side-by-side image and SVG previews to `omp git`, including Git LFS object resolution and clear placeholders for unavailable or unsupported binary content.
+- Added the `omp if-bench` command for zero-tool instruction-following and working-memory benchmarking across models, with live progress and ranked results.
+- Added `q` to quit the git TUI.
+- Added advanced whitespace filtering to the git TUI, including formatting-only changes and import-only changes in TypeScript, JavaScript, Rust, and Go.
+- Improved the git TUI sidebar by compressing single-child directory chains and separating new or untracked files from tracked changes.
+- Added Yolo-Auto to `/login` and documented the `YOLO_AUTO_API_KEY` environment variable.
+- Updated the OpenRouter `/login` flow to support browser-based sign-in and automatic API-key provisioning, while retaining support for pasted `sk-or-…` keys.
+- Added DeepInfra support for the `image_gen` and `tts` tools, including provider selection and MP3 or WAV output for text-to-speech.
+
+### Changed
+
+- Standardized completed edit results with hashline-style paths and numbered previews across edit modes.
+- Improved `omp git` responsiveness with immediate file rendering, progressive syntax highlighting, and deferred large-commit statistics.
+- Documented that `retry.maxDelayMs: 0` permits provider-requested quota waits to continue until automatic retry, rather than enforcing a wait ceiling.
+- Expanded git TUI navigation and file-management shortcuts, including refresh, stage/unstage, directory operations, hunk and file navigation, pane movement, diff-view selection, commit-form access, and paging.
+
+### Fixed
+
+- Fixed race condition where tunnel startup was incorrectly reported as failure on quick process exit
+- Fixed Obsidian theme task instructions and usage-limit text becoming unreadable against dark backgrounds.
+- Fixed marketplace-installed plugins failing to discover their `rules/` directories.
+- Fixed advisor notes in `/tree` displaying internal XML wrappers instead of readable text.
+- Fixed successful agent and subagent results being discarded when cleanup exceeded its deadline.
+- Fixed exiting plan mode mid-turn so the active turn now stops immediately.
+- Fixed Windows workstation context reporting a virtual display adapter instead of the physical GPU.
+- Fixed numbered selector menus such as `/review` ignoring digit-key selection.
+- Fixed the welcome screen failing to reflow after terminal resizing.
+- Fixed transcript layout issues that could clip assistant text, leave stale tool cards, disrupt scrolling, or make large-session rendering and shutdown unreliable.
+- Fixed streamed assistant responses failing when later provider updates revised earlier Markdown.
+- Fixed cache-miss status placement after streamed assistant output.
+- Fixed `/model` role-cycle icons overlapping their ordinal on full-width terminals.
+- Fixed constrained `/collab` QR codes rendering as empty rows; the browser URL hint is now shown instead.
+- Fixed `hub list` and child peer rosters incorrectly including parked agents in model context and restored accurate status counts.
+- Fixed browser relay clients hanging when enabling the Runtime domain on a shared tab.
+- Fixed interactive TTSR interruptions being displayed as errors after successful rule injection.
+- Fixed fast tool completions leaving a persistent running summary that obstructed later output.
+- Fixed the Windows console welcome header being duplicated after cold launch.
+- Fixed git TUI hunk navigation feedback when the sidebar has focus and preserved file selection after staging or unstaging.
+- Fixed long sessions becoming unrecoverable when providers reject histories exceeding message-count limits.
+- Improved `/dump` output with readable system-notice titles and XML-fenced raw payloads.
+- Fixed kernel sessions failing to recover when cancellation was reported by a dead kernel.
+- Applied advisor tool-call loop limits to prevent repeated failing calls from continuing without bound.
+- Fixed `lsp rename_file` incorrectly reporting inaccessible paths as nonexistent and mishandling uncertain destination checks.
+- Fixed LSP clients with different launch or initialization configurations incorrectly sharing one process; reloading now replaces superseded clients.
+- Fixed the browser relay leaving Chrome's debugging infobar attached after the last client released a tab.
+- Fixed auto-retry countdowns appearing frozen during long provider-requested waits.
+- Fixed the Todo HUD becoming stale after viewing a subagent and returning to the main session.
+- Fixed child-task artifact links and duplicate `hub jobs` result bodies.
+- Fixed `omp update` showing a POSIX reinstall command on Windows after a package-rename migration failure.
+- Preserved `thinking.requiresEffort: false` in custom model configuration so supported local Qwen templates can disable thinking explicitly.
+- Fixed project settings from shared capability files being able to replace an entire settings group when a conflicting non-object value is present; the conflicting value is now ignored with a warning.
+- Jina Reader requests now use configured credentials for higher authenticated rate limits while remaining available anonymously.
+- Fixed advisor session persistence and loading performance for repeated retries and unusually large advisor transcripts.
+- Fixed failed `browser.open` calls leaving OMP-spawned application processes running when no tab could be acquired.
+- Improved browser-handle failures with prompt, operation-specific timeout errors instead of waiting for the entire browser cell.
+- Fixed autonomous runs becoming idle after thinking-only length stops during speculative handoff.
+- Fixed completed assistant replies disappearing from the live transcript under viewport pressure.
+- Accelerated SHA-2 and SHA-3 checksums on supported ARM64 hardware.
+- Fixed large MCP tool payloads being stored redundantly on disk.
+
+## [18.0.4] - 2026-08-24
+
+### Added
+
+- Added the `omp git` command (and `/git` slash command): an interactive, fullscreen repository TUI featuring a split/inline/hunk diff viewer with minimap scrollbar, syntax highlighting, a staging sidebar with line-level staging, commit composer with amend support, and author avatars. Supports keyboard navigation, full mouse interaction, and pinning views to specific commits via `omp git <revision>`.
+- Overhauled the `/extensions` Extension Control Center into a fullscreen alternate-screen dashboard with mouse support, tab navigation, unified inspector views across extension types, live MCP connection management, and expandable details (`Ctrl+O`).
+- Added support for live syntax highlighting in streaming markdown code blocks.
+- Added an immediately editable startup composer for interactive launches, preserving drafts typed while session initialization is in progress.
+
+### Changed
+
+- Improved streaming markdown and thinking block rendering performance on long sessions by batching token updates and eliminating redundant re-processing.
+- Optimized streaming edit verification and session restoration for large files and history-heavy sessions.
+
+### Fixed
+
+- Fixed invalid streamed edit patches occasionally reaching the edit tool instead of being stopped early.
+- Fixed `!` shell commands on zsh/fish by running them inside a real PTY, resolving terminal option errors and preserving ANSI color formatting.
+- Fixed transcript layout corruption and viewport compression caused by interrupted streams, empty blocks, or collapsed wrapped diff lines.
+- Fixed transcript scrollback loss where output below sticky cards (such as hub-wait or todo) failed to commit to terminal history.
+- Improved HTTP 413 error handling: accurately distinguish between true token-context overflows and provider byte/media budget limits, persist terminal errors across sessions, and enable proper fallback-chain model switching.
+- Fixed discovery-backed session models failing to restore when resuming sessions with `omp --resume` or `--continue`.
+- Fixed browser tool initial launch timeouts on slow or cold host environments.
+- Fixed eval runtime probes hanging on Windows due to inherited stdin handles.
+- Fixed Claude models replaying partial thinking blocks as conversation text when interrupted mid-turn.
+- Fixed image request failures with Kimi Code and Moonshot models by ensuring inline base64 image delivery.
+- Fixed SQLite WAL-mode databases without sidecars failing to open in the Read tool.
+- Fixed pasted image thumbnail rendering in the composer attachment preview.
+- Fixed Linux startup event loop delays caused by legacy extension cache fsync churn.
+- Fixed subagent advisors abandoning reviews on the final yield turn during session teardown.
+- Fixed `/todo` expand/collapse commands and corrected `/shake thinking` reporting.
+
+## [18.0.3] - 2026-08-23
+
+### Added
+
+- Added opt-in edit auto-repair (`edit.autoRepair.enabled`): when an edit breaks a file's AST parse, the smol model repairs the broken region in place — validated by re-parse, revert-rejected, and surfaced as a diff in the tool result — instead of only warning.
+
+### Fixed
+
+- Resolved cursor drift and text duplication caused by overlapping or out-of-bounds spelling ranges
+- Squeezed transcript tool rows no longer render as a bare unstyled `╭─ Hub` frame: a squeezed block keeps its real render whenever it fits the allocated rows, and blocks that genuinely overflow fold to a themed frame that names the tool's activity (e.g. `Hub · send → Main`).
+- Python/Ruby/Julia eval cells that hit their wall-clock timeout during a `parallel()`/`agent()`/`tool.*` fan-out no longer get their kernel force-killed (losing all session state): the timeout now aborts in-flight bridge calls so the runner unwinds as a clean KeyboardInterrupt and the kernel survives.
+- Multi-select ask options whose labels end in `(Recommended)` now show their checked state and avoid duplicate recommendation suffixes ([#9452](https://github.com/can1357/oh-my-pi/issues/9452)).
+
+## [18.0.2] - 2026-08-23
+
+### Added
+
+- Added update channels: `omp update --canary` installs canary prereleases from the npm `canary` dist-tag and `omp update --stable` switches back; the chosen channel persists and drives the startup update check.
+
+### Changed
+
+- Unexpected Stops now offers None, Mechanical (default), and Smart modes; Smart adds small-model classification to recover text-only stops.
+
+### Fixed
+
+- Fixed crash during update output when theme configuration is missing
+- Fixed flickering typo undercurls while typing by projecting state during revalidation
+- Fixed self-update on Windows leaving the `omp` command missing or stuck on the previous version when package-manager reinstalls fail on running files
+- Ctrl+T now toggles every thinking block in the transcript, including blocks already retired to terminal history ([#9440](https://github.com/can1357/oh-my-pi/issues/9440)).
+- Copilot Grok 4.6 Responses streams that repeatedly close after thinking now stop after one same-model retry instead of consuming the full retry budget ([#9427](https://github.com/can1357/oh-my-pi/issues/9427)).
+- `/mcp test` now reports cancellation immediately when Esc is pressed during a slow config lookup, instead of staying suspended until the read settles ([#9419](https://github.com/can1357/oh-my-pi/issues/9419)).
+- Fixed remote browser relay endpoints advertising a client-local CDP WebSocket URL: `/json/version` now reflects a valid request `Host` and falls back to the relay's loopback address when it is absent or unusable.
+- Restored red/green and syntax highlighting in edit-tool result bodies ([#9439](https://github.com/can1357/oh-my-pi/issues/9439)).
+- Fixed goal mode failing to start (`No such tool: xd://goal`) when `goal.enabled` was turned on after the session had already started; the `goal` tool is now registered lazily on goal-mode entry ([#9444](https://github.com/can1357/oh-my-pi/issues/9444)).
+
 ## [18.0.1] - 2026-08-23
 
 ### Added
@@ -9,7 +162,6 @@
 - Plan review can save a plan to a chosen path and start a new session.
 - Edit results now warn when an edit leaves a previously parsing file unparseable, independent of the `edit.blackbox.enabled` recorder.
 - Added provider-wide Amazon Bedrock guardrail settings to models configuration, including custom models.
-
 - Added the `/pin` slash command to pin and unpin sessions so they stay at the top of the `--resume` picker UI.
 - Optional edit parse-regression capture appends the before/after content, model, variant, and arguments to `~/.omp/agent/edit-blackbox.jsonl` when `edit.blackbox.enabled` is enabled.
 

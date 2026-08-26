@@ -1490,7 +1490,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 		const fullOutputThreshold = 5000;
 		let preview = output;
 		let truncated = false;
-		if (outputCharCount > fullOutputThreshold) {
+		if (outputCharCount > fullOutputThreshold && result.outputPath) {
 			const slice = output.slice(0, fullOutputThreshold);
 			const lastNewline = slice.lastIndexOf("\n");
 			preview = lastNewline >= 0 ? slice.slice(0, lastNewline) : slice;

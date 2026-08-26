@@ -71,6 +71,7 @@ import type {
 	ReadToolResultEvent,
 	ToolDefinition,
 	ToolResultEvent,
+	ToolShellEnvironmentContext,
 	WriteToolResultEvent,
 } from "./extensions/types";
 import { Type } from "./legacy-typebox";
@@ -94,11 +95,7 @@ interface LegacyThemeLike {
 	bold(text: string): string;
 }
 
-export interface BashSpawnContext {
-	command: string;
-	cwd: string;
-	env: NodeJS.ProcessEnv;
-}
+export type BashSpawnContext = ToolShellEnvironmentContext;
 
 export type BashSpawnHook = (context: BashSpawnContext) => BashSpawnContext;
 
@@ -488,12 +485,30 @@ export function createReadTool(cwd: string, options?: ReadToolOptions): ToolDefi
 /** Create the legacy bash tool definition. */
 export function createBashToolDefinition(cwd: string, options?: BashToolOptions): ToolDefinition {
 	const tool = createRegistryTool(cwd, "bash");
+	const spawnHook = options?.spawnHook;
+	const shellEnv = spawnHook
+		? (spawn: ToolShellEnvironmentContext): Record<string, string> => {
+				const baseline = { ...spawn.env };
+				const result = spawnHook(spawn);
+				// Legacy hooks conventionally return `{ ...context.env, EXTRA }`.
+				// The consumer applies this as per-command overrides on an already
+				// filtered base env, so forwarding the whole object would reintroduce
+				// everything filterChildShellEnv removed. Forward only entries the
+				// hook added or changed relative to the env it was handed.
+				return Object.fromEntries(
+					Object.entries(result.env).filter(
+						(entry): entry is [string, string] => typeof entry[1] === "string" && baseline[entry[0]] !== entry[1],
+					),
+				);
+			}
+		: undefined;
 	return markToolDefinition({
 		name: "bash",
 		label: "Bash",
 		description: tool.description,
 		parameters: legacyBashSchema,
 		approval: "exec",
+		...(shellEnv ? { shellEnv } : {}),
 		renderCall: (params, optionsArg, themeArg) => {
 			const theme = renderTheme(optionsArg, themeArg);
 			const command = stringField(params, "command") ?? "";

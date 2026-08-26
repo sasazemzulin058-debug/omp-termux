@@ -126,7 +126,8 @@ async function checkForNewVersion(currentVersion: string): Promise<string | unde
 		return;
 	}
 	try {
-		const release = await getLatestRelease({ timeoutMs: 5_000 });
+		const channel = settings.get("update.channel");
+		const release = await getLatestRelease({ timeoutMs: 5_000, channel });
 		return Bun.semver.order(release.version, currentVersion) > 0 ? release.version : undefined;
 	} catch {
 		return undefined;
@@ -562,13 +563,13 @@ async function runInteractiveMode(
 	// Consume failures immediately, but defer any banner until the transcript is stable.
 	const checkedVersionPromise = versionCheckPromise.catch(() => undefined);
 
-	// Cold-launch cleanup: the first paint already clears native history, and this
-	// replay replaces the welcome/startup frame with the resumed/new transcript.
-	// Every in-process session load also uses `clearTerminalHistory`; cold launch
-	// follows the same clean-cutover path instead of preserving a previous run's
-	// transcript above the fresh one.
+	// `init` already cleared native history before painting the startup frame.
+	// The normal replay offers resumed transcript rows to the frame provider and
+	// repaints the viewport, so another destructive clear would only archive the
+	// startup frame on conhost (issue #9597). In-process session replacements
+	// still request `clearTerminalHistory` at their own callsites.
 	await logger.time("InteractiveMode.renderInitialMessages", () =>
-		mode.renderInitialMessages({ preserveExistingChat: true, clearTerminalHistory: true }),
+		mode.renderInitialMessages({ preserveExistingChat: true }),
 	);
 	// A resolved version check must not insert its banner into a partial transcript.
 	checkedVersionPromise.then(newVersion => {

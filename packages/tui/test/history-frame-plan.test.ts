@@ -25,6 +25,15 @@ class Provider implements TerminalFrameProvider {
 	}
 }
 
+class CountingTerminal extends VirtualTerminal {
+	readonly writes: string[] = [];
+
+	override write(data: string): void {
+		this.writes.push(data);
+		super.write(data);
+	}
+}
+
 const scheduler = {
 	now: () => 0,
 	scheduleImmediate(callback: () => void) {
@@ -81,7 +90,7 @@ class WidthReplayProvider implements TerminalFrameProvider {
 		this.#retired = true;
 	}
 
-	resetHistory(): void {
+	beginHistoryReplay(): void {
 		this.#retired = false;
 		this.resetCount++;
 	}
@@ -111,9 +120,35 @@ class HeightReplayProvider implements TerminalFrameProvider {
 		this.#retired = true;
 	}
 
-	resetHistory(): void {
+	beginHistoryReplay(): void {
 		this.#retired = false;
 		this.resetCount++;
+	}
+}
+
+class FlushProvider implements TerminalFrameProvider {
+	#nextId = 1;
+	#pending = ["final one", "final two"];
+	#flushing = false;
+	readonly acknowledged: number[] = [];
+
+	renderFrame(): TerminalFramePlan {
+		const row = this.#flushing ? this.#pending[0] : undefined;
+		return {
+			history: row === undefined ? undefined : { id: this.#nextId, rows: [row] },
+			viewport: ["editor"],
+		};
+	}
+
+	acknowledgeHistory(id: number): void {
+		if (id !== this.#nextId || this.#pending.length === 0) return;
+		this.acknowledged.push(id);
+		this.#nextId++;
+		this.#pending.shift();
+	}
+
+	beginHistoryFlush(): void {
+		this.#flushing = true;
 	}
 }
 
@@ -136,6 +171,42 @@ describe("terminal frame plans", () => {
 		expect(terminal.getViewport().map(row => row.trimEnd())).toEqual(["history two", "editor", "status"]);
 		tui.stop();
 	});
+	it("bottom-splits a complete replay and serializes it in one terminal write", () => {
+		const terminal = new CountingTerminal(20, 4);
+		const provider = new Provider({ viewport: ["live", "editor"] });
+		const tui = new TUI(terminal, undefined, { renderScheduler: scheduler });
+		tui.setFrameProvider(provider);
+		terminal.writes.length = 0;
+
+		provider.plan = {
+			history: { id: 1, rows: ["history one", "history two", "history three", "history four"], kind: "replay" },
+			viewport: ["live", "editor"],
+		};
+		tui.requestRender(true);
+
+		expect(terminal.writes).toHaveLength(1);
+		expect(provider.acknowledged).toEqual([1]);
+		expect(plainBuffer(terminal)).toEqual([
+			"history one",
+			"history two",
+			"history three",
+			"history four",
+			"live",
+			"editor",
+		]);
+
+		tui.requestRender(true);
+		expect(plainBuffer(terminal)).toEqual([
+			"history one",
+			"history two",
+			"history three",
+			"history four",
+			"live",
+			"editor",
+		]);
+		tui.stop();
+	});
+
 	it("repaints a viewport-only frame in place without scrolling", () => {
 		const terminal = new VirtualTerminal(20, 4);
 		const provider = new Provider({ viewport: ["spinner one", "editor"] });
@@ -147,6 +218,19 @@ describe("terminal frame plans", () => {
 		expect(terminal.getBufferPosition().baseY).toBe(0);
 		expect(terminal.getViewport().map(row => row.trimEnd())).toEqual(["spinner two", "editor", "", ""]);
 		tui.stop();
+	});
+
+	it("flushes every eligible history batch before terminal handoff", () => {
+		const terminal = new VirtualTerminal(20, 3);
+		const provider = new FlushProvider();
+		const tui = new TUI(terminal, undefined, { renderScheduler: scheduler });
+		tui.setFrameProvider(provider);
+
+		tui.stop();
+
+		expect(provider.acknowledged).toEqual([1, 2]);
+		expect(plainBuffer(terminal)).toContain("final one");
+		expect(plainBuffer(terminal)).toContain("final two");
 	});
 
 	it("keeps visible history above the anchored viewport while room remains", () => {
@@ -187,6 +271,7 @@ describe("terminal frame plans", () => {
 		).toEqual(["welcome", "editor"]);
 
 		renderScheduler.settle();
+		terminal.sendInput("\x1b[2;17R");
 		renderScheduler.settle();
 		expect(
 			terminal
@@ -219,7 +304,8 @@ describe("terminal frame plans", () => {
 
 		terminal.resize(20, 2); // a single large shrink can push live rows before the callback runs
 		renderScheduler.settle(); // restore the normal buffer, start the anchor probe
-		renderScheduler.settle(); // probe timeout → settled repaint
+		renderScheduler.settle(); // probe timeout → one bounded retry under a multiplexer
+		renderScheduler.settle(); // final timeout → settled repaint (no-op settle on direct)
 
 		const scrollback = plainBuffer(terminal).slice(0, terminal.getBufferPosition().baseY);
 		expect(scrollback.some(row => row.includes("dot-live"))).toBe(false);

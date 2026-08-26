@@ -1,6 +1,7 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import type { AssistantMessage } from "@oh-my-pi/pi-ai";
+import { logger } from "@oh-my-pi/pi-utils";
 import { ADVISOR_TRANSCRIPT_FILENAME, isAdvisorTranscriptName } from "../advisor/transcript-recorder";
 import { resolveExplicitModelRole } from "../config/model-resolver";
 import { assistantTurnProducedOutput } from "../session/messages";
@@ -19,6 +20,13 @@ import {
 
 /** Maximum prefix entries inspected for task metadata. */
 const MAX_METADATA_LINES = 64;
+/**
+ * Upper bound on records scanned to compute an advisor transcript's Hub metrics.
+ * Well above any healthy advisor file (post issue #9553 the file grows O(new
+ * content)); it exists only so a legacy multi-GB transcript can't stall the
+ * render thread when the Hub roster is built.
+ */
+const MAX_ADVISOR_HISTORY_LINES = 200_000;
 
 interface PersistedAgentMetadata {
 	activity?: string;
@@ -155,7 +163,17 @@ async function readPersistedAgentHistory(
 				const message = recordOf(record.message);
 				if (message?.role === "assistant") assistantById.set(id, assistantMetrics(message));
 			},
-			{ shouldContinue },
+			// Advisor transcripts are the one file that can grow pathologically large
+			// (issue #9553); cap their scan so one bad transcript can't stall the Hub
+			// on the render thread. Healthy advisor files sit far below this bound,
+			// so their metrics stay exact; a capped legacy file reports approximate
+			// (lower-bound) cost/tokens rather than freezing `hub list`.
+			{
+				shouldContinue,
+				maxRecords: isAdvisorTranscriptName(path.basename(transcript.sessionFile))
+					? MAX_ADVISOR_HISTORY_LINES
+					: undefined,
+			},
 		);
 	} catch {
 		return {};
@@ -322,6 +340,61 @@ async function readPersistedVibeChildIds(sessionFile: string, shouldContinue: ()
 	} catch {
 		return new Set();
 	}
+}
+
+const kPersistedRosterLatches = Symbol("persistedRosterLatches");
+
+interface RegistryWithPersistedRosterLatches extends AgentRegistry {
+	[kPersistedRosterLatches]?: Map<string, Promise<void>>;
+}
+
+async function resolveRootSessionFile(registry: AgentRegistry, hint?: string | null): Promise<string | undefined> {
+	const mainFile = registry.get(MAIN_AGENT_ID)?.sessionFile;
+	const candidate =
+		typeof hint === "string" && hint.endsWith(".jsonl")
+			? hint
+			: typeof mainFile === "string" && mainFile.endsWith(".jsonl")
+				? mainFile
+				: undefined;
+	if (candidate === undefined) return undefined;
+	let current: string = path.resolve(candidate);
+	for (let depth = 0; depth < 8; depth++) {
+		const parentFile: string = `${path.dirname(current)}.jsonl`;
+		if (!(await Bun.file(parentFile).exists())) return current;
+		current = parentFile;
+	}
+	return current;
+}
+
+/**
+ * Restore parked sibling transcripts from the interactive root session once
+ * per root. Live in-memory peers do not skip the scan; an empty tree is
+ * not scanned again.
+ */
+export async function ensurePersistedRoster(registry: AgentRegistry, sessionFileHint?: string | null): Promise<void> {
+	let root: string | undefined;
+	try {
+		root = await resolveRootSessionFile(registry, sessionFileHint);
+	} catch (error) {
+		logger.warn("Failed to resolve persisted agent roster", { error: String(error) });
+		return;
+	}
+	if (!root) return;
+
+	const taggedRegistry = registry as RegistryWithPersistedRosterLatches;
+	let latches = taggedRegistry[kPersistedRosterLatches];
+	if (!latches) {
+		latches = new Map();
+		taggedRegistry[kPersistedRosterLatches] = latches;
+	}
+	const existing = latches.get(root);
+	if (existing) return existing;
+	const pending = registerPersistedSubagents(registry, root).catch(error => {
+		latches.delete(root);
+		logger.warn("Failed to restore persisted agent roster", { root, error: String(error) });
+	});
+	latches.set(root, pending);
+	await pending;
 }
 
 /** Register persisted subagent and advisor transcripts as parked registry refs. */

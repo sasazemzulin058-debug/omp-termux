@@ -6,7 +6,7 @@
  * lifecycle manager, injecting a non-interrupting aside into busy ones) and
  * returns delivery receipts immediately. Replies are real turns by the
  * recipient, observed with `wait` (or the `await: true` send sugar). `inbox`
- * drains pending messages; `list` shows every addressable peer.
+ * drains pending messages; `list` shows actionable running+idle peers by default.
  */
 
 import type { AgentToolResult } from "@oh-my-pi/pi-agent-core";
@@ -17,7 +17,7 @@ import type { RenderResultOptions } from "../../extensibility/custom-tools/types
 import { IrcBus, type IrcDeliveryReceipt, type IrcMessage } from "../../irc/bus";
 import type { Theme } from "../../modes/theme/theme";
 import { type AgentRegistry, MAIN_AGENT_ID } from "../../registry/agent-registry";
-import { registerPersistedSubagents } from "../../registry/persisted-agents";
+import { ensurePersistedRoster } from "../../registry/persisted-agents";
 import { canSpawnAtDepth } from "../../task/types";
 import { Ellipsis, renderStatusLine, renderTreeList, truncateToWidth } from "../../tui";
 import {
@@ -29,9 +29,63 @@ import {
 	replaceTabs,
 	type ToolUIColor,
 } from "../render-utils";
-import { type CoordinationDetails, type HubRenderArgs, hubErrorResult } from "./types";
+import {
+	type CoordinationDetails,
+	DEFAULT_HUB_LIST_LIMIT,
+	type HubListStatus,
+	type HubRenderArgs,
+	type HubRosterCounts,
+	hubErrorResult,
+	MAX_HUB_LIST_LIMIT,
+} from "./types";
+
+export { DEFAULT_HUB_LIST_LIMIT, MAX_HUB_LIST_LIMIT } from "./types";
 
 export const DEFAULT_IRC_TIMEOUT_MS = 120_000;
+
+const LIST_STATUS_ORDER: Record<string, number> = { running: 0, idle: 1, parked: 2 };
+
+export interface HubListParams {
+	status?: HubListStatus;
+	limit?: number;
+}
+
+function isAddressablePeer(ref: { id: string; kind: string; status: string }, senderId: string): boolean {
+	return ref.id !== senderId && ref.kind !== "advisor" && ref.status !== "aborted";
+}
+
+function resolveHubListLimit(limit: number | undefined): number {
+	if (limit === undefined || !Number.isFinite(limit) || limit <= 0) return DEFAULT_HUB_LIST_LIMIT;
+	return Math.min(Math.max(1, Math.floor(limit)), MAX_HUB_LIST_LIMIT);
+}
+
+function selectListRefs(registry: AgentRegistry, senderId: string, status: HubListStatus | undefined) {
+	if (status === "parked") {
+		return registry.list().filter(ref => isAddressablePeer(ref, senderId) && ref.status === "parked");
+	}
+	const live = registry.listVisibleTo(senderId);
+	return status ? live.filter(ref => ref.status === status) : live;
+}
+
+function countAddressable(refs: { status: string }[]): Pick<HubRosterCounts, "running" | "idle" | "parked"> {
+	const counts = { running: 0, idle: 0, parked: 0 };
+	for (const ref of refs) {
+		if (ref.status === "running") counts.running++;
+		else if (ref.status === "idle") counts.idle++;
+		else if (ref.status === "parked") counts.parked++;
+	}
+	return counts;
+}
+
+function formatRosterSummary(counts: HubRosterCounts, emptyNoun: string): string {
+	const tally = `running ${counts.running}, idle ${counts.idle}, parked ${counts.parked}; shown ${counts.shown}, truncated ${counts.truncated}`;
+	if (counts.shown === 0) {
+		return counts.running + counts.idle + counts.parked === 0
+			? `No other agents (${tally}).`
+			: `No ${emptyNoun} (${tally}).`;
+	}
+	return `${counts.shown} peer(s) (${tally}):`;
+}
 
 /**
  * Messaging availability: there must be someone to chat with. True for every
@@ -83,54 +137,65 @@ export function messageResult(senderId: string, waited: IrcMessage): AgentToolRe
 }
 
 /**
- * List every addressable peer, restoring parked refs from disk when a resumed
- * session has no in-memory roster.
+ * List addressable peers. Default is running+idle with a conservative bound.
+ * One latched restore from the root session file runs before counts, even
+ * when live siblings are already in memory.
  */
 export async function executeList(
 	registry: AgentRegistry,
 	senderId: string,
+	params: HubListParams = {},
+	sessionFileHint?: string | null,
 ): Promise<AgentToolResult<CoordinationDetails>> {
-	let refs = registry.list();
-	if (!refs.some(ref => ref.id !== senderId && ref.status !== "aborted" && ref.kind !== "advisor")) {
-		await registerPersistedSubagents(registry, registry.get(senderId)?.sessionFile);
-		refs = registry.list();
-	}
+	await ensurePersistedRoster(registry, sessionFileHint ?? registry.get(senderId)?.sessionFile);
+	const refs = registry.list();
+
+	const selected = selectListRefs(registry, senderId, params.status);
+	selected.sort(
+		(a, b) =>
+			(LIST_STATUS_ORDER[a.status] ?? 9) - (LIST_STATUS_ORDER[b.status] ?? 9) || b.lastActivity - a.lastActivity,
+	);
+	const limit = resolveHubListLimit(params.limit);
+	const truncated = Math.max(0, selected.length - limit);
+	const shownRefs = truncated > 0 ? selected.slice(0, limit) : selected;
+	const counts: HubRosterCounts = {
+		...countAddressable(refs.filter(ref => isAddressablePeer(ref, senderId))),
+		shown: shownRefs.length,
+		truncated,
+	};
 
 	const bus = IrcBus.global();
-	const peers = refs
-		.filter(ref => ref.id !== senderId && ref.status !== "aborted" && ref.kind !== "advisor")
-		.map(ref => ({
-			id: ref.id,
-			displayName: ref.displayName,
-			kind: ref.kind,
-			status: ref.status,
-			parentId: ref.parentId,
-			unread: bus.unreadCount(ref.id),
-			lastActivity: ref.lastActivity,
-			activity: ref.activity,
-		}));
-	const lines: string[] = [];
-	if (peers.length === 0) {
-		lines.push("No other agents.");
-	} else {
-		lines.push(`${peers.length} peer(s):`);
-		for (const peer of peers) {
-			const extras = [
-				peer.activity || undefined,
-				peer.unread > 0 ? `unread ${peer.unread}` : undefined,
-				peer.parentId ? `parent ${peer.parentId}` : undefined,
-				`active ${formatDuration(Date.now() - peer.lastActivity)} ago`,
-			].filter(Boolean);
-			lines.push(`- ${peer.id} [${peer.displayName} · ${peer.kind} · ${peer.status}] — ${extras.join(", ")}`);
-		}
-		if (peers.some(peer => peer.status === "parked")) {
-			lines.push("");
-			lines.push("Parked agents are revived automatically when you message them.");
-		}
+	const peers = shownRefs.map(ref => ({
+		id: ref.id,
+		displayName: ref.displayName,
+		kind: ref.kind,
+		status: ref.status,
+		parentId: ref.parentId,
+		unread: bus.unreadCount(ref.id),
+		lastActivity: ref.lastActivity,
+		activity: ref.activity,
+	}));
+	const lines = [formatRosterSummary(counts, params.status ? `${params.status} peers` : "actionable peers")];
+	for (const peer of peers) {
+		const extras = [
+			peer.activity || undefined,
+			peer.unread > 0 ? `unread ${peer.unread}` : undefined,
+			peer.parentId ? `parent ${peer.parentId}` : undefined,
+			`active ${formatDuration(Date.now() - peer.lastActivity)} ago`,
+		].filter(Boolean);
+		lines.push(`- ${peer.id} [${peer.displayName} · ${peer.kind} · ${peer.status}] — ${extras.join(", ")}`);
+	}
+	if (counts.parked > 0) {
+		lines.push("");
+		lines.push(
+			params.status === "parked"
+				? "Parked agents are revived automatically when you message them."
+				: 'Parked agents remain queryable with status="parked" and are revived automatically when you message them.',
+		);
 	}
 	return {
 		content: [{ type: "text", text: lines.join("\n") }],
-		details: { op: "list", from: senderId, peers },
+		details: { op: "list", from: senderId, peers, counts },
 	};
 }
 
@@ -354,8 +419,6 @@ export function executeInbox(
 const BODY_LINES_COLLAPSED = 2;
 const BODY_LINES_EXPANDED = 12;
 const BODY_LINE_WIDTH = 100;
-
-const PEER_STATUS_ORDER: Record<string, number> = { running: 0, idle: 1, parked: 2 };
 
 function ircGlyph(theme: Theme): string {
 	return theme.styledSymbol("tool.irc", "accent");
@@ -647,14 +710,31 @@ function renderInboxResult(
 function renderListResult(details: Partial<CoordinationDetails>, expanded: boolean, theme: Theme): string[] {
 	const peers = [...(details.peers ?? [])].sort(
 		(a, b) =>
-			(PEER_STATUS_ORDER[a.status] ?? 9) - (PEER_STATUS_ORDER[b.status] ?? 9) || b.lastActivity - a.lastActivity,
+			(LIST_STATUS_ORDER[a.status] ?? 9) - (LIST_STATUS_ORDER[b.status] ?? 9) || b.lastActivity - a.lastActivity,
 	);
+	const rosterCounts = details.counts;
 	if (peers.length === 0) {
-		return [renderStatusLine({ icon: "info", title: "IRC peers", meta: ["no other agents"] }, theme)];
+		const meta =
+			rosterCounts && rosterCounts.parked > 0
+				? [
+						`${rosterCounts.running} running`,
+						`${rosterCounts.idle} idle`,
+						`${rosterCounts.parked} parked`,
+						...(rosterCounts.truncated > 0 ? [`${rosterCounts.truncated} truncated`] : []),
+					]
+				: ["no other agents"];
+		return [renderStatusLine({ icon: "info", title: "IRC peers", meta }, theme)];
 	}
 	const counts = new Map<string, number>();
 	for (const peer of peers) counts.set(peer.status, (counts.get(peer.status) ?? 0) + 1);
-	const meta = [...counts].map(([status, count]) => `${count} ${status}`);
+	const meta = rosterCounts
+		? [
+				`${rosterCounts.running} running`,
+				`${rosterCounts.idle} idle`,
+				`${rosterCounts.parked} parked`,
+				...(rosterCounts.truncated > 0 ? [`${rosterCounts.truncated} truncated`] : []),
+			]
+		: [...counts].map(([status, count]) => `${count} ${status}`);
 	const unreadTotal = peers.reduce((sum, peer) => sum + peer.unread, 0);
 	if (unreadTotal > 0) meta.push(theme.fg("warning", `${unreadTotal} unread`));
 	const header = renderStatusLine({ iconOverride: ircGlyph(theme), title: "IRC peers", meta }, theme);
@@ -677,7 +757,6 @@ function renderListResult(details: Partial<CoordinationDetails>, expanded: boole
 	);
 	return [header, ...items];
 }
-
 function buildResultLines(
 	result: { content: Array<{ type: string; text?: string }>; isError?: boolean },
 	details: Partial<CoordinationDetails>,

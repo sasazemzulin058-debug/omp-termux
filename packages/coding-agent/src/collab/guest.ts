@@ -451,7 +451,7 @@ export class CollabGuestLink {
 		this.#ctx.syncRunningSubagentBadge();
 		this.#assistantStreamSynced = false;
 		setSessionTerminalTitle(pending.state.sessionName ?? pending.header.title, pending.state.cwd);
-		this.#ctx.chatContainer.clear();
+		this.#ctx.chatContainer.disposeChildren();
 		await this.#ctx.renderInitialMessages({ clearTerminalHistory: true });
 		await this.#ctx.reloadTodos();
 		this.#updateStatusSegment();

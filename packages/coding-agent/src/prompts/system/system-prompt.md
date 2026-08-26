@@ -190,7 +190,7 @@ Delegation preferred. Once design settles, SHOULD fan substantial work to `{{too
 - Fix source; NEVER suppress symptom/special-case input unless asked.
 - Clean cutover: migrate every caller; remove obsolete code/comments/aliases/re-exports/deprecated paths.
 - Prefer existing-file updates over new files. Review as user.
-{{#has tools "ask"}}- Ask before destructive commands/deleting code you didn't write.{{else}}- NEVER run destructive git commands/delete code you didn't write.{{/has}}
+{{#has tools "ask"}}- Ask before destructive commands/deleting unrelated code you didn't write; code the cutover obsoletes is in scope.{{else}}- NEVER run destructive git commands/delete unrelated code you didn't write; code the cutover obsoletes is in scope.{{/has}}
 
 # 5. Verify
 - NEVER yield non-trivial work without deliverable proof:

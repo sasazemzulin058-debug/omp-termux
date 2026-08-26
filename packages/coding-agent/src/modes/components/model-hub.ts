@@ -1869,9 +1869,9 @@ export class ModelHubComponent implements Component {
 				value = theme.fg("dim", "—");
 			}
 
-			// Quick-cycle membership badge (`⟳2` = second stop of the ctrl+p cycle).
+			// Quick-cycle membership badge (`⟳ 2` = second stop of the ctrl+p cycle).
 			const cycleIndex = cycleOrder.indexOf(role);
-			const cycleStyled = cycleIndex >= 0 ? theme.fg("accent", `${theme.icon.loop}${cycleIndex + 1}`) : "";
+			const cycleStyled = cycleIndex >= 0 ? theme.fg("accent", `${theme.icon.loop} ${cycleIndex + 1}`) : "";
 
 			let line = ` ${cursor} ${dot} ${tagStyled}  ${value}`;
 			const right = [levelStyled, cycleStyled].filter(part => part.length > 0).join("  ");

@@ -8,7 +8,8 @@ import type {
 	Model,
 	SimpleStreamOptions,
 } from "@oh-my-pi/pi-ai";
-import { type BenchModelRegistry, type BenchSummary, runBenchCommand } from "@oh-my-pi/pi-coding-agent/cli/bench-cli";
+import { type BenchSummary, runBenchCommand } from "@oh-my-pi/pi-coding-agent/cli/bench-cli";
+import type { BenchModelRegistry } from "@oh-my-pi/pi-coding-agent/cli/bench-runtime";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 
 function fakeModel(provider: string, id: string): Model<Api> {

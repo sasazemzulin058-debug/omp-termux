@@ -265,6 +265,28 @@ describe("hubToolRenderer list", () => {
 		expect(row).toContain("Auth-flow security reviewer");
 		expect(row).toContain("auditing the token refresh path");
 	});
+
+	it("uses details.counts when the page is empty but parked peers exist", async () => {
+		const uiTheme = await theme();
+		const rendered = lines(
+			hubToolRenderer.renderResult(
+				{
+					content: [{ type: "text", text: "" }],
+					details: {
+						op: "list",
+						from: "Main",
+						peers: [],
+						counts: { running: 0, idle: 0, parked: 3, shown: 0, truncated: 0 },
+					} satisfies CoordinationDetails,
+				},
+				{ expanded: false, isPartial: false },
+				uiTheme,
+				{ op: "list" },
+			),
+		);
+		expect(rendered[0]).toContain("3 parked");
+		expect(rendered[0]).not.toContain("no other agents");
+	});
 });
 
 describe("hubToolRenderer body truncation", () => {
