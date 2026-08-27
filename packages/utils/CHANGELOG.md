@@ -2,6 +2,18 @@
 
 ## [Unreleased]
 
+## [18.0.7] - 2026-08-26
+
+### Added
+
+- Added `math-delimiters`, the LaTeX span/block delimiter grammar (`mathStartIndex`, `mathOpenerAt`, `mathSpanAt`, `mathBlockAt`) shared by every Markdown renderer: pandoc's anti-currency rules for `$…$`, own-line display blocks, and delimiters matched by backslash parity, so an escaped `\$x$` stays literal and a TeX row break cannot end a span early.
+- Added `RequestError.sessionBusy(message, data)` to represent ACP session-busy errors (`-32003`) through the shared JSON-RPC transport.
+- Exported `getComposerCacheDir` for resolving the per-project Composer cache directory, including support for `XDG_CACHE_HOME`.
+
+### Fixed
+
+- Fixed OMP sessions unexpectedly exiting during socket cleanup or optional-worker communication on Bun.
+
 ## [18.0.6] - 2026-08-26
 
 ### Added

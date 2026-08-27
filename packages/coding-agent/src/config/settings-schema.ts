@@ -618,7 +618,7 @@ export const SETTINGS_SCHEMA = {
 			group: "Services",
 			label: "Codex Code Mode",
 			description:
-				"Route Codex code_mode_only models (GPT-5.6) through the eval tool as a programmatic execution surface: the direct tool surface collapses to eval/ask/todo and every other session tool is invoked from eval cells. Mirrors codex-rs Code Mode. 'auto' follows the model catalog flag.",
+				"Route Codex code_mode_only models (GPT-5.6) through eval. The direct tools are eval, ask, todo, yield, think, checkpoint, and rewind. Use eval cells for other session tools. Mirrors codex-rs Code Mode. 'auto' follows the model catalog flag.",
 		},
 	},
 
@@ -630,7 +630,7 @@ export const SETTINGS_SCHEMA = {
 			group: "Services",
 			label: "Codex Code Mode Direct Tools",
 			description:
-				"Extra tool names to keep directly callable alongside eval/ask/todo when Codex Code Mode is active.",
+				"Extra direct tools for Codex Code Mode. The standard direct tools are eval, ask, todo, yield, think, checkpoint, and rewind.",
 		},
 	},
 
@@ -2931,14 +2931,13 @@ export const SETTINGS_SCHEMA = {
 	// `memories.enabled` flag is migration input only; see config/settings.ts.
 	"memory.backend": {
 		type: "enum",
-		values: ["off", "local", "hindsight", "mnemopi", "hermes"] as const,
+		values: ["off", "local", "hindsight", "mnemopi"] as const,
 		default: "off",
 		ui: {
 			tab: "memory",
 			group: "General",
 			label: "Memory Backend",
-			description:
-				"Off, local summary pipeline, Mnemopi SQLite, Hindsight remote memory, or Hermes persistent memory",
+			description: "Off, local summary pipeline, Mnemopi SQLite, or Hindsight remote memory",
 			options: [
 				{ value: "off", label: "Off", description: "No memory subsystem runs" },
 				{ value: "local", label: "Local", description: "Local rollout summarisation pipeline (memory_summary.md)" },
@@ -2947,11 +2946,6 @@ export const SETTINGS_SCHEMA = {
 					value: "mnemopi",
 					label: "Mnemopi",
 					description: "Local SQLite recall/retain backend with optional embeddings",
-				},
-				{
-					value: "hermes",
-					label: "Hermes",
-					description: "Hermes persistent memory (MEMORY.md/USER.md + SQLite FTS5) via pi-hermes-memory",
 				},
 			],
 		},
@@ -4647,7 +4641,7 @@ export const SETTINGS_SCHEMA = {
 			group: "Discovery & MCP",
 			label: "xd:// Tools",
 			description:
-				"Mount rarely-used (discoverable) tools under xd:// device URLs driven via read/write instead of shipping their schemas on every request. Sessions without a granted write tool skip mounting and expose every tool top-level. Disable to expose every enabled tool top-level.",
+				"Mount rarely-used (discoverable) tools under xd:// device URLs driven via read/write instead of shipping their schemas on every request. Sessions whose explicit tool list grants read but omits write mount devices through a device-only write transport (filesystem writes stay rejected). Disable to expose every enabled tool top-level.",
 		},
 	},
 
