@@ -7,6 +7,7 @@ Verifies exact markers exist and that a second apply_hermes_overlay is a no-op.
 
 from pathlib import Path
 import sys
+import re
 
 ROOT = Path.cwd()
 OVERLAY_DIR = ROOT / "android" / "overlay" / "hermes"
@@ -21,6 +22,11 @@ def require(rel, needle):
     if needle not in txt:
         raise SystemExit(f"verify failed: {rel} missing {needle!r}")
 
+def require_match(rel, pattern, desc):
+    txt = _read(rel)
+    if not re.search(pattern, txt):
+        raise SystemExit(f"verify failed: {rel} missing {desc!r} (pattern {pattern!r})")
+
 def require_absent(rel, needle, msg=""):
     txt = _read(rel)
     if needle in txt:
@@ -33,17 +39,44 @@ def main():
     require("packages/coding-agent/package.json", '"@types/better-sqlite3": "catalog:"')
     require("package.json", '"@types/better-sqlite3": "^7.6.13"')
 
-    # 2. Source markers
+    # 2. Source markers — scoped to exact blocks to avoid false positives from unrelated "hermes" (e.g., tools.format)
     checks = {
-        "packages/coding-agent/src/config/settings-schema.ts": '"hermes"',
         "packages/coding-agent/src/memory-backend/types.ts": 'MemoryBackendId = "off" | "local" | "hindsight" | "mnemopi" | "hermes"',
         "packages/coding-agent/src/memory-backend/index.ts": 'export * from "./hermes-backend"',
-        "packages/coding-agent/src/memory-backend/resolve.ts": 'hermesBackend',
+        "packages/coding-agent/src/memory-backend/resolve.ts": 'if (id === "hermes")',
         "packages/coding-agent/src/session/session-memory.ts": "disposeHermesRuntimeForSession",
         "packages/coding-agent/src/session/agent-session.ts": "#disposeHermes",
     }
     for rel, needle in checks.items():
         require(rel, needle)
+
+    # Additional precise checks for TS type safety (fail loudly if hermes type union missing -> TS2367)
+    # Must verify MemoryBackendId union contains hermes and settings-schema memory.backend values contain hermes
+    require_match(
+        "packages/coding-agent/src/memory-backend/types.ts",
+        r'export\s+type\s+MemoryBackendId\s*=\s*["\']off["\']\s*\|\s*["\']local["\']\s*\|\s*["\']hindsight["\']\s*\|\s*["\']mnemopi["\']\s*\|\s*["\']hermes["\']\s*;',
+        'MemoryBackendId hermes union (TS2367 guard)'
+    )
+    # settings-schema: ensure memory.backend enum includes hermes (scoped to memory.backend block, not tools.format)
+    settings_text = _read("packages/coding-agent/src/config/settings-schema.ts")
+    # Find memory.backend block and verify it contains hermes values
+    m_backend = re.search(r'"memory\.backend"', settings_text)
+    if not m_backend:
+        raise SystemExit('verify failed: packages/coding-agent/src/config/settings-schema.ts missing "memory.backend"')
+    # Check for hermes values array after memory.backend
+    hermes_values_pat = r'values:\s*\[\s*"off"\s*,\s*"local"\s*,\s*"hindsight"\s*,\s*"mnemopi"\s*,\s*"hermes"\s*\]\s*as const,'
+    if not re.search(hermes_values_pat, settings_text):
+        raise SystemExit('verify failed: packages/coding-agent/src/config/settings-schema.ts missing values: ["off", "local", "hindsight", "mnemopi", "hermes"] as const, (memory.backend not patched)')
+    # Ensure hermes UI option exists within ~4k after memory.backend
+    mem_block = settings_text[m_backend.start(): m_backend.start()+5000]
+    if 'value: "hermes"' not in mem_block:
+        raise SystemExit('verify failed: packages/coding-agent/src/config/settings-schema.ts missing value: "hermes" option in memory.backend block')
+    # Ensure hermes description also patched
+    if 'Hermes persistent memory' not in mem_block:
+        raise SystemExit('verify failed: packages/coding-agent/src/config/settings-schema.ts missing Hermes persistent memory description')
+
+    # Also verify resolve contains hermesBackend import handler
+    require("packages/coding-agent/src/memory-backend/resolve.ts", "hermesBackend")
 
     # 3. New file existence and content
     for name, rel in [("hermes-backend.ts", "packages/coding-agent/src/memory-backend/hermes-backend.ts"),
@@ -78,7 +111,7 @@ def main():
     spec.loader.exec_module(mod)  # type: ignore
     # Snapshot mtimes
     before = {}
-    for rel in list(checks.keys()) + ["packages/coding-agent/src/memory-backend/hermes-backend.ts", "packages/coding-agent/test/hermes-backend.test.ts", "packages/coding-agent/package.json", "package.json"]:
+    for rel in list(checks.keys()) + ["packages/coding-agent/src/config/settings-schema.ts", "packages/coding-agent/src/memory-backend/hermes-backend.ts", "packages/coding-agent/test/hermes-backend.test.ts", "packages/coding-agent/package.json", "package.json"]:
         p = ROOT / rel
         before[rel] = p.read_text() if p.exists() else None
     changed = mod.apply_hermes_overlay()
@@ -94,7 +127,7 @@ def main():
     for rel in ["packages/coding-agent/package.json", "packages/coding-agent/src/memory-backend/hermes-backend.ts"]:
         require_absent(rel, "#main", "in hermes context")
 
-    print(f"verify-hermes-overlay: ok (pinned {HERMES_COMMIT}, {len(checks)} markers, idempotent)")
+    print(f"verify-hermes-overlay: ok (pinned {HERMES_COMMIT}, {len(checks)+2} markers, idempotent)")
 
 if __name__ == "__main__":
     try:

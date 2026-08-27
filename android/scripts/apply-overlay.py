@@ -33,6 +33,36 @@ def once(text, old, new, rel):
 def cargo(text):
     # Drop arboard + pi-voice from always-on deps; re-add under not-android.
     # pi-voice/webrtc OOMs free GH runners (~15G+24G swap still killed).
+    # Idempotent: if target cfg already present, verify and ensure pi-voice under it.
+    has_target = "[target.'cfg(not(target_os = \"android\"))'.dependencies]" in text
+    has_upstream = "anyhow.workspace = true\narboard.workspace = true\n" in text
+    if has_target:
+        # Already patched — validate anyhow alone and handle any remaining pi-voice drift.
+        if "anyhow.workspace = true\n" not in text:
+            raise SystemExit("overlay marker mismatch: Cargo.toml: anyhow missing after patch")
+        # If upstream pi-voice trio still present before target (partial patch), strip it.
+        if "pi-voice.workspace = true\n" in text and "pi-voice stubbed on Android" not in text:
+            before_target = text.split("[target.'cfg(not(target_os = \"android\"))'.dependencies]")[0]
+            if "pi-shell.workspace = true\npi-voice.workspace = true\npi-walker.workspace = true\n" in before_target:
+                text = once(
+                    text,
+                    "pi-shell.workspace = true\npi-voice.workspace = true\npi-walker.workspace = true\n",
+                    "pi-shell.workspace = true\npi-walker.workspace = true\n",
+                    "Cargo.toml",
+                )
+        # Ensure pi-voice is present under target cfg (idempotent)
+        if "pi-voice.workspace = true" not in text.split("[dev-dependencies]")[0].split(
+            "[target.'cfg(not(target_os = \"android\"))'.dependencies]"
+        )[-1]:
+            text = once(
+                text,
+                "[target.'cfg(not(target_os = \"android\"))'.dependencies]\narboard.workspace = true\n",
+                "[target.'cfg(not(target_os = \"android\"))'.dependencies]\narboard.workspace = true\n# pi-voice stubbed on Android: webrtc/opus OOMs free GH runners.\npi-voice.workspace = true\n",
+                "Cargo.toml",
+            )
+        return text
+    if not has_upstream:
+        raise SystemExit("overlay marker mismatch: Cargo.toml: 'anyhow.workspace = true\\narboard.workspace = true\\n'")
     text = once(text, "anyhow.workspace = true\narboard.workspace = true\n", "anyhow.workspace = true\n", "Cargo.toml")
     # After upstream sync pi-voice is next to pi-shell; strip it from always-on.
     if "pi-voice.workspace = true\n" in text and "pi-voice stubbed on Android" not in text:
@@ -49,18 +79,6 @@ def cargo(text):
         "# pi-voice stubbed on Android: webrtc/opus OOMs free GH runners.\n"
         "pi-voice.workspace = true\n\n"
     )
-    if "[target.'cfg(not(target_os = \"android\"))'.dependencies]" in text:
-        # arboard already gated (fresh apply after sync may re-run). Ensure pi-voice.
-        if "pi-voice.workspace = true" not in text.split("[dev-dependencies]")[0].split(
-            "[target.'cfg(not(target_os = \"android\"))'.dependencies]"
-        )[-1]:
-            text = once(
-                text,
-                "[target.'cfg(not(target_os = \"android\"))'.dependencies]\narboard.workspace = true\n",
-                "[target.'cfg(not(target_os = \"android\"))'.dependencies]\narboard.workspace = true\n# pi-voice stubbed on Android: webrtc/opus OOMs free GH runners.\npi-voice.workspace = true\n",
-                "Cargo.toml",
-            )
-        return text
     return once(text, marker, insert + marker, "Cargo.toml")
 
 def crash(text):
