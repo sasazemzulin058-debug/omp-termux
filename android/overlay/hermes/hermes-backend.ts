@@ -24,9 +24,10 @@ import * as path from "node:path";
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import { completeSimple, retryTransientCompletion } from "@oh-my-pi/pi-ai";
 import { logger } from "@oh-my-pi/pi-utils";
-
-import { resolveRoleSelection } from "../config/model-resolver";
 import type { ModelRegistry } from "../config/model-registry";
+import { resolveRoleSelection } from "../config/model-resolver";
+import type { Settings } from "../config/settings";
+import type { AgentSession } from "../session/agent-session";
 import type {
 	MemoryBackend,
 	MemoryBackendOperationContext,
@@ -37,8 +38,6 @@ import type {
 	MemoryBackendStartOptions,
 	MemoryBackendStatus,
 } from "./types";
-import type { AgentSession } from "../session/agent-session";
-import type { Settings } from "../config/settings";
 
 // ---- Local typed seam for the expected Hermes package API ----
 // We do NOT import from "pi-hermes-memory" at the top level to keep the module
@@ -51,7 +50,10 @@ export interface HermesFactoryOptions {
 	session?: AgentSession | unknown;
 	taskDepth: number;
 	modelRegistry?: unknown;
-	exec?: (prompt: string, options?: { signal?: AbortSignal; maxTokens?: number; temperature?: number }) => Promise<string>;
+	exec?: (
+		prompt: string,
+		options?: { signal?: AbortSignal; maxTokens?: number; temperature?: number },
+	) => Promise<string>;
 }
 
 export interface HermesRuntime {
@@ -64,9 +66,7 @@ export interface HermesRuntime {
 		query: string,
 		options?: MemoryBackendSearchOptions,
 	): Promise<Partial<MemoryBackendSearchResult> & { message?: string }>;
-	save(
-		input: MemoryBackendSaveInput,
-	): Promise<Partial<MemoryBackendSaveResult> & { message?: string }>;
+	save(input: MemoryBackendSaveInput): Promise<Partial<MemoryBackendSaveResult> & { message?: string }>;
 	stats(): Promise<string | undefined>;
 	diagnose(): Promise<string | undefined>;
 	beforeAgentStartPrompt(promptText: string): Promise<string | undefined>;
@@ -84,9 +84,7 @@ const HERMES_NO_FACTORY_MESSAGE =
 	"Hermes memory backend is not available: pi-hermes-memory does not export createHermesMemoryBackend. Update the package.";
 const HERMES_NOT_STARTED_MESSAGE = "Hermes runtime has not been started for this session.";
 
-function hermesUnavailableStatus(
-	detail?: string,
-): MemoryBackendStatus {
+function hermesUnavailableStatus(detail?: string): MemoryBackendStatus {
 	return {
 		backend: "hermes",
 		active: false,
@@ -113,7 +111,7 @@ export function resolveHermesMemoryDir(agentDir: string): string {
 
 // ---- Dependency seam ----
 
-let hermesFactoryOverride: HermesFactory | null | undefined = undefined;
+let hermesFactoryOverride: HermesFactory | null | undefined;
 let hermesLoadError: string | undefined;
 
 const runtimes = new WeakMap<AgentSession, HermesRuntime>();
@@ -227,10 +225,7 @@ function createHermesExec(
 			),
 		);
 		const text = message.content
-			.filter(
-				(block): block is Extract<(typeof message.content)[number], { type: "text" }> =>
-					block.type === "text",
-			)
+			.filter((block): block is Extract<(typeof message.content)[number], { type: "text" }> => block.type === "text")
 			.map(block => block.text)
 			.join("\n")
 			.trim();
@@ -281,9 +276,7 @@ async function getOrCreateRuntimeForSession(
 	}
 }
 
-async function getRuntimeForContext(
-	context: MemoryBackendOperationContext,
-): Promise<HermesRuntime | undefined> {
+async function getRuntimeForContext(context: MemoryBackendOperationContext): Promise<HermesRuntime | undefined> {
 	if (context.session) {
 		return runtimes.get(context.session as AgentSession);
 	}
@@ -341,7 +334,7 @@ export const hermesBackend: MemoryBackend = {
 	},
 
 	async buildDeveloperInstructions(
-		agentDir: string,
+		_agentDir: string,
 		_settings: Settings,
 		session?: AgentSession,
 	): Promise<string | undefined> {
@@ -524,18 +517,11 @@ export const hermesBackend: MemoryBackend = {
 				message: raw.message,
 			};
 		} catch (error) {
-			return hermesInertSearch(
-				"hermes",
-				query,
-				error instanceof Error ? error.message : String(error),
-			);
+			return hermesInertSearch("hermes", query, error instanceof Error ? error.message : String(error));
 		}
 	},
 
-	async save(
-		context: MemoryBackendOperationContext,
-		input: MemoryBackendSaveInput,
-	): Promise<MemoryBackendSaveResult> {
+	async save(context: MemoryBackendOperationContext, input: MemoryBackendSaveInput): Promise<MemoryBackendSaveResult> {
 		const runtime = await getRuntimeForContext(context);
 		if (!runtime) {
 			return hermesInertSave("hermes", hermesLoadError ?? HERMES_NOT_STARTED_MESSAGE);
@@ -622,10 +608,7 @@ export const hermesBackend: MemoryBackend = {
 		}
 	},
 
-	async beforeAgentStartPrompt(
-		session: AgentSession,
-		promptText: string,
-	): Promise<string | undefined> {
+	async beforeAgentStartPrompt(session: AgentSession, promptText: string): Promise<string | undefined> {
 		const runtime = runtimes.get(session);
 		if (!runtime) return undefined;
 		try {
@@ -646,7 +629,6 @@ export const hermesBackend: MemoryBackend = {
 			return undefined;
 		}
 	},
-
 
 	async preCompactionContext(
 		messages: AgentMessage[],

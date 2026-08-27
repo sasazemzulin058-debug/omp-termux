@@ -2937,7 +2937,8 @@ export const SETTINGS_SCHEMA = {
 			tab: "memory",
 			group: "General",
 			label: "Memory Backend",
-			description: "Off, local summary pipeline, Mnemopi SQLite, Hindsight remote memory, or Hermes persistent memory",
+			description:
+				"Off, local summary pipeline, Mnemopi SQLite, Hindsight remote memory, or Hermes persistent memory",
 			options: [
 				{ value: "off", label: "Off", description: "No memory subsystem runs" },
 				{ value: "local", label: "Local", description: "Local rollout summarisation pipeline (memory_summary.md)" },

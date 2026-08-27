@@ -88,12 +88,30 @@ def hermes_session_memory(text):
         raise SystemExit(f"overlay marker mismatch: session-memory.ts import: {old_import!r}")
     new_import = 'import type { MnemopiSessionState } from "../mnemopi/state";\nimport type { AgentSession } from "./agent-session";'
     text = text.replace(old_import, new_import, 1)
-    marker = '\t}\n\t}\n\n\n\t/**\n\t * Apply the selected memory backend'
-    if text.count(marker) != 1:
-        raise SystemExit(f"overlay marker mismatch: session-memory.ts method boundary: {marker[:60]!r}")
-    insert = '\t}\n\t\t// Hermes disposal — ensure no stale WeakMap entry remains when backend switches\n\t\t// or session ends. Dynamic import keeps hermes off the startup graph when\n\t\t// memory.backend !== hermes; explicit inert error is handled by the backend.\n\t\ttry {\n\t\t\tconst { disposeHermesRuntimeForSession } = await import("../memory-backend/hermes-backend");\n\t\t\tconst maybeSession = this.#host.memoryBackendSession() as unknown as AgentSession;\n\t\t\tif (maybeSession) await disposeHermesRuntimeForSession(maybeSession);\n\t\t} catch (error) {\n\t\t\tconst msg = error instanceof Error ? error.message : String(error);\n\t\t\tif (!msg.includes("Cannot find module") && !msg.includes("is not installed")) {\n\t\t\t\tlogger.warn("Memory lifecycle: Hermes dispose failed", { error: msg });\n\t\t\t}\n\t\t}\n\t}\n\n\n\t/**\n\t * Apply the selected memory backend'
-    text = text.replace(marker, insert, 1)
+    # Stable anchor: doc comment must appear exactly once, regardless of surrounding whitespace.
+    doc = "\t/**\n\t * Apply the selected memory backend"
+    if text.count(doc) != 1:
+        raise SystemExit(f"overlay marker mismatch: session-memory.ts Apply doc comment: {doc!r}")
+    # Use regex to find the method closing boundary immediately before the doc comment.
+    # The method's closing brace is a single-tab "}" followed by zero or more blank lines, then the doc.
+    # Allow 1 or 2 (or more) blank lines to be stable across upstream whitespace changes.
+    # We require exactly one such boundary before the doc to ensure exact-once semantics.
+    import re as _re
+    pattern = r"\n\t\}\n(\n*)\t/\*\*\n\t \* Apply the selected memory backend"
+    matches = list(_re.finditer(pattern, text))
+    if len(matches) != 1:
+        raise SystemExit(f"overlay marker mismatch: session-memory.ts method boundary: expected 1 match for Apply doc anchor, got {len(matches)}")
+    m = matches[0]
+    # Hermes disposal block — inserted inside #disposeMemoryBackendState before its closing brace.
+    # Indentation is 2 tabs inside the method (method at 1 tab, body at 2 tabs).
+    hermes_block = "\t\t// Hermes disposal — ensure no stale WeakMap entry remains when backend switches\n\t\t// or session ends. Dynamic import keeps hermes off the startup graph when\n\t\t// memory.backend !== hermes; explicit inert error is handled by the backend.\n\t\ttry {\n\t\t\tconst { disposeHermesRuntimeForSession } = await import(\"../memory-backend/hermes-backend\");\n\t\t\tconst maybeSession = this.#host.memoryBackendSession() as unknown as AgentSession;\n\t\t\tif (maybeSession) await disposeHermesRuntimeForSession(maybeSession);\n\t\t} catch (error) {\n\t\t\t// Only log unexpected errors; missing module when hermes never installed is benign.\n\t\t\tconst msg = error instanceof Error ? error.message : String(error);\n\t\t\tif (!msg.includes(\"Cannot find module\") && !msg.includes(\"is not installed\")) {\n\t\t\t\tlogger.warn(\"Memory lifecycle: Hermes dispose failed\", { error: msg });\n\t\t\t}\n\t\t}\n"
+    old_segment = m.group(0)
+    new_segment = "\n" + hermes_block + "\t}\n\n\t/**\n\t * Apply the selected memory backend"
+    if text.count(old_segment) != 1:
+        raise SystemExit(f"overlay marker mismatch: session-memory.ts exact segment: {old_segment[:60]!r}")
+    text = text.replace(old_segment, new_segment, 1)
     return text
+
 
 def hermes_agent_session(text):
     if "#disposeHermes" in text:

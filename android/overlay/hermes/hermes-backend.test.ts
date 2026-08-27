@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { resolveMemoryBackend } from "@oh-my-pi/pi-coding-agent/memory-backend";
+import type { HermesFactory, HermesRuntime } from "@oh-my-pi/pi-coding-agent/memory-backend/hermes-backend";
 import {
 	__clearHermesRuntimesForTests,
 	__getHermesRuntimeForTests,
@@ -9,7 +10,6 @@ import {
 	hermesBackend,
 	resolveHermesMemoryDir,
 } from "@oh-my-pi/pi-coding-agent/memory-backend/hermes-backend";
-import type { HermesFactory, HermesRuntime } from "@oh-my-pi/pi-coding-agent/memory-backend/hermes-backend";
 
 describe("hermes memory backend", () => {
 	beforeEach(() => {
@@ -45,11 +45,9 @@ describe("hermes memory backend", () => {
 		expect(status.error ?? status.message).toMatch(/not available|not installed/i);
 	});
 
-	it("derives default memory directory under ${agentDir}/memory/hermes", () => {
+	it("derives default memory directory under {agentDir}/memory/hermes", () => {
 		expect(resolveHermesMemoryDir("/tmp/agent")).toBe("/tmp/agent/memory/hermes");
-		expect(resolveHermesMemoryDir("/home/user/.omp/agent")).toBe(
-			"/home/user/.omp/agent/memory/hermes",
-		);
+		expect(resolveHermesMemoryDir("/home/user/.omp/agent")).toBe("/home/user/.omp/agent/memory/hermes");
 	});
 
 	it("settings schema accepts memory.backend: hermes and honours mapping", async () => {
@@ -176,7 +174,11 @@ describe("hermes memory backend", () => {
 		);
 		expect(save).toMatchObject({ backend: "hermes", stored: 1, ids: ["1"] });
 
-		const instr = await hermesBackend.buildDeveloperInstructions(agentDir, Settings.isolated({ "memory.backend": "hermes" }) as never, session as never);
+		const instr = await hermesBackend.buildDeveloperInstructions(
+			agentDir,
+			Settings.isolated({ "memory.backend": "hermes" }) as never,
+			session as never,
+		);
 		expect(instr).toContain("Hermes memory");
 
 		const stats = await hermesBackend.stats!(agentDir, "/tmp/project", session as never);

@@ -181,7 +181,6 @@ export class SessionMemory {
 		}
 	}
 
-
 	/**
 	 * Apply the selected memory backend to runtime state, tools, and prompt.
 	 * Concurrent settings changes run in order and settle before the next turn.
