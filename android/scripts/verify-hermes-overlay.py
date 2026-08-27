@@ -10,7 +10,7 @@ import sys
 
 ROOT = Path.cwd()
 OVERLAY_DIR = ROOT / "android" / "overlay" / "hermes"
-HERMES_COMMIT = "e049747"
+HERMES_COMMIT = "f20e315"
 HERMES_SPEC = f"github:sasazemzulin058-debug/pi-hermes-memory#{HERMES_COMMIT}"
 
 def _read(rel):

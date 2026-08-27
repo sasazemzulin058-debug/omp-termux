@@ -102,7 +102,7 @@
         "@opentelemetry/sdk-metrics": "catalog:",
         "@opentelemetry/sdk-trace-base": "catalog:",
         "@opentelemetry/sdk-trace-node": "catalog:",
-        "pi-hermes-memory": "github:sasazemzulin058-debug/pi-hermes-memory#e049747",
+        "pi-hermes-memory": "github:sasazemzulin058-debug/pi-hermes-memory#f20e315",
         "puppeteer-core": "catalog:",
       },
       "devDependencies": {
@@ -1464,7 +1464,7 @@
 
     "path-scurry": ["path-scurry@2.0.2", "", { "dependencies": { "lru-cache": "^11.0.0", "minipass": "^7.1.2" } }, "sha512-3O/iVVsJAPsOnpwWIeD+d6z/7PmqApyQePUtCndjatj/9I5LylHvt5qluFaBT3I5h3r1ejfR056c+FCv+NnNXg=="],
 
-    "pi-hermes-memory": ["pi-hermes-memory@github:sasazemzulin058-debug/pi-hermes-memory#e049747", { "dependencies": { "better-sqlite3": "^12.9.0" }, "peerDependencies": { "@earendil-works/pi-coding-agent": ">=0.70.0" } }, "sasazemzulin058-debug-pi-hermes-memory-e049747", "sha512-h2C0Z8X5PXEWmU+FONihu76tPl2SMkd95rb9x9gbEyV7RNT2U9rhTxK3hEI0m2XNlo8Tco+cCMJKnu7CwqFSKQ=="],
+    "pi-hermes-memory": ["pi-hermes-memory@github:sasazemzulin058-debug/pi-hermes-memory#f20e315", { "dependencies": { "better-sqlite3": "^12.9.0" }, "peerDependencies": { "@earendil-works/pi-coding-agent": ">=0.70.0" } }, "sasazemzulin058-debug-pi-hermes-memory-f20e315", "sha512-CHVnQ8fZeBP6q/ZC/miN2/muGDhD3lbo8GmjiBEgW8llVo1c1pkVKRI7UlTlVowDdkyitx7QgwJsxBord1pj1w=="],
 
     "picocolors": ["picocolors@1.1.1", "", {}, "sha512-xceH2snhtb5M9liqDsmEw56le376mTZkEX/jEb/RxNFyegNul7eNslCXP9FDj/Lcu0X8KEyMceP2ntpaHrDEVA=="],
 
