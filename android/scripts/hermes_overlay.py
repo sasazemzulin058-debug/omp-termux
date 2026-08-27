@@ -82,12 +82,16 @@ def hermes_types(text):
     return text.replace(old, new, 1)
 
 def hermes_index(text):
-    if '"./hermes-backend"' in text:
+    correct = 'export * from "./hermes-backend";\nexport * from "./local-backend";'
+    wrong = 'export * from "./local-backend";\nexport * from "./hermes-backend";'
+    if correct in text:
         return text
+    if wrong in text:
+        return text.replace(wrong, correct, 1)
     old = 'export * from "./local-backend";'
     if text.count(old) != 1:
         raise SystemExit(f"overlay marker mismatch: memory-backend/index.ts: {old!r}")
-    new = 'export * from "./local-backend";\nexport * from "./hermes-backend";'
+    new = correct
     return text.replace(old, new, 1)
 
 def hermes_resolve(text):

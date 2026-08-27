@@ -191,11 +191,7 @@ function createHermesExec(
 	return async (prompt, options) => {
 		let resolved: { model: Model; thinkingLevel?: unknown } | undefined;
 		try {
-			resolved = resolveRoleSelection(
-				["tiny", "smol", "default"],
-				settings,
-				modelRegistry.getAvailable(),
-			);
+			resolved = resolveRoleSelection(["tiny", "smol", "default"], settings, modelRegistry.getAvailable());
 		} catch (error) {
 			throw new Error(
 				`Hermes exec unavailable: model resolution failed: ${error instanceof Error ? error.message : String(error)}`,
