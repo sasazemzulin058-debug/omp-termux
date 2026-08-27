@@ -4,6 +4,19 @@ from pathlib import Path
 
 ROOT = Path.cwd()
 
+# Hermes overlay helpers (deterministic, marker-checked)
+try:
+    from hermes_overlay import apply_hermes_overlay
+except ImportError:
+    # Fallback when run from different cwd via python3 android/scripts/apply-overlay.py
+    import importlib.util, sys
+    spec = importlib.util.spec_from_file_location("hermes_overlay", str(ROOT / "android" / "scripts" / "hermes_overlay.py"))
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules["hermes_overlay"] = mod
+    assert spec and spec.loader
+    spec.loader.exec_module(mod)  # type: ignore
+    apply_hermes_overlay = mod.apply_hermes_overlay
+
 def edit(rel, transform):
     path = ROOT / rel
     text = path.read_text()
@@ -198,4 +211,11 @@ edit("packages/natives/native/loader-state.js", loader)
 edit("packages/coding-agent/src/cli.ts", cli)
 edit("packages/coding-agent/src/cli/update-cli.ts", update_cli)
 edit("packages/natives/native/index.js", native_index)
-print("Android overlay applied: 11 transformations")
+# Hermes overlay — must run after upstream rsync to recreate OMP hermes files
+try:
+    hermes_changed = apply_hermes_overlay()
+except SystemExit:
+    raise
+except Exception as e:
+    raise SystemExit(f"hermes overlay failed: {e}") from e
+print(f"Android overlay applied: 11 transformations + Hermes overlay ({hermes_changed} hermes files changed if any)")

@@ -71,7 +71,8 @@
     "@opentelemetry/sdk-metrics": "catalog:",
     "@opentelemetry/sdk-trace-base": "catalog:",
     "@opentelemetry/sdk-trace-node": "catalog:",
-    "puppeteer-core": "catalog:"
+    "puppeteer-core": "catalog:",
+    "pi-hermes-memory": "github:sasazemzulin058-debug/pi-hermes-memory#e049747"
   },
   "optionalDependencies": {
     "@huggingface/transformers": "catalog:",

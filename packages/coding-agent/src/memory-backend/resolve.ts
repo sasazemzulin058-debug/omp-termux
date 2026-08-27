@@ -10,6 +10,7 @@ import type { MemoryBackend } from "./types";
  * through this):
  *   - `memory.backend === "hindsight"`  → Hindsight remote memory
  *   - `memory.backend === "mnemopi"`  → local Mnemopi SQLite memory
+ *   - `memory.backend === "hermes"`    → Hermes persistent memory (lazy import of pi-hermes-memory)
  *   - `memory.backend === "local"`      → local rollout summary pipeline
  *   - everything else                   → no-op
  *
@@ -18,8 +19,11 @@ import type { MemoryBackend } from "./types";
  */
 export async function resolveMemoryBackend(settings: Settings): Promise<MemoryBackend> {
 	const id = settings.get("memory.backend");
+	// Hindsight and Mnemopi are lazy-loaded to keep native/better-sqlite dependencies off the CLI startup graph.
 	if (id === "hindsight") return (await import("../hindsight/backend")).hindsightBackend;
 	if (id === "mnemopi") return (await import("../mnemopi/backend")).mnemopiBackend;
+	// Hermes is optional (pi-hermes-memory may be absent) and pulls better-sqlite3; keep it off the startup graph.
+	if (id === "hermes") return (await import("./hermes-backend")).hermesBackend;
 	if (id === "local") return localBackend;
 	return offBackend;
 }

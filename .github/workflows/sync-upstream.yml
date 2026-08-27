@@ -56,17 +56,34 @@ jobs:
         uses: oven-sh/setup-bun@v2
         with:
           bun-version-file: package.json
+      - name: Regenerate lockfile for overlay dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Overlay mutates package.json (pi-hermes-memory pinned to immutable commit).
+          # Regenerate bun.lock so it matches the post-overlay tree before frozen validation.
+          # This keeps upstream sync reproducible: every rsync + overlay yields the same lock.
+          bun install
+          echo "lockfile regenerated after overlay"
+          # Verify hermes pin is present in lockfile
+          if ! grep -q 'pi-hermes-memory.*#'"e049747" bun.lock; then
+            echo "error: bun.lock missing pinned hermes commit after regeneration" >&2
+            exit 1
+          fi
+          if grep -q 'pi-hermes-memory#main' bun.lock; then
+            echo "error: bun.lock contains mutable #main spec" >&2
+            exit 1
+          fi
       - name: Verify frozen lockfile
         shell: bash
         run: |
           set -euo pipefail
-          # Only fail if install itself rejects the lockfile. Some bun builds
-          # reformat bun.lock even under --frozen-lockfile; ignore pure format churn.
+          # Frozen install must now pass against the regenerated lockfile.
           if ! bun install --frozen-lockfile; then
-            echo "error: bun.lock is out of sync with package.json" >&2
+            echo "error: bun.lock is out of sync with package.json after overlay regeneration" >&2
             exit 1
           fi
-          git checkout -- bun.lock 2>/dev/null || true
+          # Do not restore bun.lock — keep the overlay-regenerated version.
           rm -rf .bun-cache node_modules
       - name: Push sync commit and version tag
         shell: bash
