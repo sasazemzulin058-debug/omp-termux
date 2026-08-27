@@ -14,16 +14,37 @@ def _once(text, old, new, rel):
     return text.replace(old, new, 1)
 
 def hermes_package_json(text):
+    # Ensure pi-hermes-memory spec
     if "pi-hermes-memory" in text:
         if HERMES_SPEC not in text:
             raise SystemExit(f"overlay marker mismatch: packages/coding-agent/package.json: pi-hermes-memory spec must be {HERMES_SPEC!r}")
         if "pi-hermes-memory#main" in text:
             raise SystemExit("overlay marker mismatch: packages/coding-agent/package.json: mutable #main spec found")
+        after_pi = text
+    else:
+        old = '"puppeteer-core": "catalog:"'
+        if text.count(old) != 1:
+            raise SystemExit(f"overlay marker mismatch: packages/coding-agent/package.json: {old!r}")
+        after_pi = text.replace(old, f'"puppeteer-core": "catalog:",\n    "pi-hermes-memory": "{HERMES_SPEC}"', 1)
+    # Ensure @types/better-sqlite3 devDependency (catalog reference)
+    if '"@types/better-sqlite3"' in after_pi:
+        if '"@types/better-sqlite3": "catalog:"' not in after_pi:
+            raise SystemExit("overlay marker mismatch: packages/coding-agent/package.json: @types/better-sqlite3 must be catalog:")
+        return after_pi
+    old_dev = '"@types/bun": "catalog:"'
+    if after_pi.count(old_dev) != 1:
+        raise SystemExit(f"overlay marker mismatch: packages/coding-agent/package.json devDeps: {old_dev!r}")
+    return after_pi.replace(old_dev, '"@types/better-sqlite3": "catalog:",\n    "@types/bun": "catalog:"', 1)
+
+def hermes_root_catalog(text):
+    if '"@types/better-sqlite3"' in text:
+        if '"@types/better-sqlite3": "^7.6.13"' not in text:
+            raise SystemExit("overlay marker mismatch: package.json catalog: @types/better-sqlite3 version must be ^7.6.13")
         return text
-    old = '"puppeteer-core": "catalog:"'
+    old = '"@types/bun": "^1.3.14"'
     if text.count(old) != 1:
-        raise SystemExit(f"overlay marker mismatch: packages/coding-agent/package.json: {old!r}")
-    return text.replace(old, f'"puppeteer-core": "catalog:",\n    "pi-hermes-memory": "{HERMES_SPEC}"', 1)
+        raise SystemExit(f"overlay marker mismatch: package.json catalog: {old!r}")
+    return text.replace(old, '"@types/better-sqlite3": "^7.6.13",\n      "@types/bun": "^1.3.14"', 1)
 
 def hermes_settings_schema(text):
     if '"hermes"' in text and 'memory.backend' in text:
@@ -143,6 +164,8 @@ def _edit(rel, transform):
 
 def apply_hermes_overlay():
     changed = 0
+    if _edit("package.json", hermes_root_catalog):
+        changed += 1
     if _edit("packages/coding-agent/package.json", hermes_package_json):
         changed += 1
     if _edit("packages/coding-agent/src/config/settings-schema.ts", hermes_settings_schema):

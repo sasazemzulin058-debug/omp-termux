@@ -79,6 +79,7 @@
     "sherpa-onnx-node": "1.13.2"
   },
   "devDependencies": {
+    "@types/better-sqlite3": "catalog:",
     "@types/bun": "catalog:"
   },
   "engines": {

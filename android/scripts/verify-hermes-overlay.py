@@ -30,6 +30,8 @@ def main():
     # 1. Package pin
     require("packages/coding-agent/package.json", HERMES_SPEC)
     require_absent("packages/coding-agent/package.json", "pi-hermes-memory#main", "(mutable spec)")
+    require("packages/coding-agent/package.json", '"@types/better-sqlite3": "catalog:"')
+    require("package.json", '"@types/better-sqlite3": "^7.6.13"')
 
     # 2. Source markers
     checks = {
@@ -76,7 +78,7 @@ def main():
     spec.loader.exec_module(mod)  # type: ignore
     # Snapshot mtimes
     before = {}
-    for rel in list(checks.keys()) + ["packages/coding-agent/src/memory-backend/hermes-backend.ts", "packages/coding-agent/test/hermes-backend.test.ts", "packages/coding-agent/package.json"]:
+    for rel in list(checks.keys()) + ["packages/coding-agent/src/memory-backend/hermes-backend.ts", "packages/coding-agent/test/hermes-backend.test.ts", "packages/coding-agent/package.json", "package.json"]:
         p = ROOT / rel
         before[rel] = p.read_text() if p.exists() else None
     changed = mod.apply_hermes_overlay()

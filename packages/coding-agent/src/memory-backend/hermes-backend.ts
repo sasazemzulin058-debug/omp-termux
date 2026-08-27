@@ -23,6 +23,7 @@
 import * as path from "node:path";
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import { completeSimple, retryTransientCompletion } from "@oh-my-pi/pi-ai";
+import type { Model } from "@oh-my-pi/pi-ai/types";
 import { logger } from "@oh-my-pi/pi-utils";
 import type { ModelRegistry } from "../config/model-registry";
 import { resolveRoleSelection } from "../config/model-resolver";
@@ -188,13 +189,13 @@ function createHermesExec(
 	sessionId: string,
 ): (prompt: string, options?: { signal?: AbortSignal; maxTokens?: number; temperature?: number }) => Promise<string> {
 	return async (prompt, options) => {
-		let resolved: { model?: { provider: string; id: string } } | undefined;
+		let resolved: { model: Model; thinkingLevel?: unknown } | undefined;
 		try {
 			resolved = resolveRoleSelection(
 				["tiny", "smol", "default"],
 				settings,
 				modelRegistry.getAvailable(),
-			) as typeof resolved;
+			);
 		} catch (error) {
 			throw new Error(
 				`Hermes exec unavailable: model resolution failed: ${error instanceof Error ? error.message : String(error)}`,
@@ -313,7 +314,7 @@ export const hermesBackend: MemoryBackend = {
 		const runtime = await getOrCreateRuntimeForSession(
 			options.session as AgentSession,
 			options.agentDir,
-			options.session.getCwd?.() ?? options.agentDir,
+			options.session.sessionManager?.getCwd?.() ?? options.agentDir,
 			options.taskDepth,
 			options.settings,
 			options.modelRegistry as ModelRegistry,
