@@ -66,7 +66,7 @@ jobs:
           bun install
           echo "lockfile regenerated after overlay"
           # Verify hermes pin is present in lockfile
-          if ! grep -q 'pi-hermes-memory.*#'"f20e315" bun.lock; then
+          if ! grep -q 'pi-hermes-memory.*#'"25a2b06" bun.lock; then
             echo "error: bun.lock missing pinned hermes commit after regeneration" >&2
             exit 1
           fi

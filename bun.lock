@@ -102,7 +102,7 @@
         "@opentelemetry/sdk-metrics": "catalog:",
         "@opentelemetry/sdk-trace-base": "catalog:",
         "@opentelemetry/sdk-trace-node": "catalog:",
-        "pi-hermes-memory": "github:sasazemzulin058-debug/pi-hermes-memory#f20e315",
+        "pi-hermes-memory": "github:sasazemzulin058-debug/pi-hermes-memory#25a2b06",
         "puppeteer-core": "catalog:",
       },
       "devDependencies": {
@@ -1470,7 +1470,7 @@
 
     "path-key": ["path-key@3.1.1", "", {}, "sha512-ojmeN0qd+y0jszEtoY48r0Peq5dwMEkIlCOu6Q5f41lfkswXuKtYrhgoTpLnyIcHm24Uhqx+5Tqm2InSwLhE6Q=="],
 
-    "pi-hermes-memory": ["pi-hermes-memory@github:sasazemzulin058-debug/pi-hermes-memory#f20e315", { "dependencies": { "better-sqlite3": "^12.9.0" }, "peerDependencies": { "@earendil-works/pi-coding-agent": ">=0.70.0" } }, "sasazemzulin058-debug-pi-hermes-memory-f20e315", "sha512-CHVnQ8fZeBP6q/ZC/miN2/muGDhD3lbo8GmjiBEgW8llVo1c1pkVKRI7UlTlVowDdkyitx7QgwJsxBord1pj1w=="],
+    "pi-hermes-memory": ["pi-hermes-memory@github:sasazemzulin058-debug/pi-hermes-memory#25a2b06", { "dependencies": { "better-sqlite3": "^12.9.0" }, "peerDependencies": { "@earendil-works/pi-coding-agent": ">=0.70.0" } }, "sasazemzulin058-debug-pi-hermes-memory-25a2b06", "sha512-Pxqj1qJ9IhfBseDyk5haepTgjjnzIvsxKToCt+z6ZCNy+7i5+ksAwGvwJfpy56q5e6KGM3pGv7nxbJqqCeAszQ=="],
 
     "picocolors": ["picocolors@1.1.1", "", {}, "sha512-xceH2snhtb5M9liqDsmEw56le376mTZkEX/jEb/RxNFyegNul7eNslCXP9FDj/Lcu0X8KEyMceP2ntpaHrDEVA=="],
 

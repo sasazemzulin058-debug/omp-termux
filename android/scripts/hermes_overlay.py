@@ -5,7 +5,7 @@ from pathlib import Path
 import re
 
 ROOT = Path.cwd()
-HERMES_COMMIT = "f20e315"
+HERMES_COMMIT = "25a2b06"
 HERMES_SPEC = f"github:sasazemzulin058-debug/pi-hermes-memory#{HERMES_COMMIT}"
 HERMES_OVERLAY_DIR = ROOT / "android" / "overlay" / "hermes"
 
