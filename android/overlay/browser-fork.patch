@@ -1,3 +1,16 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: OMP Termux Port <omp-termux@local>
+Date: Fri, 28 Aug 2026 00:00:00 +0000
+Subject: [PATCH] feat(browser): adapt headless browser launch and supervisor for Android Termux
+
+Support external Chromium binaries on Termux and manage background browser daemons.
+---
+ packages/coding-agent/src/tools/browser.ts         |  12 +-
+ packages/coding-agent/src/tools/browser/launch.ts  | 155 +++++++++++++++++----
+ .../coding-agent/src/tools/browser/registry.ts     |  20 +--
+ .../src/tools/browser/shared-daemon.ts             |  41 ++++--
+ 4 files changed, 181 insertions(+), 47 deletions(-)
+
 diff --git a/packages/coding-agent/src/tools/browser.ts b/packages/coding-agent/src/tools/browser.ts
 index b7f710732a..772d4582f1 100644
 --- a/packages/coding-agent/src/tools/browser.ts

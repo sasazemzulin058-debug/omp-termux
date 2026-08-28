@@ -57,6 +57,48 @@ def apply_browser_overlay():
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text(template.read_text())
     return True
+
+def apply_task_isolation_overlay():
+    """Apply task isolation repoRoot changes after upstream import."""
+    import subprocess
+    patch = ROOT / "android" / "overlay" / "task-isolation-fork.patch"
+    if not patch.is_file() or patch.stat().st_size == 0:
+        raise SystemExit(f"task isolation overlay missing or empty: {patch}")
+    command = ["git", "apply", "--whitespace=nowarn", "--check", str(patch)]
+    checked = subprocess.run(command, cwd=ROOT, text=True, capture_output=True)
+    if checked.returncode != 0:
+        detail = (checked.stderr or checked.stdout).strip()
+        raise SystemExit(f"task isolation overlay check failed: {detail}")
+    applied = subprocess.run(
+        ["git", "apply", "--whitespace=nowarn", str(patch)],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+    if applied.returncode != 0:
+        detail = (applied.stderr or applied.stdout).strip()
+        raise SystemExit(f"task isolation overlay failed to apply: {detail}")
+    return True
+
+def task_isolation_settings(text):
+    marker = '\t"task.isolation.apply": {'
+    entry = '''\t"task.isolation.repoRoot": {
+\t\ttype: "string",
+\t\tnullable: true,
+\t\tdefault: null,
+\t\tui: {
+\t\t\ttab: "tasks",
+\t\t\tgroup: "Isolation",
+\t\t\tlabel: "Isolation Repository Root",
+\t\t\tdescription:
+\t\t\t\t"Explicit path to the Git repository root to use for isolated task worktrees (defaults to current working directory)",
+\t\t},
+\t},
+'''
+    if '"task.isolation.repoRoot"' in text:
+        return text
+    return once(text, marker, entry + marker, "settings-schema.ts")
+
 def browser_settings(text):
     marker = '\t"browser.screenshotDir": {'
     entry = '''\t"browser.executablePath": {
@@ -291,4 +333,15 @@ except SystemExit:
     raise
 except Exception as e:
     raise SystemExit(f"browser overlay failed: {e}") from e
-print(f"Android overlay applied: 11 transformations + Hermes overlay ({hermes_changed} hermes files changed if any) + browser overlay")
+
+# Task isolation overlay (repoRoot support)
+task_settings_path = ROOT / "packages" / "coding-agent" / "src" / "config" / "settings-schema.ts"
+task_settings_path.write_text(task_isolation_settings(task_settings_path.read_text()))
+try:
+    apply_task_isolation_overlay()
+except SystemExit:
+    raise
+except Exception as e:
+    raise SystemExit(f"task isolation overlay failed: {e}") from e
+
+print(f"Android overlay applied: 11 transformations + Hermes overlay ({hermes_changed} hermes files changed if any) + browser overlay + task isolation overlay")
