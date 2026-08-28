@@ -111,7 +111,14 @@ export function resolveBasicShell(): string | undefined {
 	}
 
 	if (process.platform !== "win32") {
-		const searchPaths = ["/bin", "/usr/bin", "/usr/local/bin", "/opt/homebrew/bin"];
+		const searchPaths = [
+			process.env.PREFIX ? path.join(process.env.PREFIX, "bin") : undefined,
+			"/data/data/com.termux/files/usr/bin",
+			"/bin",
+			"/usr/bin",
+			"/usr/local/bin",
+			"/opt/homebrew/bin",
+		].filter((dir): dir is string => Boolean(dir));
 		const candidates = ["bash", "sh"];
 
 		for (const name of candidates) {

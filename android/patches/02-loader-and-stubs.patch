@@ -1,0 +1,53 @@
+diff --git a/packages/natives/native/index.js b/packages/natives/native/index.js
+index 255711d7eef269cdbcffed5613ff3e01fd096a79..c5491f2b23b4f89c947f11b12489242ae3c00435 100644
+--- a/packages/natives/native/index.js
++++ b/packages/natives/native/index.js
+@@ -15,15 +15,23 @@ import { adaptDesktopSession } from "./desktop-adapter.js";
+  */
+ 
+ const nativeBindings = loadNative();
++
++// Android: audio/live/webrtc modules are excluded from native addon.
++// Provide stub classes that throw a clear error instead of undefined TypeError.
++function _unsupported(name) {
++  return class {
++    constructor() { throw new Error(`${name} is not available on Android/Termux`); }
++  };
++}
+ // --- generated native exports (do not edit) ---
+ // classes
+-export const AudioCapture = nativeBindings.AudioCapture;
+-export const AudioPlayback = nativeBindings.AudioPlayback;
++export const AudioCapture = nativeBindings.AudioCapture ?? _unsupported("AudioCapture");
++export const AudioPlayback = nativeBindings.AudioPlayback ?? _unsupported("AudioPlayback");
+ export const DesktopSession = adaptDesktopSession(nativeBindings.DesktopSession);
+ export const DiffStream = nativeBindings.DiffStream;
+ export const FileLock = nativeBindings.FileLock;
+ export const HighlightStream = nativeBindings.HighlightStream;
+-export const LiveWebRtcPeer = nativeBindings.LiveWebRtcPeer;
++export const LiveWebRtcPeer = nativeBindings.LiveWebRtcPeer ?? _unsupported("LiveWebRtcPeer");
+ export const MacAppearanceObserver = nativeBindings.MacAppearanceObserver;
+ export const MacOSPowerAssertion = nativeBindings.MacOSPowerAssertion;
+ export const Process = nativeBindings.Process;
+diff --git a/packages/natives/native/loader-state.js b/packages/natives/native/loader-state.js
+index 5c07c410d4c17af6aff278b8feb2c39d994deb9e..c3dcf18ca5001d716bb05b9c02562945fed3c4f1 100644
+--- a/packages/natives/native/loader-state.js
++++ b/packages/natives/native/loader-state.js
+@@ -4,7 +4,7 @@ import { createRequire } from "node:module";
+ import * as os from "node:os";
+ import * as path from "node:path";
+ import * as zlib from "node:zlib";
+-import packageJson from "../package.json" with { type: "json" };
++const packageJson = createRequire(import.meta.url)("../package.json");
+ import { embeddedAddon } from "./embedded-addon.js";
+ 
+ /**
+@@ -31,7 +31,7 @@ import { embeddedAddon } from "./embedded-addon.js";
+  * post-build `--reset` stub) is the authoritative compiled-mode signal.
+  */
+ 
+-const SUPPORTED_PLATFORMS = ["linux-x64", "linux-arm64", "darwin-x64", "darwin-arm64", "win32-x64"];
++const SUPPORTED_PLATFORMS = ["linux-x64", "linux-arm64", "android-arm64", "darwin-x64", "darwin-arm64", "win32-x64"];
+ 
+ /**
+  * Streaming startup marker, enabled by `PI_DEBUG_STARTUP`. Local copy of the

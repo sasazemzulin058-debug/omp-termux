@@ -195,6 +195,7 @@ import {
 	toReasoningEffort,
 } from "../thinking";
 import { isLowSignalTitleInput } from "../tiny/text";
+import { isAndroidEnvironment, sendAndroidNotificationFireAndForget } from "@oh-my-pi/pi-utils";
 import { shutdownTinyTitleClient } from "../tiny/title-client";
 import type { ImageAttachmentEntry } from "../tools";
 import { resolveApproval } from "../tools/approval";
@@ -2235,6 +2236,21 @@ export class AgentSession {
 				return;
 			}
 			this.#emit(event);
+			if (event.type === "agent_end" && isAndroidEnvironment()) {
+				try {
+					const enabled = this.settings.get("system.android.notifications.enabled" as never) as unknown as boolean;
+					const events = (this.settings.get("system.android.notifications.events" as never) as unknown as string[]) ?? [];
+					const shouldNotify = enabled && (events.includes("agent_end") || events.includes("all"));
+					if (shouldNotify) {
+						sendAndroidNotificationFireAndForget({
+							id: "omp-agent-end",
+							title: "OMP agent turn complete",
+							body: (event as { isTerminal?: boolean }).isTerminal === false ? "Agent turn continued" : "Agent turn finished",
+							priority: "low",
+						});
+					}
+				} catch {}
+			}
 		} finally {
 			releaseGate();
 		}

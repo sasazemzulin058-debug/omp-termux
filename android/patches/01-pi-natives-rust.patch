@@ -1,0 +1,451 @@
+diff --git a/crates/pi-builtins/src/proc_snapshot.rs b/crates/pi-builtins/src/proc_snapshot.rs
+index 43ea86799a9c54b7c77ddb1f13b8b6caa461ba27..c2439d2248c8532f76399fc5c4e1da420972278d 100644
+--- a/crates/pi-builtins/src/proc_snapshot.rs
++++ b/crates/pi-builtins/src/proc_snapshot.rs
+@@ -41,7 +41,7 @@ pub(crate) fn sanitize_process_command(command: String) -> String {
+ 		.collect()
+ }
+ 
+-#[cfg(target_os = "linux")]
++#[cfg(any(target_os = "linux", target_os = "android"))]
+ mod proc_snapshot {
+ 	use std::{
+ 		fs,
+@@ -1080,7 +1080,7 @@ mod proc_snapshot {
+ 	}
+ }
+ 
+-#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
++#[cfg(any(target_os = "linux", target_os = "android", target_os = "macos", target_os = "windows"))]
+ pub use proc_snapshot::ProcInfo;
+ 
+ /// The processes a signal must never reach: this one and its ancestors.
+@@ -1104,7 +1104,7 @@ pub use proc_snapshot::ProcInfo;
+ ///
+ /// Listing is unaffected: `pgrep` still reports ancestors and `ps` still shows
+ /// them. Only signalling consults this.
+-#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
++#[cfg(any(target_os = "linux", target_os = "android", target_os = "macos", target_os = "windows"))]
+ pub(crate) struct HostProcesses {
+ 	/// This process and its ancestors, nearest first.
+ 	pub pids:  smallvec::SmallVec<[i32; 16]>,
+@@ -1117,7 +1117,7 @@ pub(crate) struct HostProcesses {
+ /// Keeping the walk over this rather than over [`ProcInfo`] lets the recycling
+ /// cases — which are otherwise only reachable by winning a race against the OS —
+ /// be tested with a synthetic tree.
+-#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
++#[cfg(any(target_os = "linux", target_os = "android", target_os = "macos", target_os = "windows"))]
+ #[derive(Clone, Copy)]
+ struct ChainNode {
+ 	ppid:  Option<i32>,
+@@ -1127,7 +1127,7 @@ struct ChainNode {
+ 	start: u64,
+ }
+ 
+-#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
++#[cfg(any(target_os = "linux", target_os = "android", target_os = "macos", target_os = "windows"))]
+ impl HostProcesses {
+ 	/// Walks the parent chain from the current process, taking one process-table
+ 	/// snapshot.
+diff --git a/crates/pi-builtins/src/ps.rs b/crates/pi-builtins/src/ps.rs
+index e4e5d7d951c16a5ef02f7dfc87791dc1c0cb02b4..bd43ca71b238688739d42fcd9dabe78af7134d7a 100644
+--- a/crates/pi-builtins/src/ps.rs
++++ b/crates/pi-builtins/src/ps.rs
+@@ -1244,7 +1244,7 @@ fn format_ps_elapsed(duration: Duration) -> String {
+ 	}
+ }
+ 
+-#[cfg(target_os = "linux")]
++#[cfg(any(target_os = "linux", target_os = "android"))]
+ fn ps_total_memory_bytes() -> Option<u64> {
+ 	let value = fs::read_to_string("/proc/meminfo")
+ 		.ok()?
+diff --git a/crates/pi-natives/Cargo.toml b/crates/pi-natives/Cargo.toml
+index 382df037f5e7f66fa7622348be49fc9307381091..1e8b4add80e48781d136b5ead2d34b2bd8036d07 100644
+--- a/crates/pi-natives/Cargo.toml
++++ b/crates/pi-natives/Cargo.toml
+@@ -23,7 +23,6 @@ wayland-pipewire = ["dep:pipewire"]
+ 
+ [dependencies]
+ anyhow.workspace = true
+-arboard.workspace = true
+ ast-grep-core.workspace = true
+ base64.workspace = true
+ clap.workspace = true
+@@ -53,7 +52,6 @@ flume.workspace = true
+ pi-ast.workspace = true
+ pi-iso.workspace = true
+ pi-shell.workspace = true
+-pi-voice.workspace = true
+ pi-walker.workspace = true
+ portable-pty.workspace = true
+ png.workspace = true
+@@ -102,6 +100,11 @@ clipboard-win.workspace = true
+ uiautomation = "=0.25.0"
+ winreg.workspace = true
+ 
++[target.'cfg(not(target_os = "android"))'.dependencies]
++arboard.workspace = true
++# pi-voice stubbed on Android: webrtc/opus OOMs free GH runners.
++pi-voice.workspace = true
++
+ [dev-dependencies]
+ fancy-regex.workspace = true # utok scanner differential oracle
+ tiktoken-rs.workspace = true # utok openai differential oracle
+diff --git a/crates/pi-natives/src/audio.rs b/crates/pi-natives/src/audio.rs
+index 6ca937fba9d3116b65d1693726f14ddbdf1cb73e..54663449cf2bb9ab13ed81334309c85b0c28fc8c 100644
+--- a/crates/pi-natives/src/audio.rs
++++ b/crates/pi-natives/src/audio.rs
+@@ -18,12 +18,12 @@ type CaptureCallback = ThreadsafeFunction<Float32Array, UnknownReturnValue>;
+ 
+ /// Default-microphone capture converted to mono `f32` at the requested sample
+ /// rate.
+-#[napi]
++/* #[napi] disabled on android */
+ pub struct AudioCapture {
+ 	stream: Mutex<Option<CaptureStream>>,
+ }
+ 
+-#[napi]
++/* #[napi] disabled on android */
+ impl AudioCapture {
+ 	/// Open the default microphone and deliver low-latency mono PCM chunks.
+ 	#[napi(constructor)]
+@@ -41,7 +41,7 @@ impl AudioCapture {
+ 	}
+ 
+ 	/// Stop capture immediately and release the microphone.
+-	#[napi]
++	/* #[napi] disabled on android */
+ 	pub fn stop(&self) -> Result<()> {
+ 		let stream = self.stream.lock().take();
+ 		let Some(mut stream) = stream else {
+@@ -52,13 +52,13 @@ impl AudioCapture {
+ }
+ 
+ /// Gapless mono `f32` playback through the default speaker.
+-#[napi]
++/* #[napi] disabled on android */
+ pub struct AudioPlayback {
+ 	stream: Mutex<Option<PlaybackStream>>,
+ 	state:  Arc<PlaybackState>,
+ }
+ 
+-#[napi]
++/* #[napi] disabled on android */
+ impl AudioPlayback {
+ 	/// Open the default speaker at the requested logical sample rate.
+ 	#[napi(constructor)]
+@@ -69,7 +69,7 @@ impl AudioPlayback {
+ 	}
+ 
+ 	/// Queue mono floating-point PCM in playback order.
+-	#[napi]
++	/* #[napi] disabled on android */
+ 	pub fn write(&self, samples: Float32Array) -> Result<()> {
+ 		let stream = self.stream.lock();
+ 		let stream = stream
+@@ -82,7 +82,7 @@ impl AudioPlayback {
+ 	}
+ 
+ 	/// Scale audio at render time so gain changes affect already queued samples.
+-	#[napi]
++	/* #[napi] disabled on android */
+ 	pub fn set_gain(&self, gain: f64) -> Result<()> {
+ 		let stream = self.stream.lock();
+ 		let stream = stream
+@@ -95,7 +95,7 @@ impl AudioPlayback {
+ 
+ 	/// Close input, wait until queued samples reach the speaker, then release
+ 	/// it.
+-	#[napi]
++	/* #[napi] disabled on android */
+ 	pub async fn end(&self) -> Result<()> {
+ 		{
+ 			let mut stream = self.stream.lock();
+@@ -113,7 +113,7 @@ impl AudioPlayback {
+ 	}
+ 
+ 	/// Stop immediately and discard all queued samples.
+-	#[napi]
++	/* #[napi] disabled on android */
+ 	pub fn stop(&self) -> Result<()> {
+ 		let stream = self.stream.lock().take();
+ 		if let Some(mut stream) = stream {
+diff --git a/crates/pi-natives/src/clipboard.rs b/crates/pi-natives/src/clipboard.rs
+index 390050d44710d762c5d4fd2a8f8994f3f3ec2fe7..7708f2a247471a7cac5e124ce4f26ffd2aa34d85 100644
+--- a/crates/pi-natives/src/clipboard.rs
++++ b/crates/pi-natives/src/clipboard.rs
+@@ -4,14 +4,19 @@
+ //! Performs text copy synchronously so macOS writes run on the caller thread.
+ //! This avoids worker-thread `AppKit` pasteboard warnings in CLI contexts.
+ 
++#[cfg(not(target_os = "android"))]
+ use std::io::Cursor;
+ 
++#[cfg(not(target_os = "android"))]
+ use arboard::{Clipboard, Error as ClipboardError, ImageData};
++#[cfg(not(target_os = "android"))]
+ use image::{DynamicImage, ImageFormat, RgbaImage};
+ use napi::{JsString, bindgen_prelude::*};
+ use napi_derive::napi;
+ 
+-use crate::{js, task};
++use crate::js;
++#[cfg(not(target_os = "android"))]
++use crate::task;
+ 
+ /// Clipboard image payload encoded as PNG bytes.
+ #[napi(object)]
+@@ -22,6 +27,7 @@ pub struct ClipboardImage {
+ 	pub mime_type: String,
+ }
+ 
++#[cfg(not(target_os = "android"))]
+ fn encode_png(image: ImageData<'_>) -> Result<Vec<u8>> {
+ 	let width = u32::try_from(image.width)
+ 		.map_err(|_| Error::from_reason("Clipboard image width overflow"))?;
+@@ -33,6 +39,7 @@ fn encode_png(image: ImageData<'_>) -> Result<Vec<u8>> {
+ 	rgba_to_png(buffer)
+ }
+ 
++#[cfg(not(target_os = "android"))]
+ fn rgba_to_png(buffer: RgbaImage) -> Result<Vec<u8>> {
+ 	let capacity = (buffer
+ 		.width()
+@@ -64,6 +71,7 @@ fn rgba_to_png(buffer: RgbaImage) -> Result<Vec<u8>> {
+ 		          tests cover it on every host"
+ 	)
+ )]
++#[cfg(not(target_os = "android"))]
+ fn dib_to_png(dib: &[u8]) -> Result<Vec<u8>> {
+ 	const FILE_HEADER_SIZE: u64 = 14;
+ 	const INFO_HEADER_SIZE: u64 = 40;
+@@ -152,7 +160,7 @@ pub fn copy_to_clipboard(text: JsString) -> Result<()> {
+ /// serving, without shelling out to `xclip`/`wl-copy`. Wayland is unaffected
+ /// (`wl-clipboard-rs` forks its own serving process) but sharing the instance
+ /// is harmless there.
+-#[cfg(target_os = "linux")]
++#[cfg(all(target_os = "linux", not(target_os = "android")))]
+ fn set_clipboard_text(text: &str) -> Result<()> {
+ 	use std::sync::OnceLock;
+ 
+@@ -179,7 +187,7 @@ fn set_clipboard_text(text: &str) -> Result<()> {
+ /// exits, so a transient `Clipboard` is sufficient. Keeping the write on the
+ /// calling thread also avoids worker-thread `AppKit` pasteboard warnings on
+ /// macOS.
+-#[cfg(not(target_os = "linux"))]
++#[cfg(all(not(target_os = "linux"), not(target_os = "android")))]
+ fn set_clipboard_text(text: &str) -> Result<()> {
+ 	let mut clipboard = Clipboard::new()
+ 		.map_err(|err| Error::from_reason(format!("Failed to access clipboard: {err}")))?;
+@@ -189,12 +197,20 @@ fn set_clipboard_text(text: &str) -> Result<()> {
+ 	Ok(())
+ }
+ 
++#[cfg(target_os = "android")]
++fn set_clipboard_text(_text: &str) -> Result<()> {
++	Err(Error::from_reason(
++		"Clipboard copy is not supported on Android/Termux native build; use termux-clipboard-set",
++	))
++}
++
+ /// Read an image from the system clipboard.
+ ///
+ /// Returns `Ok(None)` when no image data is available.
+ ///
+ /// # Errors
+ /// Returns an error if clipboard access fails or image encoding fails.
++#[cfg(not(target_os = "android"))]
+ #[napi]
+ pub fn read_image_from_clipboard() -> task::Promise<Option<ClipboardImage>> {
+ 	task::blocking("clipboard.read_image", (), move |_| -> Result<Option<ClipboardImage>> {
+@@ -366,3 +382,9 @@ mod tests {
+ 		assert!(dib_to_png(&oversized_header).is_err(), "header size beyond buffer must not decode");
+ 	}
+ }
++
++#[cfg(target_os = "android")]
++#[napi]
++pub async fn read_image_from_clipboard() -> Result<Option<ClipboardImage>> {
++	Ok(None)
++}
+diff --git a/crates/pi-natives/src/crash_handler.rs b/crates/pi-natives/src/crash_handler.rs
+index 7009bef3e3e88b39f4a6a3fe306ba4b7c86d9def..dbefbf6fc44b4dbcc9bd9c4affe23b93659ae006 100644
+--- a/crates/pi-natives/src/crash_handler.rs
++++ b/crates/pi-natives/src/crash_handler.rs
+@@ -36,10 +36,7 @@ use std::{
+ 	io::Write as _,
+ 	path::{Path, PathBuf},
+ 	process,
+-	sync::{
+-		Once,
+-		atomic::{AtomicBool, Ordering},
+-	},
++	sync::Once,
+ 	thread,
+ 	time::{SystemTime, UNIX_EPOCH},
+ };
+@@ -54,7 +51,6 @@ const DEFAULT_CONFIG_DIR: &str = ".omp";
+ const APP_NAME: &str = "omp";
+ 
+ static INSTALL: Once = Once::new();
+-static ALLOC_HOOK_ACTIVE: AtomicBool = AtomicBool::new(false);
+ 
+ thread_local! {
+ 	/// Active `task::blocking` panic recovery frames on this thread.
+@@ -93,19 +89,7 @@ pub fn install() {
+ 			},
+ 		}));
+ 
+-		std::alloc::set_alloc_error_hook(|layout| {
+-			// Print the canonical line before doing anything allocation-prone.
+-			// If this is genuine process-wide OOM, report formatting/path work may
+-			// recursively enter this hook; the secondary entry writes the same
+-			// stack-only fallback and aborts immediately.
+-			write_alloc_failure_line(std::io::stderr(), layout.size());
+-			if ALLOC_HOOK_ACTIVE.swap(true, Ordering::AcqRel) {
+-				process::abort();
+-			}
+-			let report = format_alloc_report(layout);
+-			persist(&report, CrashKind::Alloc, true);
+-			process::abort();
+-		});
++		// alloc hook disabled on Android: unstable on bionic.
+ 	});
+ }
+ 
+@@ -146,6 +130,7 @@ fn panic_disposition() -> PanicDisposition {
+ #[derive(Clone, Copy)]
+ enum CrashKind {
+ 	Panic,
++	#[allow(dead_code, reason = "alloc hook disabled on Android")]
+ 	Alloc,
+ }
+ 
+@@ -171,6 +156,7 @@ fn format_panic_report(info: &std::panic::PanicHookInfo<'_>) -> String {
+ 	out
+ }
+ 
++#[allow(dead_code, reason = "alloc hook disabled on Android")]
+ fn format_alloc_report(layout: Layout) -> String {
+ 	// Capturing a backtrace allocates. If the global allocator is in a state
+ 	// where small allocations keep failing this will recurse into the hook —
+@@ -195,6 +181,7 @@ fn report_header(kind: CrashKind) -> String {
+ 		pid = process::id(),
+ 	)
+ }
++#[allow(dead_code, reason = "alloc hook disabled on Android")]
+ fn write_alloc_failure_line(mut out: impl std::io::Write, size: usize) {
+ 	let _ = out.write_all(b"memory allocation of ");
+ 	let mut digits = [0u8; usize::MAX.ilog10() as usize + 1];
+diff --git a/crates/pi-natives/src/lib.rs b/crates/pi-natives/src/lib.rs
+index ac05e35461b826a87f5e0e6d642f6eeca777041e..5cc4a2b01f260f2bffe4f9cabe7751b4253e5cf0 100644
+--- a/crates/pi-natives/src/lib.rs
++++ b/crates/pi-natives/src/lib.rs
+@@ -20,10 +20,10 @@
+ 
+ #![allow(clippy::trailing_empty_array, reason = "generated by napi macro")]
+ #![allow(clippy::trivially_copy_pass_by_ref, reason = "napi env idiom")]
+-#![feature(alloc_error_hook)]
+ 
+ pub mod appearance;
+ pub mod ast;
++#[cfg(not(target_os = "android"))]
+ pub mod audio;
+ pub mod block;
+ pub mod clipboard;
+@@ -41,6 +41,7 @@ pub mod html;
+ pub mod iofs;
+ pub mod js;
+ pub mod keys;
++#[cfg(not(target_os = "android"))]
+ pub mod live;
+ /// PDF inspection and Markdown conversion.
+ pub mod pdf;
+diff --git a/crates/pi-natives/src/live.rs b/crates/pi-natives/src/live.rs
+index 9cbcd99d6643ea37624fc7d217bb3ec96d709752..12e4f5ae37df15cabd8ffcb26d878ea58a60327d 100644
+--- a/crates/pi-natives/src/live.rs
++++ b/crates/pi-natives/src/live.rs
+@@ -18,12 +18,12 @@ type StringCallback = ThreadsafeFunction<String, UnknownReturnValue>;
+ type LevelCallback = ThreadsafeFunction<f64, UnknownReturnValue>;
+ 
+ /// WebRTC peer that accepts 16 kHz mono PCM and renders remote Opus audio.
+-#[napi]
++/* #[napi] disabled on android */
+ pub struct LiveWebRtcPeer {
+ 	inner: Arc<LivePeerCore>,
+ }
+ 
+-#[napi]
++/* #[napi] disabled on android */
+ impl LiveWebRtcPeer {
+ 	/// Create an idle peer and register its event, output-level, and failure
+ 	/// callbacks.
+@@ -51,7 +51,7 @@ impl LiveWebRtcPeer {
+ 	}
+ 
+ 	/// Start the native media peer and return its SDP offer.
+-	#[napi]
++	/* #[napi] disabled on android */
+ 	pub async fn create_offer(&self) -> Result<String> {
+ 		self
+ 			.inner
+@@ -61,7 +61,7 @@ impl LiveWebRtcPeer {
+ 	}
+ 
+ 	/// Apply the remote SDP answer returned by Codex signaling.
+-	#[napi]
++	/* #[napi] disabled on android */
+ 	pub async fn accept_answer(&self, sdp: String) -> Result<()> {
+ 		self
+ 			.inner
+@@ -71,7 +71,7 @@ impl LiveWebRtcPeer {
+ 	}
+ 
+ 	/// Wait until the `oai-events` data channel is open.
+-	#[napi]
++	/* #[napi] disabled on android */
+ 	pub async fn wait_for_open(&self, timeout_ms: Option<u32>) -> Result<()> {
+ 		self
+ 			.inner
+@@ -81,7 +81,7 @@ impl LiveWebRtcPeer {
+ 	}
+ 
+ 	/// Queue 16 kHz mono floating-point PCM for Opus transmission.
+-	#[napi]
++	/* #[napi] disabled on android */
+ 	pub fn push_audio(&self, samples: Float32Array) -> Result<()> {
+ 		self
+ 			.inner
+@@ -91,7 +91,7 @@ impl LiveWebRtcPeer {
+ 
+ 	/// Enable or disable microphone transmission, discarding partial muted
+ 	/// frames.
+-	#[napi]
++	/* #[napi] disabled on android */
+ 	pub fn set_muted(&self, muted: bool) -> Result<()> {
+ 		self
+ 			.inner
+@@ -100,7 +100,7 @@ impl LiveWebRtcPeer {
+ 	}
+ 
+ 	/// Close media, the data channel, the peer connection, and speaker playback.
+-	#[napi]
++	/* #[napi] disabled on android */
+ 	pub async fn close(&self) {
+ 		self.inner.close().await;
+ 	}
+diff --git a/crates/pi-shell/src/process.rs b/crates/pi-shell/src/process.rs
+index c039bb9b5e621492d2c34d96cb5f61039308a09c..1c775045d038095ddcce8e4546efb9c014d595d8 100644
+--- a/crates/pi-shell/src/process.rs
++++ b/crates/pi-shell/src/process.rs
+@@ -16,7 +16,7 @@ pub use pi_builtins::ProcessStatus;
+ 
+ use crate::cancel::CancelToken;
+ 
+-#[cfg(target_os = "linux")]
++#[cfg(any(target_os = "linux", target_os = "android"))]
+ mod platform {
+ 	use std::{
+ 		collections::HashSet,

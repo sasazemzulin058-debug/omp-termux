@@ -23,7 +23,6 @@ wayland-pipewire = ["dep:pipewire"]
 
 [dependencies]
 anyhow.workspace = true
-arboard.workspace = true
 ast-grep-core.workspace = true
 base64.workspace = true
 clap.workspace = true
@@ -53,7 +52,6 @@ flume.workspace = true
 pi-ast.workspace = true
 pi-iso.workspace = true
 pi-shell.workspace = true
-pi-voice.workspace = true
 pi-walker.workspace = true
 portable-pty.workspace = true
 png.workspace = true
@@ -101,6 +99,11 @@ windows-sys = { workspace = true, features = ["Wdk_Storage_FileSystem", "Win32_F
 clipboard-win.workspace = true
 uiautomation = "=0.25.0"
 winreg.workspace = true
+
+[target.'cfg(not(target_os = "android"))'.dependencies]
+arboard.workspace = true
+# pi-voice stubbed on Android: webrtc/opus OOMs free GH runners.
+pi-voice.workspace = true
 
 [dev-dependencies]
 fancy-regex.workspace = true # utok scanner differential oracle

@@ -154,6 +154,7 @@ export const taskSchema = type({
 	"outputSchema?": outputSchemaInputSchema,
 	"schemaMode?": '"permissive" | "strict"',
 	"isolated?": "boolean",
+	"repoRoot?": "string",
 	"+": "delete",
 });
 const taskSchemaNoIsolation = type({
@@ -162,16 +163,19 @@ const taskSchemaNoIsolation = type({
 	task: "string",
 	"outputSchema?": outputSchemaInputSchema,
 	"schemaMode?": '"permissive" | "strict"',
+	"repoRoot?": "string",
 	"+": "delete",
 });
 const taskSchemaBatch = type({
 	context: "string",
 	tasks: taskItemSchemaIsolated.array(),
+	"repoRoot?": "string",
 	"+": "delete",
 });
 const taskSchemaBatchNoIsolation = type({
 	context: "string",
 	tasks: taskItemSchema.array(),
+	"repoRoot?": "string",
 	"+": "delete",
 });
 const ALL_TASK_SCHEMAS = [taskSchema, taskSchemaNoIsolation, taskSchemaBatch, taskSchemaBatchNoIsolation] as const;
@@ -215,6 +219,7 @@ function createTaskSchema(options: {
 			return type.raw({
 				context: "string",
 				tasks: item.array(),
+				"repoRoot?": "string",
 				"+": "delete",
 			});
 		}
@@ -230,6 +235,7 @@ function createTaskSchema(options: {
 		return type.raw({
 			context: "string",
 			tasks: item.array(),
+			"repoRoot?": "string",
 			"+": "delete",
 		});
 	}
@@ -242,6 +248,7 @@ function createTaskSchema(options: {
 			"outputSchema?": outputSchemaInputSchema,
 			"schemaMode?": '"permissive" | "strict"',
 			"isolated?": "boolean",
+			"repoRoot?": "string",
 			"+": "delete",
 		});
 	}
@@ -252,6 +259,7 @@ function createTaskSchema(options: {
 		...effortField,
 		"outputSchema?": outputSchemaInputSchema,
 		"schemaMode?": '"permissive" | "strict"',
+		"repoRoot?": "string",
 		"+": "delete",
 	});
 }
@@ -302,6 +310,8 @@ export interface TaskParams {
 	context?: string;
 	/** Run in an isolated worktree (flat form; per-item in batch form). */
 	isolated?: boolean;
+	/** Explicit repository root for this call; relative paths resolve from session cwd. */
+	repoRoot?: string;
 }
 
 /**

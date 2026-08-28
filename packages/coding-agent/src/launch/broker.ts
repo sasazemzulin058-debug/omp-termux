@@ -1,3 +1,5 @@
+import { Settings } from "../config/settings";
+import { acquireWakeLock, adjustOomScore, releaseWakeLock } from "@oh-my-pi/pi-utils";
 import * as fs from "node:fs/promises";
 import * as net from "node:net";
 import * as os from "node:os";
@@ -1416,10 +1418,24 @@ export async function startDaemonBrokerFromEnvironment(options: DaemonBrokerStar
 	if (!token) throw new Error("Daemon broker token is empty");
 	const broker = new DaemonBroker(projectDir, runtimeDir, token, idleGraceMs, restartBackoffBaseMs);
 	const cancelCleanup = postmortem.register("daemon-broker", () => broker.shutdown());
+	let androidWakeLockAcquired = false;
+	try {
+		const settings = await Settings.loadReadOnly({ cwd: projectDir });
+		const oomScoreAdj = settings.get("system.android.oomScoreAdj");
+		if (typeof oomScoreAdj === "number") adjustOomScore(oomScoreAdj);
+		if (settings.get("system.android.wakeLock") === true) {
+			androidWakeLockAcquired = await acquireWakeLock();
+		}
+	} catch {}
 	try {
 		await broker.run();
 	} finally {
 		cancelCleanup();
+		if (androidWakeLockAcquired) {
+			try {
+				await releaseWakeLock();
+			} catch {}
+		}
 		await releaseBrokerLease(lease);
 	}
 }

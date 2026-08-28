@@ -297,6 +297,7 @@ function spawnParamsFor(params: TaskParams, item: TaskItem, defaultAgent: string
 	if (item.name !== undefined) spawn.name = item.name;
 	if (item.task !== undefined) spawn.task = item.task;
 	if (params.context !== undefined) spawn.context = params.context;
+	if (params.repoRoot !== undefined) spawn.repoRoot = params.repoRoot;
 	if ("outputSchema" in item) spawn.outputSchema = item.outputSchema;
 	if ("schemaMode" in item) spawn.schemaMode = item.schemaMode;
 	if ("effort" in item) spawn.effort = item.effort;
@@ -663,7 +664,9 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 			...(Object.hasOwn(params, "outputSchema") ? { outputSchema: params.outputSchema } : {}),
 			...(Object.hasOwn(params, "schemaMode") ? { schemaMode: params.schemaMode } : {}),
 			...(params.effort !== undefined ? { effort: params.effort } : {}),
-			...("isolated" in params ? { isolation: { requested: params.isolated } } : {}),
+			...(Object.hasOwn(params, "isolated") || params.repoRoot !== undefined
+				? { isolation: { ...(Object.hasOwn(params, "isolated") ? { requested: params.isolated } : {}), ...(params.repoRoot !== undefined ? { repoRoot: params.repoRoot } : {}) } }
+				: {}),
 			blockedAgent: this.#blockedAgent,
 			enableLsp: (this.session.enableLsp ?? true) && this.session.settings.get("task.enableLsp"),
 			enableIrc: isIrcEnabled(this.session.settings, this.session.taskDepth ?? 0),
@@ -1440,7 +1443,9 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 				detached,
 				invokedAt: launchTiming?.invokedAt,
 				acquiredAt: launchTiming?.acquiredAt,
-				...("isolated" in params ? { isolation: { requested: params.isolated } } : {}),
+				...((Object.hasOwn(params, "isolated") || params.repoRoot !== undefined)
+					? { isolation: { ...(Object.hasOwn(params, "isolated") ? { requested: params.isolated } : {}), ...(params.repoRoot !== undefined ? { repoRoot: params.repoRoot } : {}) } }
+					: {}),
 				blockedAgent: this.#blockedAgent,
 				enableLsp: (this.session.enableLsp ?? true) && this.session.settings.get("task.enableLsp"),
 				enableIrc: isIrcEnabled(this.session.settings, this.session.taskDepth ?? 0),

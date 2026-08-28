@@ -21,7 +21,14 @@ async function maybeAutoChdir(parsed: Args): Promise<void> {
 		return;
 	}
 
-	const candidates = [path.join(home, "tmp"), "/tmp", "/var/tmp"];
+	const candidates = [
+		path.join(home, "tmp"),
+		process.env.TMPDIR,
+		process.env.PREFIX ? path.join(process.env.PREFIX, "tmp") : undefined,
+		"/data/data/com.termux/files/usr/tmp",
+		"/tmp",
+		"/var/tmp",
+	].filter((c): c is string => Boolean(c));
 	for (const candidate of candidates) {
 		try {
 			if (!(await directoryExists(candidate))) {
