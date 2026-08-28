@@ -25,9 +25,9 @@ jobs:
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
-      - name: Apply Android patch queue
+      - name: Prepare clean upstream and apply Android patch queue
         shell: bash
-        run: bash android/scripts/apply-patches.sh
+        run: bash android/scripts/prepare-clean-upstream.sh
 
       - name: Load Android manifest environment
         run: |

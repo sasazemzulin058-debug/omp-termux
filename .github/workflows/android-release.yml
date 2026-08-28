@@ -38,9 +38,9 @@ jobs:
         with:
           ref: ${{ env.RELEASE_TAG }}
           fetch-depth: 0
-      - name: Apply Android patch queue
+      - name: Prepare clean upstream and apply Android patch queue
         shell: bash
-        run: bash android/scripts/apply-patches.sh
+        run: bash android/scripts/prepare-clean-upstream.sh
 
       - name: Load Android manifest environment
         run: |
@@ -159,9 +159,9 @@ jobs:
         with:
           ref: ${{ env.RELEASE_TAG }}
           fetch-depth: 0
-      - name: Apply Android patch queue
+      - name: Prepare clean upstream and apply Android patch queue
         shell: bash
-        run: bash android/scripts/apply-patches.sh
+        run: bash android/scripts/prepare-clean-upstream.sh
 
       - name: Load Android manifest environment
         run: |
@@ -232,9 +232,9 @@ jobs:
         run: |
           set -euo pipefail
           grep -v '^#' android/versions.env >> "$GITHUB_ENV"
-      - name: Apply Android patch queue
+      - name: Prepare clean upstream and apply Android patch queue
         shell: bash
-        run: bash android/scripts/apply-patches.sh
+        run: bash android/scripts/prepare-clean-upstream.sh
 
       - name: Verify Android overlay and release tag
         run: python3 android/scripts/verify-overlay.py
