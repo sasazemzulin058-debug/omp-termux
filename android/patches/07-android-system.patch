@@ -1,0 +1,127 @@
+diff --git a/packages/coding-agent/src/config/settings-schema.ts b/packages/coding-agent/src/config/settings-schema.ts
+index c3448d1e9c..96ee4aa960 100644
+--- a/packages/coding-agent/src/config/settings-schema.ts
++++ b/packages/coding-agent/src/config/settings-schema.ts
+@@ -4544,6 +4544,37 @@ export const SETTINGS_SCHEMA = {
+ 				"Absolute path to the Chromium/Chrome executable for headless automation. Takes precedence over PUPPETEER_EXECUTABLE_PATH. Invalid explicit path fails closed.",
+ 		},
+ 	},
++	"system.android.wakeLock": {
++		type: "boolean",
++		default: true,
++		ui: {
++			tab: "system",
++			group: "Android / Termux",
++			label: "Acquire WakeLock",
++			description: "Keep CPU active during turn processing to prevent Android background throttling",
++		},
++	},
++	"system.android.oomScoreAdj": {
++		type: "number",
++		nullable: true,
++		default: -500,
++		ui: {
++			tab: "system",
++			group: "Android / Termux",
++			label: "OOM Score Adjustment",
++			description: "Adjust process OOM score (-1000 to 1000) to protect daemon processes from low-memory killer",
++		},
++	},
++	"system.android.notifications.enabled": {
++		type: "boolean",
++		default: true,
++		ui: {
++			tab: "system",
++			group: "Android / Termux",
++			label: "System Notifications",
++			description: "Show Android system notifications via termux-notification when tasks or turns complete",
++		},
++	},
+ 	"browser.screenshotDir": {
+ 		type: "string",
+ 		default: undefined,
+diff --git a/packages/coding-agent/src/launch/broker.ts b/packages/coding-agent/src/launch/broker.ts
+index 051962e986..fea4a111f0 100644
+--- a/packages/coding-agent/src/launch/broker.ts
++++ b/packages/coding-agent/src/launch/broker.ts
+@@ -1,3 +1,4 @@
++import { acquireWakeLock, releaseWakeLock, adjustOomScore } from "@oh-my-pi/pi-utils";
+ import * as fs from "node:fs/promises";
+ import * as net from "node:net";
+ import * as os from "node:os";
+diff --git a/packages/utils/src/android-system.ts b/packages/utils/src/android-system.ts
+new file mode 100644
+index 0000000000..120db2092f
+--- /dev/null
++++ b/packages/utils/src/android-system.ts
+@@ -0,0 +1,60 @@
++import { spawn } from "node:child_process";
++import fs from "node:fs";
++
++export function isAndroidEnvironment(): boolean {
++	return (
++		process.platform === "android" ||
++		Boolean(process.env.TERMUX_VERSION) ||
++		Boolean(process.env.ANDROID_ROOT) ||
++		Boolean(process.env.PREFIX?.includes("com.termux"))
++	);
++}
++
++export function acquireWakeLock(): void {
++	if (!isAndroidEnvironment()) return;
++	try {
++		spawn("termux-wake-lock", [], { stdio: "ignore", detached: true }).unref();
++	} catch {}
++}
++
++export function releaseWakeLock(): void {
++	if (!isAndroidEnvironment()) return;
++	try {
++		spawn("termux-wake-unlock", [], { stdio: "ignore", detached: true }).unref();
++	} catch {}
++}
++
++export function adjustOomScore(score = -500): boolean {
++	if (!isAndroidEnvironment()) return false;
++	try {
++		const clamped = Math.max(-1000, Math.min(1000, Math.round(score)));
++		fs.writeFileSync("/proc/self/oom_score_adj", String(clamped));
++		return true;
++	} catch {
++		return false;
++	}
++}
++
++export interface AndroidNotificationOptions {
++	id?: string;
++	title: string;
++	body: string;
++	icon?: string;
++	priority?: "high" | "low" | "default";
++}
++
++export function sendAndroidNotification(options: AndroidNotificationOptions): boolean {
++	if (!isAndroidEnvironment()) return false;
++	try {
++		const args: string[] = [];
++		if (options.id) args.push("--id", options.id);
++		args.push("--title", options.title);
++		args.push("--content", options.body);
++		if (options.priority) args.push("--priority", options.priority);
++		if (options.icon) args.push("--icon", options.icon);
++		spawn("termux-notification", args, { stdio: "ignore", detached: true }).unref();
++		return true;
++	} catch {
++		return false;
++	}
++}
+diff --git a/packages/utils/src/index.ts b/packages/utils/src/index.ts
+index 547bf7e2c6..40b20c5941 100644
+--- a/packages/utils/src/index.ts
++++ b/packages/utils/src/index.ts
+@@ -59,3 +59,5 @@ export function structuredCloneJSON<T>(value: T): T {
+ 	}
+ 	return JSON.parse(JSON.stringify(value)) as T;
+ }
++
++export * from "./android-system";
