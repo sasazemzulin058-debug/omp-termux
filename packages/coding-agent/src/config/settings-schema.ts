@@ -2941,14 +2941,13 @@ export const SETTINGS_SCHEMA = {
 	// `memories.enabled` flag is migration input only; see config/settings.ts.
 	"memory.backend": {
 		type: "enum",
-		values: ["off", "local", "hindsight", "mnemopi", "hermes"] as const,
+		values: ["off", "local", "hindsight", "mnemopi"] as const,
 		default: "off",
 		ui: {
 			tab: "memory",
 			group: "General",
 			label: "Memory Backend",
-			description:
-				"Off, local summary pipeline, Mnemopi SQLite, Hindsight remote memory, or Hermes persistent memory",
+			description: "Off, local summary pipeline, Mnemopi SQLite, or Hindsight remote memory",
 			options: [
 				{ value: "off", label: "Off", description: "No memory subsystem runs" },
 				{ value: "local", label: "Local", description: "Local rollout summarisation pipeline (memory_summary.md)" },
@@ -2957,11 +2956,6 @@ export const SETTINGS_SCHEMA = {
 					value: "mnemopi",
 					label: "Mnemopi",
 					description: "Local SQLite recall/retain backend with optional embeddings",
-				},
-				{
-					value: "hermes",
-					label: "Hermes",
-					description: "Hermes persistent memory (MEMORY.md/USER.md + SQLite FTS5) via pi-hermes-memory",
 				},
 			],
 		},
@@ -4533,17 +4527,6 @@ export const SETTINGS_SCHEMA = {
 				"Use cmux WKWebView surfaces for browser automation when a cmux socket is available. Set PI_BROWSER_CMUX=0 or PI_BROWSER_CMUX=1 to override.",
 		},
 	},
-	"browser.executablePath": {
-		type: "string",
-		default: undefined,
-		ui: {
-			tab: "tools",
-			group: "Grep & Browser",
-			label: "Browser Executable Path",
-			description:
-				"Absolute path to the Chromium/Chrome executable for headless automation. Takes precedence over PUPPETEER_EXECUTABLE_PATH. Invalid explicit path fails closed.",
-		},
-	},
 	"browser.screenshotDir": {
 		type: "string",
 		default: undefined,
@@ -4882,19 +4865,6 @@ export const SETTINGS_SCHEMA = {
 			label: "Apply Isolated Changes",
 			description:
 				"Automatically apply successful isolated task changes to the parent checkout; disable to retain patch or branch artifacts",
-		},
-	},
-
-	"task.isolation.repoRoot": {
-		type: "string",
-		nullable: true,
-		default: null,
-		ui: {
-			tab: "tasks",
-			group: "Isolation",
-			label: "Isolation Repository Root",
-			description:
-				"Explicit path to the Git repository root to use for isolated task worktrees (defaults to current working directory)",
 		},
 	},
 

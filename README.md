@@ -22,53 +22,15 @@
   Fork of <a href="https://github.com/badlogic/pi-mono">Pi</a> by <a href="https://github.com/mariozechner">@mariozechner</a> 
 </p>
 
+The most capable agent surface that ships. Continuously tuned by real-world use — complete out of the box, open all the way down.
+
+**60+** providers · **31** built-in tools · **14** lsp ops · **28** dap ops · **~80k** lines of Rust core.
 
 > [!NOTE]
 > Pull requests are **temporarily open to everyone** as a trial. We previously
 > required a vouch before accepting PRs; that requirement is lifted for now
 > while we evaluate how open contributions go. Depending on the results, the
 > vouch system may return.
-
-
-> [!IMPORTANT]
-> **Android ARM64 / Termux compatibility**
->
-> This fork ships a dedicated `aarch64` Android/Termux release with a
-> Bionic-compatible native addon, split OMP bundle, and bundled Bun runtime.
-> Use Android quickstart below. Do not use desktop installers, `pkg install bun`,
-> glibc Bun, or `bun build --compile`.
->
-> Supported path: **Termux · Android arm64 · Bionic · API 24 binary floor**.
-> Audio, WebRTC/live, local ONNX/STT, and clipboard image input are not part of
-> Android support. See [Android/Termux](#androidtermux) for exact boundaries.
-
-## Table of contents
-
-- [Status](#status)
-- [Install](#install)
-- [Android/Termux](#androidtermux)
-- [Building the bundled Bun from source](#building-the-bundled-bun-from-source)
-- [Features](#features)
-- [Tools](#tools)
-- [Providers](#providers)
-- [Search backends](#search-backends)
-- [Architecture](#architecture)
-- [Usage: four entry points](#usage-four-entry-points)
-- [Extensibility](#extensibility)
-- [Development](#development)
-- [Contributing](#contributing)
-- [License](#license)
-
-## Status
-
-This fork tracks upstream OMP through the automated sync workflow. The current
-source version is read from `packages/coding-agent/package.json`; Android
-release tags follow `v<version>-termux`. The port ships a self-contained
-Bionic aarch64 runtime and Android overlay.
-
-See [Android/Termux](#androidtermux) for the current device path and
-[Building the bundled Bun from source](#building-the-bundled-bun-from-source)
-for reproducible build provenance.
 
 ## Install
 
@@ -128,7 +90,8 @@ irm https://omp.sh/install.ps1 | iex
 ```sh
 mise use -g github:can1357/oh-my-pi
 ```
-macOS · Linux · Windows · bun version follows upstream package metadata
+
+macOS · Linux · Windows · bun ≥ 1.3.14
 
 ### Shell completions
 
@@ -145,132 +108,7 @@ eval "$(omp completions bash)"
 omp completions fish > ~/.config/fish/completions/omp.fish
 ```
 
-## Android/Termux
-
-This repository also ships OMP for **Termux on aarch64 Android** as a
-self-contained release: a tarball with the native `pi_natives` arm64 addon,
-the split JS bundle, and the official stable Bun Android aarch64 runtime.
-Nothing is installed from `pkg`, npm, or a source build on the device.
-
-### Quickstart
-
-```sh
-curl -fsSL https://raw.githubusercontent.com/sasazemzulin058-debug/omp-termux/main/install.sh | sh
-omp --version
-```
-
-Reproducible pinned-tag path (recommended for a specific release):
-
-```sh
-TAG="${OMP_VERSION:-latest}"
-if [ "$TAG" = latest ]; then
-  curl -fsSL https://raw.githubusercontent.com/sasazemzulin058-debug/omp-termux/main/install.sh | sh
-else
-  curl -fsSL "https://raw.githubusercontent.com/sasazemzulin058-debug/omp-termux/${TAG}/install.sh" | sh
-fi
-```
-
-The installer downloads `omp-termux.tar.gz` plus its `.sha256`, verifies the
-checksum, smoke-tests the staged tree, swaps it into `$PREFIX/lib/omp-termux`
-with a guarded two-rename swap and rollback, and writes the `omp` launcher
-(`env OMP_PLATFORM=android "$LIB_DIR/bun" "$LIB_DIR/cli.js"`).
-### Runtime vs bootstrap Bun
-
-Manifest values are the source of truth. Read `android/versions.env` before
-building or diagnosing a release:
-
-```sh
-set -a
-. android/versions.env
-set +a
-printf 'runtime=%s bootstrap=%s archive=%s\n' "$BUN_VERSION" "$BUN_BOOTSTRAP_VERSION" "$BUN_ARCHIVE_NAME"
-```
-
-`BUN_VERSION` is the bundled official stable Bun runtime for Android
-aarch64/Bionic. `BUN_BOOTSTRAP_VERSION` is CI-only and is never shipped.
-`BUN_ARCHIVE_NAME` and `BUN_SHA256` identify and verify the official GitHub
-release asset.
-
-Release details: [Android CI/CD](android/docs/ci-cd.md).
-
-### Capability boundary
-
-- Target: aarch64 Termux; binary floor API 24; `pidfd` needs an API 34-class
-  kernel (verified on one reference device).
-- Shell, PTY, process management, grep, glob, highlighting: native.
-- Clipboard text copy: JS fallback via `termux-clipboard-set`; clipboard
-  image paste returns empty.
-- Clipboard image, audio, WebRTC, desktop, local ONNX/STT: unsupported, with
-  a clear error message.
-- Browser live CDP/relay: technically available; the per-call consent
-  contract is tracked in the Android docs.
-- `omp update` is disabled on Android; the launcher prints a reinstall
-  instruction instead of touching the network or updater.
-
-### Documentation
-
-| Document | Contents |
-|----------|----------|
-| [android/README.md](android/README.md) | Port overview and current capability boundary |
-| [android/docs/setup.md](android/docs/setup.md) | Install behaviors, target installer, uninstall, recovery |
-| [android/docs/ci-cd.md](android/docs/ci-cd.md) | Build/package/release/sync pipeline and official stable Bun |
-| [android/docs/port-architecture.md](android/docs/port-architecture.md) | Port architecture and capability details |
-
-## Android Bun runtime
-
-Release packages use official stable Bun Android aarch64 assets from
-`oven-sh/bun`. CI verifies the manifest SHA256 before extracting `bun` and
-placing it at `./bun` in the Termux bundle. No source compilation, npm Bun,
-Termux `pkg bun`, or silent fallback is used.
-
-### Source-of-truth manifest
-
-`android/versions.env` is the single source of truth:
-
-```sh
-set -a
-. android/versions.env
-set +a
-printf 'runtime=%s\nbootstrap=%s\narchive=%s\nsha256=%s\nndk=%s\napi=%s\nrust=%s\n' \
-  "$BUN_VERSION" "$BUN_BOOTSTRAP_VERSION" "$BUN_ARCHIVE_NAME" \
-  "$BUN_SHA256" "$NDK_VERSION" "$ANDROID_API" "$RUST_TOOLCHAIN"
-```
-
-- `BUN_VERSION` — shipped stable runtime version.
-- `BUN_BOOTSTRAP_VERSION` — CI-only Bun used by JS/native jobs.
-- `BUN_ARCHIVE_NAME` — official Bun Android aarch64 release asset.
-- `BUN_SHA256` — exact asset checksum.
-- `NDK_VERSION`, `ANDROID_API`, `RUST_TOOLCHAIN` — Android build inputs.
-
-`android-release.yml` downloads and verifies official Bun, then packages it
-as `./bun`. `sync-upstream.yml` dispatches Android release after each tagged
-upstream sync. There is no separate Bun build workflow.
-
-### Release flow
-
-`android-release.yml` triggers on the `v<version>-termux` tag push (or a
-manual dispatch with an existing `tag` input), builds the native addon and
-split JS bundle, downloads and verifies the official stable Bun Android
-asset, packages everything as `omp-termux.tar.gz` with `./bun` at the root,
-and attaches it to the GitHub Release.
-
-`sync-upstream.yml` imports upstream OMP main, applies the deterministic
-Android overlay, verifies build inputs, then commits and pushes the sync
-commit plus the `v<version>-termux` tag atomically. Because a `GITHUB_TOKEN`
-tag push does not trigger downstream push workflows, the sync job then
-explicitly dispatches the release on the new tag
-(`gh workflow run android-release.yml --ref "$tag" -f tag="$tag"`). Full
-detail: [android/docs/ci-cd.md](android/docs/ci-cd.md).
-
-## Features
-
-The upstream feature set is unchanged in this fork. The showcase and
-reference sections are long, so they are collapsed below — fully intact.
-
-<details>
-<summary>Benchmaxxed tools — edit/read/search lift numbers and the harness post (click to expand)</summary>
-
-### Every tool, _benchmaxxed_.
+## Every tool, _benchmaxxed_.
 
 Edits that land on the first attempt. Reads that summarize files instead of dumping their content. Searches that return instantly. Pick any model — omp will get it right.
 
@@ -288,30 +126,25 @@ Edits that land on the first attempt. Reads that summarize files instead of dump
 
 [Read the full post ↗](https://blog.can.ac/2026/02/12/the-harness-problem/)
 
-</details>
-
-<details>
-<summary>The Pi you love, with batteries included — 21 built-in capabilities with captures (click to expand)</summary>
-
-### The Pi _you love_, with **batteries included**.
+## The Pi _you love_, with **batteries included**.
 
 Originally built on [Mario Zechner](https://github.com/mariozechner)'s wonderful [Pi](https://github.com/badlogic/pi-mono), omp adds everything you're missing.
 
-#### 01 · Code execution w/ tool-calling
+### 01 · Code execution w/ tool-calling
 
 Most harnesses give the agent a Python sandbox and call it done. Ours runs persistent Python and a Bun worker, and either kernel can call back into the agent's own tools — read, search, task — over a loopback bridge. The agent loads a CSV with tool.read from inside Python, charts it from JavaScript, and never leaves the cell.
 
-![omp TUI: a single eval session with `[1/2] pandas describe` (Python) printing a real DataFrame.describe() table, followed by `[2/2] top scorer` (JavaScript) running a reduce. Footer: 'Both kernels ran in one session.'](https://omp.sh/captures/eval.webp)
+![omp TUI running Python code and rendering a chart.](assets/python.webp)
 
-#### 02 · LSP wired into every write
+### 02 · LSP wired into every write
 
 Ask for a rename and you get a rename. The call goes through workspace/willRenameFiles, so re-exports, barrel files, and aliased imports update before the file moves. Everything your IDE knows, the agent knows.
 
-![omp TUI: `LSP references` returns five hits across three files for the symbol `formatBytes`, then `LSP rename` applies the change with edits to format.ts/report.ts/cli.ts, then a `Search formatBytes 0 matches` confirmation. Final line: 'Rename complete. Five edits across three files…'.](https://omp.sh/captures/lsp.webp)
+![omp TUI with TypeScript and Biome language servers active.](assets/lspv.webp)
 
 _[Read the LSP config docs](docs/lsp-config.md)_
 
-#### 03 · Drives a real debugger
+### 03 · Drives a real debugger
 
 A C binary segfaults: the agent attaches lldb, steps to the bad pointer, reads the frame. A Go service hangs: it attaches dlv and walks the goroutines. A Python process is wedged: debugpy, pause, inspect, evaluate. Most agents are still sprinkling print statements.
 
@@ -319,7 +152,7 @@ A C binary segfaults: the agent attaches lldb, steps to the bad pointer, reads t
 
 _[Watch the capture ↗](https://omp.sh/clips/dap.mp4)_
 
-#### 04 · Time-traveling stream rules
+### 04 · Time-traveling stream rules
 
 Your rules sit dormant until the model goes off-script. A regex match aborts the stream mid-token, injects the rule as a system reminder, and retries from the same point. You get course-correction without paying context tax on every turn. Injections survive compaction, so the fix sticks.
 
@@ -327,7 +160,7 @@ Your rules sit dormant until the model goes off-script. A regex match aborts the
 
 _[Watch the capture ↗](https://omp.sh/clips/ttsr.mp4)_
 
-#### 05 · First-class subagents
+### 05 · First-class subagents
 
 Split a job across workers and get typed results back. task fans out into isolated worktrees, each worker runs its own tool surface, and the final yield is a schema-validated object the parent reads directly. No prose to parse, no merge conflicts between siblings, no orphaned edits.
 
@@ -337,7 +170,7 @@ _[Watch the capture ↗](https://omp.sh/clips/irc.mp4)_
 
 Watch the fan-out while it runs: `Alt+A` opens [Agent Hub](docs/agent-hub.md), where the roster shows current activity and usage for every subagent. Open one to read its live transcript, type a steering message, revive a parked worker, or kill a stuck one without aborting the parent session.
 
-#### 06 · A second model, watching every turn.
+### 06 · A second model, watching every turn.
 
 Pair a reviewer model to the 'advisor' role and it reads every turn the main agent takes, injecting notes inline — a quiet aside, a concern, or a hard blocker. It runs on its own context and its own model, so it catches what the doer rushed past. The main agent sees the note and course-corrects, or tells you why it won't.
 
@@ -345,7 +178,7 @@ Pair a reviewer model to the 'advisor' role and it reads every turn the main age
 
 _[Watch the capture ↗](https://omp.sh/clips/advisor.mp4)_
 
-#### 07 · Hand someone the link, they're in.
+### 07 · Hand someone the link, they're in.
 
 /collab puts your live session on a relay and hands back a link — and a QR. A teammate joins from another terminal with omp join, or just opens it in a browser. Share read-write to pair on the same agent, or /collab view for a read-only link anyone can watch but no one can steer. Frames are sealed client-side; the relay never sees your keys.
 
@@ -353,7 +186,7 @@ _[Watch the capture ↗](https://omp.sh/clips/advisor.mp4)_
 
 _[Watch the capture ↗](https://omp.sh/clips/collab.mp4)_
 
-#### 08 · Read a pdf on arxiv, why not?
+### 08 · Read a pdf on arxiv, why not?
 
 web_search chains twenty-three ranked providers and hands whatever URLs it finds straight to read. Arxiv PDFs, GitHub pages, Stack Overflow threads come back as structured markdown with anchors intact — the same tool surface you use on local files. Cite, follow, quote, never lose where you came from.
 
@@ -361,45 +194,43 @@ web_search chains twenty-three ranked providers and hands whatever URLs it finds
 
 _[Watch the capture ↗](https://omp.sh/clips/web.mp4)_
 
-#### 09 · Unapologetically native. Even on Windows.
+### 09 · Unapologetically native. Even on Windows.
 
 Other agents shell out to rg, grep, find, and bash. On many machines those binaries don't exist, and on the ones where they do, every call costs a fork-exec round-trip. omp links the real implementations into the process. ripgrep, glob, find: in-process. brush is the bash — with sessions that survive across calls, and 58 command-line utilities (ls, sed, sort, xargs, even jq) ported into the builtins crate and run in-process, zero fork/exec. The same omp binary runs on macOS, Linux, and Windows — no WSL bridge.
 
-#### 10 · Code review with priorities and a verdict
+### 10 · Code review with priorities and a verdict
 
 Get a clear verdict on whether the change ships, with every issue ranked P0 through P3 and scored for confidence. /review spawns dedicated reviewer subagents that sweep branches, single commits, or uncommitted work in parallel. You tackle what blocks release first; nothing important hides in a wall of prose.
 
-#### 11 · Hashline: edit by content hash
+### 11 · Hashline: edit by content hash
 
 Perfect edits, fewer tokens. The model points at anchors instead of retyping the lines it wants to change, so whitespace battles and string-not-found loops just stop happening. Edit a stale file and the anchors diverge — we reject the patch before it corrupts anything. Grok 4 Fast spends 61% fewer output tokens on the same work.
 
-#### 12 · GitHub is just another filesystem
+### 12 · GitHub is just another filesystem
 
 Other harnesses bolt on gh_issue_view, gh_pr_view, gh_search — each with its own parameters the agent has to learn and you have to debug. We skipped that. read already handles paths; PRs are paths. One interface to teach the model, one surface to keep correct.
 
-#### 13 · Memory the agent curates
+### 13 · Memory the agent curates
 
 The agent remembers your codebase between sessions. It writes facts mid-run with retain, captures reusable lessons with learn, pulls them back with recall, and compresses each session into a mental model that loads on the first turn of the next one. Pick the engine with `memory.backend` — local, Hindsight, or Mnemopi. Project-scoped by default, so what it learns about this repo stays with this repo.
 
-#### 14 · ACP: editor-drivable agent
+### 14 · ACP: editor-drivable agent
 
 Run omp inside Zed and you get the same agent you drive from the terminal — reading the buffer you're actually looking at, writing through the editor's save path, spawning shells in the editor's terminal. Destructive tools pause for a permission prompt you can answer once and forget. No bridge, no plugin, no second brain to keep in sync.
 
-#### 15 · Inherits what your other tools already wrote
+### 15 · Inherits what your other tools already wrote
 
 Every other agent ships an importer and expects you to convert. omp reads the eight formats already on disk in their native shape — Cursor MDC, Cline .clinerules, Codex AGENTS.md, Copilot applyTo, and the rest. No migration script, no YAML-to-TOML port, no "supported subset" footnotes. The config your team wrote last quarter still works tonight.
 
-#### 16 · omp commit: atomic splits, validated messages
+### 16 · omp commit: atomic splits, validated messages
 
 omp reads the working tree through git_overview, git_file_diff, and git_hunk, then splits unrelated changes into atomic commits ordered by their dependencies. Cycles are rejected before anything is written. Source files score above tests, docs, and configs, so the headline commit is the one that matters. Lock files are excluded from analysis entirely.
 
-#### 17 · Read PRs. _Walk skills._ Pull JSON out of subagents.
+### 17 · Read PRs. _Walk skills._ Pull JSON out of subagents.
 
 Sixteen internal schemes — `pr://`, `issue://`, `agent://`, `skill://`, `ssh://`, and the rest — resolve transparently inside every FS-shaped tool the agent already calls. `read pr://1428` returns the same shape as `read src/foo.ts`. `grep` walks a diff like a directory. `agent://<id>/findings.0.path` pulls a field out of a subagent's output by path.
 
-![omp TUI reading pr://can1357/oh-my-pi/1063 and then /diff/1, showing hunk headers, added lines, and a [MODIFIED] (+12 -0) summary.](https://omp.sh/captures/pr.webp)
-
-#### 18 · Conflict resolution, made easy.
+### 18 · Conflict resolution, made easy.
 
 Each merge conflict becomes one URL. The agent writes `@theirs`, `@ours`, or `@base` to `conflict://N` and the file resolves cleanly. Bulk form: `conflict://*`.
 
@@ -407,7 +238,7 @@ Each merge conflict becomes one URL. The agent writes `@theirs`, `@ours`, or `@b
 
 _[Watch the capture ↗](https://omp.sh/clips/conflict.mp4)_
 
-#### 19 · Preview, then accept.
+### 19 · Preview, then accept.
 
 `ast_edit` returns a _(proposed)_ card with the replacement count. The change is staged. The agent writes a one-line reason to `xd://resolve`; the TUI turns it into an **Accept** card and the disk move happens — atomic, all or nothing.
 
@@ -415,29 +246,15 @@ _[Watch the capture ↗](https://omp.sh/clips/conflict.mp4)_
 
 _[Watch the capture ↗](https://omp.sh/clips/codemod.mp4)_
 
-#### 20 · Drives a _real browser_. _Or your Slack?_
+### 20 · Drives a _real browser_. _Or your Slack?_
 
 Stealth's on by default, so pages see a normal user instead of a headless bot. The same API drives any Electron app in place — point it at Slack and the agent reads your DMs the way it reads the web. Or skip the sandbox entirely: the browser relay extension lets the agent adopt the Chrome tabs you already have open, without stealing focus.
 
-![omp TUI driving the browser tool against DuckDuckGo](https://omp.sh/captures/browser.webp)
-
-#### 21 · Hands on the desktop itself
+### 21 · Hands on the desktop itself
 
 `computer` runs persistent JavaScript against the real host: enumerate windows and displays, capture screenshots, send native input, walk the OS accessibility tree, touch the clipboard. Not the browser tool, no DOM — the same desktop you're looking at.
 
-</details>
-
-## Tools
-
-All 31 built-in tools live in the same namespace as `read` and `bash`. Pin the
-active set with `--tools read,edit,bash,…`; rarely used discoverable tools
-stay behind `xd://` devices. The full reference is long and unchanged; it is
-collapsed below, intact.
-
-<details>
-<summary>Tool reference — files/search, runtime, code intelligence, coordination, desktop & web, memory & skills, prompt and session controls (click to expand)</summary>
-
-### Whatever the task needs, _it's already in the box_.
+## Whatever the task needs, _it's already in the box_.
 
 31 tools live in the same namespace as `read` and `bash`. Pin the active set with `--tools read,edit,bash,…`; rarely used discoverable tools stay behind `xd://` devices. `read xd://` lists them, and `write xd://<tool>` runs one when `tools.xdev` is enabled.
 
@@ -494,7 +311,7 @@ Setting-gated, off by default: `github`, `security_scan`, `generate_image`, `tts
 
 [Full reference →](https://omp.sh/docs/tools)
 
-#### Prompt controls
+### Prompt controls
 
 Three standalone, lowercase words opt a turn into specialized agent behavior:
 
@@ -504,50 +321,38 @@ Three standalone, lowercase words opt a turn into specialized agent behavior:
 
 They trigger only in prose, not inside code spans, fenced code blocks, XML/HTML sections, identifiers, or paths. See [Magic keywords](docs/magic-keywords.md) for exact matching rules and configuration.
 
-#### Session controls
+### Session controls
 
 Slash commands shift how a whole session runs:
 
 - `/vibe` — enter [Vibe mode](docs/vibe-mode.md): act as a director driving persistent `fast`/`good` worker sessions with a `read`-only toolset.
 - `/fresh` — reset the provider stream state (stale prompt cache, wedged stream) without changing the local transcript. See [Session operations](docs/session-operations-export-share-fork-resume.md#fresh).
 
-</details>
-
-## Providers
-
-Ten model roles route work by intent: `default`, `smol`, `slow`, `plan`,
-`commit`, plus `vision`, `designer`, `task`, `advisor`, and `tiny`. Sixty-plus
-providers span frontier APIs, coding plans, and local servers. The full
-section is long and unchanged; it is collapsed below, intact.
-
-<details>
-<summary>Providers — frontier APIs, coding plans, local servers, custom providers, routing knobs (click to expand)</summary>
-
-### Sixty-plus providers, a thousand models, _one /model away_.
+## Sixty-plus providers, a thousand models, _one /model away_.
 
 Ten roles route work by intent. `default` for normal turns. `smol` for cheap subagent fan-out. `slow` for deep reasoning. `plan` for plan mode. `commit` for changelogs. Plus `vision`, `designer`, `task`, `advisor`, and `tiny` for their namesakes. Override at launch with `--smol`, `--slow`, or `--plan`; cycle through the configured models for the active role with `Ctrl+P`. Swap the active model mid-session with the `/model` slash command.
 
 Auth tags below: `oauth` signs in with your provider account, `plan` routes through a coding-plan subscription, `local` runs against a local server with the key optional.
 
-#### Frontier APIs
+### Frontier APIs
 
 Direct APIs and gateways. Mix providers per role.
 
-Anthropic `oauth` · OpenAI · OpenAI Codex `oauth` · Google Gemini · Google Vertex · Google Antigravity `oauth` · xAI · SuperGrok `oauth` · DeepSeek · Mistral · Groq · Cerebras · Fireworks · Together · Baseten · Hugging Face · NVIDIA · Meta · Amazon Bedrock · Azure OpenAI · SiliconFlow · GMI Cloud · CoreWeave · Sakana AI · OpenRouter · Synthetic · Vercel AI Gateway · Cloudflare AI Gateway · Wafer Serverless
+Anthropic `oauth` · OpenAI · OpenAI Codex `oauth` · Google Gemini · Google Vertex · Google Antigravity `oauth` · xAI · SuperGrok `oauth` · DeepSeek · Mistral · Groq · Cerebras · Fireworks · Together · Baseten · DeepInfra · Hugging Face · NVIDIA · Meta · Amazon Bedrock · Azure OpenAI · SiliconFlow · GMI Cloud · CoreWeave · Sakana AI · OpenRouter · Synthetic · Vercel AI Gateway · Cloudflare AI Gateway · Wafer Serverless
 
-#### Coding plans
+### Coding plans
 
 Subscription-routed. `/login` attaches the session.
 
 Cursor `oauth` · GitHub Copilot `oauth` · GitLab Duo · Devin `oauth` · Kimi Code `plan` · Moonshot · MiniMax Coding Plan `plan` · MiniMax Coding Plan CN `plan` · Alibaba Coding Plan `plan` · Qwen Portal `oauth` · Z.AI / GLM Coding Plan `plan` · Zhipu Coding Plan `plan` · Xiaomi MiMo · Qianfan · Umans `plan` · NanoGPT · Novita · Venice · Kilo · ZenMux · OpenCode Go · OpenCode Zen
 
-#### Run it yourself
+### Run it yourself
 
 OpenAI-compatible `/v1/models`. Local instances skip the key.
 
 Ollama `local` · Ollama Cloud · LM Studio `local` · llama.cpp `local` · vLLM `local` · LiteLLM
 
-#### Custom OpenAI-compatible providers
+### Custom OpenAI-compatible providers
 
 Define custom providers in `~/.omp/agent/models.yml`:
 
@@ -573,7 +378,7 @@ modelRoles:
   default: spark/minimax-m3
 ```
 
-#### Four knobs that make routing useful
+### Four knobs that make routing useful
 
 - **Custom providers** — Declare anything that speaks `openai-completions`, `openai-responses`, `openai-codex-responses`, `azure-openai-responses`, `anthropic-messages`, `bedrock-converse-stream`, `google-generative-ai`, `google-gemini-cli`, or `google-vertex` in `~/.omp/agent/models.yml`.
 - **Fallback chains** — Per-role or per-model chains under `retry.fallbackChains`. When the primary throws 429s or hits a quota wall, the next entry takes the rest of the turn — restored on cooldown.
@@ -582,23 +387,11 @@ modelRoles:
 
 Full provider & routing reference at [omp.sh/docs/providers](https://omp.sh/docs/providers).
 
-</details>
-
-## Search backends
-
-`web_search` is built in, not bolted on: an `auto` chain of twenty-three
-backends, or a pinned provider, with site-aware extraction into structured
-markdown. The provider table and handler lists are long; they are collapsed
-below, intact.
-
-<details>
-<summary>Search backends — provider table, specialised handlers, security databases (click to expand)</summary>
-
-### Twenty-three backends. _One tool the agent already knows_.
+## Twenty-three backends. _One tool the agent already knows_.
 
 `web_search` is built in, not bolted on. `auto` walks a twenty-three-provider chain; pin one by name if you already pay for it. Behind every hit, site-aware extraction turns GitHub, registries, arXiv, Stack Overflow, and docs into structured markdown — anchors and link targets survive.
 
-#### Search providers
+### Search providers
 
 Twenty-three backends. Pin one, or let `auto` walk the chain in order.
 
@@ -631,7 +424,7 @@ Twenty-three backends. Pin one, or let `auto` walk the chain in order.
 
 Exa also accepts a stored API key through `/login exa`; explicit keyless selection uses the public MCP fallback.
 
-#### Specialised handlers
+### Specialised handlers
 
 The agent gets structured content, not stripped HTML.
 
@@ -643,7 +436,7 @@ The agent gets structured content, not stripped HTML.
 
 Pages convert to markdown with link structure intact. The agent can cite, follow, and quote without losing anchors.
 
-#### Security databases
+### Security databases
 
 Vuln lookups answer with vendor data, not blog summaries.
 
@@ -653,17 +446,7 @@ Vuln lookups answer with vendor data, not blog summaries.
 
 [`web_search` reference ↗](https://omp.sh/docs/tools#web_search)
 
-</details>
-
-## Architecture
-
-The Rust core — six crates and one platform-tagged N-API addon — plus the
-per-module breakdown. The tables are large; they are collapsed below, intact.
-
-<details>
-<summary>Architecture — ~80,000 lines of Rust, crates, native modules (click to expand)</summary>
-
-### Roughly **~80,000** lines of Rust, doing the work other harnesses shell out for.
+## Roughly **~80,000** lines of Rust, doing the work other harnesses shell out for.
 
 Six crates, one platform-tagged N-API addon. Search, shell, AST, highlight, PTY, desktop control, image decode, BPE counting — all in-process on the libuv pool. No fork/exec on the hot path. Another ~80k lines ride along vendored: the brush bash fork, plus 58 command-line utilities — coreutils, findutils, sed, jq, ripgrep-backed grep, fd, diff, moreutils — ported into the builtins crate and compiled straight into the shell.
 
@@ -709,11 +492,7 @@ Inside `pi-natives`, the per-module breakdown (glue and tests omitted):
 | html          | HTML to Markdown with optional content cleaning                                   | html-to-markdown-rs                       |     60 |
 | sixel         | Terminal image rendering · decode PNG · JPEG · WebP · GIF · resize · SIXEL encode | icy_sixel · image                         |     55 |
 
-</details>
-
-## Usage: four entry points
-
-### Four entry points: _interactive_, _one-shot_, RPC, and ACP.
+## Four entry points: _interactive_, _one-shot_, RPC, and ACP.
 
 Same engine, four wrappers. `omp` runs the TUI. `omp -p` answers a single prompt and exits. The Node SDK embeds the session in your process. `omp --mode rpc` and `omp acp` hand the wheel to another program over stdio.
 
@@ -723,7 +502,7 @@ The TUI is the default surface. Tool calls render as cards, edits preview before
 
 The same prompt cards surface over ACP, so editors get the picker without writing one.
 
-![omp TUI: the ask tool renders an option picker with three choices, a (Recommended) badge on the first, and 'up/down navigate · enter select · esc cancel' footer.](https://omp.sh/captures/ask.webp)
+![omp TUI showing a multi-select question from the ask tool.](assets/ask.webp)
 
 ### SDK — embed in Node
 
@@ -780,33 +559,25 @@ The [Agent Client Protocol](https://github.com/zed-industries/agent-client-proto
 
 Full reference: [omp.sh/docs/sdk](https://omp.sh/docs/sdk).
 
-## Extensibility
-
-A harness worth keeping is one you don't outgrow. Extensibility and the
-project philosophy are unchanged; the section is collapsed below, intact.
-
-<details>
-<summary>Extensibility — primitives, discovery, marketplace, philosophy (click to expand)</summary>
-
-### A harness worth keeping is one you _don't_ outgrow.
+## A harness worth keeping is one you _don't_ outgrow.
 
 Pick it up at **[omp.sh](https://omp.sh)**.
 
 omp is a fork of [Pi](https://github.com/badlogic/pi-mono) by [Mario Zechner](https://github.com/mariozechner), rewritten as a coding-first surface: sessions, subagents, slash commands, extensions — all TypeScript, all MIT, all on [GitHub](https://github.com/can1357/oh-my-pi). Shape it from config, hook it from outside, or read the source when you need to.
 
-#### Primitives
+### Primitives
 
 An extension is a TypeScript module. Same tool API, same slash-command registry, same hotkey table, same TUI primitives the built-ins use. Nothing is reserved.
 
-#### Discovery
+### Discovery
 
 On first run omp inherits whatever is already on disk: rules, skills, and MCP servers from `.claude`, `.cursor`, `.windsurf`, `.gemini`, `.codex`, `.cline`, `.github/copilot`, and `.vscode`. No migration script.
 
-#### Extensibility
+### Extensibility
 
 Ask omp to write the piece you're missing, then `/reload-plugins`. Keep it local, ship it in a `marketplace`, or publish it to npm.
 
-### Philosophy
+## Philosophy
 
 omp is a fork of [pi-mono](https://github.com/badlogic/pi-mono) by [Mario Zechner](https://github.com/mariozechner), extended with a batteries-included coding workflow.
 
@@ -816,7 +587,7 @@ Key ideas:
 - Include practical built-ins (tools, sessions, branching, subagents, extensibility)
 - Make advanced behavior configurable rather than hidden
 
-</details>
+---
 
 ## Development
 
@@ -859,14 +630,9 @@ bun dev -- --version
 
 For architecture and contribution guidelines, see [packages/coding-agent/DEVELOPMENT.md](packages/coding-agent/DEVELOPMENT.md).
 
-### Monorepo packages and Rust crates
+---
 
-The package and crate tables are large; they are collapsed below, intact.
-
-<details>
-<summary>Monorepo packages and Rust crates (click to expand)</summary>
-
-#### Monorepo Packages
+## Monorepo Packages
 
 | Package                                                                       | Description                                                                 |
 | ----------------------------------------------------------------------------- | --------------------------------------------------------------------------- |
@@ -888,7 +654,7 @@ The package and crate tables are large; they are collapsed below, intact.
 | **[@oh-my-pi/pi-metaharness](packages/metaharness)**                          | Unified benchmark runners, Harbor run storage, REST/SSE API, live dashboard |
 | **[@oh-my-pi/typescript-edit-benchmark](packages/typescript-edit-benchmark)** | Edit benchmark suite built on TypeScript source mutations                   |
 
-#### Rust Crates
+### Rust Crates
 
 | Crate                                              | Description                                                                                         |
 | -------------------------------------------------- | --------------------------------------------------------------------------------------------------- |
@@ -901,8 +667,6 @@ The package and crate tables are large; they are collapsed below, intact.
 | **[brush-core](crates/vendor/brush-core)**         | Vendored fork of [brush-shell](https://github.com/reubeno/brush) for embedded bash execution        |
 | **[pi-builtins](crates/pi-builtins)**              | Bash builtins (cd, echo, test, printf, read, export, …) plus 67 in-process command-line utilities |
 
-</details>
-
 ## Contributing
 
 Issues and pull requests are open to everyone. Open PRs are currently a
@@ -910,12 +674,20 @@ Issues and pull requests are open to everyone. Open PRs are currently a
 goes, and it may return. See **[CONTRIBUTING.md](CONTRIBUTING.md)** for
 guidelines on contributing.
 
+---
+
 ## License
 
-MIT. See [LICENSE](LICENSE).
+OMP is licensed under the [MIT License](LICENSE).
+
+Third-party and vendored code, including `crates/vendor/brush-core` and the
+third-party portions identified in `crates/pi-builtins/LICENSE`, remains under
+its respective upstream license. See `THIRD-PARTY-NOTICES.txt` and
+component-local notices for attribution and additional terms.
 
 © 2025 Mario Zechner  
-© 2025-2026 Can Bölük
+© 2025-2026 Can Bölük  
+© 2026 Stencil Labs, Inc.
 
 _made for terminals that stay open_
 

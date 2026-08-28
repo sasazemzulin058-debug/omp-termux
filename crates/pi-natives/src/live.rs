@@ -18,12 +18,12 @@ type StringCallback = ThreadsafeFunction<String, UnknownReturnValue>;
 type LevelCallback = ThreadsafeFunction<f64, UnknownReturnValue>;
 
 /// WebRTC peer that accepts 16 kHz mono PCM and renders remote Opus audio.
-/* #[napi] disabled on android */
+#[napi]
 pub struct LiveWebRtcPeer {
 	inner: Arc<LivePeerCore>,
 }
 
-/* #[napi] disabled on android */
+#[napi]
 impl LiveWebRtcPeer {
 	/// Create an idle peer and register its event, output-level, and failure
 	/// callbacks.
@@ -51,7 +51,7 @@ impl LiveWebRtcPeer {
 	}
 
 	/// Start the native media peer and return its SDP offer.
-	/* #[napi] disabled on android */
+	#[napi]
 	pub async fn create_offer(&self) -> Result<String> {
 		self
 			.inner
@@ -61,7 +61,7 @@ impl LiveWebRtcPeer {
 	}
 
 	/// Apply the remote SDP answer returned by Codex signaling.
-	/* #[napi] disabled on android */
+	#[napi]
 	pub async fn accept_answer(&self, sdp: String) -> Result<()> {
 		self
 			.inner
@@ -71,7 +71,7 @@ impl LiveWebRtcPeer {
 	}
 
 	/// Wait until the `oai-events` data channel is open.
-	/* #[napi] disabled on android */
+	#[napi]
 	pub async fn wait_for_open(&self, timeout_ms: Option<u32>) -> Result<()> {
 		self
 			.inner
@@ -81,7 +81,7 @@ impl LiveWebRtcPeer {
 	}
 
 	/// Queue 16 kHz mono floating-point PCM for Opus transmission.
-	/* #[napi] disabled on android */
+	#[napi]
 	pub fn push_audio(&self, samples: Float32Array) -> Result<()> {
 		self
 			.inner
@@ -91,7 +91,7 @@ impl LiveWebRtcPeer {
 
 	/// Enable or disable microphone transmission, discarding partial muted
 	/// frames.
-	/* #[napi] disabled on android */
+	#[napi]
 	pub fn set_muted(&self, muted: bool) -> Result<()> {
 		self
 			.inner
@@ -100,7 +100,7 @@ impl LiveWebRtcPeer {
 	}
 
 	/// Close media, the data channel, the peer connection, and speaker playback.
-	/* #[napi] disabled on android */
+	#[napi]
 	pub async fn close(&self) {
 		self.inner.close().await;
 	}

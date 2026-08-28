@@ -101,8 +101,8 @@ export interface IsolationContext {
  * each isolated spawn against. Throws when the cwd is not inside a git
  * repository; callers surface the error as a task-tool failure.
  */
-export async function prepareIsolationContext(cwd: string, explicitRepoRoot?: string): Promise<IsolationContext> {
-	const repoRoot = await getRepoRoot(cwd, explicitRepoRoot);
+export async function prepareIsolationContext(cwd: string): Promise<IsolationContext> {
+	const repoRoot = await getRepoRoot(cwd);
 	const baseline = await captureBaseline(repoRoot);
 	return { repoRoot, baseline };
 }

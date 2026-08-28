@@ -16,7 +16,7 @@ pub use pi_builtins::ProcessStatus;
 
 use crate::cancel::CancelToken;
 
-#[cfg(any(target_os = "linux", target_os = "android"))]
+#[cfg(target_os = "linux")]
 mod platform {
 	use std::{
 		collections::HashSet,

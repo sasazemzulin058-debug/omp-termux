@@ -8,7 +8,6 @@ import type { HindsightSessionState } from "../hindsight/state";
 import { resolveMemoryBackend } from "../memory-backend/resolve";
 import type { MemoryBackendStartOptions } from "../memory-backend/types";
 import type { MnemopiSessionState } from "../mnemopi/state";
-import type { AgentSession } from "./agent-session";
 
 /** Capabilities borrowed from the owning AgentSession. */
 export interface SessionMemoryHost {
@@ -163,20 +162,6 @@ export class SessionMemory {
 				await mnemopi.dispose({ consolidate: consolidateMnemopi });
 			} catch (error) {
 				logger.warn("Memory lifecycle: Mnemopi dispose failed", { error: String(error) });
-			}
-		}
-		// Hermes disposal — ensure no stale WeakMap entry remains when backend switches
-		// or session ends. Dynamic import keeps hermes off the startup graph when
-		// memory.backend !== hermes; explicit inert error is handled by the backend.
-		try {
-			const { disposeHermesRuntimeForSession } = await import("../memory-backend/hermes-backend");
-			const maybeSession = this.#host.memoryBackendSession() as unknown as AgentSession;
-			if (maybeSession) await disposeHermesRuntimeForSession(maybeSession);
-		} catch (error) {
-			// Only log unexpected errors; missing module when hermes never installed is benign.
-			const msg = error instanceof Error ? error.message : String(error);
-			if (!msg.includes("Cannot find module") && !msg.includes("is not installed")) {
-				logger.warn("Memory lifecycle: Hermes dispose failed", { error: msg });
 			}
 		}
 	}

@@ -18,12 +18,12 @@ type CaptureCallback = ThreadsafeFunction<Float32Array, UnknownReturnValue>;
 
 /// Default-microphone capture converted to mono `f32` at the requested sample
 /// rate.
-/* #[napi] disabled on android */
+#[napi]
 pub struct AudioCapture {
 	stream: Mutex<Option<CaptureStream>>,
 }
 
-/* #[napi] disabled on android */
+#[napi]
 impl AudioCapture {
 	/// Open the default microphone and deliver low-latency mono PCM chunks.
 	#[napi(constructor)]
@@ -41,7 +41,7 @@ impl AudioCapture {
 	}
 
 	/// Stop capture immediately and release the microphone.
-	/* #[napi] disabled on android */
+	#[napi]
 	pub fn stop(&self) -> Result<()> {
 		let stream = self.stream.lock().take();
 		let Some(mut stream) = stream else {
@@ -52,13 +52,13 @@ impl AudioCapture {
 }
 
 /// Gapless mono `f32` playback through the default speaker.
-/* #[napi] disabled on android */
+#[napi]
 pub struct AudioPlayback {
 	stream: Mutex<Option<PlaybackStream>>,
 	state:  Arc<PlaybackState>,
 }
 
-/* #[napi] disabled on android */
+#[napi]
 impl AudioPlayback {
 	/// Open the default speaker at the requested logical sample rate.
 	#[napi(constructor)]
@@ -69,7 +69,7 @@ impl AudioPlayback {
 	}
 
 	/// Queue mono floating-point PCM in playback order.
-	/* #[napi] disabled on android */
+	#[napi]
 	pub fn write(&self, samples: Float32Array) -> Result<()> {
 		let stream = self.stream.lock();
 		let stream = stream
@@ -82,7 +82,7 @@ impl AudioPlayback {
 	}
 
 	/// Scale audio at render time so gain changes affect already queued samples.
-	/* #[napi] disabled on android */
+	#[napi]
 	pub fn set_gain(&self, gain: f64) -> Result<()> {
 		let stream = self.stream.lock();
 		let stream = stream
@@ -95,7 +95,7 @@ impl AudioPlayback {
 
 	/// Close input, wait until queued samples reach the speaker, then release
 	/// it.
-	/* #[napi] disabled on android */
+	#[napi]
 	pub async fn end(&self) -> Result<()> {
 		{
 			let mut stream = self.stream.lock();
@@ -113,7 +113,7 @@ impl AudioPlayback {
 	}
 
 	/// Stop immediately and discard all queued samples.
-	/* #[napi] disabled on android */
+	#[napi]
 	pub fn stop(&self) -> Result<()> {
 		let stream = self.stream.lock().take();
 		if let Some(mut stream) = stream {

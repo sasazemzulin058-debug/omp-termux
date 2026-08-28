@@ -39,6 +39,7 @@ import rootLicense from "./tools/browser/relay/extension-assets/LICENSE.txt" wit
 import thirdPartyNotices from "./tools/browser/relay/extension-assets/THIRD-PARTY-NOTICES.txt" with { type: "text" };
 import { COMPUTER_WORKER_ARG } from "./tools/computer/protocol";
 import { smokeTestComputerWorker } from "./tools/computer/supervisor";
+import { startComputerWorker } from "./tools/computer/worker-entry";
 
 if (Bun.semver.order(Bun.version, MIN_BUN_VERSION) < 0) {
 	process.stderr.write(
@@ -178,8 +179,6 @@ async function runWorkerEntrypoint(arg: string | undefined): Promise<boolean> {
 	}
 	if (arg === COMPUTER_WORKER_ARG) {
 		if (parentPort) installWorkerInbox(parentPort);
-		// Dynamic import prevents eager native addon path in cold CLI startup graph.
-		const { startComputerWorker } = await import("./tools/computer/worker-entry");
 		startComputerWorker();
 		return true;
 	}

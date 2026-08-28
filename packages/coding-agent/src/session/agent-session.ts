@@ -4284,15 +4284,6 @@ export class AgentSession {
 		}
 	}
 
-	async #disposeHermes(): Promise<void> {
-		try {
-			const { disposeHermesRuntimeForSession } = await import("../memory-backend/hermes-backend");
-			await disposeHermesRuntimeForSession(this as any);
-		} catch (error) {
-			logger.warn("Failed to dispose Hermes runtime during session dispose", { error: String(error) });
-		}
-	}
-
 	async #doDispose(options: AgentSessionDisposeOptions = {}): Promise<void> {
 		this.beginDispose();
 		this.#recordSessionExit(options.reason ?? "dispose");
@@ -4337,7 +4328,6 @@ export class AgentSession {
 			advisorRecorderClosed,
 			hindsightState?.flushRetainQueue() ?? Promise.resolve(),
 			this.#disposeMnemopi(mnemopiState, options.mnemopiConsolidateTimeoutMs),
-			this.#disposeHermes(),
 		]);
 		for (const result of results) {
 			if (result.status === "rejected") {
