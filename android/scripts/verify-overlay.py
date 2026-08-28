@@ -39,5 +39,19 @@ for path, needle in checks.items():
         raise SystemExit(f"overlay verification failed: required file missing: {path}")
     require(path, needle)
 
+browser_checks = {
+    "packages/coding-agent/src/tools/browser/launch.ts": ["androidChromiumCandidates", "resolveHeadlessExecutable"],
+    "packages/coding-agent/src/tools/browser.ts": ["resolveHeadlessExecutable"],
+    "packages/coding-agent/src/tools/browser/registry.ts": ["executablePath?: string"],
+    "packages/coding-agent/src/tools/browser/shared-daemon.ts": ["specHash"],
+    "packages/coding-agent/src/config/settings-schema.ts": ['"browser.executablePath"'],
+    "packages/coding-agent/test/tools/browser-android.test.ts": ["resolveHeadlessExecutable"],
+}
+for path, needles in browser_checks.items():
+    if not (ROOT / path).is_file():
+        raise SystemExit(f"overlay verification failed: browser file missing: {path}")
+    for needle in needles:
+        require(path, needle)
+
 present = sum((ROOT / path).exists() for path in checks)
-print(f"Android overlay verified: {present} gates, version {version}")
+print(f"Android overlay verified: {present} gates + browser overlay, version {version}")

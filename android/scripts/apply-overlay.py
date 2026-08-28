@@ -30,6 +30,51 @@ def once(text, old, new, rel):
         raise SystemExit(f"overlay marker mismatch: {rel}: {old[:80]!r}")
     return text.replace(old, new)
 
+def apply_browser_overlay():
+    """Apply browser changes after upstream import; fail closed on drift."""
+    import subprocess
+    patch = ROOT / "android" / "overlay" / "browser-fork.patch"
+    if not patch.is_file() or patch.stat().st_size == 0:
+        raise SystemExit(f"browser overlay missing or empty: {patch}")
+    command = ["git", "apply", "--whitespace=nowarn", "--check", str(patch)]
+    checked = subprocess.run(command, cwd=ROOT, text=True, capture_output=True)
+    if checked.returncode != 0:
+        detail = (checked.stderr or checked.stdout).strip()
+        raise SystemExit(f"browser overlay check failed: {detail}")
+    applied = subprocess.run(
+        ["git", "apply", "--whitespace=nowarn", str(patch)],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+    if applied.returncode != 0:
+        detail = (applied.stderr or applied.stdout).strip()
+        raise SystemExit(f"browser overlay failed to apply: {detail}")
+    template = ROOT / "android" / "overlay" / "browser" / "browser-android.test.ts"
+    target = ROOT / "packages" / "coding-agent" / "test" / "tools" / "browser-android.test.ts"
+    if not template.is_file():
+        raise SystemExit(f"browser overlay missing test template: {template}")
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(template.read_text())
+    return True
+def browser_settings(text):
+    marker = '\t"browser.screenshotDir": {'
+    entry = '''\t"browser.executablePath": {
+\t\ttype: "string",
+\t\tdefault: undefined,
+\t\tui: {
+\t\t\ttab: "tools",
+\t\t\tgroup: "Grep & Browser",
+\t\t\tlabel: "Browser Executable Path",
+\t\t\tdescription:
+\t\t\t\t"Absolute path to the Chromium/Chrome executable for headless automation. Takes precedence over PUPPETEER_EXECUTABLE_PATH. Invalid explicit path fails closed.",
+\t\t},
+\t},
+'''
+    if '"browser.executablePath"' in text:
+        return text
+    return once(text, marker, entry + marker, "settings-schema.ts")
+
 def cargo(text):
     # Drop arboard + pi-voice from always-on deps; re-add under not-android.
     # pi-voice/webrtc OOMs free GH runners (~15G+24G swap still killed).
@@ -236,4 +281,14 @@ except SystemExit:
     raise
 except Exception as e:
     raise SystemExit(f"hermes overlay failed: {e}") from e
-print(f"Android overlay applied: 11 transformations + Hermes overlay ({hermes_changed} hermes files changed if any)")
+# Browser overlay must run after upstream import and Hermes overlay. It owns
+# browser runtime files while keeping Chromium external to the OMP bundle.
+browser_settings_path = ROOT / "packages" / "coding-agent" / "src" / "config" / "settings-schema.ts"
+browser_settings_path.write_text(browser_settings(browser_settings_path.read_text()))
+try:
+    apply_browser_overlay()
+except SystemExit:
+    raise
+except Exception as e:
+    raise SystemExit(f"browser overlay failed: {e}") from e
+print(f"Android overlay applied: 11 transformations + Hermes overlay ({hermes_changed} hermes files changed if any) + browser overlay")
