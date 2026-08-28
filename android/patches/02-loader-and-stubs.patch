@@ -1,5 +1,5 @@
 diff --git a/packages/natives/native/index.js b/packages/natives/native/index.js
-index 255711d7ee..c5491f2b23 100644
+index 255711d7eef269cdbcffed5613ff3e01fd096a79..c5491f2b23b4f89c947f11b12489242ae3c00435 100644
 --- a/packages/natives/native/index.js
 +++ b/packages/natives/native/index.js
 @@ -15,15 +15,23 @@ import { adaptDesktopSession } from "./desktop-adapter.js";
@@ -30,7 +30,7 @@ index 255711d7ee..c5491f2b23 100644
  export const MacOSPowerAssertion = nativeBindings.MacOSPowerAssertion;
  export const Process = nativeBindings.Process;
 diff --git a/packages/natives/native/loader-state.js b/packages/natives/native/loader-state.js
-index 5c07c410d4..c3dcf18ca5 100644
+index 5c07c410d4c17af6aff278b8feb2c39d994deb9e..c3dcf18ca5001d716bb05b9c02562945fed3c4f1 100644
 --- a/packages/natives/native/loader-state.js
 +++ b/packages/natives/native/loader-state.js
 @@ -4,7 +4,7 @@ import { createRequire } from "node:module";

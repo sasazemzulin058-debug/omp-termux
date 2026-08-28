@@ -1,5 +1,5 @@
 diff --git a/packages/coding-agent/src/tools/browser.ts b/packages/coding-agent/src/tools/browser.ts
-index b7f7107..772d458 100644
+index b7f710732a75ac974cb3ac94e15558e02ae12d9e..772d4582f16a3d0c235fa6481e516f8f0dacc57f 100644
 --- a/packages/coding-agent/src/tools/browser.ts
 +++ b/packages/coding-agent/src/tools/browser.ts
 @@ -7,6 +7,7 @@ import type { ToolSession } from "../sdk";
@@ -43,7 +43,7 @@ index b7f7107..772d458 100644
  	if (a.kind === "connected" && b.kind === "connected") return a.cdpUrl === b.cdpUrl;
  	if (a.kind === "relay" && b.kind === "relay") return a.cdpUrl === b.cdpUrl;
 diff --git a/packages/coding-agent/src/tools/browser/launch.ts b/packages/coding-agent/src/tools/browser/launch.ts
-index b27e137..454e55e 100644
+index b27e137a15ada9f9bd0cf637d471e18b2f60b268..454e55ea87aa3a6e5ddf72b2681e83b221d37dea 100644
 --- a/packages/coding-agent/src/tools/browser/launch.ts
 +++ b/packages/coding-agent/src/tools/browser/launch.ts
 @@ -68,6 +68,117 @@ function stealthIgnoreDefaultArgs(executablePath: string | undefined): string[]
@@ -251,7 +251,7 @@ index b27e137..454e55e 100644
  	const puppeteer = await loadPuppeteer();
  	const vp = opts.viewport ?? DEFAULT_VIEWPORT;
 diff --git a/packages/coding-agent/src/tools/browser/registry.ts b/packages/coding-agent/src/tools/browser/registry.ts
-index 84a82f7..9f55aa8 100644
+index 84a82f7092f0c86028afa7295f5c225343576ff9..9f55aa8e48503c44cafa43f8b9e3a09242e384ff 100644
 --- a/packages/coding-agent/src/tools/browser/registry.ts
 +++ b/packages/coding-agent/src/tools/browser/registry.ts
 @@ -19,7 +19,7 @@ import type { RelayKind } from "./relay/kind";
@@ -316,7 +316,7 @@ index 84a82f7..9f55aa8 100644
  		});
  		if (!shared) {
 diff --git a/packages/coding-agent/src/tools/browser/shared-daemon.ts b/packages/coding-agent/src/tools/browser/shared-daemon.ts
-index c26fd05..29c7725 100644
+index c26fd05bacd4bcaa8e795716e0fcd8f0b38c26ff..29c772520d4e666d7e5b4533299c934a5dab86ce 100644
 --- a/packages/coding-agent/src/tools/browser/shared-daemon.ts
 +++ b/packages/coding-agent/src/tools/browser/shared-daemon.ts
 @@ -34,11 +34,14 @@ export interface SharedBrowserEndpoint {
@@ -401,7 +401,7 @@ index c26fd05..29c7725 100644
  						pty: false,
 diff --git a/packages/coding-agent/test/tools/browser-android.test.ts b/packages/coding-agent/test/tools/browser-android.test.ts
 new file mode 100644
-index 0000000..d9da0d7
+index 0000000000000000000000000000000000000000..d9da0d715d3e96ff8a167d9beeefe71c73f36aeb
 --- /dev/null
 +++ b/packages/coding-agent/test/tools/browser-android.test.ts
 @@ -0,0 +1,354 @@

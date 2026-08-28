@@ -1,5 +1,5 @@
 diff --git a/packages/coding-agent/src/cli.ts b/packages/coding-agent/src/cli.ts
-index d981c866e6..13c99c94ae 100755
+index d981c866e6637aa483a062b94237ca21fc32f3bb..13c99c94aee2befb84810269b461747a7b17d11f 100755
 --- a/packages/coding-agent/src/cli.ts
 +++ b/packages/coding-agent/src/cli.ts
 @@ -39,7 +39,6 @@ import rootLicense from "./tools/browser/relay/extension-assets/LICENSE.txt" wit
@@ -20,7 +20,7 @@ index d981c866e6..13c99c94ae 100755
  		return true;
  	}
 diff --git a/packages/coding-agent/src/cli/update-cli.ts b/packages/coding-agent/src/cli/update-cli.ts
-index d4cac19e72..8bdead6228 100644
+index d4cac19e7249c0d43c8b30360f450c6604bb0248..8bdead6228207393c77b55a76b9d7138e26ff48a 100644
 --- a/packages/coding-agent/src/cli/update-cli.ts
 +++ b/packages/coding-agent/src/cli/update-cli.ts
 @@ -1945,6 +1945,17 @@ export async function runUpdateCommand(opts: {
@@ -42,7 +42,7 @@ index d4cac19e72..8bdead6228 100644
  	const channel = opts.channel ?? persistedChannel;
  	const isChannelSwitch = opts.channel !== undefined && opts.channel !== persistedChannel;
 diff --git a/packages/coding-agent/src/config/settings-schema.ts b/packages/coding-agent/src/config/settings-schema.ts
-index 4f30a9ead1..740446d0a7 100644
+index 4f30a9ead1c1886f9cdc7ee20a34a31c7c64927e..0fcc822b0c111e2e185009897ca7a2942ceb5c0c 100644
 --- a/packages/coding-agent/src/config/settings-schema.ts
 +++ b/packages/coding-agent/src/config/settings-schema.ts
 @@ -4527,6 +4527,17 @@ export const SETTINGS_SCHEMA = {
@@ -63,7 +63,7 @@ index 4f30a9ead1..740446d0a7 100644
  	"browser.screenshotDir": {
  		type: "string",
  		default: undefined,
-@@ -4868,6 +4920,19 @@ export const SETTINGS_SCHEMA = {
+@@ -4868,6 +4879,19 @@ export const SETTINGS_SCHEMA = {
  		},
  	},
  

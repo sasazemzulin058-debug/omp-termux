@@ -1,5 +1,5 @@
 diff --git a/packages/coding-agent/src/cli/startup-cwd.ts b/packages/coding-agent/src/cli/startup-cwd.ts
-index bc491528a4..dc6a3d5928 100644
+index bc491528a47324e374d303771ec26bcca89caa78..dc6a3d592817ba4fa8436085168f0a659a2bbeb8 100644
 --- a/packages/coding-agent/src/cli/startup-cwd.ts
 +++ b/packages/coding-agent/src/cli/startup-cwd.ts
 @@ -21,7 +21,14 @@ async function maybeAutoChdir(parsed: Args): Promise<void> {
@@ -19,7 +19,7 @@ index bc491528a4..dc6a3d5928 100644
  		try {
  			if (!(await directoryExists(candidate))) {
 diff --git a/packages/utils/src/procmgr.ts b/packages/utils/src/procmgr.ts
-index 3df3367607..87f07d061b 100644
+index 3df3367607b05630e7d2e9e26133be88b474b365..87f07d061b051f80fd8ded134e5280939bacec11 100644
 --- a/packages/utils/src/procmgr.ts
 +++ b/packages/utils/src/procmgr.ts
 @@ -111,7 +111,14 @@ export function resolveBasicShell(): string | undefined {
@@ -39,7 +39,7 @@ index 3df3367607..87f07d061b 100644
  
  		for (const name of candidates) {
 diff --git a/packages/utils/src/temp.ts b/packages/utils/src/temp.ts
-index d8555ecaf6..be26829bc1 100644
+index d8555ecaf62a08909c12fddda67cd08daf25d74f..be26829bc1cbf11a57df18021ddeefcc3f9b519b 100644
 --- a/packages/utils/src/temp.ts
 +++ b/packages/utils/src/temp.ts
 @@ -66,13 +66,29 @@ export class TempDir {

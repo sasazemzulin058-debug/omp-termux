@@ -1,5 +1,5 @@
 diff --git a/crates/pi-builtins/src/proc_snapshot.rs b/crates/pi-builtins/src/proc_snapshot.rs
-index 43ea86799a..c2439d2248 100644
+index 43ea86799a9c54b7c77ddb1f13b8b6caa461ba27..c2439d2248c8532f76399fc5c4e1da420972278d 100644
 --- a/crates/pi-builtins/src/proc_snapshot.rs
 +++ b/crates/pi-builtins/src/proc_snapshot.rs
 @@ -41,7 +41,7 @@ pub(crate) fn sanitize_process_command(command: String) -> String {
@@ -48,7 +48,7 @@ index 43ea86799a..c2439d2248 100644
  	/// Walks the parent chain from the current process, taking one process-table
  	/// snapshot.
 diff --git a/crates/pi-builtins/src/ps.rs b/crates/pi-builtins/src/ps.rs
-index e4e5d7d951..bd43ca71b2 100644
+index e4e5d7d951c16a5ef02f7dfc87791dc1c0cb02b4..bd43ca71b238688739d42fcd9dabe78af7134d7a 100644
 --- a/crates/pi-builtins/src/ps.rs
 +++ b/crates/pi-builtins/src/ps.rs
 @@ -1244,7 +1244,7 @@ fn format_ps_elapsed(duration: Duration) -> String {
@@ -61,7 +61,7 @@ index e4e5d7d951..bd43ca71b2 100644
  	let value = fs::read_to_string("/proc/meminfo")
  		.ok()?
 diff --git a/crates/pi-natives/Cargo.toml b/crates/pi-natives/Cargo.toml
-index 382df037f5..1e8b4add80 100644
+index 382df037f5e7f66fa7622348be49fc9307381091..1e8b4add80e48781d136b5ead2d34b2bd8036d07 100644
 --- a/crates/pi-natives/Cargo.toml
 +++ b/crates/pi-natives/Cargo.toml
 @@ -23,7 +23,6 @@ wayland-pipewire = ["dep:pipewire"]
@@ -93,7 +93,7 @@ index 382df037f5..1e8b4add80 100644
  fancy-regex.workspace = true # utok scanner differential oracle
  tiktoken-rs.workspace = true # utok openai differential oracle
 diff --git a/crates/pi-natives/src/audio.rs b/crates/pi-natives/src/audio.rs
-index 6ca937fba9..54663449cf 100644
+index 6ca937fba9d3116b65d1693726f14ddbdf1cb73e..54663449cf2bb9ab13ed81334309c85b0c28fc8c 100644
 --- a/crates/pi-natives/src/audio.rs
 +++ b/crates/pi-natives/src/audio.rs
 @@ -18,12 +18,12 @@ type CaptureCallback = ThreadsafeFunction<Float32Array, UnknownReturnValue>;
@@ -173,7 +173,7 @@ index 6ca937fba9..54663449cf 100644
  		let stream = self.stream.lock().take();
  		if let Some(mut stream) = stream {
 diff --git a/crates/pi-natives/src/clipboard.rs b/crates/pi-natives/src/clipboard.rs
-index 390050d447..7708f2a247 100644
+index 390050d44710d762c5d4fd2a8f8994f3f3ec2fe7..7708f2a247471a7cac5e124ce4f26ffd2aa34d85 100644
 --- a/crates/pi-natives/src/clipboard.rs
 +++ b/crates/pi-natives/src/clipboard.rs
 @@ -4,14 +4,19 @@
@@ -271,7 +271,7 @@ index 390050d447..7708f2a247 100644
 +	Ok(None)
 +}
 diff --git a/crates/pi-natives/src/crash_handler.rs b/crates/pi-natives/src/crash_handler.rs
-index 7009bef3e3..dbefbf6fc4 100644
+index 7009bef3e3e88b39f4a6a3fe306ba4b7c86d9def..dbefbf6fc44b4dbcc9bd9c4affe23b93659ae006 100644
 --- a/crates/pi-natives/src/crash_handler.rs
 +++ b/crates/pi-natives/src/crash_handler.rs
 @@ -36,10 +36,7 @@ use std::{
@@ -340,7 +340,7 @@ index 7009bef3e3..dbefbf6fc4 100644
  	let _ = out.write_all(b"memory allocation of ");
  	let mut digits = [0u8; usize::MAX.ilog10() as usize + 1];
 diff --git a/crates/pi-natives/src/lib.rs b/crates/pi-natives/src/lib.rs
-index ac05e35461..5cc4a2b01f 100644
+index ac05e35461b826a87f5e0e6d642f6eeca777041e..5cc4a2b01f260f2bffe4f9cabe7751b4253e5cf0 100644
 --- a/crates/pi-natives/src/lib.rs
 +++ b/crates/pi-natives/src/lib.rs
 @@ -20,10 +20,10 @@
@@ -364,7 +364,7 @@ index ac05e35461..5cc4a2b01f 100644
  /// PDF inspection and Markdown conversion.
  pub mod pdf;
 diff --git a/crates/pi-natives/src/live.rs b/crates/pi-natives/src/live.rs
-index 9cbcd99d66..12e4f5ae37 100644
+index 9cbcd99d6643ea37624fc7d217bb3ec96d709752..12e4f5ae37df15cabd8ffcb26d878ea58a60327d 100644
 --- a/crates/pi-natives/src/live.rs
 +++ b/crates/pi-natives/src/live.rs
 @@ -18,12 +18,12 @@ type StringCallback = ThreadsafeFunction<String, UnknownReturnValue>;
@@ -437,7 +437,7 @@ index 9cbcd99d66..12e4f5ae37 100644
  		self.inner.close().await;
  	}
 diff --git a/crates/pi-shell/src/process.rs b/crates/pi-shell/src/process.rs
-index c039bb9b5e..1c775045d0 100644
+index c039bb9b5e621492d2c34d96cb5f61039308a09c..1c775045d038095ddcce8e4546efb9c014d595d8 100644
 --- a/crates/pi-shell/src/process.rs
 +++ b/crates/pi-shell/src/process.rs
 @@ -16,7 +16,7 @@ pub use pi_builtins::ProcessStatus;

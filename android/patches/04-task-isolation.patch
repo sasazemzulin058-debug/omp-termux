@@ -1,5 +1,39 @@
+diff --git a/packages/coding-agent/src/task/index.ts b/packages/coding-agent/src/task/index.ts
+index 38d7d4f38ca6f10ed286de8a852a03971b810ead..4f3cc0e53cfe65cb03c6dfe13a890fc770706744 100644
+--- a/packages/coding-agent/src/task/index.ts
++++ b/packages/coding-agent/src/task/index.ts
+@@ -297,6 +297,7 @@ function spawnParamsFor(params: TaskParams, item: TaskItem, defaultAgent: string
+ 	if (item.name !== undefined) spawn.name = item.name;
+ 	if (item.task !== undefined) spawn.task = item.task;
+ 	if (params.context !== undefined) spawn.context = params.context;
++	if (params.repoRoot !== undefined) spawn.repoRoot = params.repoRoot;
+ 	if ("outputSchema" in item) spawn.outputSchema = item.outputSchema;
+ 	if ("schemaMode" in item) spawn.schemaMode = item.schemaMode;
+ 	if ("effort" in item) spawn.effort = item.effort;
+@@ -663,7 +664,9 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
+ 			...(Object.hasOwn(params, "outputSchema") ? { outputSchema: params.outputSchema } : {}),
+ 			...(Object.hasOwn(params, "schemaMode") ? { schemaMode: params.schemaMode } : {}),
+ 			...(params.effort !== undefined ? { effort: params.effort } : {}),
+-			...("isolated" in params ? { isolation: { requested: params.isolated } } : {}),
++			...(Object.hasOwn(params, "isolated") || params.repoRoot !== undefined
++				? { isolation: { ...(Object.hasOwn(params, "isolated") ? { requested: params.isolated } : {}), ...(params.repoRoot !== undefined ? { repoRoot: params.repoRoot } : {}) } }
++				: {}),
+ 			blockedAgent: this.#blockedAgent,
+ 			enableLsp: (this.session.enableLsp ?? true) && this.session.settings.get("task.enableLsp"),
+ 			enableIrc: isIrcEnabled(this.session.settings, this.session.taskDepth ?? 0),
+@@ -1440,7 +1443,9 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
+ 				detached,
+ 				invokedAt: launchTiming?.invokedAt,
+ 				acquiredAt: launchTiming?.acquiredAt,
+-				...("isolated" in params ? { isolation: { requested: params.isolated } } : {}),
++				...((Object.hasOwn(params, "isolated") || params.repoRoot !== undefined)
++					? { isolation: { ...(Object.hasOwn(params, "isolated") ? { requested: params.isolated } : {}), ...(params.repoRoot !== undefined ? { repoRoot: params.repoRoot } : {}) } }
++					: {}),
+ 				blockedAgent: this.#blockedAgent,
+ 				enableLsp: (this.session.enableLsp ?? true) && this.session.settings.get("task.enableLsp"),
+ 				enableIrc: isIrcEnabled(this.session.settings, this.session.taskDepth ?? 0),
 diff --git a/packages/coding-agent/src/task/isolation-runner.ts b/packages/coding-agent/src/task/isolation-runner.ts
-index 71d12b08ba..64a791f013 100644
+index 71d12b08ba319d076515252d35633a1ff6fd2a10..64a791f0132cd9a1395d2b0cb6c439fc6b1142ff 100644
 --- a/packages/coding-agent/src/task/isolation-runner.ts
 +++ b/packages/coding-agent/src/task/isolation-runner.ts
 @@ -101,8 +101,8 @@ export interface IsolationContext {
@@ -14,22 +48,104 @@ index 71d12b08ba..64a791f013 100644
  	return { repoRoot, baseline };
  }
 diff --git a/packages/coding-agent/src/task/structured-subagent.ts b/packages/coding-agent/src/task/structured-subagent.ts
-index e5189d0a00..8308009b98 100644
+index e5189d0a00a44ddc6d154710da64d121ae013f1e..8b0b63d3251cdf2c2d7f27101f0c71e43c378e1d 100644
 --- a/packages/coding-agent/src/task/structured-subagent.ts
 +++ b/packages/coding-agent/src/task/structured-subagent.ts
-@@ -578,7 +578,9 @@ export async function runStructuredSubagent(request: StructuredSubagentRequest):
+@@ -68,6 +68,7 @@ export interface StructuredSubagentIsolationControls {
+ 	requested?: boolean;
+ 	merge?: "patch" | "branch";
+ 	apply?: boolean;
++	repoRoot?: string;
+ }
+ 
+ /** Identity and presentation metadata supplied by the calling surface. */
+@@ -578,7 +579,10 @@ export async function runStructuredSubagent(request: StructuredSubagentRequest):
  		let isolationContext: IsolationContext | null = null;
  		if (policy.isIsolated) {
  			try {
 -				isolationContext = await prepareIsolationContext(request.session.cwd);
 +				const explicitRepoRoot =
-+					(request.session.settings.get("task.isolation.repoRoot" as never) as string | undefined) || undefined;
++					request.isolation?.repoRoot ??
++					((request.session.settings.get("task.isolation.repoRoot" as never) as string | undefined) || undefined);
 +				isolationContext = await prepareIsolationContext(request.session.cwd, explicitRepoRoot);
  			} catch (error) {
  				const message = error instanceof Error ? error.message : String(error);
  				throw new StructuredSubagentError(
+diff --git a/packages/coding-agent/src/task/types.ts b/packages/coding-agent/src/task/types.ts
+index 062cab65a6dcb7c25e7d895f0de85663c54e5e4c..1a911fb39a86e58b404bb43ed73f6bc3d3b4a74f 100644
+--- a/packages/coding-agent/src/task/types.ts
++++ b/packages/coding-agent/src/task/types.ts
+@@ -154,6 +154,7 @@ export const taskSchema = type({
+ 	"outputSchema?": outputSchemaInputSchema,
+ 	"schemaMode?": '"permissive" | "strict"',
+ 	"isolated?": "boolean",
++	"repoRoot?": "string",
+ 	"+": "delete",
+ });
+ const taskSchemaNoIsolation = type({
+@@ -162,16 +163,19 @@ const taskSchemaNoIsolation = type({
+ 	task: "string",
+ 	"outputSchema?": outputSchemaInputSchema,
+ 	"schemaMode?": '"permissive" | "strict"',
++	"repoRoot?": "string",
+ 	"+": "delete",
+ });
+ const taskSchemaBatch = type({
+ 	context: "string",
+ 	tasks: taskItemSchemaIsolated.array(),
++	"repoRoot?": "string",
+ 	"+": "delete",
+ });
+ const taskSchemaBatchNoIsolation = type({
+ 	context: "string",
+ 	tasks: taskItemSchema.array(),
++	"repoRoot?": "string",
+ 	"+": "delete",
+ });
+ const ALL_TASK_SCHEMAS = [taskSchema, taskSchemaNoIsolation, taskSchemaBatch, taskSchemaBatchNoIsolation] as const;
+@@ -215,6 +219,7 @@ function createTaskSchema(options: {
+ 			return type.raw({
+ 				context: "string",
+ 				tasks: item.array(),
++				"repoRoot?": "string",
+ 				"+": "delete",
+ 			});
+ 		}
+@@ -230,6 +235,7 @@ function createTaskSchema(options: {
+ 		return type.raw({
+ 			context: "string",
+ 			tasks: item.array(),
++			"repoRoot?": "string",
+ 			"+": "delete",
+ 		});
+ 	}
+@@ -242,6 +248,7 @@ function createTaskSchema(options: {
+ 			"outputSchema?": outputSchemaInputSchema,
+ 			"schemaMode?": '"permissive" | "strict"',
+ 			"isolated?": "boolean",
++			"repoRoot?": "string",
+ 			"+": "delete",
+ 		});
+ 	}
+@@ -252,6 +259,7 @@ function createTaskSchema(options: {
+ 		...effortField,
+ 		"outputSchema?": outputSchemaInputSchema,
+ 		"schemaMode?": '"permissive" | "strict"',
++		"repoRoot?": "string",
+ 		"+": "delete",
+ 	});
+ }
+@@ -302,6 +310,8 @@ export interface TaskParams {
+ 	context?: string;
+ 	/** Run in an isolated worktree (flat form; per-item in batch form). */
+ 	isolated?: boolean;
++	/** Explicit repository root for this call; relative paths resolve from session cwd. */
++	repoRoot?: string;
+ }
+ 
+ /**
 diff --git a/packages/coding-agent/src/task/worktree.ts b/packages/coding-agent/src/task/worktree.ts
-index 1961d14a09..95d8b79cca 100644
+index 1961d14a09d9acecc7f16f5976378f357feb31f2..95d8b79ccabfcab8e7d7bb6d9ecbc0fa19240235 100644
 --- a/packages/coding-agent/src/task/worktree.ts
 +++ b/packages/coding-agent/src/task/worktree.ts
 @@ -51,20 +51,33 @@ export interface WorktreeBaseline {
@@ -82,3 +198,60 @@ index 1961d14a09..95d8b79cca 100644
  	const sourceCommonDir = vcs.requireGit(repoRoot).info().commonDir;
  	const baseDir = getWorktreeDir(getTaskIsolationSegment(repoRoot, id));
  	const mergedDir = path.join(baseDir, TASK_ISOLATION_MOUNT_DIR);
+diff --git a/packages/coding-agent/test/task/structured-subagent.test.ts b/packages/coding-agent/test/task/structured-subagent.test.ts
+index 1930a890777ee82743ed52c176580897f98b096c..f2d9b2c42f69a9648dc67208be09877e91836ce9 100644
+--- a/packages/coding-agent/test/task/structured-subagent.test.ts
++++ b/packages/coding-agent/test/task/structured-subagent.test.ts
+@@ -37,6 +37,7 @@ function session(
+ 		maxDepth?: number;
+ 		isolationMode?: "none" | "worktree";
+ 		isolationApply?: boolean;
++		repoRoot?: string;
+ 		modelRoles?: Record<string, string>;
+ 	} = {},
+ ): ToolSession {
+@@ -48,6 +49,7 @@ function session(
+ 			"task.maxRecursionDepth": options.maxDepth ?? 2,
+ 			"task.isolation.mode": options.isolationMode ?? "none",
+ 			"task.enableLsp": true,
++			...(options.repoRoot ? { "task.isolation.repoRoot": options.repoRoot } : {}),
+ 			...(options.modelRoles ? { modelRoles: options.modelRoles } : {}),
+ 			...(options.isolationApply !== undefined ? { "task.isolation.apply": options.isolationApply } : {}),
+ 		}),
+@@ -435,6 +437,19 @@ describe("structured subagent primitive", () => {
+ 		expect(artifactsDirsFromRegistry()).toEqual([]);
+ 	});
+ 
++	it("uses per-call repoRoot before session repoRoot", async () => {
++		mockDiscovery();
++		const prepare = vi.spyOn(isolationRunner, "prepareIsolationContext").mockResolvedValue({ repoRoot: "/tmp" } as never);
++		vi.spyOn(executorModule, "runSubprocess").mockResolvedValue(result());
++		await runStructuredSubagent(
++			request({
++				session: session({ isolationMode: "worktree", repoRoot: "/session/root" }),
++				isolation: { requested: true, repoRoot: "/call/root" },
++			}),
++		);
++		expect(prepare).toHaveBeenCalledWith("/tmp", "/call/root");
++	});
++
+ 	it("reuses a cached output manager across concurrent allocations and sanitizes artifact ids", async () => {
+ 		mockDiscovery();
+ 		const sharedSession = session();
+diff --git a/packages/coding-agent/test/task/wire-schema.test.ts b/packages/coding-agent/test/task/wire-schema.test.ts
+index 8f81f6861bedec5630f1f4d99d4cec185406a7c6..eb41d77e7739edf4ba1023bc4c334b9e406ed481 100644
+--- a/packages/coding-agent/test/task/wire-schema.test.ts
++++ b/packages/coding-agent/test/task/wire-schema.test.ts
+@@ -58,6 +58,12 @@ describe("task wire schema", () => {
+ 		}
+ 	});
+ 
++	it("accepts explicit repoRoot on flat calls", () => {
++		const parsed = taskSchema({ agent: "scout", task: "map the repo", repoRoot: "../target" });
++		expect(parsed instanceof type.errors).toBe(false);
++		if (!(parsed instanceof type.errors)) expect(parsed.repoRoot).toBe("../target");
++	});
++
+ 	it("defaults a missing agent to 'task'", () => {
+ 		const parsed = taskSchema({ task: "x" });
+ 		expect(parsed instanceof type.errors).toBe(false);

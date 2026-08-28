@@ -1,8 +1,8 @@
 diff --git a/packages/coding-agent/src/config/settings-schema.ts b/packages/coding-agent/src/config/settings-schema.ts
-index c3448d1e9c..691d2ac699 100644
+index 0fcc822b0c111e2e185009897ca7a2942ceb5c0c..2b391a6659ccc03c5291b41ef1b10e6a037fca22 100644
 --- a/packages/coding-agent/src/config/settings-schema.ts
 +++ b/packages/coding-agent/src/config/settings-schema.ts
-@@ -4544,6 +4544,27 @@ export const SETTINGS_SCHEMA = {
+@@ -4538,6 +4538,27 @@ export const SETTINGS_SCHEMA = {
  				"Absolute path to the Chromium/Chrome executable for headless automation. Takes precedence over PUPPETEER_EXECUTABLE_PATH. Invalid explicit path fails closed.",
  		},
  	},
@@ -31,7 +31,7 @@ index c3448d1e9c..691d2ac699 100644
  		type: "string",
  		default: undefined,
 diff --git a/packages/coding-agent/src/launch/broker.ts b/packages/coding-agent/src/launch/broker.ts
-index 051962e986..e731bc4d5a 100644
+index 051962e9868a1a1121f519b44374fee5ef88f876..a74355a2bc80234afb7cfbf3e6c1a6a5b6385b1e 100644
 --- a/packages/coding-agent/src/launch/broker.ts
 +++ b/packages/coding-agent/src/launch/broker.ts
 @@ -1,3 +1,5 @@
@@ -40,7 +40,7 @@ index 051962e986..e731bc4d5a 100644
  import * as fs from "node:fs/promises";
  import * as net from "node:net";
  import * as os from "node:os";
-@@ -1416,9 +1417,23 @@ export async function startDaemonBrokerFromEnvironment(options: DaemonBrokerStartOptions = {}): Promise<void> {
+@@ -1416,10 +1418,24 @@ export async function startDaemonBrokerFromEnvironment(options: DaemonBrokerStar
  	if (!token) throw new Error("Daemon broker token is empty");
  	const broker = new DaemonBroker(projectDir, runtimeDir, token, idleGraceMs, restartBackoffBaseMs);
  	const cancelCleanup = postmortem.register("daemon-broker", () => broker.shutdown());
@@ -64,9 +64,10 @@ index 051962e986..e731bc4d5a 100644
 +		}
  		await releaseBrokerLease(lease);
  	}
+ }
 diff --git a/packages/utils/src/android-system.ts b/packages/utils/src/android-system.ts
 new file mode 100644
-index 0000000000..e7a6be8c27
+index 0000000000000000000000000000000000000000..e7a6be8c27b69de7aa080cbeb82f62befe7414c3
 --- /dev/null
 +++ b/packages/utils/src/android-system.ts
 @@ -0,0 +1,91 @@
@@ -162,7 +163,7 @@ index 0000000000..e7a6be8c27
 +	wakeLockRefCount = 0;
 +}
 diff --git a/packages/utils/src/index.ts b/packages/utils/src/index.ts
-index 547bf7e2c6..40b20c5941 100644
+index 547bf7e2c6878cb81971d18d44445c46953f9177..40b20c59418b8bbfa28b6a3a3084349894c7094d 100644
 --- a/packages/utils/src/index.ts
 +++ b/packages/utils/src/index.ts
 @@ -59,3 +59,5 @@ export function structuredCloneJSON<T>(value: T): T {
