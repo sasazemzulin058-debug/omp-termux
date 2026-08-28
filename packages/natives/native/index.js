@@ -15,15 +15,23 @@ import { adaptDesktopSession } from "./desktop-adapter.js";
  */
 
 const nativeBindings = loadNative();
+
+// Android: audio/live/webrtc modules are excluded from native addon.
+// Provide stub classes that throw a clear error instead of undefined TypeError.
+function _unsupported(name) {
+  return class {
+    constructor() { throw new Error(`${name} is not available on Android/Termux`); }
+  };
+}
 // --- generated native exports (do not edit) ---
 // classes
-export const AudioCapture = nativeBindings.AudioCapture;
-export const AudioPlayback = nativeBindings.AudioPlayback;
+export const AudioCapture = nativeBindings.AudioCapture ?? _unsupported("AudioCapture");
+export const AudioPlayback = nativeBindings.AudioPlayback ?? _unsupported("AudioPlayback");
 export const DesktopSession = adaptDesktopSession(nativeBindings.DesktopSession);
 export const DiffStream = nativeBindings.DiffStream;
 export const FileLock = nativeBindings.FileLock;
 export const HighlightStream = nativeBindings.HighlightStream;
-export const LiveWebRtcPeer = nativeBindings.LiveWebRtcPeer;
+export const LiveWebRtcPeer = nativeBindings.LiveWebRtcPeer ?? _unsupported("LiveWebRtcPeer");
 export const MacAppearanceObserver = nativeBindings.MacAppearanceObserver;
 export const MacOSPowerAssertion = nativeBindings.MacOSPowerAssertion;
 export const Process = nativeBindings.Process;

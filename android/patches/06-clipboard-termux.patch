@@ -1,0 +1,46 @@
+diff --git a/packages/coding-agent/src/utils/clipboard.ts b/packages/coding-agent/src/utils/clipboard.ts
+index 1f154931cf..27709d7b4e 100644
+--- a/packages/coding-agent/src/utils/clipboard.ts
++++ b/packages/coding-agent/src/utils/clipboard.ts
+@@ -57,6 +57,13 @@ async function spawnCapture(
+ 		clearTimeout(timer);
+ 	}
+ }
++function isAndroidOrTermux(): boolean {
++	return (
++		process.platform === "android" ||
++		Boolean(process.env.TERMUX_VERSION) ||
++		Boolean(process.env.PREFIX?.includes("com.termux"))
++	);
++}
+ 
+ function hasDisplay(): boolean {
+ 	return process.platform !== "linux" || Boolean(process.env.DISPLAY || process.env.WAYLAND_DISPLAY);
+@@ -65,7 +72,6 @@ function hasDisplay(): boolean {
+ function isWsl(): boolean {
+ 	return process.platform === "linux" && Boolean(process.env.WSL_DISTRO_NAME || process.env.WSL_INTEROP);
+ }
+-
+ /**
+  * Read file paths from the macOS pasteboard's `public.file-url` representation.
+  *
+@@ -129,7 +135,7 @@ export async function copyToClipboard(text: string): Promise<void> {
+ 
+ 	// Also try native tools (best effort for local sessions)
+ 	try {
+-		if (process.env.TERMUX_VERSION) {
++		if (isAndroidOrTermux()) {
+ 			try {
+ 				await spawnCapture(["termux-clipboard-set"], { input: text, timeoutMs: 5000 });
+ 				return;
+@@ -343,8 +349,8 @@ export async function readTextFromClipboard(): Promise<string> {
+ 		if (p === "win32") {
+ 			return (await readTextViaPowerShell()) ?? "";
+ 		}
+-		if (process.env.TERMUX_VERSION) {
+-			return await spawnCapture(["termux-clipboard-get"]);
++		if (isAndroidOrTermux()) {
++			return await spawnCapture(["termux-clipboard-get"], { timeoutMs: 5000 });
+ 		}
+ 		if (isWsl()) {
+ 			const text = await readTextViaPowerShell();

@@ -578,7 +578,9 @@ export async function runStructuredSubagent(request: StructuredSubagentRequest):
 		let isolationContext: IsolationContext | null = null;
 		if (policy.isIsolated) {
 			try {
-				isolationContext = await prepareIsolationContext(request.session.cwd);
+				const explicitRepoRoot =
+					(request.session.settings.get("task.isolation.repoRoot" as never) as string | undefined) || undefined;
+				isolationContext = await prepareIsolationContext(request.session.cwd, explicitRepoRoot);
 			} catch (error) {
 				const message = error instanceof Error ? error.message : String(error);
 				throw new StructuredSubagentError(

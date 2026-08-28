@@ -1945,6 +1945,17 @@ export async function runUpdateCommand(opts: {
 	channel?: UpdateChannel;
 }): Promise<void> {
 	console.log(chalk.dim(`Current version: ${VERSION}`));
+
+	// Android/Termux: self-update downloads desktop binaries; block early.
+	if (process.platform === "android" || process.env.OMP_PLATFORM === "android" || process.env.TERMUX_VERSION) {
+		console.log(chalk.yellow("Self-update is disabled on Android/Termux."));
+		console.log(
+			chalk.dim(
+				"Update via: curl -fsSL https://github.com/sasazemzulin058-debug/omp-termux/releases/latest/download/omp-termux.tar.gz | tar xz",
+			),
+		);
+		return;
+	}
 	const persistedChannel = readPersistedChannel() ?? "stable";
 	const channel = opts.channel ?? persistedChannel;
 	const isChannelSwitch = opts.channel !== undefined && opts.channel !== persistedChannel;
