@@ -31,7 +31,6 @@ import { resolveToCwd } from "./path-utils";
 import { ToolAbortError, ToolError, throwIfAborted } from "./tool-errors";
 import { toolResult } from "./tool-result";
 import { clampTimeout } from "./tool-timeouts";
-import { resolveHeadlessExecutable } from "./browser/launch";
 
 export {
 	type AriaSnapshotOptions,
@@ -254,6 +253,7 @@ export class BrowserTool implements AgentTool<typeof browserSchema, BrowserToolD
 			throw error;
 		}
 	}
+
 	async #open(
 		name: string,
 		params: BrowserParams,
@@ -261,12 +261,7 @@ export class BrowserTool implements AgentTool<typeof browserSchema, BrowserToolD
 		timeoutMs: number,
 		signal?: AbortSignal,
 	): Promise<AgentToolResult<BrowserToolDetails>> {
-		let kind = resolveBrowserKind(params, this.session);
-		if (kind.kind === "headless") {
-			const setting = this.session.settings.get("browser.executablePath") as string | undefined;
-			const resolved = await resolveHeadlessExecutable({ executablePathSetting: setting });
-			if (resolved) kind = { ...kind, executablePath: resolved };
-		}
+		const kind = resolveBrowserKind(params, this.session);
 		details.browser = kind.kind;
 
 		// If a tab with this name already exists on a different browser kind, fail fast — caller must close first.
@@ -481,8 +476,7 @@ function describeKind(kind: BrowserKind): string {
 
 function sameBrowserKind(a: BrowserKind, b: BrowserKind): boolean {
 	if (a.kind !== b.kind) return false;
-	if (a.kind === "headless" && b.kind === "headless")
-		return a.headless === b.headless && (a.executablePath ?? "default") === (b.executablePath ?? "default");
+	if (a.kind === "headless" && b.kind === "headless") return a.headless === b.headless;
 	if (a.kind === "spawned" && b.kind === "spawned") return a.path === b.path;
 	if (a.kind === "connected" && b.kind === "connected") return a.cdpUrl === b.cdpUrl;
 	if (a.kind === "relay" && b.kind === "relay") return a.cdpUrl === b.cdpUrl;

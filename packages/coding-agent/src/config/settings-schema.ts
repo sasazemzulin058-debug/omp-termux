@@ -2474,7 +2474,7 @@ export const SETTINGS_SCHEMA = {
 	// compaction kicks in before any request crosses into premium billing.
 	extendedContext: {
 		type: "boolean",
-		default: true,
+		default: false,
 		ui: {
 			tab: "context",
 			group: "General",
@@ -2947,8 +2947,7 @@ export const SETTINGS_SCHEMA = {
 			tab: "memory",
 			group: "General",
 			label: "Memory Backend",
-			description:
-				"Off, local summary pipeline, Mnemopi SQLite, Hindsight remote memory, or Hermes persistent memory",
+			description: "Off, local summary pipeline, Mnemopi SQLite, Hindsight remote memory, or Hermes persistent memory",
 			options: [
 				{ value: "off", label: "Off", description: "No memory subsystem runs" },
 				{ value: "local", label: "Local", description: "Local rollout summarisation pipeline (memory_summary.md)" },
@@ -4531,17 +4530,6 @@ export const SETTINGS_SCHEMA = {
 			label: "cmux Browser",
 			description:
 				"Use cmux WKWebView surfaces for browser automation when a cmux socket is available. Set PI_BROWSER_CMUX=0 or PI_BROWSER_CMUX=1 to override.",
-		},
-	},
-	"browser.executablePath": {
-		type: "string",
-		default: undefined,
-		ui: {
-			tab: "tools",
-			group: "Grep & Browser",
-			label: "Browser Executable Path",
-			description:
-				"Absolute path to the Chromium/Chrome executable for headless automation. Takes precedence over PUPPETEER_EXECUTABLE_PATH. Invalid explicit path fails closed.",
 		},
 	},
 	"browser.screenshotDir": {
