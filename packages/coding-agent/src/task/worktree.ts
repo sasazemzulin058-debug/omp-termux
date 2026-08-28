@@ -63,9 +63,21 @@ export async function getRepoRoot(cwd: string, explicitRepoRoot?: string): Promi
 	}
 
 	const repoRoot = vcs.git(targetCwd)?.info().repoRoot;
-	if (repoRoot) return repoRoot;
+	if (!repoRoot) {
+		throw new Error(`Git repository not found for isolated task execution in ${targetCwd}.`);
+	}
 
-	throw new Error(`Git repository not found for isolated task execution in ${targetCwd}.`);
+	if (explicitRepoRoot) {
+		const canonicalTarget = path.resolve(targetCwd);
+		const canonicalRoot = path.resolve(repoRoot);
+		if (canonicalTarget !== canonicalRoot) {
+			throw new Error(
+				`Configured task.isolation.repoRoot (${targetCwd}) is a subdirectory inside a repository (${repoRoot}), not the repository root itself.`,
+			);
+		}
+	}
+
+	return repoRoot;
 }
 
 const GIT_NO_INDEX_NULL_PATH = process.platform === "win32" ? "NUL" : "/dev/null";
