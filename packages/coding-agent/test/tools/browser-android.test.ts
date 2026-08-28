@@ -190,7 +190,7 @@ describe("resolveHeadlessExecutable fail-closed", () => {
 				env: androidEnv({ PUPPETEER_EXECUTABLE_PATH: "/tmp/valid" }),
 				platform: "linux",
 				prefix: PREFIX,
-				isExecutableFile: (p) => p === "/tmp/valid",
+				isExecutableFile: p => p === "/tmp/valid",
 				isChromiumExecutable: async () => true,
 			});
 		} catch (e) {
@@ -208,7 +208,7 @@ describe("resolveHeadlessExecutable fail-closed", () => {
 				env,
 				platform: "linux",
 				prefix: PREFIX,
-				isExecutableFile: (p) => p === cands[0],
+				isExecutableFile: p => p === cands[0],
 				isChromiumExecutable: async () => true,
 			}),
 		).rejects.toThrow(/PUPPETEER_EXECUTABLE_PATH/);
@@ -236,7 +236,7 @@ describe("no managed download on Android", () => {
 			env: androidEnv(),
 			platform: "linux",
 			prefix: PREFIX,
-			isExecutableFile: (p) => p === cands[2],
+			isExecutableFile: p => p === cands[2],
 			isChromiumExecutable: async () => true,
 		});
 		expect(result).toBe(cands[2]);
@@ -254,7 +254,11 @@ describe("no managed download on Android", () => {
 describe("threading executable through registry and daemon", () => {
 	it("browserKey includes executablePath", () => {
 		const base = browserKeyForTest({ kind: "headless", headless: true });
-		const withExe = browserKeyForTest({ kind: "headless", headless: true, executablePath: "/data/data/com.termux/files/usr/lib/chromium/chrome" });
+		const withExe = browserKeyForTest({
+			kind: "headless",
+			headless: true,
+			executablePath: "/data/data/com.termux/files/usr/lib/chromium/chrome",
+		});
 		const withOther = browserKeyForTest({ kind: "headless", headless: true, executablePath: "/other/chrome" });
 		expect(withExe).not.toBe(base);
 		expect(withExe).not.toBe(withOther);
@@ -265,7 +269,11 @@ describe("threading executable through registry and daemon", () => {
 	it("daemon name includes executable and spec hash", () => {
 		const base = sharedBrowserDaemonName(true);
 		const withExe = sharedBrowserDaemonName(true, "/data/data/com.termux/files/usr/lib/chromium/chrome");
-		const withExeAndSpec = sharedBrowserDaemonName(true, "/data/data/com.termux/files/usr/lib/chromium/chrome", "spec123");
+		const withExeAndSpec = sharedBrowserDaemonName(
+			true,
+			"/data/data/com.termux/files/usr/lib/chromium/chrome",
+			"spec123",
+		);
 		const withDifferentExe = sharedBrowserDaemonName(true, "/other/chrome");
 		expect(base).toBe("omp.browser.headless");
 		expect(withExe).not.toBe(base);
@@ -306,7 +314,7 @@ describe("threading executable through registry and daemon", () => {
 		const session = makeSession({ "browser.executablePath": "/tmp/chrome" });
 		const tool = new BrowserTool(session);
 		let capturedKind: registry.BrowserKind | null = null;
-		const spy = spyOn(registry, "acquireBrowser").mockImplementation(async (kind) => {
+		const spy = spyOn(registry, "acquireBrowser").mockImplementation(async kind => {
 			capturedKind = kind;
 			throw new ToolError("stop");
 		});
@@ -321,7 +329,7 @@ describe("threading executable through registry and daemon", () => {
 		spy.mockRestore();
 
 		capturedKind = null;
-		const spy2 = spyOn(registry, "acquireBrowser").mockImplementation(async (kind) => {
+		const spy2 = spyOn(registry, "acquireBrowser").mockImplementation(async kind => {
 			capturedKind = kind;
 			throw new ToolError("stop");
 		});

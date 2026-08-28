@@ -6,26 +6,26 @@ import browserDescription from "../prompts/tools/browser.md" with { type: "text"
 import type { ToolSession } from "../sdk";
 import { enforceInlineByteCap } from "../session/streaming-output";
 import { truncateForPrompt } from "./approval";
-import { resolveHeadlessExecutable } from "./browser/launch";
 import { resolveCmuxKind } from "./browser/cmux/rpc";
+import { resolveHeadlessExecutable } from "./browser/launch";
 import {
-\tacquireBrowser,
-\ttype BrowserHandle,
-\ttype BrowserKind,
-\ttype BrowserKindTag,
-\tholdBrowser,
-\treleaseBrowser,
+	acquireBrowser,
+	type BrowserHandle,
+	type BrowserKind,
+	type BrowserKindTag,
+	holdBrowser,
+	releaseBrowser,
 } from "./browser/registry";
 import { resolveRelayKind } from "./browser/relay/kind";
 import type { Observation, ScreenshotResult } from "./browser/tab-protocol";
 import {
-\ttype AcquireTabResult,
-\tacquireTab,
-\tdropHeadlessTabs,
-\tgetTab,
-\treleaseAllTabs,
-\treleaseTab,
-\trunInTab,
+	type AcquireTabResult,
+	acquireTab,
+	dropHeadlessTabs,
+	getTab,
+	releaseAllTabs,
+	releaseTab,
+	runInTab,
 } from "./browser/tab-supervisor";
 import type { OutputMeta } from "./output-meta";
 import { resolveToCwd } from "./path-utils";

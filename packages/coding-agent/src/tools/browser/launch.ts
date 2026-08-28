@@ -180,7 +180,6 @@ export async function resolveHeadlessExecutable(
 	return undefined;
 }
 
-
 const STEALTH_ACCEPT_LANGUAGE = "en-US,en";
 
 const USER_AGENT_TARGET_TIMEOUT_MS = 5_000;

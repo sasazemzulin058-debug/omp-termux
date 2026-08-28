@@ -35,11 +35,7 @@ export interface SharedBrowserEndpoint {
 }
 
 /** Stable broker daemon name for the shared automation browser. Includes executable/spec hash when provided. */
-export function sharedBrowserDaemonName(
-	headless: boolean,
-	executablePath?: string,
-	specHash?: string,
-): string {
+export function sharedBrowserDaemonName(headless: boolean, executablePath?: string, specHash?: string): string {
 	const base = headless ? "omp.browser.headless" : "omp.browser.headed";
 	if (!executablePath && !specHash) return base;
 	const input = `${executablePath ?? ""}:${specHash ?? ""}`;
@@ -80,7 +76,10 @@ export async function ensureSharedBrowser(opts: {
 	const client = await daemonClientForProject(opts.projectDir);
 	// Resolve launch spec first so daemon identity can include resolved executable and args (spec).
 	// Use a temp userDataDir placeholder for spec resolution; the final dir is derived from the hashed name.
-	const provisionalDir = path.join(daemonRuntimeDir(client.projectDir), `tmp-${opts.headless ? "headless" : "headed"}.profile`);
+	const provisionalDir = path.join(
+		daemonRuntimeDir(client.projectDir),
+		`tmp-${opts.headless ? "headless" : "headed"}.profile`,
+	);
 	const launch = await resolveSharedBrowserLaunchSpec({
 		headless: opts.headless,
 		userDataDir: provisionalDir,
