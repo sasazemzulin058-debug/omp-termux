@@ -339,9 +339,10 @@ describe("threading executable through registry and daemon", () => {
 		try {
 			await tool.execute("id", { action: "open" } as never);
 		} catch {}
-		if (capturedKind && typeof capturedKind === "object" && "kind" in capturedKind) {
-			expect(capturedKind.kind).toBe("headless");
-			const headlessKind = capturedKind as Extract<registry.BrowserKind, { kind: "headless" }>;
+		const captured = capturedKind as registry.BrowserKind | null;
+		if (captured && typeof captured === "object" && "kind" in captured) {
+			expect(captured.kind).toBe("headless");
+			const headlessKind = captured as Extract<registry.BrowserKind, { kind: "headless" }>;
 			expect(headlessKind.executablePath).toBe("/data/data/com.termux/files/usr/lib/chromium/chrome");
 		} else {
 			throw new Error("headless kind not captured");
