@@ -321,8 +321,9 @@ describe("threading executable through registry and daemon", () => {
 		try {
 			await tool.execute("id", { action: "open", app: { cdp_url: "http://127.0.0.1:9222" } } as never);
 		} catch {}
-		if (capturedKind && typeof capturedKind === "object" && "kind" in capturedKind) {
-			expect(capturedKind.kind).toBe("connected");
+		const connectedCaptured = capturedKind as registry.BrowserKind | null;
+		if (connectedCaptured && typeof connectedCaptured === "object" && "kind" in connectedCaptured) {
+			expect(connectedCaptured.kind).toBe("connected");
 		} else {
 			throw new Error("kind not captured");
 		}
