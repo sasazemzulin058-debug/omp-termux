@@ -1,5 +1,5 @@
 diff --git a/packages/coding-agent/src/task/index.ts b/packages/coding-agent/src/task/index.ts
-index 38d7d4f38ca6f10ed286de8a852a03971b810ead..4f3cc0e53cfe65cb03c6dfe13a890fc770706744 100644
+index 38d7d4f..4f3cc0e 100644
 --- a/packages/coding-agent/src/task/index.ts
 +++ b/packages/coding-agent/src/task/index.ts
 @@ -297,6 +297,7 @@ function spawnParamsFor(params: TaskParams, item: TaskItem, defaultAgent: string
@@ -33,7 +33,7 @@ index 38d7d4f38ca6f10ed286de8a852a03971b810ead..4f3cc0e53cfe65cb03c6dfe13a890fc7
  				enableLsp: (this.session.enableLsp ?? true) && this.session.settings.get("task.enableLsp"),
  				enableIrc: isIrcEnabled(this.session.settings, this.session.taskDepth ?? 0),
 diff --git a/packages/coding-agent/src/task/isolation-runner.ts b/packages/coding-agent/src/task/isolation-runner.ts
-index 71d12b08ba319d076515252d35633a1ff6fd2a10..64a791f0132cd9a1395d2b0cb6c439fc6b1142ff 100644
+index 71d12b0..64a791f 100644
 --- a/packages/coding-agent/src/task/isolation-runner.ts
 +++ b/packages/coding-agent/src/task/isolation-runner.ts
 @@ -101,8 +101,8 @@ export interface IsolationContext {
@@ -48,7 +48,7 @@ index 71d12b08ba319d076515252d35633a1ff6fd2a10..64a791f0132cd9a1395d2b0cb6c439fc
  	return { repoRoot, baseline };
  }
 diff --git a/packages/coding-agent/src/task/structured-subagent.ts b/packages/coding-agent/src/task/structured-subagent.ts
-index e5189d0a00a44ddc6d154710da64d121ae013f1e..8b0b63d3251cdf2c2d7f27101f0c71e43c378e1d 100644
+index e5189d0..8b0b63d 100644
 --- a/packages/coding-agent/src/task/structured-subagent.ts
 +++ b/packages/coding-agent/src/task/structured-subagent.ts
 @@ -68,6 +68,7 @@ export interface StructuredSubagentIsolationControls {
@@ -72,7 +72,7 @@ index e5189d0a00a44ddc6d154710da64d121ae013f1e..8b0b63d3251cdf2c2d7f27101f0c71e4
  				const message = error instanceof Error ? error.message : String(error);
  				throw new StructuredSubagentError(
 diff --git a/packages/coding-agent/src/task/types.ts b/packages/coding-agent/src/task/types.ts
-index 062cab65a6dcb7c25e7d895f0de85663c54e5e4c..1a911fb39a86e58b404bb43ed73f6bc3d3b4a74f 100644
+index 062cab6..1a911fb 100644
 --- a/packages/coding-agent/src/task/types.ts
 +++ b/packages/coding-agent/src/task/types.ts
 @@ -154,6 +154,7 @@ export const taskSchema = type({
@@ -145,16 +145,19 @@ index 062cab65a6dcb7c25e7d895f0de85663c54e5e4c..1a911fb39a86e58b404bb43ed73f6bc3
  
  /**
 diff --git a/packages/coding-agent/src/task/worktree.ts b/packages/coding-agent/src/task/worktree.ts
-index 1961d14a09d9acecc7f16f5976378f357feb31f2..95d8b79ccabfcab8e7d7bb6d9ecbc0fa19240235 100644
+index 1961d14..cbbdd33 100644
 --- a/packages/coding-agent/src/task/worktree.ts
 +++ b/packages/coding-agent/src/task/worktree.ts
-@@ -51,20 +51,33 @@ export interface WorktreeBaseline {
+@@ -51,20 +51,36 @@ export interface WorktreeBaseline {
  	nested: Array<{ relativePath: string; baseline: RepoBaseline }>;
  }
  
 -export async function getRepoRoot(cwd: string): Promise<string> {
 +export async function getRepoRoot(cwd: string, explicitRepoRoot?: string): Promise<string> {
-+	const targetCwd = explicitRepoRoot ? path.resolve(cwd, explicitRepoRoot) : cwd;
++	if (explicitRepoRoot !== undefined && explicitRepoRoot.trim() === "") {
++		throw new Error("Configured task.isolation.repoRoot must not be empty.");
++	}
++	const targetCwd = explicitRepoRoot !== undefined ? path.resolve(cwd, explicitRepoRoot) : cwd;
  	// Pure-jj check runs first so a jj workspace nested under an unrelated
  	// outer Git checkout is rejected at its own root rather than silently
  	// mutating the surrounding Git tree behind jj's back.
@@ -187,7 +190,7 @@ index 1961d14a09d9acecc7f16f5976378f357feb31f2..95d8b79ccabfcab8e7d7bb6d9ecbc0fa
  }
  
  const GIT_NO_INDEX_NULL_PATH = process.platform === "win32" ? "NUL" : "/dev/null";
-@@ -498,8 +511,9 @@ export async function ensureIsolation(
+@@ -498,8 +514,9 @@ export async function ensureIsolation(
  	baseCwd: string,
  	id: string,
  	preferred?: IsoBackendKind,
@@ -199,7 +202,7 @@ index 1961d14a09d9acecc7f16f5976378f357feb31f2..95d8b79ccabfcab8e7d7bb6d9ecbc0fa
  	const baseDir = getWorktreeDir(getTaskIsolationSegment(repoRoot, id));
  	const mergedDir = path.join(baseDir, TASK_ISOLATION_MOUNT_DIR);
 diff --git a/packages/coding-agent/test/task/structured-subagent.test.ts b/packages/coding-agent/test/task/structured-subagent.test.ts
-index 1930a890777ee82743ed52c176580897f98b096c..f2d9b2c42f69a9648dc67208be09877e91836ce9 100644
+index 1930a89..f2d9b2c 100644
 --- a/packages/coding-agent/test/task/structured-subagent.test.ts
 +++ b/packages/coding-agent/test/task/structured-subagent.test.ts
 @@ -37,6 +37,7 @@ function session(
@@ -239,7 +242,7 @@ index 1930a890777ee82743ed52c176580897f98b096c..f2d9b2c42f69a9648dc67208be09877e
  		mockDiscovery();
  		const sharedSession = session();
 diff --git a/packages/coding-agent/test/task/wire-schema.test.ts b/packages/coding-agent/test/task/wire-schema.test.ts
-index 8f81f6861bedec5630f1f4d99d4cec185406a7c6..eb41d77e7739edf4ba1023bc4c334b9e406ed481 100644
+index 8f81f68..eb41d77 100644
 --- a/packages/coding-agent/test/task/wire-schema.test.ts
 +++ b/packages/coding-agent/test/task/wire-schema.test.ts
 @@ -58,6 +58,12 @@ describe("task wire schema", () => {
