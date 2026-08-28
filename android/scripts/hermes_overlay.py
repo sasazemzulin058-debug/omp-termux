@@ -96,7 +96,7 @@ def hermes_settings_schema(text):
             raise SystemExit(f"overlay marker mismatch: packages/coding-agent/src/config/settings-schema.ts values: expected 1, got {len(matches)}")
 
     old_desc = 'description: "Off, local summary pipeline, Mnemopi SQLite, or Hindsight remote memory"'
-    new_desc = 'description: "Off, local summary pipeline, Mnemopi SQLite, Hindsight remote memory, or Hermes persistent memory"'
+    new_desc = 'description:\n\t\t\t\t"Off, local summary pipeline, Mnemopi SQLite, Hindsight remote memory, or Hermes persistent memory"'
     if old_desc in text:
         if text.count(old_desc) != 1:
             raise SystemExit("overlay marker mismatch: settings-schema.ts description")

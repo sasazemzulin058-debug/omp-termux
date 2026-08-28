@@ -6,32 +6,32 @@ import browserDescription from "../prompts/tools/browser.md" with { type: "text"
 import type { ToolSession } from "../sdk";
 import { enforceInlineByteCap } from "../session/streaming-output";
 import { truncateForPrompt } from "./approval";
+import { resolveHeadlessExecutable } from "./browser/launch";
 import { resolveCmuxKind } from "./browser/cmux/rpc";
 import {
-	acquireBrowser,
-	type BrowserHandle,
-	type BrowserKind,
-	type BrowserKindTag,
-	holdBrowser,
-	releaseBrowser,
+\tacquireBrowser,
+\ttype BrowserHandle,
+\ttype BrowserKind,
+\ttype BrowserKindTag,
+\tholdBrowser,
+\treleaseBrowser,
 } from "./browser/registry";
 import { resolveRelayKind } from "./browser/relay/kind";
 import type { Observation, ScreenshotResult } from "./browser/tab-protocol";
 import {
-	type AcquireTabResult,
-	acquireTab,
-	dropHeadlessTabs,
-	getTab,
-	releaseAllTabs,
-	releaseTab,
-	runInTab,
+\ttype AcquireTabResult,
+\tacquireTab,
+\tdropHeadlessTabs,
+\tgetTab,
+\treleaseAllTabs,
+\treleaseTab,
+\trunInTab,
 } from "./browser/tab-supervisor";
 import type { OutputMeta } from "./output-meta";
 import { resolveToCwd } from "./path-utils";
 import { ToolAbortError, ToolError, throwIfAborted } from "./tool-errors";
 import { toolResult } from "./tool-result";
 import { clampTimeout } from "./tool-timeouts";
-import { resolveHeadlessExecutable } from "./browser/launch";
 
 export {
 	type AriaSnapshotOptions,

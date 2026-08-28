@@ -105,6 +105,7 @@ export function getChromeProfileBaseDir(
 	env: Record<string, string | undefined> = process.env as Record<string, string | undefined>,
 ): string {
 	if (isAndroidEnvironment(platform, env)) {
+		const prefix = getTermuxPrefix(env);
 		const tmp = env.TMPDIR?.trim();
 		if (tmp?.startsWith(prefix)) return tmp;
 		return path.join(prefix, "tmp");

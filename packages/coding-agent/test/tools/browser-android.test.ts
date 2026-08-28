@@ -118,7 +118,7 @@ describe("resolveHeadlessExecutable precedence", () => {
 		const envPath = "/env/chrome";
 		const env = androidEnv({ PUPPETEER_EXECUTABLE_PATH: envPath });
 		const candidates = [path.join(PREFIX, "lib/chromium/chrome")];
-		const mockExec = (p: string) => true;
+		const mockExec = (_p: string) => true;
 		const result = await resolveHeadlessExecutable({
 			env,
 			platform: "linux",
@@ -147,8 +147,7 @@ describe("resolveHeadlessExecutable precedence", () => {
 
 	it("prefers $PREFIX/lib/chromium/chrome over fallback bins", async () => {
 		const cands = androidChromiumCandidates(PREFIX);
-		let firstValid: string | undefined;
-		const mockExec = (p: string) => true;
+		const mockExec = (_p: string) => true;
 		const result = await resolveHeadlessExecutable({
 			env: androidEnv(),
 			platform: "linux",

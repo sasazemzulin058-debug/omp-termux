@@ -1,15 +1,47 @@
 diff --git a/packages/coding-agent/src/tools/browser.ts b/packages/coding-agent/src/tools/browser.ts
-index b7f710732a..1ee027ab7a 100644
+index b7f710732a..32b56bc1de 100644
 --- a/packages/coding-agent/src/tools/browser.ts
 +++ b/packages/coding-agent/src/tools/browser.ts
-@@ -31,6 +31,7 @@ import { resolveToCwd } from "./path-utils";
- import { ToolAbortError, ToolError, throwIfAborted } from "./tool-errors";
- import { toolResult } from "./tool-result";
- import { clampTimeout } from "./tool-timeouts";
+@@ -6,25 +6,26 @@ import browserDescription from "../prompts/tools/browser.md" with { type: "text"
+ import type { ToolSession } from "../sdk";
+ import { enforceInlineByteCap } from "../session/streaming-output";
+ import { truncateForPrompt } from "./approval";
 +import { resolveHeadlessExecutable } from "./browser/launch";
- 
- export {
- 	type AriaSnapshotOptions,
+ import { resolveCmuxKind } from "./browser/cmux/rpc";
+ import {
+-	acquireBrowser,
+-	type BrowserHandle,
+-	type BrowserKind,
+-	type BrowserKindTag,
+-	holdBrowser,
+-	releaseBrowser,
++\tacquireBrowser,
++\ttype BrowserHandle,
++\ttype BrowserKind,
++\ttype BrowserKindTag,
++\tholdBrowser,
++\treleaseBrowser,
+ } from "./browser/registry";
+ import { resolveRelayKind } from "./browser/relay/kind";
+ import type { Observation, ScreenshotResult } from "./browser/tab-protocol";
+ import {
+-	type AcquireTabResult,
+-	acquireTab,
+-	dropHeadlessTabs,
+-	getTab,
+-	releaseAllTabs,
+-	releaseTab,
+-	runInTab,
++\ttype AcquireTabResult,
++\tacquireTab,
++\tdropHeadlessTabs,
++\tgetTab,
++\treleaseAllTabs,
++\treleaseTab,
++\trunInTab,
+ } from "./browser/tab-supervisor";
+ import type { OutputMeta } from "./output-meta";
+ import { resolveToCwd } from "./path-utils";
 @@ -253,7 +254,6 @@ export class BrowserTool implements AgentTool<typeof browserSchema, BrowserToolD
  			throw error;
  		}
@@ -43,10 +75,10 @@ index b7f710732a..1ee027ab7a 100644
  	if (a.kind === "connected" && b.kind === "connected") return a.cdpUrl === b.cdpUrl;
  	if (a.kind === "relay" && b.kind === "relay") return a.cdpUrl === b.cdpUrl;
 diff --git a/packages/coding-agent/src/tools/browser/launch.ts b/packages/coding-agent/src/tools/browser/launch.ts
-index b27e137a15..5409a72aa9 100644
+index b27e137a15..c8d090c356 100644
 --- a/packages/coding-agent/src/tools/browser/launch.ts
 +++ b/packages/coding-agent/src/tools/browser/launch.ts
-@@ -68,6 +68,117 @@ function stealthIgnoreDefaultArgs(executablePath: string | undefined): string[]
+@@ -68,6 +68,118 @@ function stealthIgnoreDefaultArgs(executablePath: string | undefined): string[]
  	if (!isMicrosoftEdgeExecutable(executablePath)) return [...STEALTH_IGNORE_DEFAULT_ARGS];
  	return STEALTH_IGNORE_DEFAULT_ARGS.filter(arg => arg !== ENABLE_AUTOMATION_FLAG);
  }
@@ -87,6 +119,7 @@ index b27e137a15..5409a72aa9 100644
 +	env: Record<string, string | undefined> = process.env as Record<string, string | undefined>,
 +): string {
 +	if (isAndroidEnvironment(platform, env)) {
++		const prefix = getTermuxPrefix(env);
 +		const tmp = env.TMPDIR?.trim();
 +		if (tmp?.startsWith(prefix)) return tmp;
 +		return path.join(prefix, "tmp");
@@ -164,7 +197,7 @@ index b27e137a15..5409a72aa9 100644
  
  const STEALTH_ACCEPT_LANGUAGE = "en-US,en";
  
-@@ -174,22 +285,20 @@ async function loadBrowsers(): Promise<typeof BrowsersNs> {
+@@ -174,22 +286,20 @@ async function loadBrowsers(): Promise<typeof BrowsersNs> {
   * Resolve the Chromium executable puppeteer will launch.
   *
   * `PUPPETEER_EXECUTABLE_PATH` always wins. On macOS the isolated Chrome for
@@ -198,7 +231,7 @@ index b27e137a15..5409a72aa9 100644
  	const envPath = process.env.PUPPETEER_EXECUTABLE_PATH;
  	if (envPath) return envPath;
  	// macOS: never route a background daemon through the user's GUI Chrome
-@@ -283,15 +392,9 @@ function isExecutableFile(p: string): boolean {
+@@ -283,15 +393,9 @@ function isExecutableFile(p: string): boolean {
  
  async function isChromiumExecutable(p: string): Promise<boolean> {
  	if (!isExecutableFile(p)) return false;
@@ -217,7 +250,7 @@ index b27e137a15..5409a72aa9 100644
  	try {
  		const probeTimeoutMs = 3000;
  		const proc = Bun.spawn([p, "--version"], {
-@@ -411,6 +514,7 @@ async function resolveSystemChromium(): Promise<string | undefined> {
+@@ -411,6 +515,7 @@ async function resolveSystemChromium(): Promise<string | undefined> {
  export interface LaunchHeadlessOptions {
  	headless: boolean;
  	viewport?: { width: number; height: number; deviceScaleFactor?: number };
@@ -225,7 +258,7 @@ index b27e137a15..5409a72aa9 100644
  	/** Additional Chromium arguments merged with the centralized launch defaults. */
  	args?: readonly string[];
  	/** Additional exact Puppeteer default arguments to suppress. */
-@@ -477,11 +581,11 @@ export async function launchHeadlessBrowser(opts: LaunchHeadlessOptions): Promis
+@@ -477,11 +582,11 @@ export async function launchHeadlessBrowser(opts: LaunchHeadlessOptions): Promis
  	// (issue #7058). `removeUserDataDir` cleans it up on our terms instead.
  	let userDataDir: string | undefined;
  	if (!launchArgs.some(arg => arg.startsWith("--user-data-dir"))) {
@@ -239,7 +272,7 @@ index b27e137a15..5409a72aa9 100644
  		const browser = await puppeteer.launch({
  			headless: opts.headless,
  			defaultViewport: opts.headless ? initialViewport : null,
-@@ -517,8 +621,9 @@ export async function resolveSharedBrowserLaunchSpec(opts: {
+@@ -517,8 +622,9 @@ export async function resolveSharedBrowserLaunchSpec(opts: {
  	headless: boolean;
  	userDataDir: string;
  	viewport?: { width: number; height: number };
