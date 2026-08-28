@@ -34,11 +34,18 @@ export interface SharedBrowserEndpoint {
 	projectDir: string;
 }
 
-/** Stable broker daemon name for the shared automation browser. */
-export function sharedBrowserDaemonName(headless: boolean): string {
-	return headless ? "omp.browser.headless" : "omp.browser.headed";
+/** Stable broker daemon name for the shared automation browser. Includes executable/spec hash when provided. */
+export function sharedBrowserDaemonName(
+	headless: boolean,
+	executablePath?: string,
+	specHash?: string,
+): string {
+	const base = headless ? "omp.browser.headless" : "omp.browser.headed";
+	if (!executablePath && !specHash) return base;
+	const input = `${executablePath ?? ""}:${specHash ?? ""}`;
+	const hash = Bun.hash(input).toString(16).padStart(16, "0").slice(-7);
+	return `${base}-${hash}`;
 }
-
 function wsEndpointOf(snapshot: DaemonSnapshot | undefined): string | undefined {
 	return snapshot?.readyMatch?.match(/ws:\/\/\S+/)?.[0];
 }
@@ -67,19 +74,34 @@ export async function ensureSharedBrowser(opts: {
 	projectDir: string;
 	headless: boolean;
 	viewport?: { width: number; height: number };
+	executablePath?: string;
 	signal?: AbortSignal;
 }): Promise<SharedBrowserEndpoint | null> {
 	const client = await daemonClientForProject(opts.projectDir);
-	const name = sharedBrowserDaemonName(opts.headless);
+	// Resolve launch spec first so daemon identity can include resolved executable and args (spec).
+	// Use a temp userDataDir placeholder for spec resolution; the final dir is derived from the hashed name.
+	const provisionalDir = path.join(daemonRuntimeDir(client.projectDir), `tmp-${opts.headless ? "headless" : "headed"}.profile`);
+	const launch = await resolveSharedBrowserLaunchSpec({
+		headless: opts.headless,
+		userDataDir: provisionalDir,
+		viewport: opts.viewport,
+		executablePath: opts.executablePath,
+	});
+	if (!launch) return null;
+	const filteredArgs = launch.args.filter(arg => !arg.startsWith("--user-data-dir"));
+	const specHash = Bun.hash(filteredArgs.join("|")).toString(16).padStart(16, "0").slice(-7);
+	const name = sharedBrowserDaemonName(opts.headless, launch.executablePath, specHash);
 	// Stable profile under the broker's runtime dir: reused across launches, and
 	// never contended by pre-daemon Chromiums that used throwaway temp profiles.
 	const userDataDir = path.join(daemonRuntimeDir(client.projectDir), `${name}.profile`);
-	const launch = await resolveSharedBrowserLaunchSpec({
+	// Re-resolve with the final userDataDir so puppeteer defaultArgs includes the correct profile path
+	const finalLaunch = await resolveSharedBrowserLaunchSpec({
 		headless: opts.headless,
 		userDataDir,
 		viewport: opts.viewport,
+		executablePath: launch.executablePath,
 	});
-	if (!launch) return null;
+	const effectiveLaunch = finalLaunch ?? launch;
 	await fs.mkdir(userDataDir, { recursive: true });
 	for (let attempt = 0; attempt < ENSURE_ATTEMPTS; attempt++) {
 		throwIfAborted(opts.signal);
@@ -91,8 +113,6 @@ export async function ensureSharedBrowser(opts: {
 			if (wsEndpoint && (await probeEndpoint(wsEndpoint))) {
 				return { wsEndpoint, daemonName: name, projectDir: client.projectDir };
 			}
-			// Live record but unreachable Chrome (wedged, or readiness never
-			// matched): replace it rather than handing out a dead endpoint.
 			await stopQuietly(client, name, "Shared browser", opts.signal);
 			continue;
 		}
@@ -102,8 +122,8 @@ export async function ensureSharedBrowser(opts: {
 					op: "start",
 					spec: {
 						name,
-						application: launch.executablePath,
-						args: launch.args,
+						application: effectiveLaunch.executablePath,
+						args: effectiveLaunch.args,
 						env: {},
 						cwd: client.projectDir,
 						pty: false,

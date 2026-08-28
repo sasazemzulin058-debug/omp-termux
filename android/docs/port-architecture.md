@@ -20,6 +20,7 @@ the decided target; staged rollout is tracked in
 | Rust `target_os` | `"android"` |
 | Runtime | official Bionic Bun, bundled in the release tarball |
 | Native addon | N-API (napi-rs) shared object, `pi_natives.android-arm64.node` |
+| Browser | **external** Termux:X11 `chromium` 149.0.7827.155, **not bundled** — `$PREFIX/lib/chromium/chrome` |
 
 ### The single most important rustc fact
 
@@ -71,6 +72,65 @@ ANDROID_API, RUST), read by both workflows and the install/package scripts.
 Version changes land only together with the addon and after the on-device
 smoke test.
 
+### External Bionic Chromium, not bundled (browser tool)
+
+The `browser` tool on Android uses an **external** Termux:X11 Chromium,
+not a bundled binary. The OMP release tarball remains `Bun + JS + pi-natives`
+only; Chromium is installed separately via `pkg` and validated by
+`android/scripts/verify-browser.sh`. Release CI publishes `verify-browser.sh` /
+`smoke-browser.sh` and metadata — it never copies `$PREFIX/lib/chromium/chrome`
+into the bundle (see `android/scripts/verify-browser.sh --check-bundle`).
+
+Pinned reference tuple (device-proven, see `android/docs/verification.md`):
+
+```text
+package:  chromium 149.0.7827.155 aarch64
+source:   https://packages.termux.dev/apt/termux-x11 x11/main aarch64 Packages
+deb:      chromium_149.0.7827.155_aarch64.deb
+SHA256:   36500e23ad23bf2616bb4f215a297ba5a2b9e625992362b9b9c6bd05e0a27272
+binary:   $PREFIX/lib/chromium/chrome
+ELF:      ARM aarch64, Android API 24, Bionic, interpreter /system/bin/linker64
+```
+
+`headless_shell` (`$PREFIX/lib/chromium/headless_shell`) is **not** the
+selected executable: it rejects remote debugging
+(`Headless commands are not compatible with remote debugging`) while the main
+`chrome` binary supports `--headless=new` with loopback CDP and screenshots
+— verified on device.
+
+**Executable resolution (headless local mode only)** — existing router stays
+first: `app.path` / relay / `browser.cdpUrl` / `cmux` before headless. Only
+headless resolves a local binary, in this order:
+
+1. `browser.executablePath` (config, `~` expanded) — validated, fails closed if invalid;
+2. `PUPPETEER_EXECUTABLE_PATH` (env) — validated, fails closed if invalid;
+3. `$PREFIX/lib/chromium/chrome` — canonical Termux:X11 binary;
+4. `$PREFIX/bin/chromium`;
+5. `$PREFIX/bin/chromium-browser`;
+6. `$PREFIX/bin/chrome`.
+
+Every candidate is validated through one async validator:
+
+- absolute path, regular executable file;
+- `--version` contains `Chromium`/`Chrome`/`Edge` and (on device) pinned `149.0.7827.155`;
+- `file(1)` confirms ARM64 shared-object/PIE, `readelf -l` shows
+  interpreter `/system/bin/linker64`, `readelf -d` shows `libc.so` (Bionic)
+  and **no** `libc.so.6` nor `ld-linux-aarch64.so.1`;
+- `.note.android.ident` API level `24`, NDK r29 build.
+
+Invalid configured paths produce an explicit `ToolError` and never silently
+fall through to another binary. When no valid Android binary exists, the tool
+throws an actionable install/configuration error. Puppeteer **never** downloads
+a managed Linux Chromium on Android (`android` platform short-circuits the
+download path — `verify-browser.sh` and the `no-linux-download` unit test
+prove it).
+
+The validated executable is threaded from `BrowserTool` → `acquireBrowser`
+→ `launchHeadlessBrowser` / `resolveSharedBrowserLaunchSpec`; daemon identity
+includes the canonical resolved executable and complete launch spec (see
+§2.3). Existing webpage `tab.screenshot()` / `ImageContent` contracts are
+preserved.
+
 ### Measured split packaging
 
 The JS package is built with `Bun.build` and **`splitting: true`** required.
@@ -95,6 +155,62 @@ it never drops them. OpenTelemetry must stay bundled into lazy chunks —
 a stale local `node_modules` once caused the experimental-subcommand
 failure, not splitting.
 
+### Browser launch and daemon identity
+
+Preserved flags plus the one device-proven Android supplement:
+
+```text
+--headless=new
+--no-sandbox
+--disable-dev-shm-usage
+--remote-debugging-address=127.0.0.1
+--remote-debugging-port=0        # ephemeral, loopback-only; never 0.0.0.0
+--user-data-dir=$PREFIX/tmp/omp-chrome-profile-*
+```
+
+Do not add `--disable-gpu`, `--single-process`, or `--no-zygote` without
+new device evidence.
+
+Profiles live under `$PREFIX/tmp/omp-chrome-profile-*` (same filesystem as
+the binary), not `$HOME/tmp` nor `/tmp`. Failed launch removes the
+OMP-owned profile and stops the matching daemon. The shared broker daemon
+(`omp.browser.headless` / `omp.browser.headed`) identity includes **every**
+launch-affecting value:
+
+- canonical executable path,
+- complete launch args,
+- headless mode,
+- profile identity.
+
+A different executable or incompatible launch spec never reuses an old daemon;
+the broker starts a fresh one. CDP binds loopback-only with an ephemeral port.
+
+Relevant files:
+
+- `packages/coding-agent/src/tools/browser/launch.ts`
+- `packages/coding-agent/src/tools/browser/registry.ts`
+- `packages/coding-agent/src/tools/browser/shared-daemon.ts`
+- `packages/coding-agent/src/tools/browser/attach.ts`
+- `android/scripts/verify-browser.sh` / `smoke-browser.sh`
+
+### Screenshots and model delivery (webpage only)
+
+`tab.screenshot()` captures **webpage compositor output only** — viewport,
+full-page, and element-by-selector — and delivers a PNG/WebP/JPEG
+`ImageContent` to the model via `packages/coding-agent/src/utils/image-resize.ts`.
+It does **not** capture Android system UI, other apps, or the full device
+display; full Android capture would require `MediaProjection`/`Termux:API` and
+is out of scope.
+
+Contracts are preserved in:
+
+- `packages/coding-agent/src/tools/browser/tab-worker.ts`
+- `packages/coding-agent/src/tools/browser/tab-protocol.ts`
+- `packages/coding-agent/src/utils/image-resize.ts`
+
+Remote relay remains explicit via `browser.relay: true` or `browser.relayUrl`;
+the existing configurable `exec`-tier approval policy is preserved.
+
 ## 3. What ships in the release bundle
 
 The release bundle `omp-termux.tar.gz` is a self-contained Bun app:
@@ -113,8 +229,11 @@ $LIB_DIR/
 ```
 
 The tarball needs no external runtime download. It owns Bun, JS chunks/assets,
-and pi-natives as one versioned Bionic unit. The guarded installer and Android update
-guard shown here are target contracts; current rollout status lives in
+and pi-natives as one versioned Bionic unit. **It never contains Chromium**
+— verify with `tar -tzf omp-termux.tar.gz | grep -i chromium` (should be
+empty) and `bash android/scripts/verify-browser.sh --check-bundle ./omp-termux.tar.gz`.
+The guarded installer and Android update guard shown here are target contracts;
+current rollout status lives in
 [port-changes.md](port-changes.md#current-state-vs-approved-pending).
 
 ### Bun platform tag and the loader
@@ -136,12 +255,21 @@ startup. `getAddonFilenames()` maps it to `pi_natives.android-arm64.node`.
   `--version` split path**. Do not claim the 100 MB figure for the shipped
   addon.
 
+### The browser artifact (separate)
+
+Browser is **not** in the bundle. If OMP ever manages a browser artifact
+(a separate archive), it would live under a separate path such as
+`$PREFIX/lib/omp-browser/` with its own pinned version/URL/SHA256 and
+ELF/Bionic validation. Current releases use the external Termux:X11 package
+only.
+
 ## 4. ABI and capability floors
 
 | Floor | Value | Meaning |
 |-------|-------|---------|
 | Binary / minSdk | **API 24** | `aarch64-linux-android24-clang`; ELF floor, minSdk 24 |
 | pidfd capability | **API 34** | `pidfd_open` / `pidfd_send_signal`; on API 31–33 seccomp may SIGSYS-kill the syscall |
+| Browser ELF | **API 24 / Bionic / ARM64** | `$PREFIX/lib/chromium/chrome` interpreter `/system/bin/linker64`; rejects glibc |
 
 API 34 is a **claimed capability floor, not a tested compatibility gate**:
 only one API 34-class device has been tested. No broad compatibility claim
@@ -159,7 +287,8 @@ works natively.
 | Codex live WebRTC peer | unsupported; current Android implementation returns an error |
 | Desktop surfaces | unsupported / not applicable |
 | Local ONNX / STT / tiny inference | unsupported; optional dependencies are not shipped |
-| Browser live CDP / relay | target contract (pending): per-call forced prompt on `open`/`run`; current flat `exec` policy does not enforce it |
+| Browser `browser` tool (webpage) | **supported via external Termux:X11 Chromium** — see §2 external Chromium; `tab.screenshot` (viewport/fullPage/element) → model `ImageContent`; CDP `127.0.0.1` ephemeral; profiles `$PREFIX/tmp`; **full device display capture not supported** |
+| Browser live CDP/relay | explicit only: `app.path` / `browser.cdpUrl` / `browser.relay` / `cmux` before headless; relay requires `browser.relay: true` or `browser.relayUrl` |
 | Clipboard text read (computer worker) | target contract (pending): per-read host approval if exposed |
 
 Unsupported surfaces return real errors — no fake or stubbed success.

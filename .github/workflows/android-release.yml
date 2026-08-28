@@ -56,6 +56,23 @@ jobs:
       - name: Validate release inputs
         run: python3 android/scripts/check-release-inputs.py
 
+      - name: Verify browser prerequisite metadata (no bundle)
+        run: |
+          set -euo pipefail
+          # Pinned Termux:X11 chromium 149.0.7827.155 — metadata only, no binary bundled
+          grep -q '149.0.7827.155' android/scripts/verify-browser.sh
+          grep -q '36500e23ad23bf2616bb4f215a297ba5a2b9e625992362b9b9c6bd05e0a27272' android/scripts/verify-browser.sh
+          grep -q 'packages.termux.dev/apt/termux-x11' android/scripts/verify-browser.sh
+          grep -q '\$PREFIX/lib/chromium/chrome' android/scripts/verify-browser.sh
+          bash -n android/scripts/verify-browser.sh
+          bash -n android/scripts/smoke-browser.sh
+          bash android/scripts/verify-browser.sh --help >/dev/null
+          bash android/scripts/smoke-browser.sh --help >/dev/null
+          # Ensure release docs reference same pin
+          grep -q '149.0.7827.155' android/docs/verification.md
+          grep -q '36500e23ad23bf2616bb4f215a297ba5a2b9e625992362b9b9c6bd05e0a27272' android/docs/verification.md
+          echo "browser metadata OK — external Termux:X11, not bundled"
+
       - name: Install Rust target
         run: |
           set -euo pipefail
@@ -150,6 +167,17 @@ jobs:
       - name: Validate release inputs
         run: python3 android/scripts/check-release-inputs.py
 
+      - name: Verify browser prerequisite metadata (no bundle)
+        run: |
+          set -euo pipefail
+          grep -q '149.0.7827.155' android/scripts/verify-browser.sh
+          grep -q '36500e23ad23bf2616bb4f215a297ba5a2b9e625992362b9b9c6bd05e0a27272' android/scripts/verify-browser.sh
+          bash -n android/scripts/verify-browser.sh
+          bash -n android/scripts/smoke-browser.sh
+          bash android/scripts/verify-browser.sh --help >/dev/null
+          # Bundle does not yet exist — metadata check only
+          echo "browser metadata OK"
+
       - name: Install Bun
         uses: oven-sh/setup-bun@v2
         with:
@@ -173,6 +201,9 @@ jobs:
           tar -tzf termux-js.tar.gz | grep -Fx './cli.js'
           tar -tzf termux-js.tar.gz | grep -F 'node_modules/@oh-my-pi/pi-natives/package.json'
           tar -tzf termux-js.tar.gz | grep -F 'node_modules/@oh-my-pi/pi-natives/native/index.js'
+          # Browser bundle-absence gate (JS bundle stage)
+          ! tar -tzf termux-js.tar.gz | grep -qi chromium
+          ! tar -tzf termux-js.tar.gz | grep -q './chrome'
 
       - name: Upload JavaScript bundle
         uses: actions/upload-artifact@v4
@@ -200,6 +231,18 @@ jobs:
 
       - name: Validate release inputs
         run: python3 android/scripts/check-release-inputs.py
+
+      - name: Verify browser prerequisite metadata (no bundle)
+        run: |
+          set -euo pipefail
+          grep -q '149.0.7827.155' android/scripts/verify-browser.sh
+          grep -q '36500e23ad23bf2616bb4f215a297ba5a2b9e625992362b9b9c6bd05e0a27272' android/scripts/verify-browser.sh
+          grep -q 'packages.termux.dev/apt/termux-x11' android/scripts/verify-browser.sh
+          bash -n android/scripts/verify-browser.sh
+          bash -n android/scripts/smoke-browser.sh
+          bash android/scripts/verify-browser.sh --help >/dev/null
+          bash android/scripts/smoke-browser.sh --help >/dev/null
+          echo "browser metadata OK"
 
       - name: Download native addon
         uses: actions/download-artifact@v4
@@ -265,6 +308,22 @@ jobs:
           tar -tzf omp-termux.tar.gz | grep -Fx './bun'
           tar -tzf omp-termux.tar.gz | grep -F './node_modules/@oh-my-pi/pi-natives/native/pi_natives.android-arm64.node'
           (cd packages/natives/native && sha256sum -c pi_natives.android-arm64.node.sha256)
+
+          # Browser bundle-absence gate — Chromium must NOT be in OMP bundle (external apt only)
+          echo "checking OMP bundle does not contain Chromium"
+          ! tar -tzf omp-termux.tar.gz | grep -qi chromium
+          ! tar -tzf omp-termux.tar.gz | grep -q './chrome'
+          ! tar -tzf omp-termux.tar.gz | grep -q 'headless_shell'
+          bash android/scripts/verify-browser.sh --check-bundle ./omp-termux.tar.gz
+          # Browser scripts metadata check on runner (no device binary)
+          bash -n android/scripts/verify-browser.sh
+          bash -n android/scripts/smoke-browser.sh
+          bash android/scripts/verify-browser.sh --help >/dev/null
+          bash android/scripts/smoke-browser.sh --help >/dev/null
+          # Probe dry-run without .deb cache (CI has no Termux chromium)
+          bash android/scripts/verify-browser.sh --help | grep -q '149.0.7827.155'
+          echo "browser bundle-absence OK"
+
       - name: Attach to release
         uses: softprops/action-gh-release@v2
         with:
@@ -274,4 +333,6 @@ jobs:
             omp-termux.tar.gz.sha256
             packages/natives/native/pi_natives.android-arm64.node
             packages/natives/native/pi_natives.android-arm64.node.sha256
+            android/scripts/verify-browser.sh
+            android/scripts/smoke-browser.sh
           fail_on_unmatched_files: true

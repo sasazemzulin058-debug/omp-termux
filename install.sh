@@ -3,6 +3,8 @@ set -eu
 
 # One-command Termux installer. CI publishes one self-contained app archive.
 # Device installs only packaged Bun runtime; no bun install or source build.
+# Browser is external: Termux:X11 chromium 149.0.7827.155 at $PREFIX/lib/chromium/chrome,
+# validated by android/scripts/verify-browser.sh — OMP bundle never contains Chromium.
 
 PREFIX_DIR="${PREFIX:-/data/data/com.termux/files/usr}"
 BIN_DIR="${OMP_BIN_DIR:-$PREFIX_DIR/bin}"
@@ -20,6 +22,13 @@ command -v curl >/dev/null 2>&1 || pkg_deps="$pkg_deps curl"
 command -v tar >/dev/null 2>&1 || pkg_deps="$pkg_deps tar"
 if [ -n "$pkg_deps" ]; then
     pkg install -y $pkg_deps
+fi
+
+# Chromium stays outside OMP bundle. Install Termux:X11 package in separate
+# transactions so repository setup completes before Chromium resolution.
+if [ "${OMP_INSTALL_BROWSER:-1}" != "0" ]; then
+    pkg install -y x11-repo
+    pkg install -y chromium
 fi
 
 mkdir -p "$BIN_DIR" "$(dirname "$LIB_DIR")"
@@ -40,6 +49,19 @@ curl -fL --retry 3 "$BASE/omp-termux.tar.gz.sha256" -o "$tmp/omp-termux.tar.gz.s
 (cd "$tmp" && sha256sum -c omp-termux.tar.gz.sha256)
 tar -xzf "$tmp/omp-termux.tar.gz" -C "$LIB_DIR.new"
 chmod +x "$LIB_DIR.new/bun"
+
+# Bundle Chromium-absence gate — OMP never bundles Chromium (external Termux:X11 package only).
+# Fail closed before swap so previous install is preserved via rollback.
+if [ -f "$LIB_DIR.new/chrome" ] || [ -f "$LIB_DIR.new/chromium" ] || [ -f "$LIB_DIR.new/headless_shell" ]; then
+    echo 'error: bundle unexpectedly contains Chromium binary — OMP bundle must remain free of Chromium' >&2
+    exit 1
+fi
+# Also reject any stray chromium-named binaries at top level or under bin/lib
+if find "$LIB_DIR.new" -maxdepth 2 -type f \( -name "chrome" -o -name "chromium" -o -name "headless_shell" \) 2>/dev/null | grep -q .; then
+    echo 'error: bundle contains Chromium executable — external Termux:X11 package only, not bundled' >&2
+    find "$LIB_DIR.new" -maxdepth 2 -type f \( -name "chrome" -o -name "chromium" -o -name "headless_shell" \) 2>&1 | head -n 5 >&2 || true
+    exit 1
+fi
 
 # Pre-swap smoke test on .new
 "$LIB_DIR.new/bun" "$LIB_DIR.new/cli.js" --version >/dev/null 2>&1 || {
@@ -89,3 +111,19 @@ fi
 rm -rf "$LIB_DIR.old"
 had_old=0
 printf '%s\n' 'Installed omp. Run: omp'
+# Browser is external — not bundled (Termux:X11 chromium 149.0.7827.155 at $PREFIX/lib/chromium/chrome, verified by android/scripts/verify-browser.sh).
+# If you have the omp-termux clone, run from repo root:
+#   pkg install -y x11-repo
+#   pkg install -y chromium
+#   bash android/scripts/verify-browser.sh
+#   bash android/scripts/smoke-browser.sh --no-network
+# If you installed via curl | sh and have no clone, fetch verifiers from the release (published as separate assets, never bundled):
+#   curl -fsSL "https://github.com/$REPO/releases/latest/download/verify-browser.sh" -o /tmp/verify-browser.sh
+#   bash /tmp/verify-browser.sh
+#   curl -fsSL "https://github.com/$REPO/releases/latest/download/smoke-browser.sh" -o /tmp/smoke-browser.sh
+#   bash /tmp/smoke-browser.sh --no-network
+printf '%s\n' 'Browser: for OMP browser tool, install external Chromium separately:'
+printf '%s\n' '  pkg install -y x11-repo'
+printf '%s\n' '  pkg install -y chromium'
+printf '%s\n' '  bash android/scripts/verify-browser.sh  # from clone, or fetch from release:'
+printf '%s\n' "  curl -fsSL https://github.com/$REPO/releases/latest/download/verify-browser.sh -o /tmp/verify-browser.sh && bash /tmp/verify-browser.sh"
