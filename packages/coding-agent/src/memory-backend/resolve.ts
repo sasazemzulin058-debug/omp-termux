@@ -20,8 +20,6 @@ export async function resolveMemoryBackend(settings: Settings): Promise<MemoryBa
 	const id = settings.get("memory.backend");
 	if (id === "hindsight") return (await import("../hindsight/backend")).hindsightBackend;
 	if (id === "mnemopi") return (await import("../mnemopi/backend")).mnemopiBackend;
-	// Hermes is optional (pi-hermes-memory may be absent) and pulls better-sqlite3; keep it off the startup graph.
-	if (id === "hermes") return (await import("./hermes-backend")).hermesBackend;
 	if (id === "local") return localBackend;
 	return offBackend;
 }

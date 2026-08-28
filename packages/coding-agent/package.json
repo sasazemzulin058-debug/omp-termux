@@ -71,15 +71,13 @@
     "@opentelemetry/sdk-metrics": "catalog:",
     "@opentelemetry/sdk-trace-base": "catalog:",
     "@opentelemetry/sdk-trace-node": "catalog:",
-    "puppeteer-core": "catalog:",
-    "pi-hermes-memory": "github:sasazemzulin058-debug/pi-hermes-memory#25a2b06"
+    "puppeteer-core": "catalog:"
   },
   "optionalDependencies": {
     "@huggingface/transformers": "catalog:",
     "sherpa-onnx-node": "1.13.2"
   },
   "devDependencies": {
-    "@types/better-sqlite3": "catalog:",
     "@types/bun": "catalog:"
   },
   "engines": {

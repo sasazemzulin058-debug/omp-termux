@@ -11,7 +11,6 @@ export type {
 	MnemopiSessionState,
 	MnemopiSessionStateOptions,
 } from "../mnemopi/state";
-export * from "./hermes-backend";
 export * from "./local-backend";
 export * from "./messages";
 export * from "./off-backend";
