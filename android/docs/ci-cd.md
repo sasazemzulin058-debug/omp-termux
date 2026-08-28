@@ -28,8 +28,8 @@ Manifest fields:
 ## Release flow
 
 1. `sync-upstream.yml` imports `can1357/oh-my-pi` `main`.
-2. `android/scripts/apply-overlay.py` reapplies deterministic Android changes.
-3. Overlay, release inputs, and frozen lockfile are validated.
+2. `android/scripts/apply-patches.sh` applies the sequential raw Git patch queue.
+3. Patch queue, release inputs, and frozen lockfile are validated.
 4. Sync commits and pushes `v<OMP_VERSION>-termux`.
 5. Sync explicitly dispatches `android-release.yml`; `GITHUB_TOKEN` tag pushes do not trigger downstream push workflows.
 6. `native-addon` builds `pi_natives.android-arm64.node` with NDK.

@@ -25,7 +25,7 @@ jobs:
           set -euo pipefail
           git remote add upstream https://github.com/can1357/oh-my-pi.git 2>/dev/null || git remote set-url upstream https://github.com/can1357/oh-my-pi.git
           git fetch --no-tags upstream main
-          git fetch --no-tags origin mod || true
+          git fetch --no-tags origin main mod || true
           upstream_tip=$(git rev-parse upstream/main)
           if git show-ref --verify --quiet refs/heads/upstream; then
             old_upstream=$(git rev-parse refs/heads/upstream)
@@ -39,10 +39,14 @@ jobs:
           fi
           git push origin refs/heads/upstream:refs/heads/upstream
 
+          # Keep generated mod descendants of prior mod; never force-push.
+          git switch --detach "$upstream_tip"
+          if git show-ref --verify --quiet refs/remotes/origin/mod; then
+            git merge --no-ff -s ours refs/remotes/origin/mod -m "chore: merge upstream for Android mod regeneration"
+          fi
           metadata_dir="$RUNNER_TEMP/android-metadata"
           mkdir -p "$metadata_dir"
           tar -C . -czf "$metadata_dir/metadata.tar.gz" android .github
-          git reset --hard upstream/main
           git clean -ffdx
           tar -C . -xzf "$metadata_dir/metadata.tar.gz"
       - name: Apply standard Git patches in CI
@@ -59,11 +63,6 @@ jobs:
           test -f crates/pi-natives/Cargo.toml
           test -f packages/natives/native/loader-state.js
           git status --short
-      - name: Publish generated mod branch
-        shell: bash
-        run: |
-          set -euo pipefail
-          git push origin HEAD:refs/heads/mod
       - name: Validate release inputs
         run: python3 android/scripts/check-release-inputs.py
       - name: Setup Bun and verify lockfile consistency
