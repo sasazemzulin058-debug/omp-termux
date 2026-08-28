@@ -37,7 +37,14 @@ jobs:
           else
             git update-ref refs/heads/upstream "$upstream_tip"
           fi
-          git push origin refs/heads/upstream:refs/heads/upstream
+          if [[ "${PUBLISH_UPSTREAM_BRANCH:-}" == 'true' ]]; then
+            if ! git push origin refs/heads/upstream:refs/heads/upstream; then
+              echo "error: PUBLISH_UPSTREAM_BRANCH=true but token cannot publish upstream branch; grant workflows permission (and contents:write) or unset repository variable" >&2
+              exit 1
+            fi
+          else
+            echo "Skipping remote upstream branch publication; local refs/heads/upstream retained"
+          fi
 
           metadata_dir="$RUNNER_TEMP/android-metadata"
           mkdir -p "$metadata_dir"
@@ -50,12 +57,15 @@ jobs:
             git merge --no-ff -s ours refs/remotes/origin/mod -m "chore: merge upstream for Android mod regeneration"
           fi
           git clean -ffdx
+          # Remove upstream .github files before restoring repository metadata.
+          git rm -r --ignore-unmatch .github
           tar -C . -xzf "$metadata_dir/metadata.tar.gz"
           if [[ ! "$upstream_tip" =~ ^[0-9a-f]{40}$ ]]; then
             echo "error: fetched upstream tip is not a 40-character SHA: $upstream_tip" >&2
             exit 1
           fi
           printf '%s\n' "$upstream_tip" > android/UPSTREAM_COMMIT
+
       - name: Apply standard Git patches in CI
         shell: bash
         run: |
