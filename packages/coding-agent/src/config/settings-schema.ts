@@ -4890,7 +4890,7 @@ export const SETTINGS_SCHEMA = {
 		nullable: true,
 		default: null,
 		ui: {
-			tab: "task",
+			tab: "tasks",
 			group: "Isolation",
 			label: "Isolation Repository Root",
 			description:

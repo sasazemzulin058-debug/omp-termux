@@ -502,6 +502,7 @@ export async function ensureIsolation(
 	explicitRepoRoot?: string,
 ): Promise<IsolationHandle> {
 	const repoRoot = await getRepoRoot(baseCwd, explicitRepoRoot);
+	const sourceCommonDir = vcs.requireGit(repoRoot).info().commonDir;
 	const baseDir = getWorktreeDir(getTaskIsolationSegment(repoRoot, id));
 	const mergedDir = path.join(baseDir, TASK_ISOLATION_MOUNT_DIR);
 	const resolution = natives.isoResolve(preferred ?? null);
