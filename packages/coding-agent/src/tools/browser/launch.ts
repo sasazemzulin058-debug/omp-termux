@@ -68,6 +68,118 @@ function stealthIgnoreDefaultArgs(executablePath: string | undefined): string[] 
 	if (!isMicrosoftEdgeExecutable(executablePath)) return [...STEALTH_IGNORE_DEFAULT_ARGS];
 	return STEALTH_IGNORE_DEFAULT_ARGS.filter(arg => arg !== ENABLE_AUTOMATION_FLAG);
 }
+// =====================================================================
+// Android / Termux Chromium helpers
+// =====================================================================
+
+export function isAndroidEnvironment(
+	platform: NodeJS.Platform = process.platform,
+	env: Record<string, string | undefined> = process.env as Record<string, string | undefined>,
+): boolean {
+	if (platform === "android") return true;
+	if (env.TERMUX_VERSION !== undefined) return true;
+	if (env.ANDROID_ROOT !== undefined) return true;
+	if (env.PREFIX && env.PREFIX.includes("com.termux")) return true;
+	return false;
+}
+
+export function getTermuxPrefix(
+	env: Record<string, string | undefined> = process.env as Record<string, string | undefined>,
+): string {
+	const raw = env.PREFIX?.trim();
+	if (raw) return raw;
+	return "/data/data/com.termux/files/usr";
+}
+
+export function androidChromiumCandidates(prefix: string = getTermuxPrefix()): string[] {
+	return [
+		path.join(prefix, "lib/chromium/chrome"),
+		path.join(prefix, "bin/chromium"),
+		path.join(prefix, "bin/chromium-browser"),
+		path.join(prefix, "bin/chrome"),
+	];
+}
+
+export function getChromeProfileBaseDir(
+	platform: NodeJS.Platform = process.platform,
+	env: Record<string, string | undefined> = process.env as Record<string, string | undefined>,
+): string {
+	if (isAndroidEnvironment(platform, env)) {
+		const prefix = getTermuxPrefix(env);
+		const tmp = env.TMPDIR?.trim();
+		if (tmp && tmp.startsWith(prefix)) return tmp;
+		return path.join(prefix, "tmp");
+	}
+	return os.tmpdir();
+}
+
+export interface ResolveHeadlessExecutableOptions {
+	executablePathSetting?: string;
+	env?: Record<string, string | undefined>;
+	platform?: NodeJS.Platform;
+	prefix?: string;
+	isExecutableFile?: (p: string) => boolean;
+	isChromiumExecutable?: (p: string) => Promise<boolean>;
+	candidates?: string[];
+}
+
+export async function resolveHeadlessExecutable(
+	opts: ResolveHeadlessExecutableOptions = {},
+): Promise<string | undefined> {
+	const platform = opts.platform ?? process.platform;
+	const env = opts.env ?? (process.env as Record<string, string | undefined>);
+	const prefix = opts.prefix ?? getTermuxPrefix(env);
+	const checkExec = opts.isExecutableFile ?? isExecutableFile;
+	const checkChromium = opts.isChromiumExecutable ?? isChromiumExecutable;
+	const isAndroid = isAndroidEnvironment(platform, env);
+	const validate = async (p: string): Promise<boolean> => {
+		if (!checkExec(p)) return false;
+		return await checkChromium(p);
+	};
+	const setting = opts.executablePathSetting?.trim();
+	if (setting) {
+		if (!path.isAbsolute(setting)) {
+			throw new ToolError(
+				`browser.executablePath is set to ${JSON.stringify(setting)} but it must be an absolute path (for example $PREFIX/lib/chromium/chrome).`,
+			);
+		}
+		if (!(await validate(setting))) {
+			throw new ToolError(
+				`browser.executablePath is set to ${JSON.stringify(setting)} but it is not a valid executable Chromium binary. ` +
+					`Install Termux chromium with \`pkg install x11-repo && pkg install chromium\` or set it to $PREFIX/lib/chromium/chrome.`,
+			);
+		}
+		return setting;
+	}
+	const envPath = env.PUPPETEER_EXECUTABLE_PATH?.trim();
+	if (envPath) {
+		if (!path.isAbsolute(envPath)) {
+			throw new ToolError(
+				`PUPPETEER_EXECUTABLE_PATH is set to ${JSON.stringify(envPath)} but it must be an absolute path.`,
+			);
+		}
+		if (!(await validate(envPath))) {
+			throw new ToolError(
+				`PUPPETEER_EXECUTABLE_PATH is set to ${JSON.stringify(envPath)} but it is not a valid executable Chromium binary. ` +
+					`Fix or unset it, or install Termux chromium with \`pkg install x11-repo && pkg install chromium\`.`,
+			);
+		}
+		return envPath;
+	}
+	if (isAndroid) {
+		const candidates = opts.candidates ?? androidChromiumCandidates(prefix);
+		for (const candidate of candidates) {
+			if (await validate(candidate)) return candidate;
+		}
+		throw new ToolError(
+			`No Chromium executable found for Android Termux. Install with \`pkg install x11-repo && pkg install chromium\` ` +
+				`and ensure one of ${candidates.join(", ")} exists and is executable. ` +
+				`You can also set browser.executablePath or PUPPETEER_EXECUTABLE_PATH to an absolute chrome binary.`,
+		);
+	}
+	return undefined;
+}
+
 
 const STEALTH_ACCEPT_LANGUAGE = "en-US,en";
 
@@ -174,22 +286,24 @@ async function loadBrowsers(): Promise<typeof BrowsersNs> {
  * Resolve the Chromium executable puppeteer will launch.
  *
  * `PUPPETEER_EXECUTABLE_PATH` always wins. On macOS the isolated Chrome for
- * Testing binary is preferred over a detected system Chrome: a headless
- * daemon launched from a system `Google Chrome.app` bundle shares its
- * LaunchServices bundle identity (`com.google.Chrome`), so macOS can deliver
- * the user's open-URL Apple Events to the daemon and silently swallow their
- * link clicks (#8673). Chrome for Testing uses a dedicated bundle id
- * (`com.google.chrome.for.testing`) that is never a user's default handler;
- * system Chrome is used on macOS only when Chrome for Testing cannot be
- * obtained. Other platforms keep the download-avoiding system Chrome
- * preference and fall back to Chrome for Testing. The managed browser is
- * cached under ~/.omp/puppeteer (getPuppeteerDir). Returns undefined when
- * platform detection fails (puppeteer default resolution takes over).
- * Exported so real-browser tests can probe launchability and skip on hosts
- * missing Chrome's system libraries.
+ * Testing binary is preferred over a detected system Chrome. Other platforms
+ * keep the download-avoiding system Chrome preference and fall back to Chrome
+ * for Testing. Android Termux resolves only its external Chromium binary.
+ * Returns undefined when platform detection fails on desktop.
  */
 let chromiumExecutablePromise: Promise<string | undefined> | undefined;
 export async function ensureChromiumExecutable(): Promise<string | undefined> {
+	try {
+		const explicitOrAndroid = await resolveHeadlessExecutable();
+		if (explicitOrAndroid) return explicitOrAndroid;
+	} catch (err) {
+		throw err;
+	}
+	if (isAndroidEnvironment()) {
+		throw new ToolError(
+			`No Chromium executable found for Android Termux. Install with \`pkg install x11-repo && pkg install chromium\` and ensure $PREFIX/lib/chromium/chrome exists.`,
+		);
+	}
 	const envPath = process.env.PUPPETEER_EXECUTABLE_PATH;
 	if (envPath) return envPath;
 	// macOS: never route a background daemon through the user's GUI Chrome
@@ -283,15 +397,9 @@ function isExecutableFile(p: string): boolean {
 
 async function isChromiumExecutable(p: string): Promise<boolean> {
 	if (!isExecutableFile(p)) return false;
-	// The version probe below launches the candidate. It exists to reject
-	// non-Chromium `chrome`/`chromium` wrapper scripts that appear on a Linux
-	// PATH (ecb22957, "validate Linux browser executables"). On Windows and
-	// macOS the candidates are fixed GUI application paths, not PATH wrappers,
-	// and executing them is harmful: a GUI `chrome.exe --version` does not print
-	// to a detached stdout and can hand off to the user's running instance,
-	// opening/activating a normal browser window (#8445). Confine the probe to
-	// Linux and trust the executable-file check elsewhere.
-	if (process.platform !== "linux") return true;
+	// The version probe rejects non-Chromium wrappers. Android Termux
+	// candidates must prove they are Chromium before reaching Puppeteer.
+	if (process.platform !== "linux" && process.platform !== "android") return true;
 	try {
 		const probeTimeoutMs = 3000;
 		const proc = Bun.spawn([p, "--version"], {
@@ -411,6 +519,7 @@ async function resolveSystemChromium(): Promise<string | undefined> {
 export interface LaunchHeadlessOptions {
 	headless: boolean;
 	viewport?: { width: number; height: number; deviceScaleFactor?: number };
+	executablePath?: string;
 	/** Additional Chromium arguments merged with the centralized launch defaults. */
 	args?: readonly string[];
 	/** Additional exact Puppeteer default arguments to suppress. */
@@ -477,11 +586,11 @@ export async function launchHeadlessBrowser(opts: LaunchHeadlessOptions): Promis
 	// (issue #7058). `removeUserDataDir` cleans it up on our terms instead.
 	let userDataDir: string | undefined;
 	if (!launchArgs.some(arg => arg.startsWith("--user-data-dir"))) {
-		userDataDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), "omp-chrome-profile-"));
+		userDataDir = await fs.promises.mkdtemp(path.join(getChromeProfileBaseDir(), "omp-chrome-profile-"));
 		launchArgs.push(`--user-data-dir=${userDataDir}`);
 	}
 	try {
-		const executablePath = await ensureChromiumExecutable();
+		const executablePath = opts.executablePath ?? (await ensureChromiumExecutable());
 		const browser = await puppeteer.launch({
 			headless: opts.headless,
 			defaultViewport: opts.headless ? initialViewport : null,
@@ -517,8 +626,9 @@ export async function resolveSharedBrowserLaunchSpec(opts: {
 	headless: boolean;
 	userDataDir: string;
 	viewport?: { width: number; height: number };
+	executablePath?: string;
 }): Promise<SharedBrowserLaunchSpec | null> {
-	const executablePath = await ensureChromiumExecutable();
+	const executablePath = opts.executablePath ?? (await ensureChromiumExecutable());
 	if (!executablePath) return null;
 	const puppeteer = await loadPuppeteer();
 	const vp = opts.viewport ?? DEFAULT_VIEWPORT;

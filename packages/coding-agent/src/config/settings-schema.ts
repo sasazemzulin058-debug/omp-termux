@@ -4532,6 +4532,17 @@ export const SETTINGS_SCHEMA = {
 				"Use cmux WKWebView surfaces for browser automation when a cmux socket is available. Set PI_BROWSER_CMUX=0 or PI_BROWSER_CMUX=1 to override.",
 		},
 	},
+	"browser.executablePath": {
+		type: "string",
+		default: undefined,
+		ui: {
+			tab: "tools",
+			group: "Grep & Browser",
+			label: "Browser Executable Path",
+			description:
+				"Absolute path to the Chromium/Chrome executable for headless automation. Takes precedence over PUPPETEER_EXECUTABLE_PATH. Invalid explicit path fails closed.",
+		},
+	},
 	"browser.screenshotDir": {
 		type: "string",
 		default: undefined,
