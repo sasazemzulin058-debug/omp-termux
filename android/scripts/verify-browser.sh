@@ -94,15 +94,19 @@ fail() { echo "error: $*" >&2; exit 1; }
 info() { echo "==> $*"; }
 warn() { echo "warn: $*" >&2; }
 
-# Resolve PREFIX_DIR robustly
-if [ -z "${PREFIX:-}" ]; then
-  if [ -d "$PREFIX_DIR" ]; then
-    warn "PREFIX not set; using $PREFIX_DIR"
-  else
-    fail "PREFIX not set and $PREFIX_DIR missing — run inside Termux"
+# Bundle-only verification runs on Ubuntu release runners without a Termux PREFIX.
+if [ -z "${PREFIX:-}" ] && [ -n "$CHECK_BUNDLE" ]; then
+  PREFIX_DIR="/tmp"
+else
+  if [ -z "${PREFIX:-}" ]; then
+    if [ -d "$PREFIX_DIR" ]; then
+      warn "PREFIX not set; using $PREFIX_DIR"
+    else
+      fail "PREFIX not set and $PREFIX_DIR missing — run inside Termux"
+    fi
   fi
+  PREFIX_DIR="${PREFIX:-$PREFIX_DIR}"
 fi
-PREFIX_DIR="${PREFIX:-$PREFIX_DIR}"
 
 CHROMIUM_BINARY="$PREFIX_DIR/lib/chromium/chrome"
 if [ -n "${CHROMIUM_BINARY_OVERRIDE:-}" ]; then

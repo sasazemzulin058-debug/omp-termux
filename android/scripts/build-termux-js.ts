@@ -83,12 +83,12 @@ async function main(): Promise<void> {
 		const shebang = cli.startsWith("#!") ? cli : `#!/usr/bin/env bun\n${cli}`;
 		await Bun.write(cliDst, shebang);
 
-		const nativesPkg = path.join(repoRoot, "packages/natives/package.json");
-		const nativesNative = path.join(repoRoot, "packages/natives/native");
-		await Bun.$`cp ${nativesPkg} ${bundleDir}/node_modules/@oh-my-pi/pi-natives/`.quiet();
-		for (const name of ["index.js", "loader-state.js", "embedded-addon.js", "clipboard.js", "desktop.js", "desktop-adapter.js"]) {
-			await Bun.$`cp ${path.join(nativesNative, name)} ${bundleDir}/node_modules/@oh-my-pi/pi-natives/native/`.quiet();
-		}
+        const nativesPkg = path.join(repoRoot, "packages/natives/package.json");
+        const nativesNative = path.join(repoRoot, "packages/natives/native");
+        await Bun.$`cp ${nativesPkg} ${bundleDir}/node_modules/@oh-my-pi/pi-natives/`.quiet();
+        for (const name of ["index.js", "loader-state.js", "embedded-addon.js", "clipboard.js", "desktop.js", "desktop-adapter.js", "vcs.js"]) {
+            await Bun.$`cp ${path.join(nativesNative, name)} ${bundleDir}/node_modules/@oh-my-pi/pi-natives/native/`.quiet();
+        }
 
 		const tarPath = path.join(repoRoot, "termux-js.tar.gz");
 		await Bun.$`tar -czf ${tarPath} -C ${bundleDir} .`.quiet();
