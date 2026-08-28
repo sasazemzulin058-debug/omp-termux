@@ -4527,6 +4527,58 @@ export const SETTINGS_SCHEMA = {
 				"Use cmux WKWebView surfaces for browser automation when a cmux socket is available. Set PI_BROWSER_CMUX=0 or PI_BROWSER_CMUX=1 to override.",
 		},
 	},
+	"browser.executablePath": {
+		type: "string",
+		default: undefined,
+		ui: {
+			tab: "tools",
+			group: "Grep & Browser",
+			label: "Browser Executable Path",
+			description:
+				"Absolute path to the Chromium/Chrome executable for headless automation. Takes precedence over PUPPETEER_EXECUTABLE_PATH. Invalid explicit path fails closed.",
+		},
+	},
+	"system.android.wakeLock": {
+		type: "boolean",
+		default: false,
+		ui: {
+			tab: "system",
+			group: "Android / Termux",
+			label: "Acquire WakeLock",
+			description: "Keep CPU active while agent is running to prevent Android background throttling (Termux only)",
+		},
+	},
+	"system.android.oomScoreAdj": {
+		type: "number",
+		nullable: true,
+		default: null,
+		ui: {
+			tab: "system",
+			group: "Android / Termux",
+			label: "OOM Score Adjustment",
+			description: "Adjust process OOM score (-1000 to 1000) to protect daemon from low-memory killer; null disables (best-effort, no guarantee)",
+		},
+	},
+	"system.android.notifications.enabled": {
+		type: "boolean",
+		default: false,
+		ui: {
+			tab: "system",
+			group: "Android / Termux",
+			label: "Android Notifications",
+			description: "Show Android system notifications via termux-notification when agent events occur (off by default)",
+		},
+	},
+	"system.android.notifications.events": {
+		type: "array",
+		default: [],
+		ui: {
+			tab: "system",
+			group: "Android / Termux",
+			label: "Notification Events",
+			description: "Which agent events trigger notifications (e.g., agent_end, turn_complete); empty means no events",
+		},
+	},
 	"browser.screenshotDir": {
 		type: "string",
 		default: undefined,
@@ -4865,6 +4917,19 @@ export const SETTINGS_SCHEMA = {
 			label: "Apply Isolated Changes",
 			description:
 				"Automatically apply successful isolated task changes to the parent checkout; disable to retain patch or branch artifacts",
+		},
+	},
+
+	"task.isolation.repoRoot": {
+		type: "string",
+		nullable: true,
+		default: null,
+		ui: {
+			tab: "tasks",
+			group: "Isolation",
+			label: "Isolation Repository Root",
+			description:
+				"Explicit path to the Git repository root to use for isolated task worktrees (defaults to current working directory)",
 		},
 	},
 

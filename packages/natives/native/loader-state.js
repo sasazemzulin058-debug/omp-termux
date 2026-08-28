@@ -4,7 +4,7 @@ import { createRequire } from "node:module";
 import * as os from "node:os";
 import * as path from "node:path";
 import * as zlib from "node:zlib";
-import packageJson from "../package.json" with { type: "json" };
+const packageJson = createRequire(import.meta.url)("../package.json");
 import { embeddedAddon } from "./embedded-addon.js";
 
 /**
@@ -31,7 +31,7 @@ import { embeddedAddon } from "./embedded-addon.js";
  * post-build `--reset` stub) is the authoritative compiled-mode signal.
  */
 
-const SUPPORTED_PLATFORMS = ["linux-x64", "linux-arm64", "darwin-x64", "darwin-arm64", "win32-x64"];
+const SUPPORTED_PLATFORMS = ["linux-x64", "linux-arm64", "android-arm64", "darwin-x64", "darwin-arm64", "win32-x64"];
 
 /**
  * Streaming startup marker, enabled by `PI_DEBUG_STARTUP`. Local copy of the

@@ -1,0 +1,173 @@
+diff --git a/packages/coding-agent/src/config/settings-schema.ts b/packages/coding-agent/src/config/settings-schema.ts
+index c3448d1e9c..691d2ac699 100644
+--- a/packages/coding-agent/src/config/settings-schema.ts
++++ b/packages/coding-agent/src/config/settings-schema.ts
+@@ -4544,6 +4544,27 @@ export const SETTINGS_SCHEMA = {
+ 				"Absolute path to the Chromium/Chrome executable for headless automation. Takes precedence over PUPPETEER_EXECUTABLE_PATH. Invalid explicit path fails closed.",
+ 		},
+ 	},
++	"system.android.wakeLock": {
++		type: "boolean",
++		default: false,
++		ui: {
++			tab: "system",
++			group: "Android / Termux",
++			label: "Acquire WakeLock",
++			description: "Keep CPU active while agent is running to prevent Android background throttling (Termux only)",
++		},
++	},
++	"system.android.oomScoreAdj": {
++		type: "number",
++		nullable: true,
++		default: null,
++		ui: {
++			tab: "system",
++			group: "Android / Termux",
++			label: "OOM Score Adjustment",
++			description: "Adjust process OOM score (-1000 to 1000) to protect daemon from low-memory killer; null disables (best-effort, no guarantee)",
++		},
++	},
+ 	"browser.screenshotDir": {
+ 		type: "string",
+ 		default: undefined,
+diff --git a/packages/coding-agent/src/launch/broker.ts b/packages/coding-agent/src/launch/broker.ts
+index 051962e986..e731bc4d5a 100644
+--- a/packages/coding-agent/src/launch/broker.ts
++++ b/packages/coding-agent/src/launch/broker.ts
+@@ -1,3 +1,5 @@
++import { Settings } from "../config/settings";
++import { acquireWakeLock, adjustOomScore, releaseWakeLock } from "@oh-my-pi/pi-utils";
+ import * as fs from "node:fs/promises";
+ import * as net from "node:net";
+ import * as os from "node:os";
+@@ -1416,9 +1417,23 @@ export async function startDaemonBrokerFromEnvironment(options: DaemonBrokerStartOptions = {}): Promise<void> {
+ 	if (!token) throw new Error("Daemon broker token is empty");
+ 	const broker = new DaemonBroker(projectDir, runtimeDir, token, idleGraceMs, restartBackoffBaseMs);
+ 	const cancelCleanup = postmortem.register("daemon-broker", () => broker.shutdown());
++	let androidWakeLockAcquired = false;
++	try {
++		const settings = await Settings.loadReadOnly({ cwd: projectDir });
++		const oomScoreAdj = settings.get("system.android.oomScoreAdj");
++		if (typeof oomScoreAdj === "number") adjustOomScore(oomScoreAdj);
++		if (settings.get("system.android.wakeLock") === true) {
++			androidWakeLockAcquired = await acquireWakeLock();
++		}
++	} catch {}
+ 	try {
+ 		await broker.run();
+ 	} finally {
+ 		cancelCleanup();
++		if (androidWakeLockAcquired) {
++			try {
++				await releaseWakeLock();
++			} catch {}
++		}
+ 		await releaseBrokerLease(lease);
+ 	}
+diff --git a/packages/utils/src/android-system.ts b/packages/utils/src/android-system.ts
+new file mode 100644
+index 0000000000..e7a6be8c27
+--- /dev/null
++++ b/packages/utils/src/android-system.ts
+@@ -0,0 +1,91 @@
++import { spawn } from "node:child_process";
++import fs from "node:fs";
++
++export function isAndroidEnvironment(
++	platform: NodeJS.Platform = process.platform,
++	env: Record<string, string | undefined> = process.env as Record<string, string | undefined>,
++): boolean {
++	if (platform === "android") return true;
++	if (env.TERMUX_VERSION !== undefined) return true;
++	if (env.PREFIX?.includes("com.termux")) return true;
++	return false;
++}
++
++let wakeLockRefCount = 0;
++
++async function runTermuxCommand(cmd: string, args: string[]): Promise<boolean> {
++	if (!isAndroidEnvironment()) return false;
++	return await new Promise<boolean>(resolve => {
++		let child: ReturnType<typeof spawn>;
++		try {
++			child = spawn(cmd, args, { stdio: "ignore", detached: true });
++		} catch {
++			resolve(false);
++			return;
++		}
++		let settled = false;
++		const done = (ok: boolean) => {
++			if (settled) return;
++			settled = true;
++			resolve(ok);
++		};
++		child.on("error", () => done(false));
++		child.on("close", code => done(code === 0));
++		// Do not claim success merely because spawn() succeeded; wait for exit code.
++		try {
++			child.unref();
++		} catch {}
++		const t = setTimeout(() => done(false), 5000);
++		// @ts-ignore - unref may not exist on Timeout in some runtimes
++		t.unref?.();
++	});
++}
++
++export async function acquireWakeLock(): Promise<boolean> {
++	if (!isAndroidEnvironment()) return false;
++	wakeLockRefCount++;
++	if (wakeLockRefCount > 1) {
++		return true;
++	}
++	const ok = await runTermuxCommand("termux-wake-lock", []);
++	if (!ok) {
++		wakeLockRefCount = Math.max(0, wakeLockRefCount - 1);
++		return false;
++	}
++	return true;
++}
++
++export async function releaseWakeLock(): Promise<boolean> {
++	if (!isAndroidEnvironment()) return false;
++	if (wakeLockRefCount <= 0) return false;
++	wakeLockRefCount--;
++	if (wakeLockRefCount > 0) {
++		return true;
++	}
++	const ok = await runTermuxCommand("termux-wake-unlock", []);
++	return ok;
++}
++
++/**
++ * Best-effort OOM score adjustment. Returns true only if the write succeeded.
++ * Callers must not assume protection if this returns false.
++ */
++export function adjustOomScore(score: number | null = -500): boolean {
++	if (!isAndroidEnvironment()) return false;
++	if (score === null || score === undefined) return false;
++	try {
++		const clamped = Math.max(-1000, Math.min(1000, Math.round(score)));
++		fs.writeFileSync("/proc/self/oom_score_adj", String(clamped));
++		return true;
++	} catch {
++		return false;
++	}
++}
++
++export function getWakeLockRefCountForTest(): number {
++	return wakeLockRefCount;
++}
++
++export function resetWakeLockForTest(): void {
++	wakeLockRefCount = 0;
++}
+diff --git a/packages/utils/src/index.ts b/packages/utils/src/index.ts
+index 547bf7e2c6..40b20c5941 100644
+--- a/packages/utils/src/index.ts
++++ b/packages/utils/src/index.ts
+@@ -59,3 +59,5 @@ export function structuredCloneJSON<T>(value: T): T {
+ 	}
+ 	return JSON.parse(JSON.stringify(value)) as T;
+ }
++
++export * from "./android-system";
