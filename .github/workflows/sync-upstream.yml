@@ -51,6 +51,11 @@ jobs:
           fi
           git clean -ffdx
           tar -C . -xzf "$metadata_dir/metadata.tar.gz"
+          if [[ ! "$upstream_tip" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "error: fetched upstream tip is not a 40-character SHA: $upstream_tip" >&2
+            exit 1
+          fi
+          printf '%s\n' "$upstream_tip" > android/UPSTREAM_COMMIT
       - name: Apply standard Git patches in CI
         shell: bash
         run: |
