@@ -1,0 +1,401 @@
+diff --git a/packages/coding-agent/src/tools/browser.ts b/packages/coding-agent/src/tools/browser.ts
+index b7f710732a..772d4582f1 100644
+--- a/packages/coding-agent/src/tools/browser.ts
++++ b/packages/coding-agent/src/tools/browser.ts
+@@ -7,6 +7,7 @@ import type { ToolSession } from "../sdk";
+ import { enforceInlineByteCap } from "../session/streaming-output";
+ import { truncateForPrompt } from "./approval";
+ import { resolveCmuxKind } from "./browser/cmux/rpc";
++import { resolveHeadlessExecutable } from "./browser/launch";
+ import {
+ 	acquireBrowser,
+ 	type BrowserHandle,
+@@ -253,7 +254,6 @@ export class BrowserTool implements AgentTool<typeof browserSchema, BrowserToolD
+ 			throw error;
+ 		}
+ 	}
+-
+ 	async #open(
+ 		name: string,
+ 		params: BrowserParams,
+@@ -261,7 +261,12 @@ export class BrowserTool implements AgentTool<typeof browserSchema, BrowserToolD
+ 		timeoutMs: number,
+ 		signal?: AbortSignal,
+ 	): Promise<AgentToolResult<BrowserToolDetails>> {
+-		const kind = resolveBrowserKind(params, this.session);
++		let kind = resolveBrowserKind(params, this.session);
++		if (kind.kind === "headless") {
++			const setting = this.session.settings.get("browser.executablePath") as string | undefined;
++			const resolved = await resolveHeadlessExecutable({ executablePathSetting: setting });
++			if (resolved) kind = { ...kind, executablePath: resolved };
++		}
+ 		details.browser = kind.kind;
+ 
+ 		// If a tab with this name already exists on a different browser kind, fail fast — caller must close first.
+@@ -476,7 +481,8 @@ function describeKind(kind: BrowserKind): string {
+ 
+ function sameBrowserKind(a: BrowserKind, b: BrowserKind): boolean {
+ 	if (a.kind !== b.kind) return false;
+-	if (a.kind === "headless" && b.kind === "headless") return a.headless === b.headless;
++	if (a.kind === "headless" && b.kind === "headless")
++		return a.headless === b.headless && (a.executablePath ?? "default") === (b.executablePath ?? "default");
+ 	if (a.kind === "spawned" && b.kind === "spawned") return a.path === b.path;
+ 	if (a.kind === "connected" && b.kind === "connected") return a.cdpUrl === b.cdpUrl;
+ 	if (a.kind === "relay" && b.kind === "relay") return a.cdpUrl === b.cdpUrl;
+diff --git a/packages/coding-agent/src/tools/browser/launch.ts b/packages/coding-agent/src/tools/browser/launch.ts
+index b27e137a15..454e55ea87 100644
+--- a/packages/coding-agent/src/tools/browser/launch.ts
++++ b/packages/coding-agent/src/tools/browser/launch.ts
+@@ -68,6 +68,117 @@ function stealthIgnoreDefaultArgs(executablePath: string | undefined): string[]
+ 	if (!isMicrosoftEdgeExecutable(executablePath)) return [...STEALTH_IGNORE_DEFAULT_ARGS];
+ 	return STEALTH_IGNORE_DEFAULT_ARGS.filter(arg => arg !== ENABLE_AUTOMATION_FLAG);
+ }
++// =====================================================================
++// Android / Termux Chromium helpers
++// =====================================================================
++
++export function isAndroidEnvironment(
++	platform: NodeJS.Platform = process.platform,
++	env: Record<string, string | undefined> = process.env as Record<string, string | undefined>,
++): boolean {
++	if (platform === "android") return true;
++	if (env.TERMUX_VERSION !== undefined) return true;
++	if (env.ANDROID_ROOT !== undefined) return true;
++	if (env.PREFIX?.includes("com.termux")) return true;
++	return false;
++}
++
++export function getTermuxPrefix(
++	env: Record<string, string | undefined> = process.env as Record<string, string | undefined>,
++): string {
++	const raw = env.PREFIX?.trim();
++	if (raw) return raw;
++	return "/data/data/com.termux/files/usr";
++}
++
++export function androidChromiumCandidates(prefix: string = getTermuxPrefix()): string[] {
++	return [
++		path.join(prefix, "lib/chromium/chrome"),
++		path.join(prefix, "bin/chromium"),
++		path.join(prefix, "bin/chromium-browser"),
++		path.join(prefix, "bin/chrome"),
++	];
++}
++
++export function getChromeProfileBaseDir(
++	platform: NodeJS.Platform = process.platform,
++	env: Record<string, string | undefined> = process.env as Record<string, string | undefined>,
++): string {
++	if (isAndroidEnvironment(platform, env)) {
++		const prefix = getTermuxPrefix(env);
++		const tmp = env.TMPDIR?.trim();
++		if (tmp?.startsWith(prefix)) return tmp;
++		return path.join(prefix, "tmp");
++	}
++	return os.tmpdir();
++}
++
++export interface ResolveHeadlessExecutableOptions {
++	executablePathSetting?: string;
++	env?: Record<string, string | undefined>;
++	platform?: NodeJS.Platform;
++	prefix?: string;
++	isExecutableFile?: (p: string) => boolean;
++	isChromiumExecutable?: (p: string) => Promise<boolean>;
++	candidates?: string[];
++}
++
++export async function resolveHeadlessExecutable(
++	opts: ResolveHeadlessExecutableOptions = {},
++): Promise<string | undefined> {
++	const platform = opts.platform ?? process.platform;
++	const env = opts.env ?? (process.env as Record<string, string | undefined>);
++	const prefix = opts.prefix ?? getTermuxPrefix(env);
++	const checkExec = opts.isExecutableFile ?? isExecutableFile;
++	const checkChromium = opts.isChromiumExecutable ?? isChromiumExecutable;
++	const isAndroid = isAndroidEnvironment(platform, env);
++	const validate = async (p: string): Promise<boolean> => {
++		if (!checkExec(p)) return false;
++		return await checkChromium(p);
++	};
++	const setting = opts.executablePathSetting?.trim();
++	if (setting) {
++		if (!path.isAbsolute(setting)) {
++			throw new ToolError(
++				`browser.executablePath is set to ${JSON.stringify(setting)} but it must be an absolute path (for example $PREFIX/lib/chromium/chrome).`,
++			);
++		}
++		if (!(await validate(setting))) {
++			throw new ToolError(
++				`browser.executablePath is set to ${JSON.stringify(setting)} but it is not a valid executable Chromium binary. ` +
++					`Install Termux chromium with \`pkg install x11-repo && pkg install chromium\` or set it to $PREFIX/lib/chromium/chrome.`,
++			);
++		}
++		return setting;
++	}
++	const envPath = env.PUPPETEER_EXECUTABLE_PATH?.trim();
++	if (envPath) {
++		if (!path.isAbsolute(envPath)) {
++			throw new ToolError(
++				`PUPPETEER_EXECUTABLE_PATH is set to ${JSON.stringify(envPath)} but it must be an absolute path.`,
++			);
++		}
++		if (!(await validate(envPath))) {
++			throw new ToolError(
++				`PUPPETEER_EXECUTABLE_PATH is set to ${JSON.stringify(envPath)} but it is not a valid executable Chromium binary. ` +
++					`Fix or unset it, or install Termux chromium with \`pkg install x11-repo && pkg install chromium\`.`,
++			);
++		}
++		return envPath;
++	}
++	if (isAndroid) {
++		const candidates = opts.candidates ?? androidChromiumCandidates(prefix);
++		for (const candidate of candidates) {
++			if (await validate(candidate)) return candidate;
++		}
++		throw new ToolError(
++			`No Chromium executable found for Android Termux. Install with \`pkg install x11-repo && pkg install chromium\` ` +
++				`and ensure one of ${candidates.join(", ")} exists and is executable. ` +
++				`You can also set browser.executablePath or PUPPETEER_EXECUTABLE_PATH to an absolute chrome binary.`,
++		);
++	}
++	return undefined;
++}
+ 
+ const STEALTH_ACCEPT_LANGUAGE = "en-US,en";
+ 
+@@ -174,22 +285,20 @@ async function loadBrowsers(): Promise<typeof BrowsersNs> {
+  * Resolve the Chromium executable puppeteer will launch.
+  *
+  * `PUPPETEER_EXECUTABLE_PATH` always wins. On macOS the isolated Chrome for
+- * Testing binary is preferred over a detected system Chrome: a headless
+- * daemon launched from a system `Google Chrome.app` bundle shares its
+- * LaunchServices bundle identity (`com.google.Chrome`), so macOS can deliver
+- * the user's open-URL Apple Events to the daemon and silently swallow their
+- * link clicks (#8673). Chrome for Testing uses a dedicated bundle id
+- * (`com.google.chrome.for.testing`) that is never a user's default handler;
+- * system Chrome is used on macOS only when Chrome for Testing cannot be
+- * obtained. Other platforms keep the download-avoiding system Chrome
+- * preference and fall back to Chrome for Testing. The managed browser is
+- * cached under ~/.omp/puppeteer (getPuppeteerDir). Returns undefined when
+- * platform detection fails (puppeteer default resolution takes over).
+- * Exported so real-browser tests can probe launchability and skip on hosts
+- * missing Chrome's system libraries.
++ * Testing binary is preferred over a detected system Chrome. Other platforms
++ * keep the download-avoiding system Chrome preference and fall back to Chrome
++ * for Testing. Android Termux resolves only its external Chromium binary.
++ * Returns undefined when platform detection fails on desktop.
+  */
+ let chromiumExecutablePromise: Promise<string | undefined> | undefined;
+ export async function ensureChromiumExecutable(): Promise<string | undefined> {
++	const explicitOrAndroid = await resolveHeadlessExecutable();
++	if (explicitOrAndroid) return explicitOrAndroid;
++	if (isAndroidEnvironment()) {
++		throw new ToolError(
++			`No Chromium executable found for Android Termux. Install with \`pkg install x11-repo && pkg install chromium\` and ensure $PREFIX/lib/chromium/chrome exists.`,
++		);
++	}
+ 	const envPath = process.env.PUPPETEER_EXECUTABLE_PATH;
+ 	if (envPath) return envPath;
+ 	// macOS: never route a background daemon through the user's GUI Chrome
+@@ -283,15 +392,9 @@ function isExecutableFile(p: string): boolean {
+ 
+ async function isChromiumExecutable(p: string): Promise<boolean> {
+ 	if (!isExecutableFile(p)) return false;
+-	// The version probe below launches the candidate. It exists to reject
+-	// non-Chromium `chrome`/`chromium` wrapper scripts that appear on a Linux
+-	// PATH (ecb22957, "validate Linux browser executables"). On Windows and
+-	// macOS the candidates are fixed GUI application paths, not PATH wrappers,
+-	// and executing them is harmful: a GUI `chrome.exe --version` does not print
+-	// to a detached stdout and can hand off to the user's running instance,
+-	// opening/activating a normal browser window (#8445). Confine the probe to
+-	// Linux and trust the executable-file check elsewhere.
+-	if (process.platform !== "linux") return true;
++	// The version probe rejects non-Chromium wrappers. Android Termux
++	// candidates must prove they are Chromium before reaching Puppeteer.
++	if (process.platform !== "linux" && process.platform !== "android") return true;
+ 	try {
+ 		const probeTimeoutMs = 3000;
+ 		const proc = Bun.spawn([p, "--version"], {
+@@ -411,6 +514,7 @@ async function resolveSystemChromium(): Promise<string | undefined> {
+ export interface LaunchHeadlessOptions {
+ 	headless: boolean;
+ 	viewport?: { width: number; height: number; deviceScaleFactor?: number };
++	executablePath?: string;
+ 	/** Additional Chromium arguments merged with the centralized launch defaults. */
+ 	args?: readonly string[];
+ 	/** Additional exact Puppeteer default arguments to suppress. */
+@@ -477,11 +581,11 @@ export async function launchHeadlessBrowser(opts: LaunchHeadlessOptions): Promis
+ 	// (issue #7058). `removeUserDataDir` cleans it up on our terms instead.
+ 	let userDataDir: string | undefined;
+ 	if (!launchArgs.some(arg => arg.startsWith("--user-data-dir"))) {
+-		userDataDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), "omp-chrome-profile-"));
++		userDataDir = await fs.promises.mkdtemp(path.join(getChromeProfileBaseDir(), "omp-chrome-profile-"));
+ 		launchArgs.push(`--user-data-dir=${userDataDir}`);
+ 	}
+ 	try {
+-		const executablePath = await ensureChromiumExecutable();
++		const executablePath = opts.executablePath ?? (await ensureChromiumExecutable());
+ 		const browser = await puppeteer.launch({
+ 			headless: opts.headless,
+ 			defaultViewport: opts.headless ? initialViewport : null,
+@@ -517,8 +621,9 @@ export async function resolveSharedBrowserLaunchSpec(opts: {
+ 	headless: boolean;
+ 	userDataDir: string;
+ 	viewport?: { width: number; height: number };
++	executablePath?: string;
+ }): Promise<SharedBrowserLaunchSpec | null> {
+-	const executablePath = await ensureChromiumExecutable();
++	const executablePath = opts.executablePath ?? (await ensureChromiumExecutable());
+ 	if (!executablePath) return null;
+ 	const puppeteer = await loadPuppeteer();
+ 	const vp = opts.viewport ?? DEFAULT_VIEWPORT;
+diff --git a/packages/coding-agent/src/tools/browser/registry.ts b/packages/coding-agent/src/tools/browser/registry.ts
+index 84a82f7092..9f55aa8e48 100644
+--- a/packages/coding-agent/src/tools/browser/registry.ts
++++ b/packages/coding-agent/src/tools/browser/registry.ts
+@@ -19,7 +19,7 @@ import type { RelayKind } from "./relay/kind";
+ import { ensureSharedBrowser } from "./shared-daemon";
+ 
+ export type PuppeteerBrowserKind =
+-	| { kind: "headless"; headless: boolean }
++	| { kind: "headless"; headless: boolean; executablePath?: string }
+ 	| { kind: "spawned"; path: string }
+ 	| { kind: "connected"; cdpUrl: string }
+ 	| RelayKind;
+@@ -81,8 +81,10 @@ const pendingOpens = new Map<string, Promise<BrowserHandle>>();
+ 
+ function browserKey(kind: BrowserKind): string {
+ 	switch (kind.kind) {
+-		case "headless":
+-			return `headless:${kind.headless ? "1" : "0"}`;
++		case "headless": {
++			const exe = (kind as Extract<PuppeteerBrowserKind, { kind: "headless" }>).executablePath;
++			return `headless:${kind.headless ? "1" : "0"}:${exe ?? "default"}`;
++		}
+ 		case "spawned":
+ 			return `spawned:${kind.path}`;
+ 		case "connected":
+@@ -94,6 +96,11 @@ function browserKey(kind: BrowserKind): string {
+ 	}
+ }
+ 
++/** Test seam: expose browserKey for daemon-key tests. */
++export function browserKeyForTest(kind: BrowserKind): string {
++	return browserKey(kind);
++}
++
+ export interface AcquireBrowserOptions {
+ 	cwd: string;
+ 	viewport?: { width: number; height: number; deviceScaleFactor?: number };
+@@ -173,17 +180,13 @@ async function openBrowserHandle(kind: BrowserKind, opts: AcquireBrowserOptions)
+ 		};
+ 	}
+ 	if (kind.kind === "headless") {
+-		// Every real omp process (session, subagent, worker — anything with a CLI
+-		// worker host) MUST go through the project-shared broker-owned Chromium:
+-		// per-process launches are what produced launch storms and orphaned
+-		// process trees. The process-local launch survives only for hosts that
+-		// cannot spawn the broker (bun test, SDK embedding without a CLI entry).
+ 		if (isCompiledBinary() || workerHostEntry() !== null) {
+ 			return await openSharedHeadlessHandle(kind, opts);
+ 		}
+ 		const { browser, userDataDir } = await launchHeadlessBrowser({
+ 			headless: kind.headless,
+ 			viewport: opts.viewport,
++			executablePath: kind.executablePath,
+ 		});
+ 		return {
+ 			key: browserKey(kind),
+@@ -407,6 +410,7 @@ async function openSharedHeadlessHandle(
+ 			projectDir: opts.cwd,
+ 			headless: kind.headless,
+ 			viewport: vp,
++			executablePath: kind.executablePath,
+ 			signal: opts.signal,
+ 		});
+ 		if (!shared) {
+diff --git a/packages/coding-agent/src/tools/browser/shared-daemon.ts b/packages/coding-agent/src/tools/browser/shared-daemon.ts
+index c26fd05bac..29c772520d 100644
+--- a/packages/coding-agent/src/tools/browser/shared-daemon.ts
++++ b/packages/coding-agent/src/tools/browser/shared-daemon.ts
+@@ -34,11 +34,14 @@ export interface SharedBrowserEndpoint {
+ 	projectDir: string;
+ }
+ 
+-/** Stable broker daemon name for the shared automation browser. */
+-export function sharedBrowserDaemonName(headless: boolean): string {
+-	return headless ? "omp.browser.headless" : "omp.browser.headed";
++/** Stable broker daemon name for the shared automation browser. Includes executable/spec hash when provided. */
++export function sharedBrowserDaemonName(headless: boolean, executablePath?: string, specHash?: string): string {
++	const base = headless ? "omp.browser.headless" : "omp.browser.headed";
++	if (!executablePath && !specHash) return base;
++	const input = `${executablePath ?? ""}:${specHash ?? ""}`;
++	const hash = Bun.hash(input).toString(16).padStart(16, "0").slice(-7);
++	return `${base}-${hash}`;
+ }
+-
+ function wsEndpointOf(snapshot: DaemonSnapshot | undefined): string | undefined {
+ 	return snapshot?.readyMatch?.match(/ws:\/\/\S+/)?.[0];
+ }
+@@ -67,19 +70,37 @@ export async function ensureSharedBrowser(opts: {
+ 	projectDir: string;
+ 	headless: boolean;
+ 	viewport?: { width: number; height: number };
++	executablePath?: string;
+ 	signal?: AbortSignal;
+ }): Promise<SharedBrowserEndpoint | null> {
+ 	const client = await daemonClientForProject(opts.projectDir);
+-	const name = sharedBrowserDaemonName(opts.headless);
++	// Resolve launch spec first so daemon identity can include resolved executable and args (spec).
++	// Use a temp userDataDir placeholder for spec resolution; the final dir is derived from the hashed name.
++	const provisionalDir = path.join(
++		daemonRuntimeDir(client.projectDir),
++		`tmp-${opts.headless ? "headless" : "headed"}.profile`,
++	);
++	const launch = await resolveSharedBrowserLaunchSpec({
++		headless: opts.headless,
++		userDataDir: provisionalDir,
++		viewport: opts.viewport,
++		executablePath: opts.executablePath,
++	});
++	if (!launch) return null;
++	const filteredArgs = launch.args.filter(arg => !arg.startsWith("--user-data-dir"));
++	const specHash = Bun.hash(filteredArgs.join("|")).toString(16).padStart(16, "0").slice(-7);
++	const name = sharedBrowserDaemonName(opts.headless, launch.executablePath, specHash);
+ 	// Stable profile under the broker's runtime dir: reused across launches, and
+ 	// never contended by pre-daemon Chromiums that used throwaway temp profiles.
+ 	const userDataDir = path.join(daemonRuntimeDir(client.projectDir), `${name}.profile`);
+-	const launch = await resolveSharedBrowserLaunchSpec({
++	// Re-resolve with the final userDataDir so puppeteer defaultArgs includes the correct profile path
++	const finalLaunch = await resolveSharedBrowserLaunchSpec({
+ 		headless: opts.headless,
+ 		userDataDir,
+ 		viewport: opts.viewport,
++		executablePath: launch.executablePath,
+ 	});
+-	if (!launch) return null;
++	const effectiveLaunch = finalLaunch ?? launch;
+ 	await fs.mkdir(userDataDir, { recursive: true });
+ 	for (let attempt = 0; attempt < ENSURE_ATTEMPTS; attempt++) {
+ 		throwIfAborted(opts.signal);
+@@ -91,8 +112,6 @@ export async function ensureSharedBrowser(opts: {
+ 			if (wsEndpoint && (await probeEndpoint(wsEndpoint))) {
+ 				return { wsEndpoint, daemonName: name, projectDir: client.projectDir };
+ 			}
+-			// Live record but unreachable Chrome (wedged, or readiness never
+-			// matched): replace it rather than handing out a dead endpoint.
+ 			await stopQuietly(client, name, "Shared browser", opts.signal);
+ 			continue;
+ 		}
+@@ -102,8 +121,8 @@ export async function ensureSharedBrowser(opts: {
+ 					op: "start",
+ 					spec: {
+ 						name,
+-						application: launch.executablePath,
+-						args: launch.args,
++						application: effectiveLaunch.executablePath,
++						args: effectiveLaunch.args,
+ 						env: {},
+ 						cwd: client.projectDir,
+ 						pty: false,

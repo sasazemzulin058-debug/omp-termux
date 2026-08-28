@@ -1,7 +1,0 @@
-diff --git a/crates/pi-shell/src/process.rs b/crates/pi-shell/src/process.rs
-index bb299be..3bb9a48 100644
---- a/crates/pi-shell/src/process.rs
-+++ b/crates/pi-shell/src/process.rs
-@@ -22 +22 @@ pub enum ProcessStatus {
--#[cfg(target_os = "linux")]
-+#[cfg(any(target_os = "linux", target_os = "android"))]
