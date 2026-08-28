@@ -4885,6 +4885,19 @@ export const SETTINGS_SCHEMA = {
 		},
 	},
 
+	"task.isolation.repoRoot": {
+		type: "string",
+		nullable: true,
+		default: null,
+		ui: {
+			tab: "task",
+			group: "Isolation",
+			label: "Isolation Repository Root",
+			description:
+				"Explicit path to the Git repository root to use for isolated task worktrees (defaults to current working directory)",
+		},
+	},
+
 	"task.isolation.merge": {
 		type: "enum",
 		values: ["patch", "branch"] as const,

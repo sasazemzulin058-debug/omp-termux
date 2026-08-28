@@ -51,20 +51,21 @@ export interface WorktreeBaseline {
 	nested: Array<{ relativePath: string; baseline: RepoBaseline }>;
 }
 
-export async function getRepoRoot(cwd: string): Promise<string> {
+export async function getRepoRoot(cwd: string, explicitRepoRoot?: string): Promise<string> {
+	const targetCwd = explicitRepoRoot ? path.resolve(cwd, explicitRepoRoot) : cwd;
 	// Pure-jj check runs first so a jj workspace nested under an unrelated
 	// outer Git checkout is rejected at its own root rather than silently
 	// mutating the surrounding Git tree behind jj's back.
-	if (vcs.isPureJj(cwd)) {
+	if (vcs.isPureJj(targetCwd)) {
 		throw new Error(
 			"Isolated task execution requires a Git checkout, but this workspace is pure Jujutsu (`.jj/` without a colocated `.git/`). Run `jj git init --colocate` to add a Git checkout, or set `task.isolation.mode: none` to disable task isolation.",
 		);
 	}
 
-	const repoRoot = vcs.git(cwd)?.info().repoRoot;
+	const repoRoot = vcs.git(targetCwd)?.info().repoRoot;
 	if (repoRoot) return repoRoot;
 
-	throw new Error("Git repository not found for isolated task execution.");
+	throw new Error(`Git repository not found for isolated task execution in ${targetCwd}.`);
 }
 
 const GIT_NO_INDEX_NULL_PATH = process.platform === "win32" ? "NUL" : "/dev/null";
@@ -498,9 +499,9 @@ export async function ensureIsolation(
 	baseCwd: string,
 	id: string,
 	preferred?: IsoBackendKind,
+	explicitRepoRoot?: string,
 ): Promise<IsolationHandle> {
-	const repoRoot = await getRepoRoot(baseCwd);
-	const sourceCommonDir = vcs.requireGit(repoRoot).info().commonDir;
+	const repoRoot = await getRepoRoot(baseCwd, explicitRepoRoot);
 	const baseDir = getWorktreeDir(getTaskIsolationSegment(repoRoot, id));
 	const mergedDir = path.join(baseDir, TASK_ISOLATION_MOUNT_DIR);
 	const resolution = natives.isoResolve(preferred ?? null);
