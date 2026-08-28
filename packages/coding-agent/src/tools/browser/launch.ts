@@ -79,7 +79,7 @@ export function isAndroidEnvironment(
 	if (platform === "android") return true;
 	if (env.TERMUX_VERSION !== undefined) return true;
 	if (env.ANDROID_ROOT !== undefined) return true;
-	if (env.PREFIX && env.PREFIX.includes("com.termux")) return true;
+	if (env.PREFIX?.includes("com.termux")) return true;
 	return false;
 }
 
@@ -105,9 +105,8 @@ export function getChromeProfileBaseDir(
 	env: Record<string, string | undefined> = process.env as Record<string, string | undefined>,
 ): string {
 	if (isAndroidEnvironment(platform, env)) {
-		const prefix = getTermuxPrefix(env);
 		const tmp = env.TMPDIR?.trim();
-		if (tmp && tmp.startsWith(prefix)) return tmp;
+		if (tmp?.startsWith(prefix)) return tmp;
 		return path.join(prefix, "tmp");
 	}
 	return os.tmpdir();
@@ -293,12 +292,8 @@ async function loadBrowsers(): Promise<typeof BrowsersNs> {
  */
 let chromiumExecutablePromise: Promise<string | undefined> | undefined;
 export async function ensureChromiumExecutable(): Promise<string | undefined> {
-	try {
-		const explicitOrAndroid = await resolveHeadlessExecutable();
-		if (explicitOrAndroid) return explicitOrAndroid;
-	} catch (err) {
-		throw err;
-	}
+	const explicitOrAndroid = await resolveHeadlessExecutable();
+	if (explicitOrAndroid) return explicitOrAndroid;
 	if (isAndroidEnvironment()) {
 		throw new ToolError(
 			`No Chromium executable found for Android Termux. Install with \`pkg install x11-repo && pkg install chromium\` and ensure $PREFIX/lib/chromium/chrome exists.`,
