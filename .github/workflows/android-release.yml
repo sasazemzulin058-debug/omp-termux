@@ -4,6 +4,7 @@ on:
   push:
     tags:
       - "v*-termux"
+      - "v*-termux-r*"
   workflow_dispatch:
     inputs:
       tag:

@@ -65,6 +65,8 @@ jobs:
             exit 1
           fi
           printf '%s\n' "$upstream_tip" > android/UPSTREAM_COMMIT
+        env:
+          PUBLISH_UPSTREAM_BRANCH: ${{ vars.PUBLISH_UPSTREAM_BRANCH }}
 
       - name: Apply standard Git patches in CI
         shell: bash
@@ -97,18 +99,37 @@ jobs:
         run: |
           set -euo pipefail
           version=$(python3 -c "import json; print(json.load(open('packages/coding-agent/package.json'))['version'])")
-          tag="v${version}-termux"
+          base_tag="v${version}-termux"
           git config user.name github-actions[bot]
           git config user.email 41898282+github-actions[bot]@users.noreply.github.com
           git add -A
           git commit -m "chore: generate Android mod ${version}" || true
           current_commit=$(git rev-parse HEAD)
           git push origin HEAD:refs/heads/mod
-          if remote_tag=$(git ls-remote --exit-code origin "refs/tags/$tag"); then
+
+          # Keep tags immutable. A stale base tag gets one deterministic tag
+          # derived from generated HEAD; never overwrite or delete either tag.
+          tag="$base_tag"
+          if git ls-remote --exit-code origin "refs/tags/$base_tag" >/dev/null; then
+            git fetch --no-tags origin "+refs/tags/$base_tag:refs/tags/$base_tag"
+            tag_commit=$(git rev-parse "refs/tags/$base_tag^{commit}")
+            if [ "$tag_commit" != "$current_commit" ]; then
+              tag="${base_tag}-r${current_commit:0:12}"
+              echo "base release tag points to $tag_commit; using collision-safe tag $tag"
+            fi
+          else
+            ls_remote_status=$?
+            if [ "$ls_remote_status" -ne 2 ]; then
+              echo "error: unable to query release tag $base_tag on origin" >&2
+              exit "$ls_remote_status"
+            fi
+          fi
+
+          if git ls-remote --exit-code origin "refs/tags/$tag" >/dev/null; then
             git fetch --no-tags origin "+refs/tags/$tag:refs/tags/$tag"
             tag_commit=$(git rev-parse "refs/tags/$tag^{commit}")
             if [ "$tag_commit" != "$current_commit" ]; then
-              echo "error: release tag $tag points to $tag_commit, expected generated HEAD $current_commit" >&2
+              echo "error: immutable release tag $tag points to $tag_commit, expected generated HEAD $current_commit" >&2
               exit 1
             fi
             echo "release tag already exists: $tag"

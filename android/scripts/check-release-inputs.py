@@ -3,6 +3,7 @@
 import argparse
 import json
 import os
+import re
 import sys
 from pathlib import Path
 
@@ -53,8 +54,12 @@ def main():
     release_tag = os.environ.get("RELEASE_TAG", "").strip()
     if release_tag:
         expected_tag = f"v{version}-termux"
-        if release_tag != expected_tag:
-            sys.exit(f"error: RELEASE_TAG mismatch: got '{release_tag}', expected '{expected_tag}' (package version: {version})")
+        safe_tag = rf"{re.escape(expected_tag)}(?:-r[0-9a-f]{{12}})?"
+        if not re.fullmatch(safe_tag, release_tag):
+            sys.exit(
+                f"error: RELEASE_TAG mismatch: got '{release_tag}', expected '{expected_tag}' "
+                f"or collision form '{expected_tag}-r<12 lowercase hex>' (package version: {version})"
+            )
 
     # 3. Require patch queue metadata and key patched-tree marker files
     required_patch_markers = [

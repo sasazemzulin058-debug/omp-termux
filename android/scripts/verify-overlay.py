@@ -3,7 +3,7 @@
 from pathlib import Path
 import json
 import os
-
+import re
 ROOT = Path.cwd()
 
 def read(path):
@@ -15,8 +15,11 @@ def require(path, needle):
 
 version = json.loads(read("packages/coding-agent/package.json"))["version"]
 tag = os.environ.get("RELEASE_TAG", "")
-if tag and tag != f"v{version}-termux":
-    raise SystemExit(f"version/tag mismatch: package={version}, tag={tag}")
+if tag and not re.fullmatch(rf"v{re.escape(version)}-termux(?:-r[0-9a-f]{{12}})?", tag):
+    raise SystemExit(
+        f"version/tag mismatch: package={version}, tag={tag}; expected "
+        f"v{version}-termux or v{version}-termux-r<12 lowercase hex>"
+    )
 
 checks = {
     "crates/pi-natives/src/lib.rs": "#![feature(alloc_error_hook)]",
