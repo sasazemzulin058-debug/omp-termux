@@ -56,16 +56,39 @@ def main():
         if release_tag != expected_tag:
             sys.exit(f"error: RELEASE_TAG mismatch: got '{release_tag}', expected '{expected_tag}' (package version: {version})")
 
-    # 3. Require key overlay marker files
-    required_overlay_markers = [
-        "android/scripts/apply-overlay.py",
+    # 3. Require patch queue metadata and key patched-tree marker files
+    required_patch_markers = [
+        "android/scripts/apply-patches.sh",
+        "android/patches/MANIFEST",
         "android/scripts/build-termux.sh",
+    ]
+    for marker in required_patch_markers:
+        marker_path = root / marker
+        if not marker_path.is_file():
+            sys.exit(f"error: missing required patch queue marker file: {marker}")
+
+    manifest_path = root / "android" / "patches" / "MANIFEST"
+    active_patches = sorted(
+        p.name for p in manifest_path.parent.glob("[0-9][0-9]-*.patch")
+    )
+    manifest_entries = [
+        line.strip()
+        for line in manifest_path.read_text(encoding="utf-8").splitlines()
+        if line.strip() and not line.lstrip().startswith("#")
+    ]
+    if manifest_entries != active_patches:
+        sys.exit(
+            "error: active patch queue does not match MANIFEST: "
+            f"manifest={manifest_entries}, files={active_patches}"
+        )
+
+    required_overlay_markers = [
         "packages/natives/native/loader-state.js",
     ]
     for marker in required_overlay_markers:
         marker_path = root / marker
         if not marker_path.is_file():
-            sys.exit(f"error: missing required overlay marker file: {marker}")
+            sys.exit(f"error: missing required patched-tree marker file: {marker}")
 
     # 4. Reject runtime cache directories in fresh staging tree
     # In CI, checkout is fresh before bun install.

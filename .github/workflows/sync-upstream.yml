@@ -19,61 +19,64 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-      - name: Fetch and reset to upstream main
+      - name: Fetch upstream and prepare generated mod tree
         shell: bash
         run: |
           set -euo pipefail
           git remote add upstream https://github.com/can1357/oh-my-pi.git 2>/dev/null || git remote set-url upstream https://github.com/can1357/oh-my-pi.git
-          git fetch upstream main
-          # Keep android/ directory intact while resetting code to upstream
-          git checkout upstream/main -- . ':(exclude)android' ':(exclude).github'
+          git fetch --no-tags upstream main
+          git fetch --no-tags origin mod || true
+          upstream_tip=$(git rev-parse upstream/main)
+          if git show-ref --verify --quiet refs/heads/upstream; then
+            old_upstream=$(git rev-parse refs/heads/upstream)
+            git merge-base --is-ancestor "$old_upstream" "$upstream_tip" || {
+              echo "error: local upstream branch would move backwards" >&2
+              exit 1
+            }
+            git update-ref refs/heads/upstream "$upstream_tip" "$old_upstream"
+          else
+            git update-ref refs/heads/upstream "$upstream_tip"
+          fi
+          git push origin refs/heads/upstream:refs/heads/upstream
+
+          metadata_dir="$RUNNER_TEMP/android-metadata"
+          mkdir -p "$metadata_dir"
+          tar -C . -czf "$metadata_dir/metadata.tar.gz" android .github
+          git reset --hard upstream/main
+          git clean -ffdx
+          tar -C . -xzf "$metadata_dir/metadata.tar.gz"
       - name: Apply standard Git patches in CI
         shell: bash
         run: |
           set -euo pipefail
           bash android/scripts/apply-patches.sh
-      - name: Verify upstream build inputs
+      - name: Verify generated patched tree
         run: |
+          set -euo pipefail
+          git diff --check
           test -f package.json
           test -f bun.lock
           test -f crates/pi-natives/Cargo.toml
           test -f packages/natives/native/loader-state.js
+          git status --short
+      - name: Publish generated mod branch
+        shell: bash
+        run: |
+          set -euo pipefail
+          git push origin HEAD:refs/heads/mod
       - name: Validate release inputs
         run: python3 android/scripts/check-release-inputs.py
       - name: Setup Bun and verify lockfile consistency
         uses: oven-sh/setup-bun@v2
         with:
           bun-version-file: package.json
-      - name: Regenerate lockfile for overlay dependencies
-        shell: bash
-        run: |
-          set -euo pipefail
-          # Overlay mutates package.json (pi-hermes-memory pinned to immutable commit).
-          # Regenerate bun.lock so it matches the post-overlay tree before frozen validation.
-          # This keeps upstream sync reproducible: every rsync + overlay yields the same lock.
-          bun install
-          echo "lockfile regenerated after overlay"
-          # Verify hermes pin is present in lockfile
-          if ! grep -q 'pi-hermes-memory.*#'"25a2b06" bun.lock; then
-            echo "error: bun.lock missing pinned hermes commit after regeneration" >&2
-            exit 1
-          fi
-          if grep -q 'pi-hermes-memory#main' bun.lock; then
-            echo "error: bun.lock contains mutable #main spec" >&2
-            exit 1
-          fi
       - name: Verify frozen lockfile
         shell: bash
         run: |
           set -euo pipefail
-          # Frozen install must now pass against the regenerated lockfile.
-          if ! bun install --frozen-lockfile; then
-            echo "error: bun.lock is out of sync with package.json after overlay regeneration" >&2
-            exit 1
-          fi
-          # Do not restore bun.lock — keep the overlay-regenerated version.
+          bun install --frozen-lockfile
           rm -rf .bun-cache node_modules
-      - name: Push sync commit and version tag
+      - name: Commit and publish generated mod tree
         shell: bash
         run: |
           set -euo pipefail
@@ -82,26 +85,15 @@ jobs:
           git config user.name github-actions[bot]
           git config user.email 41898282+github-actions[bot]@users.noreply.github.com
           git add -A
-          if git diff --cached --quiet; then
-            echo "upstream unchanged"
-            exit 0
+          git commit -m "chore: generate Android mod ${version}" || true
+          git push origin HEAD:refs/heads/mod
+          if git show-ref --tags --verify --quiet "refs/tags/$tag"; then
+            echo "release tag already exists: $tag"
+          else
+            git tag "$tag"
+            git push origin "refs/tags/$tag"
           fi
-          git commit -m "chore: sync upstream OMP ${version}"
-          if remote_tag_sha=$(git ls-remote --tags origin "refs/tags/$tag" | awk '{print $1}'); then
-            if [ -n "$remote_tag_sha" ]; then
-              head_sha=$(git rev-parse HEAD)
-              if [ "$remote_tag_sha" = "$head_sha" ]; then
-                echo "release already published: $tag"
-                exit 0
-              fi
-              echo "warning: tag $tag already exists on $remote_tag_sha, pushing main only without re-tagging"
-              git push origin HEAD:main
-              exit 0
-            fi
-          fi
-          git tag "$tag"
-          git push --atomic origin HEAD:main "refs/tags/$tag"
-          echo "dispatching android release for $tag"
+          echo "dispatching Android release for $tag"
           gh workflow run android-release.yml --repo "${{ github.repository }}" --ref "$tag" -f tag="$tag"
         env:
           GH_TOKEN: ${{ github.token }}

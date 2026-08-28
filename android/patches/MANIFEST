@@ -1,0 +1,11 @@
+# Active patch order - must be applied sequentially on clean upstream checkout
+# This manifest is validated by android/scripts/apply-patches.sh
+01-pi-natives-rust.patch
+02-loader-and-stubs.patch
+03-browser-termux.patch
+04-task-isolation.patch
+05-settings-and-cli.patch
+06-clipboard-termux.patch
+07-android-system.patch
+08-android-notifications.patch
+09-shell-temp-paths.patch

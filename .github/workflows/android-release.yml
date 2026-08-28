@@ -36,7 +36,11 @@ jobs:
 
       - uses: actions/checkout@v4
         with:
-          ref: ${{ github.event_name == 'push' && github.ref || github.sha }}
+          ref: mod
+          fetch-depth: 0
+      - name: Apply Android patch queue
+        shell: bash
+        run: bash android/scripts/apply-patches.sh
 
       - name: Load Android manifest environment
         run: |
@@ -147,14 +151,17 @@ jobs:
             packages/natives/native/pi_natives.android-arm64.node
             packages/natives/native/pi_natives.android-arm64.node.sha256
           if-no-files-found: error
-
   js-bundle:
     name: Build Termux JavaScript bundle
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ github.event_name == 'push' && github.ref || github.sha }}
+          ref: mod
+          fetch-depth: 0
+      - name: Apply Android patch queue
+        shell: bash
+        run: bash android/scripts/apply-patches.sh
 
       - name: Load Android manifest environment
         run: |
@@ -219,12 +226,15 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ github.event_name == 'push' && github.ref || github.sha }}
-
+          ref: mod
+          fetch-depth: 0
       - name: Load Android manifest environment
         run: |
           set -euo pipefail
           grep -v '^#' android/versions.env >> "$GITHUB_ENV"
+      - name: Apply Android patch queue
+        shell: bash
+        run: bash android/scripts/apply-patches.sh
 
       - name: Verify Android overlay and release tag
         run: python3 android/scripts/verify-overlay.py
