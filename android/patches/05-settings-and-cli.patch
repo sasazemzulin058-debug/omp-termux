@@ -1,0 +1,85 @@
+diff --git a/packages/coding-agent/src/cli.ts b/packages/coding-agent/src/cli.ts
+index d981c866e6637aa483a062b94237ca21fc32f3bb..13c99c94aee2befb84810269b461747a7b17d11f 100755
+--- a/packages/coding-agent/src/cli.ts
++++ b/packages/coding-agent/src/cli.ts
+@@ -39,7 +39,6 @@ import rootLicense from "./tools/browser/relay/extension-assets/LICENSE.txt" wit
+ import thirdPartyNotices from "./tools/browser/relay/extension-assets/THIRD-PARTY-NOTICES.txt" with { type: "text" };
+ import { COMPUTER_WORKER_ARG } from "./tools/computer/protocol";
+ import { smokeTestComputerWorker } from "./tools/computer/supervisor";
+-import { startComputerWorker } from "./tools/computer/worker-entry";
+ 
+ if (Bun.semver.order(Bun.version, MIN_BUN_VERSION) < 0) {
+ 	process.stderr.write(
+@@ -179,6 +178,8 @@ async function runWorkerEntrypoint(arg: string | undefined): Promise<boolean> {
+ 	}
+ 	if (arg === COMPUTER_WORKER_ARG) {
+ 		if (parentPort) installWorkerInbox(parentPort);
++		// Dynamic import prevents eager native addon path in cold CLI startup graph.
++		const { startComputerWorker } = await import("./tools/computer/worker-entry");
+ 		startComputerWorker();
+ 		return true;
+ 	}
+diff --git a/packages/coding-agent/src/cli/update-cli.ts b/packages/coding-agent/src/cli/update-cli.ts
+index d4cac19e7249c0d43c8b30360f450c6604bb0248..8bdead6228207393c77b55a76b9d7138e26ff48a 100644
+--- a/packages/coding-agent/src/cli/update-cli.ts
++++ b/packages/coding-agent/src/cli/update-cli.ts
+@@ -1945,6 +1945,17 @@ export async function runUpdateCommand(opts: {
+ 	channel?: UpdateChannel;
+ }): Promise<void> {
+ 	console.log(chalk.dim(`Current version: ${VERSION}`));
++
++	// Android/Termux: self-update downloads desktop binaries; block early.
++	if (process.platform === "android" || process.env.OMP_PLATFORM === "android" || process.env.TERMUX_VERSION) {
++		console.log(chalk.yellow("Self-update is disabled on Android/Termux."));
++		console.log(
++			chalk.dim(
++				"Update via: curl -fsSL https://github.com/sasazemzulin058-debug/omp-termux/releases/latest/download/omp-termux.tar.gz | tar xz",
++			),
++		);
++		return;
++	}
+ 	const persistedChannel = readPersistedChannel() ?? "stable";
+ 	const channel = opts.channel ?? persistedChannel;
+ 	const isChannelSwitch = opts.channel !== undefined && opts.channel !== persistedChannel;
+diff --git a/packages/coding-agent/src/config/settings-schema.ts b/packages/coding-agent/src/config/settings-schema.ts
+index 4f30a9ead1c1886f9cdc7ee20a34a31c7c64927e..0fcc822b0c111e2e185009897ca7a2942ceb5c0c 100644
+--- a/packages/coding-agent/src/config/settings-schema.ts
++++ b/packages/coding-agent/src/config/settings-schema.ts
+@@ -4527,6 +4527,17 @@ export const SETTINGS_SCHEMA = {
+ 				"Use cmux WKWebView surfaces for browser automation when a cmux socket is available. Set PI_BROWSER_CMUX=0 or PI_BROWSER_CMUX=1 to override.",
+ 		},
+ 	},
++	"browser.executablePath": {
++		type: "string",
++		default: undefined,
++		ui: {
++			tab: "tools",
++			group: "Grep & Browser",
++			label: "Browser Executable Path",
++			description:
++				"Absolute path to the Chromium/Chrome executable for headless automation. Takes precedence over PUPPETEER_EXECUTABLE_PATH. Invalid explicit path fails closed.",
++		},
++	},
+ 	"browser.screenshotDir": {
+ 		type: "string",
+ 		default: undefined,
+@@ -4868,6 +4879,19 @@ export const SETTINGS_SCHEMA = {
+ 		},
+ 	},
+ 
++	"task.isolation.repoRoot": {
++		type: "string",
++		nullable: true,
++		default: null,
++		ui: {
++			tab: "tasks",
++			group: "Isolation",
++			label: "Isolation Repository Root",
++			description:
++				"Explicit path to the Git repository root to use for isolated task worktrees (defaults to current working directory)",
++		},
++	},
++
+ 	"task.isolation.merge": {
+ 		type: "enum",
+ 		values: ["patch", "branch"] as const,

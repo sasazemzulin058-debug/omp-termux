@@ -58,6 +58,12 @@ describe("task wire schema", () => {
 		}
 	});
 
+	it("accepts explicit repoRoot on flat calls", () => {
+		const parsed = taskSchema({ agent: "scout", task: "map the repo", repoRoot: "../target" });
+		expect(parsed instanceof type.errors).toBe(false);
+		if (!(parsed instanceof type.errors)) expect(parsed.repoRoot).toBe("../target");
+	});
+
 	it("defaults a missing agent to 'task'", () => {
 		const parsed = taskSchema({ task: "x" });
 		expect(parsed instanceof type.errors).toBe(false);

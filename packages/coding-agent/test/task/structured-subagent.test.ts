@@ -37,6 +37,7 @@ function session(
 		maxDepth?: number;
 		isolationMode?: "none" | "worktree";
 		isolationApply?: boolean;
+		repoRoot?: string;
 		modelRoles?: Record<string, string>;
 	} = {},
 ): ToolSession {
@@ -48,6 +49,7 @@ function session(
 			"task.maxRecursionDepth": options.maxDepth ?? 2,
 			"task.isolation.mode": options.isolationMode ?? "none",
 			"task.enableLsp": true,
+			...(options.repoRoot ? { "task.isolation.repoRoot": options.repoRoot } : {}),
 			...(options.modelRoles ? { modelRoles: options.modelRoles } : {}),
 			...(options.isolationApply !== undefined ? { "task.isolation.apply": options.isolationApply } : {}),
 		}),
@@ -433,6 +435,19 @@ describe("structured subagent primitive", () => {
 			),
 		).rejects.toThrow("Isolated subagent execution could not be prepared: not a repository");
 		expect(artifactsDirsFromRegistry()).toEqual([]);
+	});
+
+	it("uses per-call repoRoot before session repoRoot", async () => {
+		mockDiscovery();
+		const prepare = vi.spyOn(isolationRunner, "prepareIsolationContext").mockResolvedValue({ repoRoot: "/tmp" } as never);
+		vi.spyOn(executorModule, "runSubprocess").mockResolvedValue(result());
+		await runStructuredSubagent(
+			request({
+				session: session({ isolationMode: "worktree", repoRoot: "/session/root" }),
+				isolation: { requested: true, repoRoot: "/call/root" },
+			}),
+		);
+		expect(prepare).toHaveBeenCalledWith("/tmp", "/call/root");
 	});
 
 	it("reuses a cached output manager across concurrent allocations and sanitizes artifact ids", async () => {

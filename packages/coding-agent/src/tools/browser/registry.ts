@@ -19,7 +19,7 @@ import type { RelayKind } from "./relay/kind";
 import { ensureSharedBrowser } from "./shared-daemon";
 
 export type PuppeteerBrowserKind =
-	| { kind: "headless"; headless: boolean }
+	| { kind: "headless"; headless: boolean; executablePath?: string }
 	| { kind: "spawned"; path: string }
 	| { kind: "connected"; cdpUrl: string }
 	| RelayKind;
@@ -81,8 +81,10 @@ const pendingOpens = new Map<string, Promise<BrowserHandle>>();
 
 function browserKey(kind: BrowserKind): string {
 	switch (kind.kind) {
-		case "headless":
-			return `headless:${kind.headless ? "1" : "0"}`;
+		case "headless": {
+			const exe = (kind as Extract<PuppeteerBrowserKind, { kind: "headless" }>).executablePath;
+			return `headless:${kind.headless ? "1" : "0"}:${exe ?? "default"}`;
+		}
 		case "spawned":
 			return `spawned:${kind.path}`;
 		case "connected":
@@ -92,6 +94,11 @@ function browserKey(kind: BrowserKind): string {
 		case "cmux":
 			return `cmux:${kind.socketPath}`;
 	}
+}
+
+/** Test seam: expose browserKey for daemon-key tests. */
+export function browserKeyForTest(kind: BrowserKind): string {
+	return browserKey(kind);
 }
 
 export interface AcquireBrowserOptions {
@@ -173,17 +180,13 @@ async function openBrowserHandle(kind: BrowserKind, opts: AcquireBrowserOptions)
 		};
 	}
 	if (kind.kind === "headless") {
-		// Every real omp process (session, subagent, worker — anything with a CLI
-		// worker host) MUST go through the project-shared broker-owned Chromium:
-		// per-process launches are what produced launch storms and orphaned
-		// process trees. The process-local launch survives only for hosts that
-		// cannot spawn the broker (bun test, SDK embedding without a CLI entry).
 		if (isCompiledBinary() || workerHostEntry() !== null) {
 			return await openSharedHeadlessHandle(kind, opts);
 		}
 		const { browser, userDataDir } = await launchHeadlessBrowser({
 			headless: kind.headless,
 			viewport: opts.viewport,
+			executablePath: kind.executablePath,
 		});
 		return {
 			key: browserKey(kind),
@@ -407,6 +410,7 @@ async function openSharedHeadlessHandle(
 			projectDir: opts.cwd,
 			headless: kind.headless,
 			viewport: vp,
+			executablePath: kind.executablePath,
 			signal: opts.signal,
 		});
 		if (!shared) {

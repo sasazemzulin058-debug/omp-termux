@@ -66,13 +66,29 @@ export class TempDir {
 	}
 }
 
-const kTempDir = os.tmpdir();
+export function getTempDir(): string {
+	if (process.env.TMPDIR) {
+		return process.env.TMPDIR;
+	}
+	if (process.env.PREFIX) {
+		const prefixTmp = path.join(process.env.PREFIX, "tmp");
+		if (fs.existsSync(prefixTmp)) {
+			return prefixTmp;
+		}
+	}
+	const termuxTmp = "/data/data/com.termux/files/usr/tmp";
+	if (fs.existsSync(termuxTmp)) {
+		return termuxTmp;
+	}
+	return os.tmpdir();
+}
 
 function normalizePrefix(prefix?: string): string {
+	const tempDir = getTempDir();
 	if (!prefix) {
-		return `${kTempDir}${path.sep}pi-temp-`;
+		return `${tempDir}${path.sep}pi-temp-`;
 	} else if (prefix.startsWith("@")) {
-		return path.join(kTempDir, prefix.slice(1));
+		return path.join(tempDir, prefix.slice(1));
 	}
 	return prefix;
 }
