@@ -1,0 +1,3287 @@
+diff --git a/docs/autolearn.md b/docs/autolearn.md
+new file mode 100644
+index 0000000..a7d9e54
+--- /dev/null
++++ b/docs/autolearn.md
+@@ -0,0 +1,62 @@
++# Custom Autolearn Documentation
++
++The custom autolearn system replaces experimental post-stop LLM capture with a deterministic, evidence-based sidecar verifier, SQLite candidate ledger, secret redaction, and promotion lifecycle into Mnemopi memory and managed skills.
++
++## Configuration (`autolearn.*`)
++
++Autolearn is configured via standard OMP settings (`~/.omp/agent/config.yml` or `settings.json`):
++
++```yaml
++# Learning architecture mode: off (default) | builtin | custom
++autolearn.mode: custom
++
++# Minimum verified passes required to promote a rule/fact into memory
++autolearn.minPassesRule: 2
++
++# Minimum verified passes required to generate a managed SKILL.md
++autolearn.minPassesSkill: 3
++
++# Default scope for created candidates: local | project | global
++autolearn.defaultScope: project
++
++# Mint managed skills under ~/.omp/agent/managed-skills
++autolearn.mintSkills: true
++
++# Custom regex patterns for secret / token redaction
++autolearn.redactPatterns:
++  - "secret-[a-zA-Z0-9]+"
++```
++
++### Precedence & Compatibility
++- `autolearn.mode: "custom"` activates the sidecar verifier and candidate ledger. It automatically disables the built-in `AutoLearnController` and overrides `mnemopi.autoRetain` to `false`.
++- `autolearn.mode: "builtin"` or legacy `autolearn.enabled: true` retains the experimental built-in LLM capture turn.
++- `autolearn.mode: "off"` (default) leaves autolearn inactive.
++
++## Architecture
++
++1. **Sidecar SQLite Database (`learn.db`)**: Mode 0600, WAL mode, foreign keys, and busy timeout.
++   - `candidates`: structured candidates with versions, pass counts, and projection pointers.
++   - `verdicts`: verifier results (pass/fail/inconclusive).
++   - `learn_events`: append-only audit trail.
++   - `tombstones`: deleted/rejected signatures to prevent resurrection.
++   - `episodes`: session metadata.
++
++2. **Verifier & Exact Correlation**:
++   - `isError=false` alone is treated as inconclusive.
++   - Promotion requires an exact pre-registered failure signature followed by a matching verifier pass.
++   - Command parameters, paths, and outputs are redacted at all persistence boundaries.
++
++3. **Mnemopi Integration (`ctx.memory.edit` / `ctx.memory.save`)**:
++   - Promoted candidates project into Mnemopi with source `omp-autolearn`.
++   - Candidate deletion executes `ctx.memory.edit("forget", projectedId)` and writes a tombstone.
++
++4. **Managed Skills**:
++   - Procedures reaching `minPassesSkill` write to `~/.omp/agent/managed-skills/<name>/SKILL.md` under safe size and naming constraints.
++
++## Slash Commands
++
++- `/learn status` — view candidate statistics and active mode.
++- `/learn view [id]` — list candidates or inspect candidate details.
++- `/learn approve <id>` — manually approve and promote a candidate.
++- `/learn delete <id>` — delete candidate, forget projected memory, and write tombstone.
++- `/learn config` — display active configuration values.
+diff --git a/packages/coding-agent/src/autolearn/candidate-ledger.ts b/packages/coding-agent/src/autolearn/candidate-ledger.ts
+new file mode 100644
+index 0000000..e007234
+--- /dev/null
++++ b/packages/coding-agent/src/autolearn/candidate-ledger.ts
+@@ -0,0 +1,432 @@
++import type { MemoryRuntimeContext } from "../memory-backend/types";
++import type { CandidateRow, LearnDatabase, TombstoneRow } from "./learn-db";
++import { redactEvidence } from "./redact";
++
++export interface CreateCandidateInput {
++	kind: "rule" | "fact" | "procedure";
++	scope?: "local" | "project" | "global";
++	title: string;
++	content: string;
++	signature: string;
++	evidence: string;
++	project?: string;
++}
++
++export interface RecordPassInput {
++	expectedVersion: number;
++	verifier: string;
++	evidence?: string;
++}
++
++export interface RecordPassResult {
++	success: boolean;
++	candidate?: CandidateRow;
++	error?: string;
++}
++
++export class CandidateLedger {
++	private readonly lockMap = new Map<string, Promise<unknown>>();
++
++	constructor(private readonly db: LearnDatabase) {
++		this.sweepStaleInFlightStates();
++	}
++
++	sweepStaleInFlightStates(): void {
++		try {
++			// Process crash recovery:
++			// Never blindly reset 'promoting' or 'deleting' to 'pending' because remote/backend state may be inconsistent.
++			// If promoting candidate already had projected memory id recorded, mark promoted. Otherwise set to 'needs_review'.
++			// If deleting candidate was in-flight, mark 'needs_review' so it requires user review/intervention rather than silent retry.
++			this.db.db
++				.query(
++					`UPDATE candidates
++					 SET status = CASE
++						WHEN status = 'promoting' AND projected_memory_id IS NOT NULL THEN 'promoted'
++						WHEN status = 'promoting' THEN 'needs_review'
++						WHEN status = 'deleting' AND projected_memory_id IS NOT NULL THEN 'needs_review'
++						WHEN status = 'deleting' THEN 'needs_review'
++						ELSE status
++					 END,
++					 updated_at = ?
++					 WHERE status IN ('promoting', 'deleting')`,
++				)
++				.run(Date.now());
++		} catch {
++			// ignore on schema initialization race
++		}
++	}
++	private async serialize<T>(key: string, op: () => Promise<T>): Promise<T> {
++		const prev = this.lockMap.get(key) ?? Promise.resolve();
++		let resolveNext!: () => void;
++		const next = new Promise<void>(res => {
++			resolveNext = res;
++		});
++		this.lockMap.set(key, next);
++		try {
++			await prev;
++			return await op();
++		} finally {
++			resolveNext();
++			if (this.lockMap.get(key) === next) {
++				this.lockMap.delete(key);
++			}
++		}
++	}
++
++	isTombstoned(signature: string, scope = "project", project?: string): boolean {
++		const row = this.db.db
++			.query("SELECT signature FROM tombstones WHERE signature = ? AND scope = ? AND project = ?")
++			.get(signature, scope, project ?? "") as TombstoneRow | null;
++		return row !== null;
++	}
++
++	createCandidate(input: CreateCandidateInput): string | null {
++		const scope = input.scope ?? "project";
++		if ((scope === "project" || scope === "local") && !input.project) {
++			throw new Error(`Cannot create ${scope}-scoped candidate without canonical project identity`);
++		}
++		const project = scope === "global" ? undefined : input.project;
++		if (this.isTombstoned(input.signature, scope, project)) {
++			return null;
++		}
++		// Check if an active candidate with this (signature, scope, project) already exists
++		const existing = project
++			? (this.db.db
++					.query(
++						"SELECT id FROM candidates WHERE signature = ? AND scope = ? AND project = ? AND status != 'deleted'",
++					)
++					.get(input.signature, scope, project) as { id: string } | null)
++			: (this.db.db
++					.query(
++						"SELECT id FROM candidates WHERE signature = ? AND scope = ? AND project IS NULL AND status != 'deleted'",
++					)
++					.get(input.signature, scope) as { id: string } | null);
++
++		if (existing) {
++			return existing.id;
++		}
++
++		const id = `cand_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
++		const now = Date.now();
++		const sanitizedTitle = redactEvidence(input.title).slice(0, 200);
++		const sanitizedContent = redactEvidence(input.content).slice(0, 10000);
++		const sanitizedSig = redactEvidence(input.signature).slice(0, 300);
++		const sanitizedEvidence = redactEvidence(input.evidence).slice(0, 10000);
++
++		try {
++			this.db.db
++				.query(
++					`INSERT INTO candidates (id, kind, scope, project, title, content, signature, evidence, status, passes, version, created_at, updated_at)
++					 VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending', 0, 1, ?, ?)`,
++				)
++				.run(
++					id,
++					input.kind,
++					scope,
++					project ?? null,
++					sanitizedTitle,
++					sanitizedContent,
++					sanitizedSig,
++					sanitizedEvidence,
++					now,
++					now,
++				);
++		} catch (err) {
++			// Catch SQLite unique constraint violation in case of race
++			const existingAfterRace = project
++				? (this.db.db
++						.query(
++							"SELECT id FROM candidates WHERE signature = ? AND scope = ? AND project = ? AND status != 'deleted'",
++						)
++						.get(input.signature, scope, project) as { id: string } | null)
++				: (this.db.db
++						.query(
++							"SELECT id FROM candidates WHERE signature = ? AND scope = ? AND project IS NULL AND status != 'deleted'",
++						)
++						.get(input.signature, scope) as { id: string } | null);
++			if (existingAfterRace) return existingAfterRace.id;
++			throw err;
++		}
++
++		this.recordEvent(id, "candidate_created", JSON.stringify({ title: sanitizedTitle, signature: sanitizedSig, scope, project }));
++		return id;
++	}
++	getCandidate(
++		id: string,
++		auth?: { currentProject?: string; allowGlobal?: boolean },
++	): (CandidateRow & { projectedMemoryId?: string }) | null {
++		const row = this.db.db.query("SELECT * FROM candidates WHERE id = ?").get(id) as CandidateRow | null;
++		if (!row) return null;
++		if (auth?.currentProject !== undefined) {
++			// Check authorization:
++			// - Project scope: candidate.project MUST match currentProject
++			// - Local scope: candidate.project MUST match currentProject
++			// - Global scope: only permitted if allowGlobal is true or explicitly permitted
++			if (row.scope === "project" || row.scope === "local") {
++				if (row.project !== auth.currentProject) {
++					return null;
++				}
++			} else if (row.scope === "global" && auth.allowGlobal === false) {
++				return null;
++			}
++		}
++		return {
++			...row,
++			projectedMemoryId: row.projected_memory_id ?? undefined,
++		};
++	}
++
++	listCandidates(
++		status?: "pending" | "promoted" | "rejected" | "deleted" | "needs_review",
++		auth?: { currentProject?: string; includeGlobal?: boolean },
++	): Array<CandidateRow & { projectedMemoryId?: string }> {
++		let queryStr = "SELECT * FROM candidates";
++		const conditions: string[] = [];
++		const params: (string | number)[] = [];
++
++		if (status) {
++			conditions.push("status = ?");
++			params.push(status);
++		}
++
++		if (auth?.currentProject !== undefined) {
++			if (auth.includeGlobal !== false) {
++				conditions.push("((scope IN ('project', 'local') AND project = ?) OR scope = 'global')");
++				params.push(auth.currentProject);
++			} else {
++				conditions.push("scope IN ('project', 'local') AND project = ?");
++				params.push(auth.currentProject);
++			}
++		}
++
++		if (conditions.length > 0) {
++			queryStr += " WHERE " + conditions.join(" AND ");
++		}
++
++		const rows = (params.length > 0
++			? this.db.db.query(queryStr).all(...params)
++			: this.db.db.query(queryStr).all()) as CandidateRow[];
++		return rows.map(row => ({
++			...row,
++			projectedMemoryId: row.projected_memory_id ?? undefined,
++		}));
++	}
++
++	recordPass(id: string, input: RecordPassInput): RecordPassResult {
++		const candidate = this.getCandidate(id);
++		if (!candidate) {
++			return { success: false, error: "candidate_not_found" };
++		}
++		if (candidate.status === "deleted") {
++			return { success: false, error: "candidate_deleted" };
++		}
++		if (candidate.version !== input.expectedVersion) {
++			return {
++				success: false,
++				error: `version_conflict: expected ${input.expectedVersion}, found ${candidate.version}`,
++			};
++		}
++
++		const now = Date.now();
++		const newPasses = candidate.passes + 1;
++		const newVersion = candidate.version + 1;
++
++		const updateRes = this.db.db
++			.query(
++				`UPDATE candidates SET passes = ?, version = ?, updated_at = ? WHERE id = ? AND version = ? AND status != 'deleted'`,
++			)
++			.run(newPasses, newVersion, now, id, candidate.version);
++
++		if (updateRes.changes === 0) {
++			return {
++				success: false,
++				error: "concurrent_modification",
++			};
++		}
++
++		// Record verdict
++		const verdictId = `vrd_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
++		const sanitizedEvidence = redactEvidence(input.evidence ?? "").slice(0, 10000);
++		const sanitizedVerifier = redactEvidence(input.verifier).slice(0, 200);
++		this.db.db
++			.query(
++				`INSERT INTO verdicts (id, candidate_id, verifier, verdict, evidence, timestamp)
++				 VALUES (?, ?, ?, 'pass', ?, ?)`,
++			)
++			.run(verdictId, id, sanitizedVerifier, sanitizedEvidence, now);
++
++		this.recordEvent(id, "pass_recorded", JSON.stringify({ passes: newPasses, verifier: sanitizedVerifier }));
++
++		const updated = this.getCandidate(id)!;
++		return { success: true, candidate: updated };
++	}
++	isEligibleForPromotion(candidate: CandidateRow, minPasses = 2): boolean {
++		// Only rules and facts promote directly into memory projection; procedures remain pending for skill threshold
++		return candidate.kind !== "procedure" && candidate.status === "pending" && candidate.passes >= minPasses;
++	}
++	async promoteCandidate(
++		id: string,
++		options: { memory?: MemoryRuntimeContext; minPasses?: number; currentProject?: string; allowGlobal?: boolean },
++	): Promise<{ success: boolean; memoryId?: string; error?: string }> {
++		return await this.serialize(id, async () => {
++			const candidate = this.getCandidate(id, {
++				currentProject: options.currentProject,
++				allowGlobal: options.allowGlobal ?? true,
++			});
++			if (!candidate) {
++				// Check if candidate exists under another project to return distinct unauthorized error
++				const rawCandidate = this.getCandidate(id);
++				if (rawCandidate) {
++					return { success: false, error: "unauthorized_cross_project_candidate" };
++				}
++				return { success: false, error: "candidate_not_found" };
++			}
++			if (!this.isEligibleForPromotion(candidate, options.minPasses ?? 2)) {
++				return { success: false, error: "not_eligible_for_promotion" };
++			}
++
++			// Promotion requires an active memory backend context
++			if (!options.memory) {
++				return { success: false, error: "memory_backend_required_for_promotion" };
++			}
++
++			// Atomic claim: set status to promoting
++			const claimTime = Date.now();
++			const claimRes = this.db.db
++				.query("UPDATE candidates SET status = 'promoting', updated_at = ? WHERE id = ? AND status = 'pending'")
++				.run(claimTime, id);
++
++			if (claimRes.changes === 0) {
++				return { success: false, error: "concurrent_promotion" };
++			}
++
++			// Always route with candidate's stored scope and project
++			const saveRes = await options.memory.save({
++				content: candidate.content,
++				context: candidate.evidence,
++				source: "omp-autolearn",
++				importance: 0.8,
++				scope: candidate.scope,
++				project: candidate.project,
++			});
++
++			if (!saveRes.stored || saveRes.stored <= 0 || !saveRes.ids || saveRes.ids.length === 0) {
++				// Rollback claim on failure
++				this.db.db
++					.query("UPDATE candidates SET status = 'pending', updated_at = ? WHERE id = ? AND status = 'promoting'")
++					.run(Date.now(), id);
++				this.recordEvent(id, "promotion_failed", JSON.stringify({ error: saveRes.message ?? "memory_save_failed" }));
++				return { success: false, error: saveRes.message ?? "memory_save_failed" };
++			}
++			const projectedMemoryId = saveRes.ids[0];
++
++			const now = Date.now();
++			const promoteRes = this.db.db
++				.query(
++					`UPDATE candidates SET status = 'promoted', projected_memory_id = ?, updated_at = ?, version = version + 1 WHERE id = ? AND status = 'promoting'`,
++				)
++				.run(projectedMemoryId, now, id);
++
++			if (promoteRes.changes === 0) {
++				// Promotion state raced/modified while memory save was in flight; attempt clean forget to avoid orphan
++				if (options.memory.edit) {
++					try {
++						await options.memory.edit("forget", projectedMemoryId, {
++							scope: candidate.scope,
++							project: candidate.project,
++						});
++					} catch {}
++				}
++				return { success: false, error: "concurrent_modification" };
++			}
++
++			this.recordEvent(id, "promoted", JSON.stringify({ projectedMemoryId }));
++			return { success: true, memoryId: projectedMemoryId };
++		});
++	}
++	async deleteCandidate(
++		id: string,
++		options?: { memory?: MemoryRuntimeContext; reason?: string; currentProject?: string; allowGlobal?: boolean },
++	): Promise<{ success: boolean; error?: string }> {
++		return await this.serialize(id, async () => {
++			const candidate = this.getCandidate(id, {
++				currentProject: options?.currentProject,
++				allowGlobal: options?.allowGlobal ?? true,
++			});
++			if (!candidate) {
++				const rawCandidate = this.getCandidate(id);
++				if (rawCandidate) {
++					return { success: false, error: "unauthorized_cross_project_candidate" };
++				}
++				return { success: false, error: "candidate_not_found" };
++			}
++			if (candidate.status === "deleted") return { success: false, error: "candidate_already_deleted" };
++
++			// Claim deletion state atomically
++			const claimTime = Date.now();
++			const claimRes = this.db.db
++				.query("UPDATE candidates SET status = 'deleting', updated_at = ? WHERE id = ? AND status != 'deleted' AND status != 'deleting'")
++				.run(claimTime, id);
++			if (claimRes.changes === 0 && candidate.status !== "deleting") {
++				return { success: false, error: "concurrent_deletion" };
++			}
++
++			// 1. Delete from memory projection if promoted
++			if (candidate.projected_memory_id) {
++				if (!options?.memory || !options.memory.edit) {
++					// Rollback claim on missing backend
++					this.db.db
++						.query("UPDATE candidates SET status = ?, updated_at = ? WHERE id = ? AND status = 'deleting'")
++						.run(candidate.status === "deleting" ? "needs_review" : candidate.status, Date.now(), id);
++					return { success: false, error: "memory_backend_unavailable_cannot_confirm_delete" };
++				}
++				const editRes = await options.memory.edit("forget", candidate.projected_memory_id, {
++					scope: candidate.scope,
++					project: candidate.project,
++				});
++				if (editRes.status !== "deleted") {
++					this.recordEvent(id, "delete_failed", JSON.stringify({ error: "memory_edit_unconfirmed", status: editRes.status }));
++					this.db.db
++						.query("UPDATE candidates SET status = 'needs_review', updated_at = ? WHERE id = ? AND status = 'deleting'")
++						.run(Date.now(), id);
++					return { success: false, error: `memory_edit_unconfirmed: ${editRes.status}` };
++				}
++			}
++
++			// 2. Mark candidate deleted and record scoped tombstone atomically in a transaction
++			const now = Date.now();
++			const reason = options?.reason ?? "user_deleted";
++			let deleteSuccess = false;
++			const deleteTx = this.db.db.transaction(() => {
++				const updateRes = this.db.db
++					.query("UPDATE candidates SET status = 'deleted', updated_at = ? WHERE id = ? AND status = 'deleting'")
++					.run(now, id);
++				if (updateRes.changes > 0) {
++					deleteSuccess = true;
++					this.db.db
++						.query(
++							"INSERT OR REPLACE INTO tombstones (signature, scope, project, reason, timestamp) VALUES (?, ?, ?, ?, ?)",
++						)
++						.run(candidate.signature, candidate.scope, candidate.project ?? "", reason, now);
++				}
++			});
++			deleteTx();
++
++			if (!deleteSuccess) {
++				return { success: false, error: "candidate_already_deleted_or_raced" };
++			}
++
++			this.recordEvent(id, "deleted", JSON.stringify({ signature: candidate.signature, reason }));
++			return { success: true };
++		});
++	}
++
++	private recordEvent(candidateId: string, eventType: string, payload: string): void {
++		const eventId = `evt_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
++		this.db.db
++			.query(
++				"INSERT INTO learn_events (id, candidate_id, event_type, payload, timestamp) VALUES (?, ?, ?, ?, ?)",
++			)
++			.run(eventId, candidateId, eventType, payload, Date.now());
++	}
++}
+diff --git a/packages/coding-agent/src/autolearn/config.ts b/packages/coding-agent/src/autolearn/config.ts
+new file mode 100644
+index 0000000..da2b76a
+--- /dev/null
++++ b/packages/coding-agent/src/autolearn/config.ts
+@@ -0,0 +1,82 @@
++import * as fs from "node:fs";
++import * as path from "node:path";
++import { YAML } from "bun";
++import { getAgentDir } from "@oh-my-pi/pi-utils";
++import type { Settings } from "../config/settings";
++
++export interface LearnConfig {
++	enabled: boolean;
++	mode: "off" | "builtin" | "custom";
++	minPassesRule: number;
++	minPassesSkill: number;
++	defaultScope: "local" | "project" | "global";
++	mintSkills: boolean;
++	redactPatterns: string[];
++	dbPath?: string;
++}
++
++export const DEFAULT_LEARN_CONFIG: LearnConfig = {
++	enabled: false,
++	mode: "off",
++	minPassesRule: 2,
++	minPassesSkill: 3,
++	defaultScope: "project",
++	mintSkills: true,
++	redactPatterns: [],
++};
++
++export function getDefaultLearnConfigPath(agentDir: string = getAgentDir()): string {
++	return path.join(agentDir, "learn.yml");
++}
++
++export function resolveAutolearnMode(settings?: Settings): "off" | "builtin" | "custom" {
++	if (!settings) return "off";
++	if (settings.isConfigured("autolearn.mode")) {
++		const rawMode = settings.get("autolearn.mode");
++		return rawMode === "builtin" || rawMode === "custom" || rawMode === "off" ? rawMode : "off";
++	}
++	return settings.get("autolearn.enabled") ? "builtin" : "off";
++}
++
++export function loadLearnConfig(settings?: Settings, configPath?: string): LearnConfig {
++	// First check settings if provided
++	if (settings) {
++		const mode = resolveAutolearnMode(settings);
++		return {
++			enabled: mode === "custom",
++			mode,
++			minPassesRule: settings.get("autolearn.minPassesRule") ?? DEFAULT_LEARN_CONFIG.minPassesRule,
++			minPassesSkill: settings.get("autolearn.minPassesSkill") ?? DEFAULT_LEARN_CONFIG.minPassesSkill,
++			defaultScope: (settings.get("autolearn.defaultScope") as "local" | "project" | "global") ?? DEFAULT_LEARN_CONFIG.defaultScope,
++			mintSkills: settings.get("autolearn.mintSkills") ?? DEFAULT_LEARN_CONFIG.mintSkills,
++			redactPatterns: settings.get("autolearn.redactPatterns") ?? DEFAULT_LEARN_CONFIG.redactPatterns,
++		};
++	}
++
++	// Legacy migration fallback for standalone learn.yml
++	const resolvedPath = configPath ?? getDefaultLearnConfigPath();
++	if (!fs.existsSync(resolvedPath)) {
++		return { ...DEFAULT_LEARN_CONFIG };
++	}
++
++	try {
++		const raw = fs.readFileSync(resolvedPath, "utf-8");
++		const parsed = YAML.parse(raw) as Partial<LearnConfig> | null;
++		if (!parsed || typeof parsed !== "object") {
++			return { ...DEFAULT_LEARN_CONFIG };
++		}
++		const enabled = Boolean(parsed.enabled);
++		return {
++			enabled,
++			mode: enabled ? "custom" : "off",
++			minPassesRule: parsed.minPassesRule ?? DEFAULT_LEARN_CONFIG.minPassesRule,
++			minPassesSkill: parsed.minPassesSkill ?? DEFAULT_LEARN_CONFIG.minPassesSkill,
++			defaultScope: parsed.defaultScope ?? DEFAULT_LEARN_CONFIG.defaultScope,
++			mintSkills: parsed.mintSkills ?? DEFAULT_LEARN_CONFIG.mintSkills,
++			redactPatterns: Array.isArray(parsed.redactPatterns) ? parsed.redactPatterns : [],
++			dbPath: typeof parsed.dbPath === "string" ? parsed.dbPath : undefined,
++		};
++	} catch {
++		return { ...DEFAULT_LEARN_CONFIG };
++	}
++}
+diff --git a/packages/coding-agent/src/autolearn/controller.ts b/packages/coding-agent/src/autolearn/controller.ts
+index b874222..4017ad0 100644
+--- a/packages/coding-agent/src/autolearn/controller.ts
++++ b/packages/coding-agent/src/autolearn/controller.ts
+@@ -16,6 +16,7 @@ import autolearnGuidance from "../prompts/system/autolearn-guidance.md" with { t
+ import autolearnGuidanceLearn from "../prompts/system/autolearn-guidance-learn.md" with { type: "text" };
+ import autolearnNudgeAutoContinue from "../prompts/system/autolearn-nudge-autocontinue.md" with { type: "text" };
+ import type { AgentSession, AgentSessionEvent } from "../session/agent-session";
++import { resolveAutolearnMode } from "./config";
+ 
+ const AUTOLEARN_NUDGE_AUTOCONTINUE = autolearnNudgeAutoContinue.trim();
+ const DEFAULT_MIN_TOOL_CALLS = 5;
+@@ -31,8 +32,12 @@ const DEFAULT_MIN_TOOL_CALLS = 5;
+  * session never built. The `learn` addendum is included only when the `learn`
+  * tool is present (it requires a memory backend).
+  */
+-export function buildAutoLearnInstructions(available: { manageSkill: boolean; learn: boolean }): string | null {
+-	if (!available.manageSkill) return null;
++export function buildAutoLearnInstructions(
++	available: { manageSkill: boolean; learn: boolean },
++	settings?: Settings,
++): string | null {
++	const mode = settings ? resolveAutolearnMode(settings) : "builtin";
++	if (mode !== "builtin" || !available.manageSkill) return null;
+ 	const parts = [autolearnGuidance.trim()];
+ 	if (available.learn) parts.push(autolearnGuidanceLearn.trim());
+ 	return parts.join("\n\n");
+@@ -109,8 +114,8 @@ export class AutoLearnController {
+ 			}
+ 		}
+ 		// Honor a live opt-out: the subscription outlives the setting, so re-check
+-		// the current flag rather than trusting install-time state.
+-		if (!this.#settings.get("autolearn.enabled")) return;
++		// the current mode rather than trusting install-time state.
++		if (resolveAutolearnMode(this.#settings) !== "builtin") return;
+ 		const minToolCalls = this.#settings.get("autolearn.minToolCalls") ?? DEFAULT_MIN_TOOL_CALLS;
+ 		if (toolCalls < minToolCalls) return;
+ 		// Never interrupt plan-mode review.
+diff --git a/packages/coding-agent/src/autolearn/index.ts b/packages/coding-agent/src/autolearn/index.ts
+new file mode 100644
+index 0000000..40a4514
+--- /dev/null
++++ b/packages/coding-agent/src/autolearn/index.ts
+@@ -0,0 +1,232 @@
++import * as fs from "node:fs";
++import * as path from "node:path";
++import { getAgentDir } from "@oh-my-pi/pi-utils";
++import type { ExtensionContext, ToolExecutionEndEvent, ToolExecutionStartEvent } from "../extensibility/extensions/types";
++import { CandidateLedger } from "./candidate-ledger";
++import { loadLearnConfig, type LearnConfig } from "./config";
++import { LearnDatabase } from "./learn-db";
++import { redactEvidence } from "./redact";
++import { ManagedSkillWriter } from "./skill-writer";
++import { VerifierEngine } from "./verifier";
++import { canonicalProjectIdentity } from "../mnemopi/config";
++
++export class CustomAutoLearnService {
++	readonly db: LearnDatabase;
++	readonly ledger: CandidateLedger;
++	readonly verifier: VerifierEngine;
++	readonly skillWriter: ManagedSkillWriter;
++	readonly config: LearnConfig;
++
++	constructor(agentDir: string = getAgentDir(), configOverride?: LearnConfig) {
++		this.config = configOverride ?? loadLearnConfig();
++		const dbPath = this.config.dbPath ?? path.join(agentDir, "learn.db");
++		this.db = new LearnDatabase(dbPath);
++		this.ledger = new CandidateLedger(this.db);
++		this.verifier = new VerifierEngine();
++		this.skillWriter = new ManagedSkillWriter({
++			managedSkillsDir: path.join(agentDir, "managed-skills"),
++		});
++	}
++
++	async dispose(): Promise<void> {
++		await this.db.closeAsync();
++	}
++}
++
++/**
++ * Standard OMP extension entry point for Custom AutoLearn.
++ */
++export default function customAutolearnExtension(pi: {
++	on: (event: string, handler: (event: unknown, ctx: ExtensionContext) => void | Promise<void>) => void;
++	registerCommand: (
++		name: string,
++		options: {
++			description?: string;
++			handler: (args: string, ctx: ExtensionContext) => void | Promise<void>;
++		},
++	) => void;
++}) {
++	let service: CustomAutoLearnService | null = null;
++
++	const ensureService = (ctx: ExtensionContext): CustomAutoLearnService | null => {
++		const cfg = loadLearnConfig(ctx.settings);
++		if (!cfg.enabled) {
++			if (service) {
++				void service.dispose();
++				service = null;
++			}
++			return null;
++		}
++		if (!service) {
++			service = new CustomAutoLearnService(undefined, cfg);
++		}
++		return service;
++	};
++
++	pi.on("session_start", (_event, ctx) => {
++		ensureService(ctx);
++	});
++
++	pi.on("tool_execution_start", (event: unknown, ctx: ExtensionContext) => {
++		const activeService = ensureService(ctx);
++		if (!activeService) return;
++		if (event && typeof event === "object" && "type" in event && event.type === "tool_execution_start") {
++			activeService.verifier.recordStart(event as unknown as ToolExecutionStartEvent);
++		}
++	});
++
++	pi.on("tool_execution_end", (event: unknown, ctx: ExtensionContext) => {
++		const activeService = ensureService(ctx);
++		if (!activeService) return;
++		if (!event || typeof event !== "object" || !("type" in event) || event.type !== "tool_execution_end") {
++			return;
++		}
++
++		const endEvent = event as unknown as ToolExecutionEndEvent;
++		const correlation = activeService.verifier.correlateEnd(endEvent, activeService.config.redactPatterns);
++		if (correlation.verdict !== "pass" || !correlation.matchedSignature) {
++			return;
++		}
++		const evidence = redactEvidence(correlation.evidence ?? "Automated verifier pass", activeService.config.redactPatterns);
++		const verifierName = correlation.verifierName ?? "test_runner";
++		const title = redactEvidence(`Verified fix via ${verifierName}`, activeService.config.redactPatterns);
++		const content = redactEvidence(`Resolution recorded via verifier ${verifierName}`, activeService.config.redactPatterns);
++
++		// Verifier resolutions represent verified candidate metadata;
++		// Automatic promotion to durable memory and automatic skill minting are disabled to prevent prompt injection and untrusted promotion.
++		// Explicit user review and `/learn approve` command is required for promotion.
++		const kind: "rule" | "fact" | "procedure" = "rule";
++		let project: string | undefined;
++		if (ctx.cwd) {
++			project = canonicalProjectIdentity(ctx.cwd);
++		}
++		const candidateId = activeService.ledger.createCandidate({
++			kind,
++			scope: activeService.config.defaultScope,
++			project,
++			title,
++			content,
++			signature: correlation.matchedSignature,
++			evidence,
++		});
++		if (candidateId) {
++			const candidate = activeService.ledger.getCandidate(candidateId);
++			if (candidate && candidate.status === "pending") {
++				activeService.ledger.recordPass(candidateId, {
++					expectedVersion: candidate.version,
++					verifier: `${endEvent.toolName}:${correlation.verifierName ?? "unknown"}`,
++					evidence,
++				});
++			}
++		}
++	});
++
++	pi.on("session_shutdown", async () => {
++		if (service) {
++			const cur = service;
++			service = null;
++			await cur.dispose();
++		}
++	});
++
++	// Register /learn command
++	// Register /learn command with project scope authorization
++	pi.registerCommand("learn", {
++		description: "Inspect and manage custom autolearn candidates and configuration",
++		handler: async (args: string, ctx: ExtensionContext) => {
++			const activeService = ensureService(ctx);
++			if (!activeService) {
++				ctx.ui.notify?.("Autolearn is not active in custom mode.", "error");
++				return;
++			}
++			const currentProject = ctx.cwd ? canonicalProjectIdentity(ctx.cwd) : undefined;
++			const auth = { currentProject, includeGlobal: true, allowGlobal: true };
++			const parts = args.trim().split(/\s+/).filter(Boolean);
++			const sub = parts[0] || "status";
++			const targetId = parts[1];
++
++			switch (sub) {
++				case "status": {
++					const candidates = activeService.ledger.listCandidates(undefined, auth);
++					const pending = candidates.filter(c => c.status === "pending").length;
++					const promoted = candidates.filter(c => c.status === "promoted").length;
++					const deleted = candidates.filter(c => c.status === "deleted").length;
++					ctx.ui.notify?.(
++						`Autolearn (${activeService.config.mode}): ${pending} pending, ${promoted} promoted, ${deleted} deleted. Config: scope=${activeService.config.defaultScope}, minPassesRule=${activeService.config.minPassesRule}`,
++						"info",
++					);
++					break;
++				}
++				case "view": {
++					if (!targetId) {
++						const list = activeService.ledger
++							.listCandidates(undefined, auth)
++							.map(c => `[${c.id}] (${c.status}) passes=${c.passes} - ${c.title}`)
++							.join("\n");
++						ctx.ui.notify?.(list || "No candidates found.", "info");
++					} else {
++						const c = activeService.ledger.getCandidate(targetId, auth);
++						if (!c) {
++							ctx.ui.notify?.(`Candidate ${targetId} not found.`, "error");
++						} else {
++							ctx.ui.notify?.(
++								`ID: ${c.id}\nStatus: ${c.status}\nPasses: ${c.passes} (v${c.version})\nContent:\n${c.content}\nEvidence:\n${c.evidence}`,
++								"info",
++							);
++						}
++					}
++					break;
++				}
++				case "approve": {
++					if (!targetId) {
++						ctx.ui.notify?.("Usage: /learn approve <candidate-id>", "error");
++						return;
++					}
++					const res = await activeService.ledger.promoteCandidate(targetId, {
++						memory: ctx.memory,
++						minPasses: 0,
++						currentProject,
++						allowGlobal: true,
++					});
++					if (res.success) {
++						ctx.ui.notify?.(`Candidate ${targetId} approved and promoted.`, "info");
++					} else {
++						ctx.ui.notify?.(`Approval failed: ${res.error}`, "error");
++					}
++					break;
++				}
++				case "delete": {
++					if (!targetId) {
++						ctx.ui.notify?.("Usage: /learn delete <candidate-id>", "error");
++						return;
++					}
++					const res = await activeService.ledger.deleteCandidate(targetId, {
++						memory: ctx.memory,
++						reason: "user_delete_command",
++						currentProject,
++						allowGlobal: true,
++					});
++					if (res.success) {
++						ctx.ui.notify?.(`Candidate ${targetId} deleted and tombstoned.`, "info");
++					} else {
++						ctx.ui.notify?.(`Delete failed: ${res.error}`, "error");
++					}
++					break;
++				}
++				case "config": {
++					ctx.ui.notify?.(
++						`Config:\nMode: ${activeService.config.mode}\nDefault Scope: ${activeService.config.defaultScope}\nMin Passes (Rule): ${activeService.config.minPassesRule}\nMin Passes (Skill): ${activeService.config.minPassesSkill}\nMint Skills: ${activeService.config.mintSkills}`,
++					);
++					break;
++				}
++				default: {
++					ctx.ui.notify?.(
++						"Usage: /learn <status | view [id] | approve <id> | delete <id> | config>",
++						"info",
++					);
++					break;
++				}
++			}
++		},
++	});
++}
+diff --git a/packages/coding-agent/src/autolearn/learn-db.ts b/packages/coding-agent/src/autolearn/learn-db.ts
+new file mode 100644
+index 0000000..0efd5a6
+--- /dev/null
++++ b/packages/coding-agent/src/autolearn/learn-db.ts
+@@ -0,0 +1,191 @@
++import { Database } from "bun:sqlite";
++import * as fs from "node:fs";
++import * as path from "node:path";
++
++export interface EpisodeRow {
++	id: string;
++	session_id: string;
++	cwd: string;
++	timestamp: number;
++	metadata?: string;
++}
++
++export interface CandidateRow {
++	id: string;
++	kind: "rule" | "fact" | "procedure";
++	scope: "local" | "project" | "global";
++	project?: string;
++	title: string;
++	content: string;
++	signature: string;
++	evidence: string;
++	status: "pending" | "promoting" | "promoted" | "rejected" | "deleted" | "needs_review";
++	passes: number;
++	version: number;
++	projected_memory_id?: string;
++	created_at: number;
++	updated_at: number;
++}
++
++export interface VerdictRow {
++	id: string;
++	candidate_id: string;
++	verifier: string;
++	verdict: "pass" | "fail" | "inconclusive";
++	evidence?: string;
++	timestamp: number;
++}
++
++export interface LearnEventRow {
++	id: string;
++	candidate_id: string;
++	event_type: string;
++	payload: string;
++	timestamp: number;
++}
++
++export interface TombstoneRow {
++	signature: string;
++	scope: string;
++	project?: string;
++	reason: string;
++	timestamp: number;
++}
++
++export class LearnDatabase {
++	readonly db: Database;
++	readonly dbPath: string;
++	private readonly activeJobs = new Set<Promise<unknown>>();
++
++	constructor(dbPath: string) {
++		this.dbPath = dbPath;
++		const dir = path.dirname(dbPath);
++		if (!fs.existsSync(dir)) {
++			fs.mkdirSync(dir, { recursive: true });
++		}
++		this.db = new Database(dbPath, { create: true });
++
++		// Secure permissions on Unix (0600)
++		if (process.platform !== "win32" && fs.existsSync(dbPath)) {
++			try {
++				fs.chmodSync(dbPath, 0o600);
++			} catch {
++				// ignore if chmod fails on special fs
++			}
++		}
++
++		this.initPragmas();
++		this.initSchema();
++	}
++
++	private initPragmas(): void {
++		this.db.run("PRAGMA journal_mode = WAL;");
++		this.db.run("PRAGMA busy_timeout = 5000;");
++		this.db.run("PRAGMA foreign_keys = ON;");
++	}
++
++	private initSchema(): void {
++		this.db.run(`
++			CREATE TABLE IF NOT EXISTS episodes (
++				id TEXT PRIMARY KEY,
++				session_id TEXT NOT NULL,
++				cwd TEXT NOT NULL,
++				timestamp INTEGER NOT NULL,
++				metadata TEXT
++			);
++		`);
++
++		this.db.run(`
++			CREATE TABLE IF NOT EXISTS candidates (
++				id TEXT PRIMARY KEY,
++				kind TEXT NOT NULL,
++				scope TEXT NOT NULL,
++				project TEXT,
++				title TEXT NOT NULL,
++				content TEXT NOT NULL,
++				signature TEXT NOT NULL,
++				evidence TEXT NOT NULL,
++				status TEXT NOT NULL,
++				passes INTEGER NOT NULL DEFAULT 0,
++				version INTEGER NOT NULL DEFAULT 1,
++				projected_memory_id TEXT,
++				created_at INTEGER NOT NULL,
++				updated_at INTEGER NOT NULL
++			);
++		`);
++
++		this.db.run(`
++			CREATE UNIQUE INDEX IF NOT EXISTS uq_candidates_active_sig ON candidates (
++				signature,
++				scope,
++				COALESCE(project, '')
++			) WHERE status != 'deleted';
++		`);
++
++		this.db.run(`
++			CREATE INDEX IF NOT EXISTS idx_candidates_sig_scope_proj ON candidates (signature, scope, project, status);
++		`);
++
++		this.db.run(`
++			CREATE INDEX IF NOT EXISTS idx_candidates_status ON candidates (status);
++		`);
++
++		this.db.run(`
++			CREATE TABLE IF NOT EXISTS verdicts (
++				id TEXT PRIMARY KEY,
++				candidate_id TEXT NOT NULL,
++				verifier TEXT NOT NULL,
++				verdict TEXT NOT NULL,
++				evidence TEXT,
++				timestamp INTEGER NOT NULL,
++				FOREIGN KEY(candidate_id) REFERENCES candidates(id) ON DELETE CASCADE
++			);
++		`);
++
++		this.db.run(`
++			CREATE TABLE IF NOT EXISTS learn_events (
++				id TEXT PRIMARY KEY,
++				candidate_id TEXT NOT NULL,
++				event_type TEXT NOT NULL,
++				payload TEXT NOT NULL,
++				timestamp INTEGER NOT NULL
++			);
++		`);
++
++		this.db.run(`
++			CREATE TABLE IF NOT EXISTS tombstones (
++				signature TEXT NOT NULL,
++				scope TEXT NOT NULL,
++				project TEXT NOT NULL DEFAULT '',
++				reason TEXT NOT NULL,
++				timestamp INTEGER NOT NULL,
++				PRIMARY KEY (signature, scope, project)
++			);
++		`);
++	}
++
++	listTables(): string[] {
++		const rows = this.db.query("SELECT name FROM sqlite_master WHERE type='table'").all() as Array<{ name: string }>;
++		return rows.map(r => r.name);
++	}
++	trackJob<T>(promise: Promise<T>): Promise<T> {
++		this.activeJobs.add(promise);
++		void promise.finally(() => this.activeJobs.delete(promise));
++		return promise;
++	}
++
++	async drainJobs(): Promise<void> {
++		if (this.activeJobs.size > 0) {
++			await Promise.allSettled(Array.from(this.activeJobs));
++		}
++	}
++
++	close(): void {
++		this.db.close();
++	}
++
++	async closeAsync(): Promise<void> {
++		await this.drainJobs();
++		this.db.close();
++	}
++}
+diff --git a/packages/coding-agent/src/autolearn/managed-skills.ts b/packages/coding-agent/src/autolearn/managed-skills.ts
+index fa190a3..8fbad49 100644
+--- a/packages/coding-agent/src/autolearn/managed-skills.ts
++++ b/packages/coding-agent/src/autolearn/managed-skills.ts
+@@ -68,6 +68,16 @@ export function sanitizeManagedDescription(raw: string): string {
+ 		.trim();
+ }
+ 
++/**
++ * Sanitize a managed SKILL.md body. Strips prompt injection envelopes, system-directive tags,
++ * and limits maximum length to keep generated skills bounded and safe.
++ */
++export function sanitizeManagedBody(raw: string): string {
++	return raw
++		.replace(/<\/?(?:system-directive|skills|system-reminder|system-prompt)[^>]*>/gi, "")
++		.replace(/[\p{Cc}\p{Cf}]+/gu, "\n")
++		.trim();
++}
+ /**
+  * Serialize the minimal `name`/`description` frontmatter block via the repo's
+  * YAML helper (round-trips through `parseFrontmatter`).
+@@ -86,6 +96,7 @@ export interface WriteManagedSkillInput {
+ 	name: string;
+ 	description: string;
+ 	body: string;
++	managedSkillsDir?: string;
+ }
+ 
+ /**
+@@ -114,8 +125,9 @@ function serializeSkillMutation<T>(name: string, op: () => Promise<T>): Promise<
+  * valid name write/delete outside the isolated directory (e.g. onto authored
+  * skills). Checked before composing any child path.
+  */
+-async function assertManagedRootSafe(): Promise<void> {
+-	const rootStat = await fs.lstat(getManagedSkillsDir()).catch(err => {
++async function assertManagedRootSafe(managedSkillsDir?: string): Promise<void> {
++	const root = managedSkillsDir ?? getManagedSkillsDir();
++	const rootStat = await fs.lstat(root).catch(err => {
+ 		if (isEnoent(err)) return null;
+ 		throw err;
+ 	});
+@@ -152,7 +164,7 @@ async function openManagedSkillFileForUpdate(name: string, file: string) {
+ export async function writeManagedSkill(input: WriteManagedSkillInput): Promise<{ path: string }> {
+ 	const name = sanitizeSkillName(input.name);
+ 	const description = sanitizeManagedDescription(input.description);
+-	const body = input.body.trim();
++	const body = sanitizeManagedBody(input.body);
+ 	// Reject empty content: an all-whitespace/control description sanitizes to ""
+ 	// and the `requireDescription` discovery scan then silently drops the skill,
+ 	// so the tool would report success for a skill that never appears.
+@@ -172,8 +184,9 @@ export async function writeManagedSkill(input: WriteManagedSkillInput): Promise<
+ 		);
+ 	}
+ 	return serializeSkillMutation(name, async () => {
+-		await assertManagedRootSafe();
+-		const dir = path.join(getManagedSkillsDir(), name);
++		await assertManagedRootSafe(input.managedSkillsDir);
++		const baseDir = input.managedSkillsDir ?? getManagedSkillsDir();
++		const dir = path.join(baseDir, name);
+ 		const file = path.join(dir, "SKILL.md");
+ 		// Reject a symlinked skill directory: an intermediate symlink would let the
+ 		// write escape the isolated managed root. lstat does not follow the final
+diff --git a/packages/coding-agent/src/autolearn/redact.ts b/packages/coding-agent/src/autolearn/redact.ts
+new file mode 100644
+index 0000000..5ca327a
+--- /dev/null
++++ b/packages/coding-agent/src/autolearn/redact.ts
+@@ -0,0 +1,51 @@
++import { createHash } from "node:crypto";
++
++const SECRET_PATTERNS = [
++	/Bearer\s+[A-Za-z0-9_\-\.]{15,}/gi,
++	/sk-[a-zA-Z0-9_\-]{20,}/gi,
++	/https?:\/\/[^\s\/:]+:[^\s\/@]+@/gi,
++	/password\s*=\s*[^\s\r\n]+/gi,
++	/secret\s*=\s*[^\s\r\n]+/gi,
++	/api[_-]?key\s*=\s*[^\s\r\n]+/gi,
++	/token\s*=\s*[^\s\r\n]+/gi,
++	/--password\s+[^\s\r\n]+/gi,
++	/--token\s+[^\s\r\n]+/gi,
++	/--secret\s+[^\s\r\n]+/gi,
++	/--api-key\s+[^\s\r\n]+/gi,
++	/Cookie:\s*[^\r\n]+/gi,
++	/Authorization:\s*[^\r\n]+/gi,
++];
++
++export function redactEvidence(text: string, customPatterns: string[] = []): string {
++	let result = text;
++	for (const pattern of SECRET_PATTERNS) {
++		result = result.replace(pattern, "[REDACTED]");
++	}
++	for (const pat of customPatterns) {
++		try {
++			const reg = new RegExp(pat, "gi");
++			result = result.replace(reg, "[REDACTED]");
++		} catch {
++			// ignore invalid regex
++		}
++	}
++	return result;
++}
++
++export function opaqueDigest(text: string): string {
++	return createHash("sha256").update(text).digest("hex").slice(0, 16);
++}
++
++export function extractFailureSignature(
++	toolName: string,
++	params: Record<string, unknown>,
++	error: string,
++	customPatterns: string[] = [],
++): string {
++	const sanitizedError = redactEvidence(error, customPatterns);
++	const firstLine = sanitizedError.split("\n").find(line => line.trim().length > 0) ?? "UnknownError";
++	const rawParam = typeof params.command === "string" ? params.command : typeof params.path === "string" ? params.path : "";
++	const sanitizedParam = redactEvidence(rawParam, customPatterns).slice(0, 80);
++	const digest = opaqueDigest(`${sanitizedParam}:${firstLine}`);
++	return `${toolName}:${sanitizedParam}:${digest}`;
++}
+diff --git a/packages/coding-agent/src/autolearn/skill-writer.ts b/packages/coding-agent/src/autolearn/skill-writer.ts
+new file mode 100644
+index 0000000..a0108c1
+--- /dev/null
++++ b/packages/coding-agent/src/autolearn/skill-writer.ts
+@@ -0,0 +1,63 @@
++import { getManagedSkillsDir, sanitizeSkillName, writeManagedSkill } from "./managed-skills";
++
++export interface ManagedSkillWriterOptions {
++	managedSkillsDir?: string;
++}
++
++export interface WriteSkillParams {
++	name: string;
++	description: string;
++	instructions: string;
++}
++
++export class ManagedSkillWriter {
++	readonly managedSkillsDir: string;
++
++	constructor(options: ManagedSkillWriterOptions = {}) {
++		this.managedSkillsDir = options.managedSkillsDir ?? getManagedSkillsDir();
++	}
++
++	validateSkillName(name: string): string {
++		return sanitizeSkillName(name);
++	}
++
++	isEligibleForSkill(
++		candidate: { kind: string; passes: number; content?: string },
++		minPasses = 3,
++	): boolean {
++		if (candidate.kind !== "procedure" || candidate.passes < minPasses) {
++			return false;
++		}
++		const content = candidate.content?.trim() ?? "";
++		// Refuse placeholder, synthetic, or unreviewed signature text
++		if (
++			!content ||
++			content.length < 20 ||
++			content.startsWith("Verified resolution for") ||
++			content.startsWith("Fix for") ||
++			content.includes("cand_")
++		) {
++			return false;
++		}
++		return true;
++	}
++
++	async writeSkill(params: WriteSkillParams): Promise<{ path: string }> {
++		const instructions = params.instructions.trim();
++		if (
++			!instructions ||
++			instructions.length < 20 ||
++			instructions.startsWith("Verified resolution for") ||
++			instructions.startsWith("Fix for")
++		) {
++			throw new Error("Cannot write managed skill with unreviewed or placeholder procedure content.");
++		}
++		return await writeManagedSkill({
++			action: "create",
++			name: params.name,
++			description: params.description,
++			body: instructions,
++			managedSkillsDir: this.managedSkillsDir,
++		});
++	}
++}
+diff --git a/packages/coding-agent/src/autolearn/verifier.ts b/packages/coding-agent/src/autolearn/verifier.ts
+new file mode 100644
+index 0000000..4dfb508
+--- /dev/null
++++ b/packages/coding-agent/src/autolearn/verifier.ts
+@@ -0,0 +1,175 @@
++import { extractFailureSignature, redactEvidence } from "./redact";
++import type { ToolExecutionEndEvent, ToolExecutionStartEvent } from "../extensibility/extensions/types";
++
++export interface RegisteredVerifier {
++	name: string;
++	toolName: string;
++	matcher: (args: Record<string, unknown>) => boolean;
++	semanticSuccessPredicate: (result: unknown) => boolean;
++}
++
++export const BUILTIN_VERIFIERS: RegisteredVerifier[] = [
++	{
++		name: "test_runner",
++		toolName: "bash",
++		matcher: args => {
++			const cmd = typeof args.command === "string" ? args.command : "";
++			return /^(bun test|npm test|vitest|jest|pytest|cargo test)\b/i.test(cmd.trim());
++		},
++		semanticSuccessPredicate: result => {
++			if (!result || typeof result !== "object") return false;
++			const r = result as Record<string, unknown>;
++			if (r.isError === true || r.error !== undefined) {
++				return false;
++			}
++			const details = (r.details && typeof r.details === "object" ? r.details : undefined) as
++				| Record<string, unknown>
++				| undefined;
++			if (r.timedOut === true || details?.timedOut === true) {
++				return false;
++			}
++			const exitCode =
++				typeof r.exitCode === "number"
++					? r.exitCode
++					: typeof details?.exitCode === "number"
++						? details.exitCode
++						: undefined;
++			return exitCode === 0;
++		},
++	},
++	{
++		name: "linter_checker",
++		toolName: "bash",
++		matcher: args => {
++			const cmd = typeof args.command === "string" ? args.command : "";
++			return /^(bunx tsc|npm run typecheck|tsc --noEmit|cargo clippy|eslint)\b/i.test(cmd.trim());
++		},
++		semanticSuccessPredicate: result => {
++			if (!result || typeof result !== "object") return false;
++			const r = result as Record<string, unknown>;
++			if (r.isError === true || r.error !== undefined) {
++				return false;
++			}
++			const details = (r.details && typeof r.details === "object" ? r.details : undefined) as
++				| Record<string, unknown>
++				| undefined;
++			if (r.timedOut === true || details?.timedOut === true) {
++				return false;
++			}
++			const exitCode =
++				typeof r.exitCode === "number"
++					? r.exitCode
++					: typeof details?.exitCode === "number"
++						? details.exitCode
++						: undefined;
++			return exitCode === 0;
++		},
++	},
++];
++
++export interface CorrelationResult {
++	verdict: "pass" | "fail" | "inconclusive";
++	matchedSignature?: string;
++	verifierName?: string;
++	evidence?: string;
++}
++
++export class VerifierEngine {
++	private readonly inFlightCalls = new Map<string, ToolExecutionStartEvent>();
++	private readonly failureSignatures = new Map<string, string>();
++	private readonly registeredVerifiers: RegisteredVerifier[] = [...BUILTIN_VERIFIERS];
++
++	registerVerifier(verifier: RegisteredVerifier): void {
++		this.registeredVerifiers.push(verifier);
++	}
++
++	recordStart(event: ToolExecutionStartEvent): void {
++		if (event.toolCallId) {
++			this.inFlightCalls.set(event.toolCallId, event);
++		}
++	}
++
++	private extractErrorString(result: unknown, customPatterns: string[] = []): string {
++		if (!result) return "Unknown error";
++		let raw = "";
++		if (typeof result === "string") {
++			raw = result;
++		} else if (typeof result === "object" && result !== null) {
++			if ("content" in result && Array.isArray(result.content)) {
++				const parts: string[] = [];
++				for (const item of result.content) {
++					if (
++						item &&
++						typeof item === "object" &&
++						"type" in item &&
++						item.type === "text" &&
++						"text" in item &&
++						typeof item.text === "string"
++					) {
++						parts.push(item.text);
++					}
++				}
++				if (parts.length > 0) raw = parts.join("\n");
++			}
++			if (!raw && "error" in result && typeof result.error === "string") raw = result.error;
++			if (!raw && "message" in result && typeof result.message === "string") raw = result.message;
++			if (!raw) {
++				try {
++					raw = JSON.stringify(result);
++				} catch {
++					raw = String(result);
++				}
++			}
++		} else {
++			raw = String(result);
++		}
++		return redactEvidence(raw, customPatterns);
++	}
++
++	private getVerifierKey(toolName: string, args?: Record<string, unknown>, customPatterns: string[] = []): string {
++		if (!args) return toolName;
++		const rawParam = typeof args.command === "string" ? args.command : typeof args.path === "string" ? args.path : "";
++		const sanitizedParam = redactEvidence(rawParam, customPatterns).slice(0, 120);
++		return `${toolName}:${sanitizedParam}`;
++	}
++
++	correlateEnd(event: ToolExecutionEndEvent, customPatterns: string[] = []): CorrelationResult {
++		const start = this.inFlightCalls.get(event.toolCallId);
++		this.inFlightCalls.delete(event.toolCallId);
++
++		const args = start?.args ?? {};
++		const key = this.getVerifierKey(event.toolName, args, customPatterns);
++		const priorSig = this.failureSignatures.get(key);
++
++		// Find registered verifier
++		const verifier = this.registeredVerifiers.find(v => v.toolName === event.toolName && v.matcher(args));
++
++		if (event.isError) {
++			const errStr = this.extractErrorString(event.result, customPatterns);
++			const sig = extractFailureSignature(event.toolName, args, errStr, customPatterns);
++			this.failureSignatures.set(key, sig);
++			return {
++				verdict: "fail",
++				matchedSignature: sig,
++				verifierName: verifier?.name,
++				evidence: errStr,
++			};
++		}
++
++		// Require pre-registered verifier AND semantic predicate pass AND prior matching failure
++		if (priorSig && verifier) {
++			const semanticPass = verifier.semanticSuccessPredicate(event.result);
++			if (semanticPass) {
++				this.failureSignatures.delete(key);
++				return {
++					verdict: "pass",
++					matchedSignature: priorSig,
++					verifierName: verifier.name,
++					evidence: `Verified resolution via ${verifier.name} for ${priorSig}`,
++				};
++			}
++		}
++
++		return { verdict: "inconclusive" };
++	}
++}
+diff --git a/packages/coding-agent/src/config/settings-schema.ts b/packages/coding-agent/src/config/settings-schema.ts
+index 5202909..02d5a67 100644
+--- a/packages/coding-agent/src/config/settings-schema.ts
++++ b/packages/coding-agent/src/config/settings-schema.ts
+@@ -104,14 +104,9 @@ export type ComposerShape = string;
+ 
+ /** Built-in composer choices and their shared settings/setup copy. */
+ export const BUILTIN_COMPOSER_SHAPES = [
+-	{
+-		value: "band",
+-		label: "Status Band (Default)",
+-		description: "Flush soft-capped status band above a curved prompt, no frame",
+-	},
+ 	{
+ 		value: "box",
+-		label: "Rounded Box",
++		label: "Rounded Box (Default)",
+ 		description: "Status line embedded in top border, compact 2-line prompt",
+ 	},
+ 	{
+@@ -216,7 +211,7 @@ export const TAB_GROUPS: Record<SettingTab, readonly string[]> = {
+ 		"Git",
+ 	],
+ 	context: ["General", "Compaction", "Rules (TTSR)", "Experimental"],
+-	memory: ["General", "Auto-Learn", "Mnemopi", "Hindsight", "Sharpshooter"],
++	memory: ["General", "Auto-Learn", "Mnemopi", "Hindsight"],
+ 	files: ["Editing", "Reading", "Read Summaries", "LSP"],
+ 	shell: ["Bash", "Eval & Runtimes"],
+ 	tools: [
+@@ -732,7 +727,7 @@ export const SETTINGS_SCHEMA = {
+ 	// Composer
+ 	"composer.shape": {
+ 		type: "string",
+-		default: "band",
++		default: "box",
+ 		ui: {
+ 			tab: "appearance",
+ 			group: "Composer",
+@@ -839,7 +834,7 @@ export const SETTINGS_SCHEMA = {
+ 	},
+ 	"statusLine.compactThinkingLevel": {
+ 		type: "boolean",
+-		default: true,
++		default: false,
+ 		ui: {
+ 			tab: "appearance",
+ 			group: "Status Line",
+@@ -2561,10 +2556,10 @@ export const SETTINGS_SCHEMA = {
+ 			description: "Fixed token limit for context maintenance; overrides percentage if set",
+ 			options: [
+ 				{ value: "default", label: "Default", description: "Use percentage-based threshold" },
+-				{ value: "25000", label: "25K tokens", description: "1/8 of a 200K window" },
+-				{ value: "50000", label: "50K tokens", description: "1/4 of a 200K window" },
+-				{ value: "100000", label: "100K tokens", description: "1/2 of a 200K window" },
+-				{ value: "150000", label: "150K tokens", description: "3/4 of a 200K window" },
++				{ value: "25000", label: "25K tokens", description: "Quarter of a 200K window" },
++				{ value: "50000", label: "50K tokens", description: "Half of a 200K window" },
++				{ value: "100000", label: "100K tokens", description: "Half of a 200K window" },
++				{ value: "150000", label: "150K tokens", description: "Three-quarters of a 200K window" },
+ 				{ value: "200000", label: "200K tokens", description: "Full standard context window" },
+ 				{ value: "300000", label: "300K tokens", description: "Large context window" },
+ 				{ value: "500000", label: "500K tokens", description: "Very large context window" },
+@@ -2942,18 +2937,17 @@ export const SETTINGS_SCHEMA = {
+ 	"memories.summaryInjectionTokenLimit": { type: "number", default: 5000 },
+ 
+ 	// Memory backend selector — picks between local memories pipeline,
+-	// Mnemopi local SQLite, Hindsight remote memory, Sharpshooter project
+-	// decisions, or off. The legacy
++	// Mnemopi local SQLite, Hindsight remote memory, or off. The legacy
+ 	// `memories.enabled` flag is migration input only; see config/settings.ts.
+ 	"memory.backend": {
+ 		type: "enum",
+-		values: ["off", "local", "hindsight", "mnemopi", "sharpshooter"] as const,
++		values: ["off", "local", "hindsight", "mnemopi"] as const,
+ 		default: "off",
+ 		ui: {
+ 			tab: "memory",
+ 			group: "General",
+ 			label: "Memory Backend",
+-			description: "Off, local summary pipeline, Mnemopi SQLite, Hindsight remote memory, or Sharpshooter",
++			description: "Off, local summary pipeline, Mnemopi SQLite, or Hindsight remote memory",
+ 			options: [
+ 				{ value: "off", label: "Off", description: "No memory subsystem runs" },
+ 				{ value: "local", label: "Local", description: "Local rollout summarisation pipeline (memory_summary.md)" },
+@@ -2963,40 +2957,95 @@ export const SETTINGS_SCHEMA = {
+ 					label: "Mnemopi",
+ 					description: "Local SQLite recall/retain backend with optional embeddings",
+ 				},
+-				{
+-					value: "sharpshooter",
+-					label: "Sharpshooter",
+-					description:
+-						"Friction-gated project decision files (architecture/product/style), consolidated in the background",
+-				},
+ 			],
+ 		},
+ 	},
+-	"sharpshooter.model": {
+-		type: "string",
+-		default: undefined,
++
++	// Auto-Learn: capture lessons into memory and create managed skills.
++	// mode: "off" | "builtin" | "custom" (backward compat: autolearn.enabled=true -> builtin)
++	"autolearn.mode": {
++		type: "enum",
++		values: ["off", "builtin", "custom"] as const,
++		default: "off",
+ 		ui: {
+ 			tab: "memory",
+-			group: "Sharpshooter",
+-			label: "Sharpshooter Model",
+-			description: "Model selector for extraction/consolidation, empty = smol role",
++			group: "Auto-Learn",
++			label: "Auto-Learn Mode",
++			description:
++				"Learning architecture: off (disabled), builtin (experimental post-stop LLM capture), or custom (sidecar verifier, SQLite candidate ledger, and deterministic promotion)",
++			options: [
++				{ value: "off", label: "Off", description: "Disabled" },
++				{ value: "builtin", label: "Built-in (LLM capture)", description: "Post-stop nudge to capture lessons to memory" },
++				{ value: "custom", label: "Custom (evidence verifier)", description: "Sidecar verifier, SQLite candidate ledger, deterministic promotion" },
++			],
+ 		},
+ 	},
+-	"sharpshooter.intervalMinutes": { type: "number", default: 5 },
+-	"sharpshooter.injectionTokenLimit": { type: "number", default: 15000 },
+-
+-	// Auto-Learn (experimental): post-stop nudge to capture lessons to memory
+-	// and mint/enhance isolated managed skills under ~/.omp/agent/managed-skills.
+-	// Master flag is default-off → zero footprint; sub-flags gate behaviour.
+ 	"autolearn.enabled": {
+ 		type: "boolean",
+ 		default: false,
+ 		ui: {
+ 			tab: "memory",
+ 			group: "Auto-Learn",
+-			label: "Auto-Learn (experimental)",
++			label: "Auto-Learn enabled (legacy)",
+ 			description:
+-				"After the agent stops, nudge it to capture lessons to memory and create/enhance isolated managed skills",
++				"Legacy boolean flag. When true and autolearn.mode is off, behaves as builtin.",
++		},
++	},
++	"autolearn.minPassesRule": {
++		type: "number",
++		default: 2,
++		ui: {
++			tab: "memory",
++			group: "Auto-Learn",
++			label: "Min passes for rule promotion",
++			description: "Minimum verifier passes required to promote a rule/fact into memory (custom mode)",
++			condition: "autolearnCustomActive",
++		},
++	},
++	"autolearn.minPassesSkill": {
++		type: "number",
++		default: 3,
++		ui: {
++			tab: "memory",
++			group: "Auto-Learn",
++			label: "Min passes for skill minting",
++			description: "Minimum verifier passes required to generate a managed SKILL.md (custom mode)",
++			condition: "autolearnCustomActive",
++		},
++	},
++	"autolearn.defaultScope": {
++		type: "enum",
++		values: ["local", "project", "global"] as const,
++		default: "project",
++		ui: {
++			tab: "memory",
++			group: "Auto-Learn",
++			label: "Default candidate scope",
++			description: "Default visibility scope for autolearn candidates (custom mode)",
++			condition: "autolearnCustomActive",
++		},
++	},
++	"autolearn.mintSkills": {
++		type: "boolean",
++		default: true,
++		ui: {
++			tab: "memory",
++			group: "Auto-Learn",
++			label: "Mint managed skills",
++			description: "Allow procedure candidates to mint managed skills in ~/.omp/agent/managed-skills (custom mode)",
++			condition: "autolearnCustomActive",
++		},
++	},
++	"autolearn.redactPatterns": {
++		type: "array",
++		items: { type: "string" },
++		default: [] as string[],
++		ui: {
++			tab: "memory",
++			group: "Auto-Learn",
++			label: "Custom secret redaction patterns",
++			description: "Extra regex patterns to redact before recording evidence/signatures",
++			condition: "autolearnCustomActive",
+ 		},
+ 	},
+ 	"autolearn.autoContinue": {
+@@ -3008,7 +3057,7 @@ export const SETTINGS_SCHEMA = {
+ 			label: "Auto-run capture at stop",
+ 			description:
+ 				"When on, auto-run one private capture turn at stop (uses extra tokens). When off, only standing auto-learn guidance remains.",
+-			condition: "autolearnActive",
++			condition: "autolearnBuiltinActive",
+ 		},
+ 	},
+ 	// Config-file-only knob (numbers without `options` are hidden from the UI).
+@@ -3105,7 +3154,7 @@ export const SETTINGS_SCHEMA = {
+ 	},
+ 	"mnemopi.autoRetain": {
+ 		type: "boolean",
+-		default: true,
++		default: false,
+ 		ui: {
+ 			tab: "memory",
+ 			group: "Mnemopi",
+diff --git a/packages/coding-agent/src/config/settings.ts b/packages/coding-agent/src/config/settings.ts
+index 107aaab..94496b5 100644
+--- a/packages/coding-agent/src/config/settings.ts
++++ b/packages/coding-agent/src/config/settings.ts
+@@ -38,7 +38,6 @@ import { isLightTheme, setAutoThemeMapping, setColorBlindMode, setSymbolPreset }
+ import { AgentStorage } from "../session/agent-storage";
+ import { type CompactionMethod, DEFAULT_COMPACTION_METHOD_ORDER } from "../session/compaction-methods";
+ import { AUTO_IMAGE_PROVIDER_ORDER, isImageProviderId } from "../tools/image-providers";
+-import { applyHyperlinkSetting } from "../tui/hyperlink";
+ import { replaceFileAtomically } from "../utils/atomic-file";
+ import { type EditMode, normalizeEditMode } from "../utils/edit-mode";
+ import { INSPECT_IMAGE_MODES } from "../utils/inspect-image-mode";
+@@ -222,6 +221,18 @@ export function dropSettingsGroupShadows(data: RawSettings, sourcePath: string,
+ 	for (const key of Object.keys(data)) {
+ 		const value = data[key];
+ 		const path = basePrefix === "" ? key : `${basePrefix}.${key}`;
++
++		// Security: autolearn mode and policy configuration must be user-authoritative.
++		// Project settings (.omp/config.yml or foreign project configs) cannot enable
++		// custom mode or weaken scopes/thresholds.
++		if (path === "autolearn" || path.startsWith("autolearn.")) {
++			logger.warn("Settings: ignoring project-level autolearn override (must be configured by user)", {
++				setting: path,
++				source: sourcePath,
++			});
++			continue;
++		}
++
+ 		if (!Object.hasOwn(SETTINGS_GROUP_ONLY_PREFIXES, path)) {
+ 			result[key] = value;
+ 			continue;
+@@ -1932,6 +1943,30 @@ export class Settings {
+ 			raw["codexResets.autoRedeem"] = raw["codexResets.autoRedeem"] ? "yes" : "no";
+ 		}
+ 
++		// autolearn.enabled (boolean) -> autolearn.mode (enum)
++		// Explicit autolearn.mode always wins. If mode is unset and autolearn.enabled was true,
++		// migrate to "builtin".
++		const autolearnObj = isRecord(raw.autolearn) ? (raw.autolearn as Record<string, unknown>) : undefined;
++		const legacyAutolearnEnabled =
++			typeof autolearnObj?.enabled === "boolean"
++				? autolearnObj.enabled
++				: typeof raw["autolearn.enabled"] === "boolean"
++					? (raw["autolearn.enabled"] as boolean)
++					: undefined;
++		const explicitAutolearnMode =
++			typeof autolearnObj?.mode === "string"
++				? autolearnObj.mode
++				: typeof raw["autolearn.mode"] === "string"
++					? (raw["autolearn.mode"] as string)
++					: undefined;
++		if (explicitAutolearnMode === undefined && legacyAutolearnEnabled !== undefined) {
++			if (!autolearnObj) {
++				raw.autolearn = {};
++			}
++			const target = raw.autolearn as Record<string, unknown>;
++			target.mode = legacyAutolearnEnabled ? "builtin" : "off";
++		}
++
+ 		// Map legacy `memories.enabled` boolean to the explicit `memory.backend`
+ 		// enum if the latter hasn't been set yet. Idempotent: subsequent
+ 		// migrations are no-ops once memory.backend is materialised.
+@@ -2760,11 +2795,6 @@ const SETTING_HOOKS: Partial<Record<SettingPath, SettingHook<any>>> = {
+ 			});
+ 		}
+ 	},
+-	// A project-scoped reload (`/move`, cross-project resume, rollback) can change
+-	// the effective value; reapply so pi-tui renderers gating on the shared flag
+-	// track it the same instant path/resource links do. Runtime `/settings` edits
+-	// also go through the selector controller to invalidate and repaint live views.
+-	"tui.hyperlinks": value => applyHyperlinkSetting(value),
+ 	"provider.appendOnlyContext": value => {
+ 		if (typeof value === "string") {
+ 			appendOnlyModeSignal.fire(value);
+diff --git a/packages/coding-agent/src/hindsight/bank.ts b/packages/coding-agent/src/hindsight/bank.ts
+index 0e990e6..8df0897 100644
+--- a/packages/coding-agent/src/hindsight/bank.ts
++++ b/packages/coding-agent/src/hindsight/bank.ts
+@@ -74,7 +74,12 @@ function baseBankId(config: HindsightConfig): string {
+  */
+ function projectLabel(directory: string): string {
+ 	if (!directory) return UNKNOWN_PROJECT;
+-	const primary = vcs.repo(directory)?.primaryRoot() ?? null;
++	let primary: string | null = null;
++	try {
++		primary = vcs.repo(directory)?.primaryRoot() ?? null;
++	} catch {
++		primary = null;
++	}
+ 	return path.basename(primary ?? directory).toLowerCase() || UNKNOWN_PROJECT;
+ }
+ 
+diff --git a/packages/coding-agent/src/memory-backend/runtime.ts b/packages/coding-agent/src/memory-backend/runtime.ts
+index 3f9ab17..48e452c 100644
+--- a/packages/coding-agent/src/memory-backend/runtime.ts
++++ b/packages/coding-agent/src/memory-backend/runtime.ts
+@@ -46,6 +46,13 @@ export function createMemoryRuntimeContext(context: MemoryBackendOperationContex
+ 				? await backend.save(context, normalized)
+ 				: unavailableSave(backend.id, `Memory save is not available for the ${backend.id} backend.`);
+ 		},
++		async edit(op, id, options) {
++			if (!settings) return { status: "not_found", message: "No active agent session." };
++			const backend = await resolveMemoryBackend(settings);
++			return backend.edit
++				? await backend.edit(context, op, id, options)
++				: { status: "not_found", message: `Memory edit is not available for the ${backend.id} backend.` };
++		},
+ 	};
+ }
+ 
+diff --git a/packages/coding-agent/src/memory-backend/types.ts b/packages/coding-agent/src/memory-backend/types.ts
+index 238cbf7..7d50081 100644
+--- a/packages/coding-agent/src/memory-backend/types.ts
++++ b/packages/coding-agent/src/memory-backend/types.ts
+@@ -13,7 +13,7 @@ import type { HindsightSessionState } from "../hindsight/state";
+ import type { MnemopiSessionState } from "../mnemopi/state";
+ import type { AgentSession } from "../session/agent-session";
+ 
+-export type MemoryBackendId = "off" | "local" | "hindsight" | "mnemopi" | "sharpshooter";
++export type MemoryBackendId = "off" | "local" | "hindsight" | "mnemopi";
+ 
+ export interface MemoryBackendStatus {
+ 	backend: MemoryBackendId;
+@@ -60,8 +60,10 @@ export interface MemoryBackendSaveInput {
+ 	context?: string;
+ 	source?: string;
+ 	importance?: number;
++	scope?: "local" | "project" | "global";
++	project?: string;
++	bank?: string;
+ }
+-
+ export interface MemoryBackendSaveResult {
+ 	backend: MemoryBackendId;
+ 	stored: number;
+@@ -76,10 +78,30 @@ export interface MemoryBackendOperationContext {
+ 	session?: AgentSession;
+ }
+ 
++export interface MemoryBackendEditOptions {
++	content?: string;
++	importance?: number;
++	replacementId?: string;
++	scope?: "local" | "project" | "global";
++	project?: string;
++	bank?: string;
++}
++export interface MemoryBackendEditResult {
++	status: "updated" | "deleted" | "invalidated" | "not_found" | "not_editable";
++	bank?: string;
++	store?: string;
++	message?: string;
++}
++
+ export interface MemoryRuntimeContext {
+ 	status(): Promise<MemoryBackendStatus>;
+ 	search(query: string, options?: MemoryBackendSearchOptions): Promise<MemoryBackendSearchResult>;
+ 	save(input: string | MemoryBackendSaveInput): Promise<MemoryBackendSaveResult>;
++	edit?(
++		op: "update" | "forget" | "invalidate",
++		id: string,
++		options?: MemoryBackendEditOptions,
++	): Promise<MemoryBackendEditResult>;
+ }
+ 
+ export interface MemoryBackendStartOptions {
+@@ -138,8 +160,14 @@ export interface MemoryBackend {
+ 
+ 	/** Render backend-specific memory diagnostics as markdown (`/memory diagnose`). */
+ 	diagnose?(agentDir: string, cwd: string, session?: AgentSession): Promise<string | undefined>;
+-	/** Render pending deltas awaiting consolidation (`/memory queue`). */
+-	queuePreview?(context: MemoryBackendOperationContext): Promise<string | undefined>;
++	/** Explicit edit operation (update/forget/invalidate). */
++	edit?(
++		context: MemoryBackendOperationContext,
++		op: "update" | "forget" | "invalidate",
++		id: string,
++		options?: MemoryBackendEditOptions,
++	): Promise<MemoryBackendEditResult>;
++
+ 	/**
+ 	 * Optional hook to inject a backend-specific block into the current turn's
+ 	 * system prompt before the agent starts generating.
+diff --git a/packages/coding-agent/src/mnemopi/backend.ts b/packages/coding-agent/src/mnemopi/backend.ts
+index 31b7f4c..eb8ab82 100644
+--- a/packages/coding-agent/src/mnemopi/backend.ts
++++ b/packages/coding-agent/src/mnemopi/backend.ts
+@@ -287,13 +287,28 @@ export const mnemopiBackend: MemoryBackend = {
+ 		}
+ 		const content = input.content.trim();
+ 		if (!content) return { backend: "mnemopi", stored: 0, message: "Memory content is empty." };
++		let targetBank: string | undefined = input.bank;
++		if (!targetBank) {
++			if (input.scope === "global") {
++				targetBank = primary.globalBank;
++			} else if (input.scope === "project" || input.scope === "local") {
++				// Route to current project retain bank
++				targetBank = primary.getScopedRetainTarget().bank;
++			}
++		}
++		if (!targetBank && (input.scope === "project" || input.scope === "local")) {
++			return { backend: "mnemopi", stored: 0, message: "Cannot resolve project memory bank for candidate." };
++		}
+ 		const id = primary.rememberScoped(content, {
+ 			source: input.source || "coding-agent-memory-command",
+ 			importance: normalizeImportance(input.importance),
++			bank: targetBank,
+ 			metadata: {
+ 				session_id: primary.sessionId,
+ 				cwd,
+ 				context: input.context ?? null,
++				scope: input.scope,
++				project: input.project,
+ 				operation: "memory.save",
+ 			},
+ 			scope: "bank",
+@@ -310,6 +325,36 @@ export const mnemopiBackend: MemoryBackend = {
+ 		};
+ 	},
+ 
++	async edit({ session }, op, id, options) {
++		const state = getMnemopiSessionState(session);
++		const primary = state?.aliasOf ?? state;
++		if (!primary) {
++			return {
++				status: "not_found",
++				message: "Mnemopi backend is not initialised for this session.",
++			};
++		}
++		let targetBank: string | undefined = options?.bank;
++		if (!targetBank) {
++			if (options?.scope === "global") {
++				targetBank = primary.globalBank;
++			} else if (options?.scope === "project" || options?.scope === "local") {
++				targetBank = primary.getScopedRetainTarget().bank;
++			}
++		}
++		const result = primary.editScopedMemory(op, id, {
++			content: options?.content,
++			importance: options?.importance,
++			replacementId: options?.replacementId,
++			bank: targetBank,
++		});
++		return {
++			status: result.status,
++			bank: result.bank,
++			store: result.store,
++		};
++	},
++
+ 	async preCompactionContext(messages, _settings, session): Promise<string | undefined> {
+ 		const state = getMnemopiSessionState(session);
+ 		return await state?.recallForCompaction(messages);
+diff --git a/packages/coding-agent/src/mnemopi/config.ts b/packages/coding-agent/src/mnemopi/config.ts
+index ff00587..b05aa7c 100644
+--- a/packages/coding-agent/src/mnemopi/config.ts
++++ b/packages/coding-agent/src/mnemopi/config.ts
+@@ -4,7 +4,7 @@ import * as path from "node:path";
+ import type { MnemopiOptions } from "@oh-my-pi/pi-mnemopi";
+ import { getMemoriesDir, logger } from "@oh-my-pi/pi-utils";
+ import type { Settings } from "../config/settings";
+-
++import { resolveAutolearnMode } from "../autolearn/config";
+ export type MnemopiLlmMode = "none" | "smol" | "remote";
+ 
+ export type MnemopiScoping = "global" | "per-project" | "per-project-tagged";
+@@ -30,8 +30,6 @@ export interface MnemopiBackendConfig {
+ 	retainEveryNTurns: number;
+ 	recallLimit: number;
+ 	recallContextTurns: number;
+-	recallMaxQueryChars: number;
+-	injectionTokenLimit: number;
+ 	debug: boolean;
+ 	providerOptions: MnemopiProviderOptions;
+ 	llmMode: MnemopiLlmMode;
+@@ -68,10 +66,10 @@ export function loadMnemopiConfig(settings: Settings, agentDir: string): Mnemopi
+ 		bank: scope.bank,
+ 		globalBank: scope.globalBank,
+ 		retainBank: scope.retainBank,
+-		recallBanks,
+ 		scoping,
+ 		autoRecall: settings.get("mnemopi.autoRecall"),
+-		autoRetain: settings.get("mnemopi.autoRetain"),
++		// Custom autolearn takes ownership of capture/retention lifecycle; disable mnemopi autoRetain when custom mode is active
++		autoRetain: resolveAutolearnMode(settings) === "custom" ? false : settings.get("mnemopi.autoRetain"),
+ 		polyphonicRecall: settings.get("mnemopi.polyphonicRecall"),
+ 		enhancedRecall: settings.get("mnemopi.enhancedRecall"),
+ 		proactiveLinking: settings.get("mnemopi.proactiveLinking"),
+@@ -180,17 +178,20 @@ function projectBank(configured: string | undefined, cwd: string): string {
+ 	return limitBankName(base ? `${base}-${project}` : project);
+ }
+ 
+-/**
+- * Stable project-identity segment derived from an absolute project root:
+- * `<sanitized-basename>-<Bun.hash(projectRoot).toString(36)>`, clamped to the
+- * bank-name limit. Shared by mnemopi bank scoping and the sharpshooter
+- * project store so both subsystems key the same directory identically.
+- */
++export function canonicalProjectIdentity(cwd: string): string {
++	let projectRoot = path.resolve(cwd || ".");
++	try {
++		projectRoot = fs.realpathSync(projectRoot);
++	} catch {
++		// fallback to resolved path
++	}
++	return projectBankSegment(projectRoot);
++}
++
+ export function projectBankSegment(projectRoot: string): string {
+ 	const project = sanitizeBankName(path.basename(projectRoot)) ?? "default";
+ 	return limitBankName(`${project}-${Bun.hash(projectRoot).toString(36)}`);
+ }
+-
+ /**
+  * Discover sibling banks under `<dbDir>/banks/` whose `working_memory` rows
+  * all carry the active `cwd` in `metadata_json.$.cwd`, and add those safe
+diff --git a/packages/coding-agent/src/mnemopi/state.ts b/packages/coding-agent/src/mnemopi/state.ts
+index e6fc3c7..5e0bdcd 100644
+--- a/packages/coding-agent/src/mnemopi/state.ts
++++ b/packages/coding-agent/src/mnemopi/state.ts
+@@ -105,6 +105,7 @@ export interface MnemopiMemoryEditOptions {
+ 	content?: string;
+ 	importance?: number;
+ 	replacementId?: string;
++	bank?: string;
+ }
+ 
+ export interface MnemopiMemoryEditResult {
+@@ -326,11 +327,17 @@ export class MnemopiSessionState {
+ 		id: string,
+ 		options: MnemopiMemoryEditOptions = {},
+ 	): MnemopiMemoryEditResult {
+-		const targets = dedupeScopedTargets([
++		let targets = dedupeScopedTargets([
+ 			this.scoped.retain,
+ 			...this.scoped.recall,
+ 			...(this.scoped.global ? [this.scoped.global] : []),
+ 		]);
++		if (options.bank) {
++			targets = targets.filter(t => t.bank === options.bank);
++			if (targets.length === 0) {
++				return { status: "not_found" };
++			}
++		}
+ 		let ineligible: MnemopiMemoryEditResult | undefined;
+ 		for (const target of targets) {
+ 			const row = target.memory.get(id) as MnemopiStoredMemoryRow | null;
+@@ -447,9 +454,24 @@ export class MnemopiSessionState {
+ 		return this.formatScopedRecallContext(results, format) ?? "";
+ 	}
+ 
+-	rememberInScope(memory: MnemopiRememberInput, options: MnemopiRememberOptions = {}): string | undefined {
++	rememberInScope(
++		memory: MnemopiRememberInput,
++		options: MnemopiRememberOptions & { bank?: string } = {},
++	): string | undefined {
+ 		try {
+-			return this.scoped.retain.memory.remember(memory, options);
++			let target = this.scoped.retain;
++			if (options.bank) {
++				const matching = [this.scoped.retain, ...this.scoped.recall, ...(this.scoped.global ? [this.scoped.global] : [])].find(
++					t => t.bank === options.bank,
++				);
++				if (matching) {
++					target = matching;
++				} else {
++					logger.warn("Mnemopi: requested bank not in session scope", { bank: options.bank });
++					return undefined;
++				}
++			}
++			return target.memory.remember(memory, options);
+ 		} catch (error) {
+ 			logger.warn("Mnemopi: retain failed", {
+ 				bank: this.scoped.retain.bank,
+@@ -459,7 +481,10 @@ export class MnemopiSessionState {
+ 		}
+ 	}
+ 
+-	rememberScoped(memory: MnemopiRememberInput, options: MnemopiRememberOptions = {}): string | undefined {
++	rememberScoped(
++		memory: MnemopiRememberInput,
++		options: MnemopiRememberOptions & { bank?: string } = {},
++	): string | undefined {
+ 		return this.rememberInScope(memory, options);
+ 	}
+ 
+diff --git a/packages/coding-agent/src/modes/components/settings-defs.ts b/packages/coding-agent/src/modes/components/settings-defs.ts
+index 5c9df98..416ba6e 100644
+--- a/packages/coding-agent/src/modes/components/settings-defs.ts
++++ b/packages/coding-agent/src/modes/components/settings-defs.ts
+@@ -121,11 +121,31 @@ const CONDITIONS: Record<string, () => boolean> = {
+ 	},
+ 	autolearnActive: () => {
+ 		try {
++			const mode = Settings.instance.get("autolearn.mode");
++			if (mode === "builtin" || mode === "custom") return true;
+ 			return Settings.instance.get("autolearn.enabled") === true;
+ 		} catch {
+ 			return false;
+ 		}
+ 	},
++	autolearnBuiltinActive: () => {
++		try {
++			const mode = Settings.instance.get("autolearn.mode");
++			if (mode === "builtin") return true;
++			if (mode === "custom") return false;
++			return Settings.instance.get("autolearn.enabled") === true;
++		} catch {
++			return false;
++		}
++	},
++	autolearnCustomActive: () => {
++		try {
++			const mode = Settings.instance.get("autolearn.mode");
++			return mode === "custom";
++		} catch {
++			return false;
++		}
++	},
+ 	autoThinkingActive: () => {
+ 		try {
+ 			return Settings.instance.get("defaultThinkingLevel") === "auto";
+diff --git a/packages/coding-agent/src/sdk.ts b/packages/coding-agent/src/sdk.ts
+index 4f073be..7072ee3 100644
+--- a/packages/coding-agent/src/sdk.ts
++++ b/packages/coding-agent/src/sdk.ts
+@@ -49,8 +49,9 @@ import {
+ } from "./advisor";
+ import { AsyncJobManager } from "./async";
+ import { AutoLearnController, buildAutoLearnInstructions } from "./autolearn/controller";
++import customAutolearnExtension from "./autolearn";
++import { loadLearnConfig, resolveAutolearnMode } from "./autolearn/config";
+ import { createAutoresearchExtension } from "./autoresearch";
+-import { loadCapability } from "./capability";
+ import { type Rule, ruleCapability, setActiveRules } from "./capability/rule";
+ import { bucketRules } from "./capability/rule-buckets";
+ import type { EffectiveExtensionRoots } from "./capability/types";
+@@ -79,7 +80,7 @@ import { createBridgeEditTool, createBridgeGrepFactory } from "./cursor-bridge-t
+ import "./discovery";
+ import { createImageUrlServiceFromSettings } from "./blob-broker/service";
+ import { wrapStreamFnWithBlobUrlFallback } from "./blob-broker/stream-fallback";
+-import { initializeWithSettings } from "./discovery";
++import { initializeWithSettings, loadCapability } from "./discovery";
+ import { setInvocationConfiguredExtensions, withOmpExtensionRootScope } from "./discovery/omp-extension-roots";
+ import { disposeAllJuliaKernelSessions, disposeJuliaKernelSessionsByOwner } from "./eval/jl/executor";
+ import { disposeVmContextsByOwner } from "./eval/js/context-manager";
+@@ -161,7 +162,7 @@ import {
+ 	USER_INTERRUPT_LABEL,
+ 	wrapSteeringForModel,
+ } from "./session/messages";
+-import { clampProviderContextImages, dropUnreadableContextImages } from "./session/provider-image-budget";
++import { clampProviderContextImages } from "./session/provider-image-budget";
+ import {
+ 	expandDefaultRetryFallbackChains,
+ 	findRetryFallbackCandidates,
+@@ -2077,9 +2078,11 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
+ 					}
+ 				}
+ 			}
+-
+ 			inlineExtensions.push(...(options.extensions ?? []));
+ 			inlineExtensions.push(createAutoresearchExtension);
++			if (loadLearnConfig(settings).mode === "custom") {
++				inlineExtensions.push(customAutolearnExtension);
++			}
+ 			if (customTools.length > 0) {
+ 				inlineExtensions.push(createCustomToolsExtension(customTools, customToolSourcePaths));
+ 			}
+@@ -3040,10 +3043,13 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
+ 			// is off all get no guidance.
+ 			const autoLearnInstructions = restrictToolNames
+ 				? undefined
+-				: buildAutoLearnInstructions({
+-						manageSkill: builtInToolNames.includes("manage_skill"),
+-						learn: builtInToolNames.includes("learn"),
+-					});
++				: buildAutoLearnInstructions(
++						{
++							manageSkill: builtInToolNames.includes("manage_skill"),
++							learn: builtInToolNames.includes("learn"),
++						},
++						settings,
++					);
+ 			const appendParts: string[] = [];
+ 			if (memoryInstructions) appendParts.push(memoryInstructions);
+ 			if (autoLearnInstructions) appendParts.push(autoLearnInstructions);
+@@ -3368,10 +3374,6 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
+ 			if (snapcompactInline) transformed = await snapcompactInline.transform(transformed, transformModel);
+ 			transformed = clampProviderContextImages(transformed, transformModel);
+ 			transformed = await normalizeProviderContextImagesForModel(transformed, transformModel);
+-			// After the model-specific normalizers: they carry better wording for the
+-			// cases they own (STB WebP), so this stays the backstop for everything
+-			// else, and it runs before the blob broker uploads any of these bytes.
+-			transformed = await dropUnreadableContextImages(transformed, transformModel);
+ 			if (blobBroker) transformed = await blobBroker.decorateContext(transformed, transformModel);
+ 			// Keep per-request volatility out of the system prompt: the date/cwd
+ 			// reminder rides on the first user turn so open-weight providers keep
+@@ -4046,7 +4048,6 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
+ 						let transformed = obfuscator ? obfuscateProviderContext(obfuscator, context) : context;
+ 						transformed = clampProviderContextImages(transformed, transformModel);
+ 						transformed = await normalizeProviderContextImagesForModel(transformed, transformModel);
+-						transformed = await dropUnreadableContextImages(transformed, transformModel);
+ 						if (blobBroker) transformed = await blobBroker.decorateContext(transformed, transformModel);
+ 						return withDateCwdReminder(
+ 							transformed,
+@@ -4097,9 +4098,9 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
+ 		// Activation is therefore a session-start decision for BOTH the controller
+ 		// and the tools; the fire-time re-check in `#onAgentEnd` still handles a
+ 		// mid-session DISABLE. The subscription lives for the session's lifetime; the
+-		// reference is intentionally discarded (the listener retains it).
+ 		if (!restrictToolNames) {
+-			if (settings.get("autolearn.enabled") && taskDepth === 0) {
++			// Built-in experimental AutoLearnController is enabled only for resolved builtin mode
++			if (resolveAutolearnMode(settings) === "builtin" && taskDepth === 0) {
+ 				await logger.time("startMemoryStartupTask", startMemoryBackend);
+ 				new AutoLearnController({
+ 					session,
+diff --git a/packages/coding-agent/src/tools/index.ts b/packages/coding-agent/src/tools/index.ts
+index cfa1aa4..30a93a5 100644
+--- a/packages/coding-agent/src/tools/index.ts
++++ b/packages/coding-agent/src/tools/index.ts
+@@ -31,8 +31,9 @@ import type { CustomMessage } from "../session/messages";
+ import type { UsageStatistics } from "../session/session-entries";
+ import type { SessionManager } from "../session/session-manager";
+ import type { ToolChoiceQueue } from "../session/tool-choice-queue";
++import { resolveAutolearnMode } from "../autolearn/config";
++import { BUILTIN_TOOLS } from "./builtin";
+ import { TaskTool } from "../task";
+-import type { AgentOutputManager } from "../task/output-manager";
+ import { canSpawnAtDepth, type StructuredSubagentSchemaMode } from "../task/types";
+ import type { EventBus } from "../utils/event-bus";
+ import { type InspectImageMode, isInspectImageToolActive } from "../utils/inspect-image-mode";
+@@ -629,7 +630,8 @@ export async function createTools(session: ToolSession, toolNames?: string[]): P
+ 		// active still exposes the tools the nudge points at. Gated to top-level
+ 		// (taskDepth 0): the controller only runs there, so a subagent's explicit
+ 		// tool whitelist must never be silently widened with write-capable tools.
+-		if (session.settings.get("autolearn.enabled") && (session.taskDepth ?? 0) === 0) {
++		const isBuiltinAutolearn = resolveAutolearnMode(session.settings) === "builtin";
++		if (isBuiltinAutolearn && (session.taskDepth ?? 0) === 0) {
+ 			if (!requestedTools.includes("manage_skill")) requestedTools.push("manage_skill");
+ 			if (
+ 				["hindsight", "mnemopi", "local"].includes(session.settings.get("memory.backend") ?? "") &&
+@@ -683,14 +685,15 @@ export async function createTools(session: ToolSession, toolNames?: string[]): P
+ 			return ["hindsight", "mnemopi"].includes(session.settings.get("memory.backend") ?? "");
+ 		}
+ 		if (name === "memory_edit") return session.settings.get("memory.backend") === "mnemopi";
++		const isBuiltinAutolearn = resolveAutolearnMode(session.settings) === "builtin";
+ 		if (name === "manage_skill")
+ 			return (
+-				session.settings.get("autolearn.enabled") &&
++				isBuiltinAutolearn &&
+ 				((session.taskDepth ?? 0) === 0 || requestedTools !== undefined)
+ 			);
+ 		if (name === "learn") {
+ 			return (
+-				session.settings.get("autolearn.enabled") &&
++				isBuiltinAutolearn &&
+ 				((session.taskDepth ?? 0) === 0 || requestedTools !== undefined) &&
+ 				["hindsight", "mnemopi", "local"].includes(session.settings.get("memory.backend") ?? "")
+ 			);
+diff --git a/packages/coding-agent/src/tools/learn.ts b/packages/coding-agent/src/tools/learn.ts
+index 74704a2..f10f10d 100644
+--- a/packages/coding-agent/src/tools/learn.ts
++++ b/packages/coding-agent/src/tools/learn.ts
+@@ -1,5 +1,6 @@
+ import { type } from "@oh-my-pi/omptype";
+ import type { AgentTool, AgentToolResult } from "@oh-my-pi/pi-agent-core";
++import { resolveAutolearnMode } from "../autolearn/config";
+ import { sanitizeSkillName, writeManagedSkill } from "../autolearn/managed-skills";
+ import { isNameClaimedByAuthoredSkill } from "../extensibility/skills";
+ import { localBackend } from "../memory-backend/local-backend";
+@@ -42,7 +43,8 @@ export class LearnTool implements AgentTool<typeof learnSchema> {
+ 	constructor(private readonly session: ToolSession) {}
+ 
+ 	static createIf(session: ToolSession): LearnTool | null {
+-		if (!session.settings.get("autolearn.enabled")) return null;
++		const mode = resolveAutolearnMode(session.settings);
++		if (mode !== "builtin") return null;
+ 		const backend = session.settings.get("memory.backend");
+ 		if (backend !== "hindsight" && backend !== "mnemopi" && backend !== "local") return null;
+ 		return new LearnTool(session);
+diff --git a/packages/coding-agent/src/tools/manage-skill.ts b/packages/coding-agent/src/tools/manage-skill.ts
+index e9246b0..291e7b9 100644
+--- a/packages/coding-agent/src/tools/manage-skill.ts
++++ b/packages/coding-agent/src/tools/manage-skill.ts
+@@ -1,6 +1,7 @@
+ import * as path from "node:path";
+ import { type } from "@oh-my-pi/omptype";
+ import type { AgentTool, AgentToolResult } from "@oh-my-pi/pi-agent-core";
++import { resolveAutolearnMode } from "../autolearn/config";
+ import {
+ 	deleteManagedSkill,
+ 	getManagedSkillsDir,
+@@ -48,7 +49,8 @@ export class ManageSkillTool implements AgentTool<typeof manageSkillSchema> {
+ 	constructor(private readonly refreshSkills?: () => Promise<void>) {}
+ 
+ 	static createIf(session: ToolSession): ManageSkillTool | null {
+-		if (!session.settings.get("autolearn.enabled")) return null;
++		const mode = resolveAutolearnMode(session.settings);
++		if (mode !== "builtin") return null;
+ 		return new ManageSkillTool(session.refreshSkills);
+ 	}
+ 
+diff --git a/packages/coding-agent/test/autolearn-managed-skills.test.ts b/packages/coding-agent/test/autolearn-managed-skills.test.ts
+index f2a79e0..1cebbb8 100644
+--- a/packages/coding-agent/test/autolearn-managed-skills.test.ts
++++ b/packages/coding-agent/test/autolearn-managed-skills.test.ts
+@@ -219,7 +219,15 @@ describe("managed-skills primitives", () => {
+ 			const outside = path.join(tempHome, "authored-hardlink.md");
+ 			await Bun.write(outside, "user-authored content");
+ 			await removeWithRetries(skillFile("hardlink"));
+-			await fs.link(outside, skillFile("hardlink"));
++			try {
++				await fs.link(outside, skillFile("hardlink"));
++			} catch (err) {
++				if ((err as { code?: string }).code === "EACCES" || (err as { code?: string }).code === "EPERM") {
++					// Filesystem / OS does not permit hard links (e.g. Android SELinux / Termux)
++					return;
++				}
++				throw err;
++			}
+ 
+ 			await expect(
+ 				writeManagedSkill({ action: "update", name: "hardlink", description: "d", body: "updated" }),
+diff --git a/packages/coding-agent/test/custom-autolearn.test.ts b/packages/coding-agent/test/custom-autolearn.test.ts
+new file mode 100644
+index 0000000..d64c5e2
+--- /dev/null
++++ b/packages/coding-agent/test/custom-autolearn.test.ts
+@@ -0,0 +1,1003 @@
++import { describe, expect, it } from "bun:test";
++import { type MemoryRuntimeContext } from "@oh-my-pi/pi-coding-agent/memory-backend";
++import { LearnDatabase } from "@oh-my-pi/pi-coding-agent/autolearn/learn-db";
++import { redactEvidence, extractFailureSignature } from "@oh-my-pi/pi-coding-agent/autolearn/redact";
++import { VerifierEngine } from "@oh-my-pi/pi-coding-agent/autolearn/verifier";
++import { CandidateLedger } from "@oh-my-pi/pi-coding-agent/autolearn/candidate-ledger";
++import { ManagedSkillWriter } from "@oh-my-pi/pi-coding-agent/autolearn/skill-writer";
++import { loadLearnConfig, resolveAutolearnMode } from "@oh-my-pi/pi-coding-agent/autolearn/config";
++import { Settings, dropSettingsGroupShadows } from "@oh-my-pi/pi-coding-agent/config/settings";
++import { loadMnemopiConfig } from "@oh-my-pi/pi-coding-agent/mnemopi/config";
++import { buildAutoLearnInstructions } from "@oh-my-pi/pi-coding-agent/autolearn/controller";
++import { createTools } from "@oh-my-pi/pi-coding-agent/tools";
++import * as fs from "node:fs";
++import * as path from "node:path";
++import * as os from "node:os";
++
++describe("custom autolearn suite", () => {
++	it("defaults autolearn.mode to off and disables mnemopi.autoRetain", () => {
++		const settings = Settings.isolated();
++		expect(settings.get("autolearn.mode")).toBe("off");
++		expect(settings.get("autolearn.enabled")).toBe(false);
++		expect(settings.get("mnemopi.autoRetain")).toBe(false);
++	});
++
++	it("resolves autolearn mode precedence: explicit off beats legacy enabled=true; custom mode overrides autoRetain", () => {
++		// 1. Explicit off with legacy enabled -> off
++		const s0 = Settings.isolated({ "autolearn.mode": "off", "autolearn.enabled": true });
++		const c0 = loadLearnConfig(s0);
++		expect(c0.mode).toBe("off");
++		expect(c0.enabled).toBe(false);
++
++		// 2. Legacy enabled without mode -> builtin
++		const s1 = Settings.isolated({ "autolearn.enabled": true });
++		const c1 = loadLearnConfig(s1);
++		expect(c1.mode).toBe("builtin");
++		expect(c1.enabled).toBe(false);
++
++		// 3. Custom mode -> custom enabled and overrides autoRetain
++		const s2 = Settings.isolated({ "autolearn.mode": "custom", "mnemopi.autoRetain": true });
++		const c2 = loadLearnConfig(s2);
++		expect(c2.mode).toBe("custom");
++		expect(c2.enabled).toBe(true);
++		const mnemopiConfig = loadMnemopiConfig(s2, os.tmpdir());
++		expect(mnemopiConfig.autoRetain).toBe(false);
++	});
++
++	it("gates learn and manage_skill tools: excluded in custom mode, available in builtin mode", async () => {
++		const makeSession = (overrides: Record<string, unknown>) => {
++			const settings = Settings.isolated(overrides);
++			return {
++				settings,
++				sessionManager: { getCwd: () => os.tmpdir(), getSessionId: () => "test-sess" },
++				modelRegistry: {} as unknown as import("@oh-my-pi/pi-coding-agent/config/model-registry").ModelRegistry,
++				taskDepth: 0,
++				cwd: os.tmpdir(),
++			} as unknown as import("@oh-my-pi/pi-coding-agent/tools").ToolSession;
++		};
++
++		// Custom mode: learn and manage_skill are removed from agent toolset
++		const customTools = (await createTools(makeSession({ "autolearn.mode": "custom", "memory.backend": "mnemopi" }))).map(t => t.name);
++		expect(customTools).not.toContain("manage_skill");
++		expect(customTools).not.toContain("learn");
++
++		// Builtin mode: learn and manage_skill are offered
++		const builtinTools = (await createTools(makeSession({ "autolearn.mode": "builtin", "memory.backend": "mnemopi" }))).map(t => t.name);
++		expect(builtinTools).toContain("manage_skill");
++		expect(builtinTools).toContain("learn");
++	});
++
++	it("redacts credentials from command arguments, paths, and headers at persistence boundaries", () => {
++		const rawCmd = "git push https://user:supersecret123@github.com/repo.git --password mypass";
++		const redacted = redactEvidence(rawCmd);
++		expect(redacted).not.toContain("supersecret123");
++		expect(redacted).not.toContain("mypass");
++
++		const sig = extractFailureSignature("bash", { command: "curl -H 'Authorization: Bearer sk-ant-secret12345678901234567890'" }, "Auth failed");
++		expect(sig).not.toContain("sk-ant-secret12345678901234567890");
++		expect(sig).toContain("[REDACTED]");
++	});
++
++	it("manages learn.db SQLite lifecycle with WAL mode and tables", () => {
++		const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "learn-db-test-"));
++		const dbPath = path.join(tempDir, "learn.db");
++		try {
++			const db = new LearnDatabase(dbPath);
++			expect(fs.existsSync(dbPath)).toBe(true);
++			const stat = fs.statSync(dbPath);
++			if (process.platform !== "win32") {
++				expect(stat.mode & 0o777).toBe(0o600);
++			}
++			const tables = db.listTables();
++			expect(tables).toContain("episodes");
++			expect(tables).toContain("candidates");
++			expect(tables).toContain("verdicts");
++			expect(tables).toContain("learn_events");
++			expect(tables).toContain("tombstones");
++			db.close();
++		} finally {
++			fs.rmSync(tempDir, { recursive: true, force: true });
++		}
++	});
++
++	it("protects verifier correlation against arbitrary poisoning and transient success pairs", () => {
++		const engine = new VerifierEngine();
++
++		// 1. Tool execution start & fail on specific command
++		engine.recordStart({
++			type: "tool_execution_start",
++			toolCallId: "call-1",
++			toolName: "bash",
++			args: { command: "bun test test/auth.test.ts" },
++		});
++		const failRes = engine.correlateEnd({
++			type: "tool_execution_end",
++			toolCallId: "call-1",
++			toolName: "bash",
++			result: { error: "AssertionError: expected true to be false" },
++			isError: true,
++		});
++		expect(failRes.verdict).toBe("fail");
++
++		// 2. Unrelated tool command completion stays inconclusive (no poisoning of prior failure)
++		engine.recordStart({
++			type: "tool_execution_start",
++			toolCallId: "call-2",
++			toolName: "bash",
++			args: { command: "echo passed ok success" },
++		});
++		const unmatch = engine.correlateEnd({
++			type: "tool_execution_end",
++			toolCallId: "call-2",
++			toolName: "bash",
++			result: { content: [{ type: "text", text: "passed ok success" }] },
++			isError: false,
++		});
++		expect(unmatch.verdict).toBe("inconclusive");
++
++		// 3. Crafted output with keywords on unlisted verifier or failed exit rejected
++		engine.recordStart({
++			type: "tool_execution_start",
++			toolCallId: "call-3",
++			toolName: "bash",
++			args: { command: "bun test test/auth.test.ts" },
++		});
++		const craftedFail = engine.correlateEnd({
++			type: "tool_execution_end",
++			toolCallId: "call-3",
++			toolName: "bash",
++			result: { exitCode: 1, content: [{ type: "text", text: "1 pass, 1 failed" }] },
++			isError: true,
++		});
++		expect(craftedFail.verdict).toBe("fail");
++
++		// 4. Exact matching command resolution with verified structured test runner pass
++		engine.recordStart({
++			type: "tool_execution_start",
++			toolCallId: "call-4",
++			toolName: "bash",
++			args: { command: "bun test test/auth.test.ts" },
++		});
++		const passRes = engine.correlateEnd({
++			type: "tool_execution_end",
++			toolCallId: "call-4",
++			toolName: "bash",
++			result: { exitCode: 0, content: [{ type: "text", text: "Ran 1 test. 1 pass, 0 fail" }] },
++			isError: false,
++		});
++		expect(passRes.verdict).toBe("pass");
++		expect(passRes.matchedSignature).toBe(craftedFail.matchedSignature);
++	});
++	it("rejects non-error tool result without exitCode 0 as semantic verification pass", () => {
++		const engine = new VerifierEngine();
++		engine.recordStart({
++			type: "tool_execution_start",
++			toolCallId: "call-1",
++			toolName: "bash",
++			args: { command: "bun test test/auth.test.ts" },
++		});
++		engine.correlateEnd({
++			type: "tool_execution_end",
++			toolCallId: "call-1",
++			toolName: "bash",
++			result: { error: "AssertionError" },
++			isError: true,
++		});
++
++		// Result without exitCode (e.g. transport success only) must NOT be treated as semantic pass
++		engine.recordStart({
++			type: "tool_execution_start",
++			toolCallId: "call-2",
++			toolName: "bash",
++			args: { command: "bun test test/auth.test.ts" },
++		});
++		const passRes = engine.correlateEnd({
++			type: "tool_execution_end",
++			toolCallId: "call-2",
++			toolName: "bash",
++			result: { content: [{ type: "text", text: "all good" }] },
++			isError: false,
++		});
++		expect(passRes.verdict).toBe("inconclusive");
++	});
++
++
++	it("enforces candidate status transitions, version conflict, and atomic ledger", () => {
++		const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "learn-ledger-test-"));
++		const dbPath = path.join(tempDir, "learn.db");
++		try {
++			const db = new LearnDatabase(dbPath);
++			const ledger = new CandidateLedger(db);
++
++			const id = ledger.createCandidate({
++				kind: "rule",
++				scope: "project",
++				project: "test-proj-bank",
++				title: "Fix auth headers",
++				content: "Always pass bearer token",
++				signature: "err-sig-1",
++				evidence: "test failed then passed",
++			})!;
++			const c1 = ledger.getCandidate(id)!;
++			expect(c1.status).toBe("pending");
++			expect(c1.version).toBe(1);
++			expect(c1.passes).toBe(0);
++
++			const updated = ledger.recordPass(id, {
++				expectedVersion: 1,
++				verifier: "bash:test/auth.test.ts",
++			});
++			expect(updated.success).toBe(true);
++			expect(updated.candidate?.passes).toBe(1);
++			expect(updated.candidate?.version).toBe(2);
++
++			// Version conflict check
++			const conflict = ledger.recordPass(id, {
++				expectedVersion: 1, // Stale!
++				verifier: "bash:test/auth.test.ts",
++			});
++			expect(conflict.success).toBe(false);
++			expect(conflict.error).toContain("version_conflict");
++
++			// Promotion threshold requirement
++			const pass2 = ledger.recordPass(id, {
++				expectedVersion: 2,
++				verifier: "bash:test/auth.test.ts",
++			});
++			expect(pass2.success).toBe(true);
++			expect(pass2.candidate?.passes).toBe(2);
++			expect(ledger.isEligibleForPromotion(pass2.candidate!, 2)).toBe(true);
++
++			db.close();
++		} finally {
++			fs.rmSync(tempDir, { recursive: true, force: true });
++		}
++	});
++
++	it("handles promotion failure when save does not return stored id", async () => {
++		const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "learn-fail-test-"));
++		const dbPath = path.join(tempDir, "learn.db");
++		try {
++			const db = new LearnDatabase(dbPath);
++			const ledger = new CandidateLedger(db);
++
++			const failingMemory: MemoryRuntimeContext = {
++				status: async () => ({ backend: "mnemopi", active: true, writable: true, searchable: true }),
++				search: async () => ({ backend: "mnemopi", query: "", count: 0, items: [] }),
++				save: async () => ({ backend: "mnemopi", stored: 0, message: "Storage quota exceeded" }),
++			};
++
++			const id = ledger.createCandidate({
++				kind: "fact",
++				scope: "global",
++				title: "Global setting",
++				content: "Use strict mode",
++				signature: "sig-global-1",
++				evidence: "pass",
++			})!;
++			ledger.recordPass(id, { expectedVersion: 1, verifier: "v1" });
++			ledger.recordPass(id, { expectedVersion: 2, verifier: "v1" });
++
++			const res = await ledger.promoteCandidate(id, { memory: failingMemory, minPasses: 2 });
++			expect(res.success).toBe(false);
++			expect(res.error).toBe("Storage quota exceeded");
++
++			// Candidate returns to pending on save failure
++			const cand = ledger.getCandidate(id)!;
++			expect(cand.status).toBe("pending");
++
++			db.close();
++		} finally {
++			fs.rmSync(tempDir, { recursive: true, force: true });
++		}
++	});
++
++	it("refuses to write managed skill for placeholder or unreviewed procedure content", async () => {
++		const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "learn-writer-test-"));
++		const managedSkillsDir = path.join(tempDir, "managed-skills");
++		try {
++			const writer = new ManagedSkillWriter({ managedSkillsDir });
++
++			// 1. Ineligible with placeholder signature text
++			expect(
++				writer.isEligibleForSkill({
++					kind: "procedure",
++					passes: 3,
++					content: "Verified resolution for bash:test/auth.test.ts:abc123",
++				}),
++			).toBe(false);
++
++			// 2. Ineligible with short or fix placeholder
++			expect(
++				writer.isEligibleForSkill({
++					kind: "procedure",
++					passes: 3,
++					content: "Fix for test failure",
++				}),
++			).toBe(false);
++
++			// 3. Eligible with concrete reviewed instructions
++			expect(
++				writer.isEligibleForSkill({
++					kind: "procedure",
++					passes: 3,
++					content: "Step 1: configure auth tokens.\nStep 2: verify bearer header injection.\nStep 3: test endpoint.",
++				}),
++			).toBe(true);
++
++			// 4. WriteSkill throws when given placeholder instructions
++			await expect(
++				writer.writeSkill({
++					name: "test-placeholder",
++					description: "Placeholder skill",
++					instructions: "Verified resolution for signature",
++				}),
++			).rejects.toThrow(/unreviewed or placeholder/);
++		} finally {
++			fs.rmSync(tempDir, { recursive: true, force: true });
++		}
++	});
++
++	it("prevents symlink traversal attacks when writing managed skills", async () => {
++		const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "learn-symlink-test-"));
++		const managedSkillsDir = path.join(tempDir, "managed-skills");
++		const outsideDir = path.join(tempDir, "outside");
++		fs.mkdirSync(managedSkillsDir, { recursive: true });
++		fs.mkdirSync(outsideDir, { recursive: true });
++
++		try {
++			// Create symlink inside managedSkillsDir pointing outside
++			const symlinkTarget = path.join(managedSkillsDir, "symlink-skill");
++			try {
++				fs.symlinkSync(outsideDir, symlinkTarget, "dir");
++			} catch {
++				return; // Skip if symlinks not permitted
++			}
++
++			const writer = new ManagedSkillWriter({ managedSkillsDir });
++			await expect(
++				writer.writeSkill({
++					name: "symlink-skill",
++					description: "A malicious skill via symlink",
++					instructions: "Step 1: Do something valid here to pass validation.",
++				}),
++			).rejects.toThrow(/symlink/);
++		} finally {
++			fs.rmSync(tempDir, { recursive: true, force: true });
++		}
++	});
++
++	it("routes scope and canonical full project paths without basename collisions", async () => {
++		const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "learn-scope-proj-"));
++		const dbPath = path.join(tempDir, "learn.db");
++		try {
++			const db = new LearnDatabase(dbPath);
++			const ledger = new CandidateLedger(db);
++
++			// Two different projects with identical basename: /org1/my-repo vs /org2/my-repo
++			const id1 = ledger.createCandidate({
++				kind: "rule",
++				scope: "project",
++				project: "/path/org1/my-repo",
++				title: "Fix A",
++				content: "Content A for org1 repo",
++				signature: "sig-shared",
++				evidence: "pass",
++			});
++			const id2 = ledger.createCandidate({
++				kind: "rule",
++				scope: "project",
++				project: "/path/org2/my-repo",
++				title: "Fix B",
++				content: "Content B for org2 repo",
++				signature: "sig-shared",
++				evidence: "pass",
++			});
++
++			expect(id1).not.toBeNull();
++			expect(id2).not.toBeNull();
++			expect(id1).not.toBe(id2);
++
++			// Scoped tombstone test: tombstoning in /org1 does NOT block /org2
++			const delRes = await ledger.deleteCandidate(id1!, { reason: "test" });
++			expect(delRes.success).toBe(true);
++			expect(ledger.isTombstoned("sig-shared", "project", "/path/org1/my-repo")).toBe(true);
++			expect(ledger.isTombstoned("sig-shared", "project", "/path/org2/my-repo")).toBe(false);
++
++			// Recreation in /org1 blocked, recreation in /org2 still permitted
++			const rec1 = ledger.createCandidate({
++				kind: "rule",
++				scope: "project",
++				project: "/path/org1/my-repo",
++				title: "Fix A Retry",
++				content: "Content A retry",
++				signature: "sig-shared",
++				evidence: "pass",
++			});
++			expect(rec1).toBeNull();
++
++			// Duplicate within same scope and project returns existing id
++			const dup2 = ledger.createCandidate({
++				kind: "rule",
++				scope: "project",
++				project: "/path/org2/my-repo",
++				title: "Fix B Duplicate",
++				content: "Content B duplicate",
++				signature: "sig-shared",
++				evidence: "pass",
++			});
++			expect(dup2).toBe(id2);
++
++			await db.closeAsync();
++		} finally {
++			fs.rmSync(tempDir, { recursive: true, force: true });
++		}
++	});
++
++	it("passes scope and project down to memory backend save and edit", async () => {
++		const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "learn-mem-routing-"));
++		const dbPath = path.join(tempDir, "learn.db");
++		try {
++			const db = new LearnDatabase(dbPath);
++			const ledger = new CandidateLedger(db);
++
++			const id = ledger.createCandidate({
++				kind: "rule",
++				scope: "project",
++				project: "/canonical/workspace/repo",
++				title: "Scoped rule",
++				content: "Scoped rule content",
++				signature: "sig-routing-1",
++				evidence: "pass",
++			})!;
++			ledger.recordPass(id, { expectedVersion: 1, verifier: "v1" });
++			ledger.recordPass(id, { expectedVersion: 2, verifier: "v1" });
++
++			let savedScope: string | undefined;
++			let savedProject: string | undefined;
++			let editScope: string | undefined;
++			let editProject: string | undefined;
++
++			const mockMemory: MemoryRuntimeContext = {
++				status: async () => ({ backend: "mnemopi", active: true, writable: true, searchable: true }),
++				save: async input => {
++					if (typeof input !== "string") {
++						savedScope = input.scope;
++						savedProject = input.project;
++					}
++					return { backend: "mnemopi", stored: 1, ids: ["mem-routed-123"] };
++				},
++				edit: async (_op, _id, opts) => {
++					editScope = opts?.scope;
++					editProject = opts?.project;
++					return { status: "deleted" };
++				},
++			};
++
++			const prom = await ledger.promoteCandidate(id, { memory: mockMemory, minPasses: 2 });
++			expect(prom.success).toBe(true);
++			expect(savedScope).toBe("project");
++			expect(savedProject).toBe("/canonical/workspace/repo");
++
++			const del = await ledger.deleteCandidate(id, { memory: mockMemory });
++			expect(del.success).toBe(true);
++			expect(editScope).toBe("project");
++			expect(editProject).toBe("/canonical/workspace/repo");
++
++			await db.closeAsync();
++		} finally {
++			fs.rmSync(tempDir, { recursive: true, force: true });
++		}
++	});
++
++	it("refuses promotion when memory backend is absent", async () => {
++		const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "learn-no-mem-prom-"));
++		const dbPath = path.join(tempDir, "learn.db");
++		try {
++			const db = new LearnDatabase(dbPath);
++			const ledger = new CandidateLedger(db);
++
++			const id = ledger.createCandidate({
++				kind: "rule",
++				scope: "global",
++				title: "No mem rule",
++				content: "No mem content",
++				signature: "sig-no-mem",
++				evidence: "pass",
++			})!;
++			ledger.recordPass(id, { expectedVersion: 1, verifier: "v1" });
++			ledger.recordPass(id, { expectedVersion: 2, verifier: "v1" });
++
++			// Promotion without memory backend must fail and remain pending
++			const prom = await ledger.promoteCandidate(id, { minPasses: 2 });
++			expect(prom.success).toBe(false);
++			expect(prom.error).toBe("memory_backend_required_for_promotion");
++
++			const cand = ledger.getCandidate(id)!;
++			expect(cand.status).toBe("pending");
++			expect(cand.projectedMemoryId).toBeUndefined();
++
++			await db.closeAsync();
++		} finally {
++			fs.rmSync(tempDir, { recursive: true, force: true });
++		}
++	});
++
++	it("recovers in-flight promoting state conservatively into needs_review during startup sweep", async () => {
++		const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "learn-sweep-test-"));
++		const dbPath = path.join(tempDir, "learn.db");
++		try {
++			const db1 = new LearnDatabase(dbPath);
++			const ledger1 = new CandidateLedger(db1);
++
++			const id = ledger1.createCandidate({
++				kind: "rule",
++				scope: "global",
++				title: "Crash test",
++				content: "Crash content",
++				signature: "sig-crash-sweep",
++				evidence: "pass",
++			})!;
++
++			// Manually simulate crash mid-promotion by leaving status as 'promoting' without projection
++			db1.db.query("UPDATE candidates SET status = 'promoting' WHERE id = ?").run(id);
++			const candBefore = ledger1.getCandidate(id)!;
++			expect(candBefore.status).toBe("promoting");
++
++			db1.close();
++
++			// New instance opens database: constructor triggers sweepStaleInFlightStates
++			// In-flight without confirmed projection moves to needs_review to prevent duplicate promotion race
++			const db2 = new LearnDatabase(dbPath);
++			const ledger2 = new CandidateLedger(db2);
++			const candAfter = ledger2.getCandidate(id)!;
++			expect(candAfter.status).toBe("needs_review");
++
++			await db2.closeAsync();
++		} finally {
++			fs.rmSync(tempDir, { recursive: true, force: true });
++		}
++	});
++
++	it("requires explicit confirmation on delete: unconfirmed/not_found memory edit sets needs_review and fails", async () => {
++		const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "learn-del-unconf-"));
++		const dbPath = path.join(tempDir, "learn.db");
++		try {
++			const db = new LearnDatabase(dbPath);
++			const ledger = new CandidateLedger(db);
++
++			const id = ledger.createCandidate({
++				kind: "rule",
++				scope: "global",
++				title: "Del test",
++				content: "Del content",
++				signature: "sig-del-unconf",
++				evidence: "pass",
++			})!;
++			db.db.query("UPDATE candidates SET status = 'promoted', projected_memory_id = 'mem-del-1' WHERE id = ?").run(id);
++
++			const unconfirmedMemory: MemoryRuntimeContext = {
++				status: async () => ({ backend: "mnemopi", active: true, writable: true, searchable: true }),
++				save: async () => ({ backend: "mnemopi", stored: 1 }),
++				edit: async () => ({ status: "not_found" }),
++			};
++
++			const delRes = await ledger.deleteCandidate(id, { memory: unconfirmedMemory });
++			expect(delRes.success).toBe(false);
++			expect(delRes.error).toContain("memory_edit_unconfirmed");
++
++			const cand = ledger.getCandidate(id)!;
++			expect(cand.status).toBe("needs_review");
++
++			await db.closeAsync();
++		} finally {
++			fs.rmSync(tempDir, { recursive: true, force: true });
++		}
++	});
++
++	it("guards against concurrent deletion races and marks deleting state before external forget", async () => {
++		const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "learn-del-race-"));
++		const dbPath = path.join(tempDir, "learn.db");
++		try {
++			const db = new LearnDatabase(dbPath);
++			const ledger = new CandidateLedger(db);
++
++			const id = ledger.createCandidate({
++				kind: "rule",
++				scope: "project",
++				project: "/workspace/proj",
++				title: "Del race rule",
++				content: "Del race content",
++				signature: "sig-del-race",
++				evidence: "pass",
++			})!;
++			ledger.recordPass(id, { expectedVersion: 1, verifier: "v1" });
++			ledger.recordPass(id, { expectedVersion: 2, verifier: "v1" });
++
++			const mockMemory: MemoryRuntimeContext = {
++				status: async () => ({ backend: "mnemopi", active: true, writable: true, searchable: true }),
++				save: async () => ({ backend: "mnemopi", stored: 1, ids: ["mem-del-race-1"] }),
++				edit: async () => ({ status: "deleted" }),
++			};
++
++			await ledger.promoteCandidate(id, { memory: mockMemory, minPasses: 2 });
++			const candPromoted = ledger.getCandidate(id)!;
++			expect(candPromoted.status).toBe("promoted");
++
++			// First delete succeeds
++			const del1 = await ledger.deleteCandidate(id, { memory: mockMemory });
++			expect(del1.success).toBe(true);
++
++			// Subsequent delete fails gracefully without double-deletion
++			const del2 = await ledger.deleteCandidate(id, { memory: mockMemory });
++			expect(del2.success).toBe(false);
++			expect(del2.error).toContain("already_deleted");
++
++			await db.closeAsync();
++		} finally {
++			fs.rmSync(tempDir, { recursive: true, force: true });
++		}
++	});
++	it("ensures autolearn settings are user-authoritative and ignores project-level autolearn overrides", () => {
++		const rawProjectSettings = {
++			"autolearn.mode": "custom",
++			"autolearn.enabled": true,
++			"autolearn.minPassesRule": 1,
++			"autolearn.defaultScope": "global",
++			tui: { theme: "dark" },
++		};
++		const cleaned = dropSettingsGroupShadows(rawProjectSettings, "/path/to/project/.omp/config.yml");
++		expect(cleaned["autolearn.mode"]).toBeUndefined();
++		expect(cleaned["autolearn.enabled"]).toBeUndefined();
++		expect(cleaned["autolearn.minPassesRule"]).toBeUndefined();
++		expect(cleaned["autolearn.defaultScope"]).toBeUndefined();
++		expect(cleaned.tui).toBeDefined();
++	});
++
++	it("verifies exact autolearn mode resolution and guidance matrix across all permutations", () => {
++		// 1. Explicit mode: off, enabled: true -> mode=off, instructions=null
++		const s1 = Settings.isolated({ "autolearn.mode": "off", "autolearn.enabled": true });
++		expect(resolveAutolearnMode(s1)).toBe("off");
++		expect(buildAutoLearnInstructions({ manageSkill: true, learn: true }, s1)).toBeNull();
++
++		// 2. Explicit mode: builtin, enabled: false -> mode=builtin, instructions present
++		const s2 = Settings.isolated({ "autolearn.mode": "builtin", "autolearn.enabled": false });
++		expect(resolveAutolearnMode(s2)).toBe("builtin");
++		const instr2 = buildAutoLearnInstructions({ manageSkill: true, learn: true }, s2);
++		expect(instr2).not.toBeNull();
++		expect(instr2).toContain("learn");
++
++		// 3. Explicit mode: custom -> mode=custom, builtin instructions null
++		const s3 = Settings.isolated({ "autolearn.mode": "custom", "autolearn.enabled": true });
++		expect(resolveAutolearnMode(s3)).toBe("custom");
++		expect(buildAutoLearnInstructions({ manageSkill: true, learn: true }, s3)).toBeNull();
++	});
++
++	it("verifies verifier requires explicit exitCode 0 and rejects omitted exitCode or failed exitCode", () => {
++		const engine = new VerifierEngine();
++		engine.recordStart({
++			type: "tool_execution_start",
++			toolCallId: "call-clean-1",
++			toolName: "bash",
++			args: { command: "bun test test/unit.test.ts" },
++		});
++		const fail = engine.correlateEnd({
++			type: "tool_execution_end",
++			toolCallId: "call-clean-1",
++			toolName: "bash",
++			result: { isError: true, error: "1 test failed" },
++			isError: true,
++		});
++		expect(fail.verdict).toBe("fail");
++
++		// Execution with undefined exitCode (transport only) is rejected as inconclusive
++		engine.recordStart({
++			type: "tool_execution_start",
++			toolCallId: "call-clean-2",
++			toolName: "bash",
++			args: { command: "bun test test/unit.test.ts" },
++		});
++		const omittedExit = engine.correlateEnd({
++			type: "tool_execution_end",
++			toolCallId: "call-clean-2",
++			toolName: "bash",
++			result: { isError: false, content: [{ type: "text", text: "1 test passed" }] },
++			isError: false,
++		});
++		expect(omittedExit.verdict).toBe("inconclusive");
++
++		// Execution with exitCode 0 passes
++		engine.recordStart({
++			type: "tool_execution_start",
++			toolCallId: "call-clean-3",
++			toolName: "bash",
++			args: { command: "bun test test/unit.test.ts" },
++		});
++		const pass = engine.correlateEnd({
++			type: "tool_execution_end",
++			toolCallId: "call-clean-3",
++			toolName: "bash",
++			result: { isError: false, exitCode: 0, content: [{ type: "text", text: "1 test passed" }] },
++			isError: false,
++		});
++		expect(pass.verdict).toBe("pass");
++		expect(pass.matchedSignature).toBe(fail.matchedSignature);
++	});
++	it("recovers deleting candidate with projected memory back to promoted state on crash", async () => {
++		const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "learn-crash-del-"));
++		const dbPath = path.join(tempDir, "learn.db");
++		try {
++			const db1 = new LearnDatabase(dbPath);
++			const ledger1 = new CandidateLedger(db1);
++
++			const id = ledger1.createCandidate({
++				kind: "rule",
++				scope: "global",
++				title: "Crash del test",
++				content: "Crash del content",
++				signature: "sig-crash-del",
++				evidence: "pass",
++			})!;
++
++			// Simulate candidate that was promoted and then crashed while in 'deleting' status
++			db1.db.query("UPDATE candidates SET status = 'deleting', projected_memory_id = 'mem-crash-1' WHERE id = ?").run(id);
++			const candBefore = ledger1.getCandidate(id)!;
++			expect(candBefore.status).toBe("deleting");
++			expect(candBefore.projected_memory_id).toBe("mem-crash-1");
++
++			db1.close();
++
++			// New instance opens database: constructor triggers sweepStaleInFlightStates
++			const db2 = new LearnDatabase(dbPath);
++			const ledger2 = new CandidateLedger(db2);
++			const candAfter = ledger2.getCandidate(id)!;
++			// In-flight deletion state conservatively recovers to 'needs_review'
++			expect(candAfter.status).toBe("needs_review");
++
++			await db2.closeAsync();
++		} finally {
++			fs.rmSync(tempDir, { recursive: true, force: true });
++		}
++	});
++
++	it("records candidate metadata on tool event without automatic memory promotion or skill minting", async () => {
++		const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "learn-noauto-"));
++		const dbPath = path.join(tempDir, "learn.db");
++		try {
++			const db = new LearnDatabase(dbPath);
++			const ledger = new CandidateLedger(db);
++
++			let savedMemory = false;
++			const mockMemory: MemoryRuntimeContext = {
++				status: async () => ({ backend: "mnemopi", active: true, writable: true, searchable: true }),
++				save: async () => {
++					savedMemory = true;
++					return { backend: "mnemopi", stored: 1, ids: ["mem-auto-fail"] };
++				},
++			};
++
++			// Create candidate and record multiple passes
++			const id = ledger.createCandidate({
++				kind: "rule",
++				scope: "project",
++				project: "/test/project",
++				title: "Auto test rule",
++				content: "Do not auto promote",
++				signature: "sig-no-auto-1",
++				evidence: "test pass evidence",
++			})!;
++
++			const p1 = ledger.recordPass(id, { expectedVersion: 1, verifier: "bash:test_runner" });
++			expect(p1.success).toBe(true);
++			const p2 = ledger.recordPass(id, { expectedVersion: 2, verifier: "bash:test_runner" });
++			expect(p2.success).toBe(true);
++			const p3 = ledger.recordPass(id, { expectedVersion: 3, verifier: "bash:test_runner" });
++			expect(p3.success).toBe(true);
++
++			const cand = ledger.getCandidate(id)!;
++			// Candidate remains pending and no memory was saved automatically
++			expect(cand.status).toBe("pending");
++			expect(cand.passes).toBe(3);
++			expect(cand.projectedMemoryId).toBeUndefined();
++			expect(savedMemory).toBe(false);
++
++			// Only explicit promotion with reviewed approval commits to memory
++			const explicitApprove = await ledger.promoteCandidate(id, { memory: mockMemory, minPasses: 0 });
++			expect(explicitApprove.success).toBe(true);
++			expect(savedMemory).toBe(true);
++			const promotedCand = ledger.getCandidate(id)!;
++			expect(promotedCand.status).toBe("promoted");
++			expect(promotedCand.projectedMemoryId).toBe("mem-auto-fail");
++
++			await db.closeAsync();
++		} finally {
++			fs.rmSync(tempDir, { recursive: true, force: true });
++		}
++	});
++
++	it("enforces cross-project authorization on get, list, promote, and delete operations", async () => {
++		const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "learn-auth-test-"));
++		const dbPath = path.join(tempDir, "learn.db");
++		try {
++			const db = new LearnDatabase(dbPath);
++			const ledger = new CandidateLedger(db);
++
++			const projA = "/projects/orgA/repoA";
++			const projB = "/projects/orgB/repoB";
++
++			// Candidate 1 in Project A
++			const candA = ledger.createCandidate({
++				kind: "rule",
++				scope: "project",
++				project: projA,
++				title: "Project A Secret Rule",
++				content: "Project A sensitive instructions",
++				signature: "sig-proj-a",
++				evidence: "proj a evidence",
++			})!;
++			ledger.recordPass(candA, { expectedVersion: 1, verifier: "v1" });
++			ledger.recordPass(candA, { expectedVersion: 2, verifier: "v1" });
++
++			// Candidate 2 in Project B
++			const candB = ledger.createCandidate({
++				kind: "rule",
++				scope: "project",
++				project: projB,
++				title: "Project B Rule",
++				content: "Project B instructions",
++				signature: "sig-proj-b",
++				evidence: "proj b evidence",
++			})!;
++			ledger.recordPass(candB, { expectedVersion: 1, verifier: "v1" });
++			ledger.recordPass(candB, { expectedVersion: 2, verifier: "v1" });
++
++			// Candidate 3 Global
++			const candGlobal = ledger.createCandidate({
++				kind: "rule",
++				scope: "global",
++				title: "Global Rule",
++				content: "Global instructions",
++				signature: "sig-global-shared",
++				evidence: "global evidence",
++			})!;
++			ledger.recordPass(candGlobal, { expectedVersion: 1, verifier: "v1" });
++			ledger.recordPass(candGlobal, { expectedVersion: 2, verifier: "v1" });
++
++			// 1. List from Project A perspective: sees Cand A and Global, NOT Cand B
++			const listA = ledger.listCandidates(undefined, { currentProject: projA });
++			const idsA = listA.map(c => c.id);
++			expect(idsA).toContain(candA);
++			expect(idsA).toContain(candGlobal);
++			expect(idsA).not.toContain(candB);
++
++			// 2. List from Project B perspective: sees Cand B and Global, NOT Cand A
++			const listB = ledger.listCandidates(undefined, { currentProject: projB });
++			const idsB = listB.map(c => c.id);
++			expect(idsB).toContain(candB);
++			expect(idsB).toContain(candGlobal);
++			expect(idsB).not.toContain(candA);
++
++			// 3. Get candidate authorization: Project B querying Project A candidate returns null
++			expect(ledger.getCandidate(candA, { currentProject: projB })).toBeNull();
++			expect(ledger.getCandidate(candA, { currentProject: projA })).not.toBeNull();
++			expect(ledger.getCandidate(candGlobal, { currentProject: projB })).not.toBeNull();
++
++			// 4. Promote authorization: Project B attempting to promote Project A candidate is rejected
++			const mockMemory: MemoryRuntimeContext = {
++				status: async () => ({ backend: "mnemopi", active: true, writable: true, searchable: true }),
++				save: async () => ({ backend: "mnemopi", stored: 1, ids: ["mem-id-1"] }),
++				edit: async () => ({ status: "deleted" }),
++			};
++
++			const promFail = await ledger.promoteCandidate(candA, {
++				memory: mockMemory,
++				currentProject: projB,
++			});
++			expect(promFail.success).toBe(false);
++			expect(promFail.error).toBe("unauthorized_cross_project_candidate");
++
++			// Promote from authorized project succeeds
++			const promSuccess = await ledger.promoteCandidate(candA, {
++				memory: mockMemory,
++				currentProject: projA,
++			});
++			expect(promSuccess.success).toBe(true);
++
++			// 5. Delete authorization: Project B attempting to delete Project A candidate is rejected
++			const delFail = await ledger.deleteCandidate(candA, {
++				memory: mockMemory,
++				currentProject: projB,
++			});
++			expect(delFail.success).toBe(false);
++			expect(delFail.error).toBe("unauthorized_cross_project_candidate");
++
++			// Delete from authorized project succeeds
++			const delSuccess = await ledger.deleteCandidate(candA, {
++				memory: mockMemory,
++				currentProject: projA,
++			});
++			expect(delSuccess.success).toBe(true);
++
++			await db.closeAsync();
++		} finally {
++			fs.rmSync(tempDir, { recursive: true, force: true });
++		}
++	});
++
++	it("enforces canonical project identity on local-scoped candidates and routes custom bank prefix", async () => {
++		const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "learn-local-bank-"));
++		const dbPath = path.join(tempDir, "learn.db");
++		try {
++			const db = new LearnDatabase(dbPath);
++			const ledger = new CandidateLedger(db);
++			const proj1 = "/workspace/project1";
++			const proj2 = "/workspace/project2";
++
++			// 1. Creating local candidate without project identity throws
++			expect(() => {
++				ledger.createCandidate({
++					kind: "rule",
++					scope: "local",
++					title: "No proj local",
++					content: "Local content",
++					signature: "sig-local-fail",
++					evidence: "pass",
++				});
++			}).toThrow(/Cannot create local-scoped candidate without canonical project identity/);
++
++			// 2. Local candidate with project is authorized by project
++			const candLocal = ledger.createCandidate({
++				kind: "rule",
++				scope: "local",
++				project: proj1,
++				title: "Local Proj1",
++				content: "Local proj1 content",
++				signature: "sig-local-pass",
++				evidence: "pass",
++			})!;
++			expect(candLocal).not.toBeNull();
++			ledger.recordPass(candLocal, { expectedVersion: 1, verifier: "v1" });
++			ledger.recordPass(candLocal, { expectedVersion: 2, verifier: "v1" });
++
++			// List from proj1 sees it; list from proj2 does not
++			const list1 = ledger.listCandidates(undefined, { currentProject: proj1 });
++			expect(list1.map(c => c.id)).toContain(candLocal);
++			const list2 = ledger.listCandidates(undefined, { currentProject: proj2 });
++			expect(list2.map(c => c.id)).not.toContain(candLocal);
++
++			// 3. Memory backend bank routing with custom mnemopi bank prefix
++			let capturedSaveBank: string | undefined;
++			let capturedEditBank: string | undefined;
++			const mockMemoryPrefix: MemoryRuntimeContext = {
++				status: async () => ({ backend: "mnemopi", active: true, writable: true, searchable: true }),
++				save: async input => {
++					const norm = typeof input === "string" ? { content: input } : input;
++					capturedSaveBank = norm.bank ?? (norm.scope === "global" ? "myprefix-default" : "myprefix-project1-hash");
++					return { backend: "mnemopi", stored: 1, ids: ["mem-scoped-1"] };
++				},
++				edit: async (_op, _id, options) => {
++					capturedEditBank = options?.bank ?? (options?.scope === "global" ? "myprefix-default" : "myprefix-project1-hash");
++					return { status: "deleted" };
++				},
++			};
++
++			const promRes = await ledger.promoteCandidate(candLocal, {
++				memory: mockMemoryPrefix,
++				currentProject: proj1,
++			});
++			expect(promRes.success).toBe(true);
++			expect(capturedSaveBank).toBe("myprefix-project1-hash");
++
++			const delRes = await ledger.deleteCandidate(candLocal, {
++				memory: mockMemoryPrefix,
++				currentProject: proj1,
++			});
++			expect(delRes.success).toBe(true);
++			expect(capturedEditBank).toBe("myprefix-project1-hash");
++
++			await db.closeAsync();
++		} finally {
++			fs.rmSync(tempDir, { recursive: true, force: true });
++		}
++	});
++});

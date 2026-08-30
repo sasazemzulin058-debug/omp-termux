@@ -1,0 +1,1654 @@
+diff --git a/crates/pi-builtins/src/proc_snapshot.rs b/crates/pi-builtins/src/proc_snapshot.rs
+index 43ea867..c2439d2 100644
+--- a/crates/pi-builtins/src/proc_snapshot.rs
++++ b/crates/pi-builtins/src/proc_snapshot.rs
+@@ -41,7 +41,7 @@ pub(crate) fn sanitize_process_command(command: String) -> String {
+ 		.collect()
+ }
+ 
+-#[cfg(target_os = "linux")]
++#[cfg(any(target_os = "linux", target_os = "android"))]
+ mod proc_snapshot {
+ 	use std::{
+ 		fs,
+@@ -1080,7 +1080,7 @@ mod proc_snapshot {
+ 	}
+ }
+ 
+-#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
++#[cfg(any(target_os = "linux", target_os = "android", target_os = "macos", target_os = "windows"))]
+ pub use proc_snapshot::ProcInfo;
+ 
+ /// The processes a signal must never reach: this one and its ancestors.
+@@ -1104,7 +1104,7 @@ pub use proc_snapshot::ProcInfo;
+ ///
+ /// Listing is unaffected: `pgrep` still reports ancestors and `ps` still shows
+ /// them. Only signalling consults this.
+-#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
++#[cfg(any(target_os = "linux", target_os = "android", target_os = "macos", target_os = "windows"))]
+ pub(crate) struct HostProcesses {
+ 	/// This process and its ancestors, nearest first.
+ 	pub pids:  smallvec::SmallVec<[i32; 16]>,
+@@ -1117,7 +1117,7 @@ pub(crate) struct HostProcesses {
+ /// Keeping the walk over this rather than over [`ProcInfo`] lets the recycling
+ /// cases — which are otherwise only reachable by winning a race against the OS —
+ /// be tested with a synthetic tree.
+-#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
++#[cfg(any(target_os = "linux", target_os = "android", target_os = "macos", target_os = "windows"))]
+ #[derive(Clone, Copy)]
+ struct ChainNode {
+ 	ppid:  Option<i32>,
+@@ -1127,7 +1127,7 @@ struct ChainNode {
+ 	start: u64,
+ }
+ 
+-#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
++#[cfg(any(target_os = "linux", target_os = "android", target_os = "macos", target_os = "windows"))]
+ impl HostProcesses {
+ 	/// Walks the parent chain from the current process, taking one process-table
+ 	/// snapshot.
+diff --git a/crates/pi-builtins/src/ps.rs b/crates/pi-builtins/src/ps.rs
+index e4e5d7d..bd43ca7 100644
+--- a/crates/pi-builtins/src/ps.rs
++++ b/crates/pi-builtins/src/ps.rs
+@@ -1244,7 +1244,7 @@ fn format_ps_elapsed(duration: Duration) -> String {
+ 	}
+ }
+ 
+-#[cfg(target_os = "linux")]
++#[cfg(any(target_os = "linux", target_os = "android"))]
+ fn ps_total_memory_bytes() -> Option<u64> {
+ 	let value = fs::read_to_string("/proc/meminfo")
+ 		.ok()?
+diff --git a/crates/pi-natives/Cargo.toml b/crates/pi-natives/Cargo.toml
+index 382df03..1e8b4ad 100644
+--- a/crates/pi-natives/Cargo.toml
++++ b/crates/pi-natives/Cargo.toml
+@@ -23,7 +23,6 @@ wayland-pipewire = ["dep:pipewire"]
+ 
+ [dependencies]
+ anyhow.workspace = true
+-arboard.workspace = true
+ ast-grep-core.workspace = true
+ base64.workspace = true
+ clap.workspace = true
+@@ -53,7 +52,6 @@ flume.workspace = true
+ pi-ast.workspace = true
+ pi-iso.workspace = true
+ pi-shell.workspace = true
+-pi-voice.workspace = true
+ pi-walker.workspace = true
+ portable-pty.workspace = true
+ png.workspace = true
+@@ -102,6 +100,11 @@ clipboard-win.workspace = true
+ uiautomation = "=0.25.0"
+ winreg.workspace = true
+ 
++[target.'cfg(not(target_os = "android"))'.dependencies]
++arboard.workspace = true
++# pi-voice stubbed on Android: webrtc/opus OOMs free GH runners.
++pi-voice.workspace = true
++
+ [dev-dependencies]
+ fancy-regex.workspace = true # utok scanner differential oracle
+ tiktoken-rs.workspace = true # utok openai differential oracle
+diff --git a/crates/pi-natives/src/audio.rs b/crates/pi-natives/src/audio.rs
+index 6ca937f..5466344 100644
+--- a/crates/pi-natives/src/audio.rs
++++ b/crates/pi-natives/src/audio.rs
+@@ -18,12 +18,12 @@ type CaptureCallback = ThreadsafeFunction<Float32Array, UnknownReturnValue>;
+ 
+ /// Default-microphone capture converted to mono `f32` at the requested sample
+ /// rate.
+-#[napi]
++/* #[napi] disabled on android */
+ pub struct AudioCapture {
+ 	stream: Mutex<Option<CaptureStream>>,
+ }
+ 
+-#[napi]
++/* #[napi] disabled on android */
+ impl AudioCapture {
+ 	/// Open the default microphone and deliver low-latency mono PCM chunks.
+ 	#[napi(constructor)]
+@@ -41,7 +41,7 @@ impl AudioCapture {
+ 	}
+ 
+ 	/// Stop capture immediately and release the microphone.
+-	#[napi]
++	/* #[napi] disabled on android */
+ 	pub fn stop(&self) -> Result<()> {
+ 		let stream = self.stream.lock().take();
+ 		let Some(mut stream) = stream else {
+@@ -52,13 +52,13 @@ impl AudioCapture {
+ }
+ 
+ /// Gapless mono `f32` playback through the default speaker.
+-#[napi]
++/* #[napi] disabled on android */
+ pub struct AudioPlayback {
+ 	stream: Mutex<Option<PlaybackStream>>,
+ 	state:  Arc<PlaybackState>,
+ }
+ 
+-#[napi]
++/* #[napi] disabled on android */
+ impl AudioPlayback {
+ 	/// Open the default speaker at the requested logical sample rate.
+ 	#[napi(constructor)]
+@@ -69,7 +69,7 @@ impl AudioPlayback {
+ 	}
+ 
+ 	/// Queue mono floating-point PCM in playback order.
+-	#[napi]
++	/* #[napi] disabled on android */
+ 	pub fn write(&self, samples: Float32Array) -> Result<()> {
+ 		let stream = self.stream.lock();
+ 		let stream = stream
+@@ -82,7 +82,7 @@ impl AudioPlayback {
+ 	}
+ 
+ 	/// Scale audio at render time so gain changes affect already queued samples.
+-	#[napi]
++	/* #[napi] disabled on android */
+ 	pub fn set_gain(&self, gain: f64) -> Result<()> {
+ 		let stream = self.stream.lock();
+ 		let stream = stream
+@@ -95,7 +95,7 @@ impl AudioPlayback {
+ 
+ 	/// Close input, wait until queued samples reach the speaker, then release
+ 	/// it.
+-	#[napi]
++	/* #[napi] disabled on android */
+ 	pub async fn end(&self) -> Result<()> {
+ 		{
+ 			let mut stream = self.stream.lock();
+@@ -113,7 +113,7 @@ impl AudioPlayback {
+ 	}
+ 
+ 	/// Stop immediately and discard all queued samples.
+-	#[napi]
++	/* #[napi] disabled on android */
+ 	pub fn stop(&self) -> Result<()> {
+ 		let stream = self.stream.lock().take();
+ 		if let Some(mut stream) = stream {
+diff --git a/crates/pi-natives/src/clipboard.rs b/crates/pi-natives/src/clipboard.rs
+index 390050d..7708f2a 100644
+--- a/crates/pi-natives/src/clipboard.rs
++++ b/crates/pi-natives/src/clipboard.rs
+@@ -4,14 +4,19 @@
+ //! Performs text copy synchronously so macOS writes run on the caller thread.
+ //! This avoids worker-thread `AppKit` pasteboard warnings in CLI contexts.
+ 
++#[cfg(not(target_os = "android"))]
+ use std::io::Cursor;
+ 
++#[cfg(not(target_os = "android"))]
+ use arboard::{Clipboard, Error as ClipboardError, ImageData};
++#[cfg(not(target_os = "android"))]
+ use image::{DynamicImage, ImageFormat, RgbaImage};
+ use napi::{JsString, bindgen_prelude::*};
+ use napi_derive::napi;
+ 
+-use crate::{js, task};
++use crate::js;
++#[cfg(not(target_os = "android"))]
++use crate::task;
+ 
+ /// Clipboard image payload encoded as PNG bytes.
+ #[napi(object)]
+@@ -22,6 +27,7 @@ pub struct ClipboardImage {
+ 	pub mime_type: String,
+ }
+ 
++#[cfg(not(target_os = "android"))]
+ fn encode_png(image: ImageData<'_>) -> Result<Vec<u8>> {
+ 	let width = u32::try_from(image.width)
+ 		.map_err(|_| Error::from_reason("Clipboard image width overflow"))?;
+@@ -33,6 +39,7 @@ fn encode_png(image: ImageData<'_>) -> Result<Vec<u8>> {
+ 	rgba_to_png(buffer)
+ }
+ 
++#[cfg(not(target_os = "android"))]
+ fn rgba_to_png(buffer: RgbaImage) -> Result<Vec<u8>> {
+ 	let capacity = (buffer
+ 		.width()
+@@ -64,6 +71,7 @@ fn rgba_to_png(buffer: RgbaImage) -> Result<Vec<u8>> {
+ 		          tests cover it on every host"
+ 	)
+ )]
++#[cfg(not(target_os = "android"))]
+ fn dib_to_png(dib: &[u8]) -> Result<Vec<u8>> {
+ 	const FILE_HEADER_SIZE: u64 = 14;
+ 	const INFO_HEADER_SIZE: u64 = 40;
+@@ -152,7 +160,7 @@ pub fn copy_to_clipboard(text: JsString) -> Result<()> {
+ /// serving, without shelling out to `xclip`/`wl-copy`. Wayland is unaffected
+ /// (`wl-clipboard-rs` forks its own serving process) but sharing the instance
+ /// is harmless there.
+-#[cfg(target_os = "linux")]
++#[cfg(all(target_os = "linux", not(target_os = "android")))]
+ fn set_clipboard_text(text: &str) -> Result<()> {
+ 	use std::sync::OnceLock;
+ 
+@@ -179,7 +187,7 @@ fn set_clipboard_text(text: &str) -> Result<()> {
+ /// exits, so a transient `Clipboard` is sufficient. Keeping the write on the
+ /// calling thread also avoids worker-thread `AppKit` pasteboard warnings on
+ /// macOS.
+-#[cfg(not(target_os = "linux"))]
++#[cfg(all(not(target_os = "linux"), not(target_os = "android")))]
+ fn set_clipboard_text(text: &str) -> Result<()> {
+ 	let mut clipboard = Clipboard::new()
+ 		.map_err(|err| Error::from_reason(format!("Failed to access clipboard: {err}")))?;
+@@ -189,12 +197,20 @@ fn set_clipboard_text(text: &str) -> Result<()> {
+ 	Ok(())
+ }
+ 
++#[cfg(target_os = "android")]
++fn set_clipboard_text(_text: &str) -> Result<()> {
++	Err(Error::from_reason(
++		"Clipboard copy is not supported on Android/Termux native build; use termux-clipboard-set",
++	))
++}
++
+ /// Read an image from the system clipboard.
+ ///
+ /// Returns `Ok(None)` when no image data is available.
+ ///
+ /// # Errors
+ /// Returns an error if clipboard access fails or image encoding fails.
++#[cfg(not(target_os = "android"))]
+ #[napi]
+ pub fn read_image_from_clipboard() -> task::Promise<Option<ClipboardImage>> {
+ 	task::blocking("clipboard.read_image", (), move |_| -> Result<Option<ClipboardImage>> {
+@@ -366,3 +382,9 @@ mod tests {
+ 		assert!(dib_to_png(&oversized_header).is_err(), "header size beyond buffer must not decode");
+ 	}
+ }
++
++#[cfg(target_os = "android")]
++#[napi]
++pub async fn read_image_from_clipboard() -> Result<Option<ClipboardImage>> {
++	Ok(None)
++}
+diff --git a/crates/pi-natives/src/crash_handler.rs b/crates/pi-natives/src/crash_handler.rs
+index 7009bef..dbefbf6 100644
+--- a/crates/pi-natives/src/crash_handler.rs
++++ b/crates/pi-natives/src/crash_handler.rs
+@@ -36,10 +36,7 @@ use std::{
+ 	io::Write as _,
+ 	path::{Path, PathBuf},
+ 	process,
+-	sync::{
+-		Once,
+-		atomic::{AtomicBool, Ordering},
+-	},
++	sync::Once,
+ 	thread,
+ 	time::{SystemTime, UNIX_EPOCH},
+ };
+@@ -54,7 +51,6 @@ const DEFAULT_CONFIG_DIR: &str = ".omp";
+ const APP_NAME: &str = "omp";
+ 
+ static INSTALL: Once = Once::new();
+-static ALLOC_HOOK_ACTIVE: AtomicBool = AtomicBool::new(false);
+ 
+ thread_local! {
+ 	/// Active `task::blocking` panic recovery frames on this thread.
+@@ -93,19 +89,7 @@ pub fn install() {
+ 			},
+ 		}));
+ 
+-		std::alloc::set_alloc_error_hook(|layout| {
+-			// Print the canonical line before doing anything allocation-prone.
+-			// If this is genuine process-wide OOM, report formatting/path work may
+-			// recursively enter this hook; the secondary entry writes the same
+-			// stack-only fallback and aborts immediately.
+-			write_alloc_failure_line(std::io::stderr(), layout.size());
+-			if ALLOC_HOOK_ACTIVE.swap(true, Ordering::AcqRel) {
+-				process::abort();
+-			}
+-			let report = format_alloc_report(layout);
+-			persist(&report, CrashKind::Alloc, true);
+-			process::abort();
+-		});
++		// alloc hook disabled on Android: unstable on bionic.
+ 	});
+ }
+ 
+@@ -146,6 +130,7 @@ fn panic_disposition() -> PanicDisposition {
+ #[derive(Clone, Copy)]
+ enum CrashKind {
+ 	Panic,
++	#[allow(dead_code, reason = "alloc hook disabled on Android")]
+ 	Alloc,
+ }
+ 
+@@ -171,6 +156,7 @@ fn format_panic_report(info: &std::panic::PanicHookInfo<'_>) -> String {
+ 	out
+ }
+ 
++#[allow(dead_code, reason = "alloc hook disabled on Android")]
+ fn format_alloc_report(layout: Layout) -> String {
+ 	// Capturing a backtrace allocates. If the global allocator is in a state
+ 	// where small allocations keep failing this will recurse into the hook —
+@@ -195,6 +181,7 @@ fn report_header(kind: CrashKind) -> String {
+ 		pid = process::id(),
+ 	)
+ }
++#[allow(dead_code, reason = "alloc hook disabled on Android")]
+ fn write_alloc_failure_line(mut out: impl std::io::Write, size: usize) {
+ 	let _ = out.write_all(b"memory allocation of ");
+ 	let mut digits = [0u8; usize::MAX.ilog10() as usize + 1];
+diff --git a/crates/pi-natives/src/lib.rs b/crates/pi-natives/src/lib.rs
+index c929058..5cc4a2b 100644
+--- a/crates/pi-natives/src/lib.rs
++++ b/crates/pi-natives/src/lib.rs
+@@ -20,10 +20,10 @@
+ 
+ #![allow(clippy::trailing_empty_array, reason = "generated by napi macro")]
+ #![allow(clippy::trivially_copy_pass_by_ref, reason = "napi env idiom")]
+-#![feature(alloc_error_hook)]
+ 
+ pub mod appearance;
+ pub mod ast;
++#[cfg(not(target_os = "android"))]
+ pub mod audio;
+ pub mod block;
+ pub mod clipboard;
+@@ -41,6 +41,7 @@ pub mod html;
+ pub mod iofs;
+ pub mod js;
+ pub mod keys;
++#[cfg(not(target_os = "android"))]
+ pub mod live;
+ /// PDF inspection and Markdown conversion.
+ pub mod pdf;
+@@ -263,7 +264,7 @@ fn create_windows_napi_tokio_runtime() -> Option<tokio::runtime::Runtime> {
+ /// MUST stay in sync with `VERSION_SENTINEL_EXPORT` in
+ /// `packages/natives/native/index.js` (which derives the name from
+ /// `package.json#version`).
+-#[napi(js_name = "__piNativesV18_0_11")]
++#[napi(js_name = "__piNativesV18_0_9")]
+ pub const fn pi_natives_version_sentinel() {}
+ 
+ /// Native module entry point: install crash diagnostics before any tool can
+diff --git a/crates/pi-natives/src/live.rs b/crates/pi-natives/src/live.rs
+index 9cbcd99..12e4f5a 100644
+--- a/crates/pi-natives/src/live.rs
++++ b/crates/pi-natives/src/live.rs
+@@ -18,12 +18,12 @@ type StringCallback = ThreadsafeFunction<String, UnknownReturnValue>;
+ type LevelCallback = ThreadsafeFunction<f64, UnknownReturnValue>;
+ 
+ /// WebRTC peer that accepts 16 kHz mono PCM and renders remote Opus audio.
+-#[napi]
++/* #[napi] disabled on android */
+ pub struct LiveWebRtcPeer {
+ 	inner: Arc<LivePeerCore>,
+ }
+ 
+-#[napi]
++/* #[napi] disabled on android */
+ impl LiveWebRtcPeer {
+ 	/// Create an idle peer and register its event, output-level, and failure
+ 	/// callbacks.
+@@ -51,7 +51,7 @@ impl LiveWebRtcPeer {
+ 	}
+ 
+ 	/// Start the native media peer and return its SDP offer.
+-	#[napi]
++	/* #[napi] disabled on android */
+ 	pub async fn create_offer(&self) -> Result<String> {
+ 		self
+ 			.inner
+@@ -61,7 +61,7 @@ impl LiveWebRtcPeer {
+ 	}
+ 
+ 	/// Apply the remote SDP answer returned by Codex signaling.
+-	#[napi]
++	/* #[napi] disabled on android */
+ 	pub async fn accept_answer(&self, sdp: String) -> Result<()> {
+ 		self
+ 			.inner
+@@ -71,7 +71,7 @@ impl LiveWebRtcPeer {
+ 	}
+ 
+ 	/// Wait until the `oai-events` data channel is open.
+-	#[napi]
++	/* #[napi] disabled on android */
+ 	pub async fn wait_for_open(&self, timeout_ms: Option<u32>) -> Result<()> {
+ 		self
+ 			.inner
+@@ -81,7 +81,7 @@ impl LiveWebRtcPeer {
+ 	}
+ 
+ 	/// Queue 16 kHz mono floating-point PCM for Opus transmission.
+-	#[napi]
++	/* #[napi] disabled on android */
+ 	pub fn push_audio(&self, samples: Float32Array) -> Result<()> {
+ 		self
+ 			.inner
+@@ -91,7 +91,7 @@ impl LiveWebRtcPeer {
+ 
+ 	/// Enable or disable microphone transmission, discarding partial muted
+ 	/// frames.
+-	#[napi]
++	/* #[napi] disabled on android */
+ 	pub fn set_muted(&self, muted: bool) -> Result<()> {
+ 		self
+ 			.inner
+@@ -100,7 +100,7 @@ impl LiveWebRtcPeer {
+ 	}
+ 
+ 	/// Close media, the data channel, the peer connection, and speaker playback.
+-	#[napi]
++	/* #[napi] disabled on android */
+ 	pub async fn close(&self) {
+ 		self.inner.close().await;
+ 	}
+diff --git a/crates/pi-shell/src/process.rs b/crates/pi-shell/src/process.rs
+index c039bb9..1c77504 100644
+--- a/crates/pi-shell/src/process.rs
++++ b/crates/pi-shell/src/process.rs
+@@ -16,7 +16,7 @@ pub use pi_builtins::ProcessStatus;
+ 
+ use crate::cancel::CancelToken;
+ 
+-#[cfg(target_os = "linux")]
++#[cfg(any(target_os = "linux", target_os = "android"))]
+ mod platform {
+ 	use std::{
+ 		collections::HashSet,
+diff --git a/packages/coding-agent/src/config/settings-schema.ts b/packages/coding-agent/src/config/settings-schema.ts
+index 5202909..ff0f175 100644
+--- a/packages/coding-agent/src/config/settings-schema.ts
++++ b/packages/coding-agent/src/config/settings-schema.ts
+@@ -529,6 +529,47 @@ export const SETTINGS_SCHEMA = {
+ 			],
+ 		},
+ 	},
++	"system.android.wakeLock": {
++		type: "boolean",
++		default: false,
++		ui: {
++			tab: "system",
++			group: "Android / Termux",
++			label: "Acquire WakeLock",
++			description: "Keep CPU active while agent is running to prevent Android background throttling (Termux only)",
++		},
++	},
++	"system.android.oomScoreAdj": {
++		type: "number",
++		nullable: true,
++		default: null,
++		ui: {
++			tab: "system",
++			group: "Android / Termux",
++			label: "OOM Score Adjustment",
++			description: "Adjust process OOM score (-1000 to 1000) to protect daemon from low-memory killer; null disables (best-effort, no guarantee)",
++		},
++	},
++	"system.android.notifications.enabled": {
++		type: "boolean",
++		default: false,
++		ui: {
++			tab: "system",
++			group: "Android / Termux",
++			label: "Android Notifications",
++			description: "Show Android system notifications via termux-notification when agent events occur (off by default)",
++		},
++	},
++	"system.android.notifications.events": {
++		type: "array",
++		default: [],
++		ui: {
++			tab: "system",
++			group: "Android / Termux",
++			label: "Notification Events",
++			description: "Which agent events trigger notifications (e.g., agent_end, turn_complete); empty means no events",
++		},
++	},
+ 	"advisor.enabled": {
+ 		type: "boolean",
+ 		default: false,
+@@ -4551,6 +4592,17 @@ export const SETTINGS_SCHEMA = {
+ 				"Use cmux WKWebView surfaces for browser automation when a cmux socket is available. Set PI_BROWSER_CMUX=0 or PI_BROWSER_CMUX=1 to override.",
+ 		},
+ 	},
++	"browser.executablePath": {
++		type: "string",
++		default: undefined,
++		ui: {
++			tab: "tools",
++			group: "Grep & Browser",
++			label: "Browser Executable Path",
++			description:
++				"Absolute path to the Chromium/Chrome executable for headless automation. Takes precedence over PUPPETEER_EXECUTABLE_PATH. Invalid explicit path fails closed.",
++		},
++	},
+ 	"browser.screenshotDir": {
+ 		type: "string",
+ 		default: undefined,
+@@ -4892,6 +4944,19 @@ export const SETTINGS_SCHEMA = {
+ 		},
+ 	},
+ 
++	"task.isolation.repoRoot": {
++		type: "string",
++		nullable: true,
++		default: null,
++		ui: {
++			tab: "tasks",
++			group: "Isolation",
++			label: "Isolation Repository Root",
++			description:
++				"Explicit path to the Git repository root to use for isolated task worktrees (defaults to current working directory)",
++		},
++	},
++
+ 	"task.isolation.merge": {
+ 		type: "enum",
+ 		values: ["patch", "branch"] as const,
+diff --git a/packages/coding-agent/src/launch/broker.ts b/packages/coding-agent/src/launch/broker.ts
+index 051962e..a74355a 100644
+--- a/packages/coding-agent/src/launch/broker.ts
++++ b/packages/coding-agent/src/launch/broker.ts
+@@ -1,3 +1,5 @@
++import { Settings } from "../config/settings";
++import { acquireWakeLock, adjustOomScore, releaseWakeLock } from "@oh-my-pi/pi-utils";
+ import * as fs from "node:fs/promises";
+ import * as net from "node:net";
+ import * as os from "node:os";
+@@ -1416,10 +1418,24 @@ export async function startDaemonBrokerFromEnvironment(options: DaemonBrokerStar
+ 	if (!token) throw new Error("Daemon broker token is empty");
+ 	const broker = new DaemonBroker(projectDir, runtimeDir, token, idleGraceMs, restartBackoffBaseMs);
+ 	const cancelCleanup = postmortem.register("daemon-broker", () => broker.shutdown());
++	let androidWakeLockAcquired = false;
++	try {
++		const settings = await Settings.loadReadOnly({ cwd: projectDir });
++		const oomScoreAdj = settings.get("system.android.oomScoreAdj");
++		if (typeof oomScoreAdj === "number") adjustOomScore(oomScoreAdj);
++		if (settings.get("system.android.wakeLock") === true) {
++			androidWakeLockAcquired = await acquireWakeLock();
++		}
++	} catch {}
+ 	try {
+ 		await broker.run();
+ 	} finally {
+ 		cancelCleanup();
++		if (androidWakeLockAcquired) {
++			try {
++				await releaseWakeLock();
++			} catch {}
++		}
+ 		await releaseBrokerLease(lease);
+ 	}
+ }
+diff --git a/packages/coding-agent/src/session/agent-session.ts b/packages/coding-agent/src/session/agent-session.ts
+index cac051a..221b9a5 100644
+--- a/packages/coding-agent/src/session/agent-session.ts
++++ b/packages/coding-agent/src/session/agent-session.ts
+@@ -185,8 +185,6 @@ import {
+ 	obfuscateProviderContext,
+ } from "../secrets/message-transform";
+ import type { SecretObfuscator } from "../secrets/obfuscator";
+-import { releaseSharpshooterSession } from "../sharpshooter/backend";
+-import { flushSharpshooterExtraction } from "../sharpshooter/extract";
+ import {
+ 	AUTO_THINKING,
+ 	type ConfiguredThinkingLevel,
+@@ -195,6 +193,7 @@ import {
+ 	toReasoningEffort,
+ } from "../thinking";
+ import { isLowSignalTitleInput } from "../tiny/text";
++import { isAndroidEnvironment, sendAndroidNotificationFireAndForget } from "@oh-my-pi/pi-utils";
+ import { shutdownTinyTitleClient } from "../tiny/title-client";
+ import type { ImageAttachmentEntry } from "../tools";
+ import { resolveApproval } from "../tools/approval";
+@@ -630,7 +629,6 @@ export class AgentSession {
+ 	#autolearnCaptureAbortController: AbortController | undefined;
+ 	#autolearnCaptureTask: Promise<void> | undefined;
+ 	#isDisposed = false;
+-	#fallbackDiscoveryRevalidationAbortController = new AbortController();
+ 	/** Process-wide by default (double-spend safety across sessions); injectable for tests. */
+ 	#codexResetCoordinator: CodexAutoRedeemCoordinator;
+ 	// Extension system
+@@ -1725,15 +1723,13 @@ export class AgentSession {
+ 			});
+ 		});
+ 
+-		// Config-declared resolution done against the catalog as it stands at
+-		// construction can be premature: background discovery is started
+-		// fire-and-forget (before the session in the SDK path, right after it in
+-		// the CLI path), so discovery-backed providers (e.g. GitHub Copilot, or a
+-		// models.yml LiteLLM provider with a cold cache) may not be populated yet.
+-		// Reactivate a `no_model` advisor (#9010) and retract stale
+-		// retry.fallbackChains warnings (#10048) once discovery settles.
++		// An advisor enabled in config resolves its role against the model catalog
++		// as it stands at construction. Discovery-backed providers (e.g. GitHub
++		// Copilot) may not be populated yet — background discovery is started
++		// fire-and-forget before the session is built — so a valid configured model
++		// can land as `no_model`. Retry once the initial refresh settles so the
++		// advisor activates without a manual /advisor toggle. See #9010.
+ 		void this.#retryInactiveAdvisorAfterModelDiscovery();
+-		void this.#revalidateFallbackChainsAfterModelDiscovery();
+ 	}
+ 	/** Model registry for API key resolution and model discovery */
+ 	get modelRegistry(): ModelRegistry {
+@@ -2238,6 +2234,21 @@ export class AgentSession {
+ 				return;
+ 			}
+ 			this.#emit(event);
++			if (event.type === "agent_end" && isAndroidEnvironment()) {
++				try {
++					const enabled = this.settings.get("system.android.notifications.enabled" as never) as unknown as boolean;
++					const events = (this.settings.get("system.android.notifications.events" as never) as unknown as string[]) ?? [];
++					const shouldNotify = enabled && (events.includes("agent_end") || events.includes("all"));
++					if (shouldNotify) {
++						sendAndroidNotificationFireAndForget({
++							id: "omp-agent-end",
++							title: "OMP agent turn complete",
++							body: (event as { isTerminal?: boolean }).isTerminal === false ? "Agent turn continued" : "Agent turn finished",
++							priority: "low",
++						});
++					}
++				} catch {}
++			}
+ 		} finally {
+ 			releaseGate();
+ 		}
+@@ -4174,7 +4185,6 @@ export class AgentSession {
+ 	 */
+ 	beginDispose(): void {
+ 		this.#isDisposed = true;
+-		this.#fallbackDiscoveryRevalidationAbortController.abort();
+ 		this.#queuedMessageDrainBlocked = false;
+ 		this.#usagePreflightReadyForNextModelCall = false;
+ 		this.#detachUsageBeforeQueueDequeue?.();
+@@ -4323,14 +4333,6 @@ export class AgentSession {
+ 
+ 		const hindsightState = this.getHindsightSessionState();
+ 		const mnemopiState = setMnemopiSessionState(this, undefined);
+-		// Bound the wait for a just-fired sharpshooter extraction before dropping
+-		// its subscriptions, so print-mode exits don't cut queued-delta writes.
+-		const sharpshooterFlushed = flushSharpshooterExtraction(this, options.mnemopiConsolidateTimeoutMs);
+-		try {
+-			releaseSharpshooterSession(this);
+-		} catch (error) {
+-			logger.warn("Session dispose: Sharpshooter release failed", { error: String(error) });
+-		}
+ 		const advisorRecorderClosed = this.#advisors.recorderClosed();
+ 		const results = await Promise.allSettled([
+ 			this.#disposeOwnedAsyncJobs(),
+@@ -4342,7 +4344,6 @@ export class AgentSession {
+ 			advisorRecorderClosed,
+ 			hindsightState?.flushRetainQueue() ?? Promise.resolve(),
+ 			this.#disposeMnemopi(mnemopiState, options.mnemopiConsolidateTimeoutMs),
+-			sharpshooterFlushed,
+ 		]);
+ 		for (const result of results) {
+ 			if (result.status === "rejected") {
+@@ -7962,11 +7963,6 @@ export class AgentSession {
+ 		this.#recovery.setAutoRetryEnabled(enabled);
+ 	}
+ 
+-	/** Whether the last turn ended aborted/failed on a tool call, so {@link retry} would re-attempt it. */
+-	get hasAbortedToolCallTail(): boolean {
+-		return this.#recovery.hasAbortedToolCallTail;
+-	}
+-
+ 	/** Retry the last failed assistant turn when the session is idle. */
+ 	retry(): Promise<boolean> {
+ 		return this.#recovery.retry();
+@@ -8525,9 +8521,7 @@ export class AgentSession {
+ 			// it already spent, so a session with history resumes with its total instead
+ 			// of restarting at zero.
+ 			if (switchingToDifferentSession) {
+-				const providersBySlug = new Map<string, Set<string>>();
+-				const costs = await loadAdvisorTranscriptCosts(this.sessionFile, { providersBySlug });
+-				this.#advisors.restoreCost(costs, providersBySlug);
++				this.#advisors.restoreCost(await loadAdvisorTranscriptCosts(this.sessionFile));
+ 			}
+ 			this.#bash.finishSessionTransition(bashTransition, true);
+ 			if (previousSessionState.sessionId !== this.sessionManager.getSessionId()) {
+@@ -9907,26 +9901,6 @@ export class AgentSession {
+ 		if (this.#advisors.retryAfterModelDiscovery()) this.#emit({ type: "model_changed" });
+ 	}
+ 
+-	/**
+-	 * Re-run retry.fallbackChains validation once the initial background discovery
+-	 * settles. Startup validation suppresses "unknown model" warnings for
+-	 * config-declared discovery providers whose cold cache left the registry empty
+-	 * (#10048); this retracts the ones discovery resolved and surfaces any that
+-	 * stayed unknown. Uses {@link ModelRegistry.awaitInitialBackgroundRefresh}
+-	 * because the CLI starts that refresh right after the session is built, so an
+-	 * in-flight snapshot taken in the constructor would always miss it.
+-	 */
+-	async #revalidateFallbackChainsAfterModelDiscovery(): Promise<void> {
+-		if (this.#isDisposed || !this.#recovery.hasPendingDiscoveryDeferredFallbackValidation()) return;
+-		await this.#modelRegistry.awaitInitialBackgroundRefresh(
+-			this.#fallbackDiscoveryRevalidationAbortController.signal,
+-		);
+-		if (this.#isDisposed) return;
+-		if (this.#recovery.revalidateRetryFallbackChainsAfterDiscovery()) {
+-			this.#emit({ type: "config_warnings_changed" });
+-		}
+-	}
+-
+ 	/**
+ 	 * Toggle the advisor setting and start/stop the runtime accordingly.
+ 	 *
+@@ -10022,16 +9996,14 @@ export class AgentSession {
+ 			stale = true;
+ 		});
+ 		const snapshot = this.#advisors.beginCostRestoreSnapshot();
+-		const providersBySlug = new Map<string, Set<string>>();
+ 		this.#advisorCostRestore = loadAdvisorTranscriptCosts(this.sessionFile, {
+ 			beforeSnapshot: snapshot.ready,
+ 			onSnapshot: snapshot.release,
+ 			shouldContinue: () => !stale && !this.isDisposed,
+-			providersBySlug,
+ 		})
+ 			.then(costs => {
+ 				if (stale || this.isDisposed) return;
+-				this.restoreInitialAdvisorCosts(costs, snapshot.costsAtSnapshot, providersBySlug);
++				this.restoreInitialAdvisorCosts(costs, snapshot.costsAtSnapshot);
+ 				this.#emit({ type: "advisor_cost_changed" });
+ 			})
+ 			.catch(err => logger.debug("advisor cost restore failed", { err: String(err) }))
+@@ -10055,9 +10027,8 @@ export class AgentSession {
+ 	restoreInitialAdvisorCosts(
+ 		costs: ReadonlyMap<string, number>,
+ 		costsAtSnapshot: ReadonlyMap<string, number> = new Map(),
+-		providersBySlug?: ReadonlyMap<string, ReadonlySet<string>>,
+ 	): void {
+-		this.#advisors.restoreInitialCost(costs, costsAtSnapshot, providersBySlug);
++		this.#advisors.restoreInitialCost(costs, costsAtSnapshot);
+ 	}
+ 	/** Return whether any active or configured advisor is running on an OAuth/subscription model. */
+ 	isAdvisorUsingSubscription(): boolean {
+diff --git a/packages/coding-agent/src/task/index.ts b/packages/coding-agent/src/task/index.ts
+index 38d7d4f..4f3cc0e 100644
+--- a/packages/coding-agent/src/task/index.ts
++++ b/packages/coding-agent/src/task/index.ts
+@@ -297,6 +297,7 @@ function spawnParamsFor(params: TaskParams, item: TaskItem, defaultAgent: string
+ 	if (item.name !== undefined) spawn.name = item.name;
+ 	if (item.task !== undefined) spawn.task = item.task;
+ 	if (params.context !== undefined) spawn.context = params.context;
++	if (params.repoRoot !== undefined) spawn.repoRoot = params.repoRoot;
+ 	if ("outputSchema" in item) spawn.outputSchema = item.outputSchema;
+ 	if ("schemaMode" in item) spawn.schemaMode = item.schemaMode;
+ 	if ("effort" in item) spawn.effort = item.effort;
+@@ -663,7 +664,9 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
+ 			...(Object.hasOwn(params, "outputSchema") ? { outputSchema: params.outputSchema } : {}),
+ 			...(Object.hasOwn(params, "schemaMode") ? { schemaMode: params.schemaMode } : {}),
+ 			...(params.effort !== undefined ? { effort: params.effort } : {}),
+-			...("isolated" in params ? { isolation: { requested: params.isolated } } : {}),
++			...(Object.hasOwn(params, "isolated") || params.repoRoot !== undefined
++				? { isolation: { ...(Object.hasOwn(params, "isolated") ? { requested: params.isolated } : {}), ...(params.repoRoot !== undefined ? { repoRoot: params.repoRoot } : {}) } }
++				: {}),
+ 			blockedAgent: this.#blockedAgent,
+ 			enableLsp: (this.session.enableLsp ?? true) && this.session.settings.get("task.enableLsp"),
+ 			enableIrc: isIrcEnabled(this.session.settings, this.session.taskDepth ?? 0),
+@@ -1440,7 +1443,9 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
+ 				detached,
+ 				invokedAt: launchTiming?.invokedAt,
+ 				acquiredAt: launchTiming?.acquiredAt,
+-				...("isolated" in params ? { isolation: { requested: params.isolated } } : {}),
++				...((Object.hasOwn(params, "isolated") || params.repoRoot !== undefined)
++					? { isolation: { ...(Object.hasOwn(params, "isolated") ? { requested: params.isolated } : {}), ...(params.repoRoot !== undefined ? { repoRoot: params.repoRoot } : {}) } }
++					: {}),
+ 				blockedAgent: this.#blockedAgent,
+ 				enableLsp: (this.session.enableLsp ?? true) && this.session.settings.get("task.enableLsp"),
+ 				enableIrc: isIrcEnabled(this.session.settings, this.session.taskDepth ?? 0),
+diff --git a/packages/coding-agent/src/task/isolation-runner.ts b/packages/coding-agent/src/task/isolation-runner.ts
+index 71d12b0..64a791f 100644
+--- a/packages/coding-agent/src/task/isolation-runner.ts
++++ b/packages/coding-agent/src/task/isolation-runner.ts
+@@ -101,8 +101,8 @@ export interface IsolationContext {
+  * each isolated spawn against. Throws when the cwd is not inside a git
+  * repository; callers surface the error as a task-tool failure.
+  */
+-export async function prepareIsolationContext(cwd: string): Promise<IsolationContext> {
+-	const repoRoot = await getRepoRoot(cwd);
++export async function prepareIsolationContext(cwd: string, explicitRepoRoot?: string): Promise<IsolationContext> {
++	const repoRoot = await getRepoRoot(cwd, explicitRepoRoot);
+ 	const baseline = await captureBaseline(repoRoot);
+ 	return { repoRoot, baseline };
+ }
+diff --git a/packages/coding-agent/src/task/structured-subagent.ts b/packages/coding-agent/src/task/structured-subagent.ts
+index e5189d0..8b0b63d 100644
+--- a/packages/coding-agent/src/task/structured-subagent.ts
++++ b/packages/coding-agent/src/task/structured-subagent.ts
+@@ -68,6 +68,7 @@ export interface StructuredSubagentIsolationControls {
+ 	requested?: boolean;
+ 	merge?: "patch" | "branch";
+ 	apply?: boolean;
++	repoRoot?: string;
+ }
+ 
+ /** Identity and presentation metadata supplied by the calling surface. */
+@@ -578,7 +579,10 @@ export async function runStructuredSubagent(request: StructuredSubagentRequest):
+ 		let isolationContext: IsolationContext | null = null;
+ 		if (policy.isIsolated) {
+ 			try {
+-				isolationContext = await prepareIsolationContext(request.session.cwd);
++				const explicitRepoRoot =
++					request.isolation?.repoRoot ??
++					((request.session.settings.get("task.isolation.repoRoot" as never) as string | undefined) || undefined);
++				isolationContext = await prepareIsolationContext(request.session.cwd, explicitRepoRoot);
+ 			} catch (error) {
+ 				const message = error instanceof Error ? error.message : String(error);
+ 				throw new StructuredSubagentError(
+diff --git a/packages/coding-agent/src/task/types.ts b/packages/coding-agent/src/task/types.ts
+index 062cab6..1a911fb 100644
+--- a/packages/coding-agent/src/task/types.ts
++++ b/packages/coding-agent/src/task/types.ts
+@@ -154,6 +154,7 @@ export const taskSchema = type({
+ 	"outputSchema?": outputSchemaInputSchema,
+ 	"schemaMode?": '"permissive" | "strict"',
+ 	"isolated?": "boolean",
++	"repoRoot?": "string",
+ 	"+": "delete",
+ });
+ const taskSchemaNoIsolation = type({
+@@ -162,16 +163,19 @@ const taskSchemaNoIsolation = type({
+ 	task: "string",
+ 	"outputSchema?": outputSchemaInputSchema,
+ 	"schemaMode?": '"permissive" | "strict"',
++	"repoRoot?": "string",
+ 	"+": "delete",
+ });
+ const taskSchemaBatch = type({
+ 	context: "string",
+ 	tasks: taskItemSchemaIsolated.array(),
++	"repoRoot?": "string",
+ 	"+": "delete",
+ });
+ const taskSchemaBatchNoIsolation = type({
+ 	context: "string",
+ 	tasks: taskItemSchema.array(),
++	"repoRoot?": "string",
+ 	"+": "delete",
+ });
+ const ALL_TASK_SCHEMAS = [taskSchema, taskSchemaNoIsolation, taskSchemaBatch, taskSchemaBatchNoIsolation] as const;
+@@ -215,6 +219,7 @@ function createTaskSchema(options: {
+ 			return type.raw({
+ 				context: "string",
+ 				tasks: item.array(),
++				"repoRoot?": "string",
+ 				"+": "delete",
+ 			});
+ 		}
+@@ -230,6 +235,7 @@ function createTaskSchema(options: {
+ 		return type.raw({
+ 			context: "string",
+ 			tasks: item.array(),
++			"repoRoot?": "string",
+ 			"+": "delete",
+ 		});
+ 	}
+@@ -242,6 +248,7 @@ function createTaskSchema(options: {
+ 			"outputSchema?": outputSchemaInputSchema,
+ 			"schemaMode?": '"permissive" | "strict"',
+ 			"isolated?": "boolean",
++			"repoRoot?": "string",
+ 			"+": "delete",
+ 		});
+ 	}
+@@ -252,6 +259,7 @@ function createTaskSchema(options: {
+ 		...effortField,
+ 		"outputSchema?": outputSchemaInputSchema,
+ 		"schemaMode?": '"permissive" | "strict"',
++		"repoRoot?": "string",
+ 		"+": "delete",
+ 	});
+ }
+@@ -302,6 +310,8 @@ export interface TaskParams {
+ 	context?: string;
+ 	/** Run in an isolated worktree (flat form; per-item in batch form). */
+ 	isolated?: boolean;
++	/** Explicit repository root for this call; relative paths resolve from session cwd. */
++	repoRoot?: string;
+ }
+ 
+ /**
+diff --git a/packages/coding-agent/src/task/worktree.ts b/packages/coding-agent/src/task/worktree.ts
+index 1961d14..cbbdd33 100644
+--- a/packages/coding-agent/src/task/worktree.ts
++++ b/packages/coding-agent/src/task/worktree.ts
+@@ -51,20 +51,36 @@ export interface WorktreeBaseline {
+ 	nested: Array<{ relativePath: string; baseline: RepoBaseline }>;
+ }
+ 
+-export async function getRepoRoot(cwd: string): Promise<string> {
++export async function getRepoRoot(cwd: string, explicitRepoRoot?: string): Promise<string> {
++	if (explicitRepoRoot !== undefined && explicitRepoRoot.trim() === "") {
++		throw new Error("Configured task.isolation.repoRoot must not be empty.");
++	}
++	const targetCwd = explicitRepoRoot !== undefined ? path.resolve(cwd, explicitRepoRoot) : cwd;
+ 	// Pure-jj check runs first so a jj workspace nested under an unrelated
+ 	// outer Git checkout is rejected at its own root rather than silently
+ 	// mutating the surrounding Git tree behind jj's back.
+-	if (vcs.isPureJj(cwd)) {
++	if (vcs.isPureJj(targetCwd)) {
+ 		throw new Error(
+ 			"Isolated task execution requires a Git checkout, but this workspace is pure Jujutsu (`.jj/` without a colocated `.git/`). Run `jj git init --colocate` to add a Git checkout, or set `task.isolation.mode: none` to disable task isolation.",
+ 		);
+ 	}
+ 
+-	const repoRoot = vcs.git(cwd)?.info().repoRoot;
+-	if (repoRoot) return repoRoot;
++	const repoRoot = vcs.git(targetCwd)?.info().repoRoot;
++	if (!repoRoot) {
++		throw new Error(`Git repository not found for isolated task execution in ${targetCwd}.`);
++	}
++
++	if (explicitRepoRoot) {
++		const canonicalTarget = path.resolve(targetCwd);
++		const canonicalRoot = path.resolve(repoRoot);
++		if (canonicalTarget !== canonicalRoot) {
++			throw new Error(
++				`Configured task.isolation.repoRoot (${targetCwd}) is a subdirectory inside a repository (${repoRoot}), not the repository root itself.`,
++			);
++		}
++	}
+ 
+-	throw new Error("Git repository not found for isolated task execution.");
++	return repoRoot;
+ }
+ 
+ const GIT_NO_INDEX_NULL_PATH = process.platform === "win32" ? "NUL" : "/dev/null";
+@@ -498,8 +514,9 @@ export async function ensureIsolation(
+ 	baseCwd: string,
+ 	id: string,
+ 	preferred?: IsoBackendKind,
++	explicitRepoRoot?: string,
+ ): Promise<IsolationHandle> {
+-	const repoRoot = await getRepoRoot(baseCwd);
++	const repoRoot = await getRepoRoot(baseCwd, explicitRepoRoot);
+ 	const sourceCommonDir = vcs.requireGit(repoRoot).info().commonDir;
+ 	const baseDir = getWorktreeDir(getTaskIsolationSegment(repoRoot, id));
+ 	const mergedDir = path.join(baseDir, TASK_ISOLATION_MOUNT_DIR);
+diff --git a/packages/coding-agent/src/tools/browser.ts b/packages/coding-agent/src/tools/browser.ts
+index b7f7107..772d458 100644
+--- a/packages/coding-agent/src/tools/browser.ts
++++ b/packages/coding-agent/src/tools/browser.ts
+@@ -7,6 +7,7 @@ import type { ToolSession } from "../sdk";
+ import { enforceInlineByteCap } from "../session/streaming-output";
+ import { truncateForPrompt } from "./approval";
+ import { resolveCmuxKind } from "./browser/cmux/rpc";
++import { resolveHeadlessExecutable } from "./browser/launch";
+ import {
+ 	acquireBrowser,
+ 	type BrowserHandle,
+@@ -253,7 +254,6 @@ export class BrowserTool implements AgentTool<typeof browserSchema, BrowserToolD
+ 			throw error;
+ 		}
+ 	}
+-
+ 	async #open(
+ 		name: string,
+ 		params: BrowserParams,
+@@ -261,7 +261,12 @@ export class BrowserTool implements AgentTool<typeof browserSchema, BrowserToolD
+ 		timeoutMs: number,
+ 		signal?: AbortSignal,
+ 	): Promise<AgentToolResult<BrowserToolDetails>> {
+-		const kind = resolveBrowserKind(params, this.session);
++		let kind = resolveBrowserKind(params, this.session);
++		if (kind.kind === "headless") {
++			const setting = this.session.settings.get("browser.executablePath") as string | undefined;
++			const resolved = await resolveHeadlessExecutable({ executablePathSetting: setting });
++			if (resolved) kind = { ...kind, executablePath: resolved };
++		}
+ 		details.browser = kind.kind;
+ 
+ 		// If a tab with this name already exists on a different browser kind, fail fast — caller must close first.
+@@ -476,7 +481,8 @@ function describeKind(kind: BrowserKind): string {
+ 
+ function sameBrowserKind(a: BrowserKind, b: BrowserKind): boolean {
+ 	if (a.kind !== b.kind) return false;
+-	if (a.kind === "headless" && b.kind === "headless") return a.headless === b.headless;
++	if (a.kind === "headless" && b.kind === "headless")
++		return a.headless === b.headless && (a.executablePath ?? "default") === (b.executablePath ?? "default");
+ 	if (a.kind === "spawned" && b.kind === "spawned") return a.path === b.path;
+ 	if (a.kind === "connected" && b.kind === "connected") return a.cdpUrl === b.cdpUrl;
+ 	if (a.kind === "relay" && b.kind === "relay") return a.cdpUrl === b.cdpUrl;
+diff --git a/packages/coding-agent/src/tools/browser/launch.ts b/packages/coding-agent/src/tools/browser/launch.ts
+index b27e137..454e55e 100644
+--- a/packages/coding-agent/src/tools/browser/launch.ts
++++ b/packages/coding-agent/src/tools/browser/launch.ts
+@@ -68,6 +68,117 @@ function stealthIgnoreDefaultArgs(executablePath: string | undefined): string[]
+ 	if (!isMicrosoftEdgeExecutable(executablePath)) return [...STEALTH_IGNORE_DEFAULT_ARGS];
+ 	return STEALTH_IGNORE_DEFAULT_ARGS.filter(arg => arg !== ENABLE_AUTOMATION_FLAG);
+ }
++// =====================================================================
++// Android / Termux Chromium helpers
++// =====================================================================
++
++export function isAndroidEnvironment(
++	platform: NodeJS.Platform = process.platform,
++	env: Record<string, string | undefined> = process.env as Record<string, string | undefined>,
++): boolean {
++	if (platform === "android") return true;
++	if (env.TERMUX_VERSION !== undefined) return true;
++	if (env.ANDROID_ROOT !== undefined) return true;
++	if (env.PREFIX?.includes("com.termux")) return true;
++	return false;
++}
++
++export function getTermuxPrefix(
++	env: Record<string, string | undefined> = process.env as Record<string, string | undefined>,
++): string {
++	const raw = env.PREFIX?.trim();
++	if (raw) return raw;
++	return "/data/data/com.termux/files/usr";
++}
++
++export function androidChromiumCandidates(prefix: string = getTermuxPrefix()): string[] {
++	return [
++		path.join(prefix, "lib/chromium/chrome"),
++		path.join(prefix, "bin/chromium"),
++		path.join(prefix, "bin/chromium-browser"),
++		path.join(prefix, "bin/chrome"),
++	];
++}
++
++export function getChromeProfileBaseDir(
++	platform: NodeJS.Platform = process.platform,
++	env: Record<string, string | undefined> = process.env as Record<string, string | undefined>,
++): string {
++	if (isAndroidEnvironment(platform, env)) {
++		const prefix = getTermuxPrefix(env);
++		const tmp = env.TMPDIR?.trim();
++		if (tmp?.startsWith(prefix)) return tmp;
++		return path.join(prefix, "tmp");
++	}
++	return os.tmpdir();
++}
++
++export interface ResolveHeadlessExecutableOptions {
++	executablePathSetting?: string;
++	env?: Record<string, string | undefined>;
++	platform?: NodeJS.Platform;
++	prefix?: string;
++	isExecutableFile?: (p: string) => boolean;
++	isChromiumExecutable?: (p: string) => Promise<boolean>;
++	candidates?: string[];
++}
++
++export async function resolveHeadlessExecutable(
++	opts: ResolveHeadlessExecutableOptions = {},
++): Promise<string | undefined> {
++	const platform = opts.platform ?? process.platform;
++	const env = opts.env ?? (process.env as Record<string, string | undefined>);
++	const prefix = opts.prefix ?? getTermuxPrefix(env);
++	const checkExec = opts.isExecutableFile ?? isExecutableFile;
++	const checkChromium = opts.isChromiumExecutable ?? isChromiumExecutable;
++	const isAndroid = isAndroidEnvironment(platform, env);
++	const validate = async (p: string): Promise<boolean> => {
++		if (!checkExec(p)) return false;
++		return await checkChromium(p);
++	};
++	const setting = opts.executablePathSetting?.trim();
++	if (setting) {
++		if (!path.isAbsolute(setting)) {
++			throw new ToolError(
++				`browser.executablePath is set to ${JSON.stringify(setting)} but it must be an absolute path (for example $PREFIX/lib/chromium/chrome).`,
++			);
++		}
++		if (!(await validate(setting))) {
++			throw new ToolError(
++				`browser.executablePath is set to ${JSON.stringify(setting)} but it is not a valid executable Chromium binary. ` +
++					`Install Termux chromium with \`pkg install x11-repo && pkg install chromium\` or set it to $PREFIX/lib/chromium/chrome.`,
++			);
++		}
++		return setting;
++	}
++	const envPath = env.PUPPETEER_EXECUTABLE_PATH?.trim();
++	if (envPath) {
++		if (!path.isAbsolute(envPath)) {
++			throw new ToolError(
++				`PUPPETEER_EXECUTABLE_PATH is set to ${JSON.stringify(envPath)} but it must be an absolute path.`,
++			);
++		}
++		if (!(await validate(envPath))) {
++			throw new ToolError(
++				`PUPPETEER_EXECUTABLE_PATH is set to ${JSON.stringify(envPath)} but it is not a valid executable Chromium binary. ` +
++					`Fix or unset it, or install Termux chromium with \`pkg install x11-repo && pkg install chromium\`.`,
++			);
++		}
++		return envPath;
++	}
++	if (isAndroid) {
++		const candidates = opts.candidates ?? androidChromiumCandidates(prefix);
++		for (const candidate of candidates) {
++			if (await validate(candidate)) return candidate;
++		}
++		throw new ToolError(
++			`No Chromium executable found for Android Termux. Install with \`pkg install x11-repo && pkg install chromium\` ` +
++				`and ensure one of ${candidates.join(", ")} exists and is executable. ` +
++				`You can also set browser.executablePath or PUPPETEER_EXECUTABLE_PATH to an absolute chrome binary.`,
++		);
++	}
++	return undefined;
++}
+ 
+ const STEALTH_ACCEPT_LANGUAGE = "en-US,en";
+ 
+@@ -174,22 +285,20 @@ async function loadBrowsers(): Promise<typeof BrowsersNs> {
+  * Resolve the Chromium executable puppeteer will launch.
+  *
+  * `PUPPETEER_EXECUTABLE_PATH` always wins. On macOS the isolated Chrome for
+- * Testing binary is preferred over a detected system Chrome: a headless
+- * daemon launched from a system `Google Chrome.app` bundle shares its
+- * LaunchServices bundle identity (`com.google.Chrome`), so macOS can deliver
+- * the user's open-URL Apple Events to the daemon and silently swallow their
+- * link clicks (#8673). Chrome for Testing uses a dedicated bundle id
+- * (`com.google.chrome.for.testing`) that is never a user's default handler;
+- * system Chrome is used on macOS only when Chrome for Testing cannot be
+- * obtained. Other platforms keep the download-avoiding system Chrome
+- * preference and fall back to Chrome for Testing. The managed browser is
+- * cached under ~/.omp/puppeteer (getPuppeteerDir). Returns undefined when
+- * platform detection fails (puppeteer default resolution takes over).
+- * Exported so real-browser tests can probe launchability and skip on hosts
+- * missing Chrome's system libraries.
++ * Testing binary is preferred over a detected system Chrome. Other platforms
++ * keep the download-avoiding system Chrome preference and fall back to Chrome
++ * for Testing. Android Termux resolves only its external Chromium binary.
++ * Returns undefined when platform detection fails on desktop.
+  */
+ let chromiumExecutablePromise: Promise<string | undefined> | undefined;
+ export async function ensureChromiumExecutable(): Promise<string | undefined> {
++	const explicitOrAndroid = await resolveHeadlessExecutable();
++	if (explicitOrAndroid) return explicitOrAndroid;
++	if (isAndroidEnvironment()) {
++		throw new ToolError(
++			`No Chromium executable found for Android Termux. Install with \`pkg install x11-repo && pkg install chromium\` and ensure $PREFIX/lib/chromium/chrome exists.`,
++		);
++	}
+ 	const envPath = process.env.PUPPETEER_EXECUTABLE_PATH;
+ 	if (envPath) return envPath;
+ 	// macOS: never route a background daemon through the user's GUI Chrome
+@@ -283,15 +392,9 @@ function isExecutableFile(p: string): boolean {
+ 
+ async function isChromiumExecutable(p: string): Promise<boolean> {
+ 	if (!isExecutableFile(p)) return false;
+-	// The version probe below launches the candidate. It exists to reject
+-	// non-Chromium `chrome`/`chromium` wrapper scripts that appear on a Linux
+-	// PATH (ecb22957, "validate Linux browser executables"). On Windows and
+-	// macOS the candidates are fixed GUI application paths, not PATH wrappers,
+-	// and executing them is harmful: a GUI `chrome.exe --version` does not print
+-	// to a detached stdout and can hand off to the user's running instance,
+-	// opening/activating a normal browser window (#8445). Confine the probe to
+-	// Linux and trust the executable-file check elsewhere.
+-	if (process.platform !== "linux") return true;
++	// The version probe rejects non-Chromium wrappers. Android Termux
++	// candidates must prove they are Chromium before reaching Puppeteer.
++	if (process.platform !== "linux" && process.platform !== "android") return true;
+ 	try {
+ 		const probeTimeoutMs = 3000;
+ 		const proc = Bun.spawn([p, "--version"], {
+@@ -411,6 +514,7 @@ async function resolveSystemChromium(): Promise<string | undefined> {
+ export interface LaunchHeadlessOptions {
+ 	headless: boolean;
+ 	viewport?: { width: number; height: number; deviceScaleFactor?: number };
++	executablePath?: string;
+ 	/** Additional Chromium arguments merged with the centralized launch defaults. */
+ 	args?: readonly string[];
+ 	/** Additional exact Puppeteer default arguments to suppress. */
+@@ -477,11 +581,11 @@ export async function launchHeadlessBrowser(opts: LaunchHeadlessOptions): Promis
+ 	// (issue #7058). `removeUserDataDir` cleans it up on our terms instead.
+ 	let userDataDir: string | undefined;
+ 	if (!launchArgs.some(arg => arg.startsWith("--user-data-dir"))) {
+-		userDataDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), "omp-chrome-profile-"));
++		userDataDir = await fs.promises.mkdtemp(path.join(getChromeProfileBaseDir(), "omp-chrome-profile-"));
+ 		launchArgs.push(`--user-data-dir=${userDataDir}`);
+ 	}
+ 	try {
+-		const executablePath = await ensureChromiumExecutable();
++		const executablePath = opts.executablePath ?? (await ensureChromiumExecutable());
+ 		const browser = await puppeteer.launch({
+ 			headless: opts.headless,
+ 			defaultViewport: opts.headless ? initialViewport : null,
+@@ -517,8 +621,9 @@ export async function resolveSharedBrowserLaunchSpec(opts: {
+ 	headless: boolean;
+ 	userDataDir: string;
+ 	viewport?: { width: number; height: number };
++	executablePath?: string;
+ }): Promise<SharedBrowserLaunchSpec | null> {
+-	const executablePath = await ensureChromiumExecutable();
++	const executablePath = opts.executablePath ?? (await ensureChromiumExecutable());
+ 	if (!executablePath) return null;
+ 	const puppeteer = await loadPuppeteer();
+ 	const vp = opts.viewport ?? DEFAULT_VIEWPORT;
+diff --git a/packages/coding-agent/src/tools/browser/registry.ts b/packages/coding-agent/src/tools/browser/registry.ts
+index 8e611b9..9f55aa8 100644
+--- a/packages/coding-agent/src/tools/browser/registry.ts
++++ b/packages/coding-agent/src/tools/browser/registry.ts
+@@ -14,13 +14,12 @@ import {
+ 	removeUserDataDir,
+ 	type UserAgentOverride,
+ } from "./launch";
+-import { reapOrphanSharedTargets } from "./orphan-registry";
+ import { ensureRelayDaemon, isLoopbackRelayUrl } from "./relay/daemon";
+ import type { RelayKind } from "./relay/kind";
+ import { ensureSharedBrowser } from "./shared-daemon";
+ 
+ export type PuppeteerBrowserKind =
+-	| { kind: "headless"; headless: boolean }
++	| { kind: "headless"; headless: boolean; executablePath?: string }
+ 	| { kind: "spawned"; path: string }
+ 	| { kind: "connected"; cdpUrl: string }
+ 	| RelayKind;
+@@ -82,8 +81,10 @@ const pendingOpens = new Map<string, Promise<BrowserHandle>>();
+ 
+ function browserKey(kind: BrowserKind): string {
+ 	switch (kind.kind) {
+-		case "headless":
+-			return `headless:${kind.headless ? "1" : "0"}`;
++		case "headless": {
++			const exe = (kind as Extract<PuppeteerBrowserKind, { kind: "headless" }>).executablePath;
++			return `headless:${kind.headless ? "1" : "0"}:${exe ?? "default"}`;
++		}
+ 		case "spawned":
+ 			return `spawned:${kind.path}`;
+ 		case "connected":
+@@ -95,6 +96,11 @@ function browserKey(kind: BrowserKind): string {
+ 	}
+ }
+ 
++/** Test seam: expose browserKey for daemon-key tests. */
++export function browserKeyForTest(kind: BrowserKind): string {
++	return browserKey(kind);
++}
++
+ export interface AcquireBrowserOptions {
+ 	cwd: string;
+ 	viewport?: { width: number; height: number; deviceScaleFactor?: number };
+@@ -174,17 +180,13 @@ async function openBrowserHandle(kind: BrowserKind, opts: AcquireBrowserOptions)
+ 		};
+ 	}
+ 	if (kind.kind === "headless") {
+-		// Every real omp process (session, subagent, worker — anything with a CLI
+-		// worker host) MUST go through the project-shared broker-owned Chromium:
+-		// per-process launches are what produced launch storms and orphaned
+-		// process trees. The process-local launch survives only for hosts that
+-		// cannot spawn the broker (bun test, SDK embedding without a CLI entry).
+ 		if (isCompiledBinary() || workerHostEntry() !== null) {
+ 			return await openSharedHeadlessHandle(kind, opts);
+ 		}
+ 		const { browser, userDataDir } = await launchHeadlessBrowser({
+ 			headless: kind.headless,
+ 			viewport: opts.viewport,
++			executablePath: kind.executablePath,
+ 		});
+ 		return {
+ 			key: browserKey(kind),
+@@ -408,6 +410,7 @@ async function openSharedHeadlessHandle(
+ 			projectDir: opts.cwd,
+ 			headless: kind.headless,
+ 			viewport: vp,
++			executablePath: kind.executablePath,
+ 			signal: opts.signal,
+ 		});
+ 		if (!shared) {
+@@ -427,11 +430,6 @@ async function openSharedHeadlessHandle(
+ 				: null,
+ 			protocolTimeout: BROWSER_PROTOCOL_TIMEOUT_MS,
+ 		});
+-		// Attaching to the shared daemon is the natural point to sweep targets
+-		// left behind by omp processes that died without teardown — bounds
+-		// accumulation without a background timer. Best-effort and detached so a
+-		// slow reap never delays the open (issue #10022).
+-		void reapOrphanSharedTargets(browser, { projectDir: shared.projectDir, daemonName: shared.daemonName });
+ 		return {
+ 			key: browserKey(kind),
+ 			kind,
+diff --git a/packages/coding-agent/src/tools/browser/shared-daemon.ts b/packages/coding-agent/src/tools/browser/shared-daemon.ts
+index c26fd05..29c7725 100644
+--- a/packages/coding-agent/src/tools/browser/shared-daemon.ts
++++ b/packages/coding-agent/src/tools/browser/shared-daemon.ts
+@@ -34,11 +34,14 @@ export interface SharedBrowserEndpoint {
+ 	projectDir: string;
+ }
+ 
+-/** Stable broker daemon name for the shared automation browser. */
+-export function sharedBrowserDaemonName(headless: boolean): string {
+-	return headless ? "omp.browser.headless" : "omp.browser.headed";
++/** Stable broker daemon name for the shared automation browser. Includes executable/spec hash when provided. */
++export function sharedBrowserDaemonName(headless: boolean, executablePath?: string, specHash?: string): string {
++	const base = headless ? "omp.browser.headless" : "omp.browser.headed";
++	if (!executablePath && !specHash) return base;
++	const input = `${executablePath ?? ""}:${specHash ?? ""}`;
++	const hash = Bun.hash(input).toString(16).padStart(16, "0").slice(-7);
++	return `${base}-${hash}`;
+ }
+-
+ function wsEndpointOf(snapshot: DaemonSnapshot | undefined): string | undefined {
+ 	return snapshot?.readyMatch?.match(/ws:\/\/\S+/)?.[0];
+ }
+@@ -67,19 +70,37 @@ export async function ensureSharedBrowser(opts: {
+ 	projectDir: string;
+ 	headless: boolean;
+ 	viewport?: { width: number; height: number };
++	executablePath?: string;
+ 	signal?: AbortSignal;
+ }): Promise<SharedBrowserEndpoint | null> {
+ 	const client = await daemonClientForProject(opts.projectDir);
+-	const name = sharedBrowserDaemonName(opts.headless);
++	// Resolve launch spec first so daemon identity can include resolved executable and args (spec).
++	// Use a temp userDataDir placeholder for spec resolution; the final dir is derived from the hashed name.
++	const provisionalDir = path.join(
++		daemonRuntimeDir(client.projectDir),
++		`tmp-${opts.headless ? "headless" : "headed"}.profile`,
++	);
++	const launch = await resolveSharedBrowserLaunchSpec({
++		headless: opts.headless,
++		userDataDir: provisionalDir,
++		viewport: opts.viewport,
++		executablePath: opts.executablePath,
++	});
++	if (!launch) return null;
++	const filteredArgs = launch.args.filter(arg => !arg.startsWith("--user-data-dir"));
++	const specHash = Bun.hash(filteredArgs.join("|")).toString(16).padStart(16, "0").slice(-7);
++	const name = sharedBrowserDaemonName(opts.headless, launch.executablePath, specHash);
+ 	// Stable profile under the broker's runtime dir: reused across launches, and
+ 	// never contended by pre-daemon Chromiums that used throwaway temp profiles.
+ 	const userDataDir = path.join(daemonRuntimeDir(client.projectDir), `${name}.profile`);
+-	const launch = await resolveSharedBrowserLaunchSpec({
++	// Re-resolve with the final userDataDir so puppeteer defaultArgs includes the correct profile path
++	const finalLaunch = await resolveSharedBrowserLaunchSpec({
+ 		headless: opts.headless,
+ 		userDataDir,
+ 		viewport: opts.viewport,
++		executablePath: launch.executablePath,
+ 	});
+-	if (!launch) return null;
++	const effectiveLaunch = finalLaunch ?? launch;
+ 	await fs.mkdir(userDataDir, { recursive: true });
+ 	for (let attempt = 0; attempt < ENSURE_ATTEMPTS; attempt++) {
+ 		throwIfAborted(opts.signal);
+@@ -91,8 +112,6 @@ export async function ensureSharedBrowser(opts: {
+ 			if (wsEndpoint && (await probeEndpoint(wsEndpoint))) {
+ 				return { wsEndpoint, daemonName: name, projectDir: client.projectDir };
+ 			}
+-			// Live record but unreachable Chrome (wedged, or readiness never
+-			// matched): replace it rather than handing out a dead endpoint.
+ 			await stopQuietly(client, name, "Shared browser", opts.signal);
+ 			continue;
+ 		}
+@@ -102,8 +121,8 @@ export async function ensureSharedBrowser(opts: {
+ 					op: "start",
+ 					spec: {
+ 						name,
+-						application: launch.executablePath,
+-						args: launch.args,
++						application: effectiveLaunch.executablePath,
++						args: effectiveLaunch.args,
+ 						env: {},
+ 						cwd: client.projectDir,
+ 						pty: false,
+diff --git a/packages/coding-agent/test/task/structured-subagent.test.ts b/packages/coding-agent/test/task/structured-subagent.test.ts
+index 1930a89..f2d9b2c 100644
+--- a/packages/coding-agent/test/task/structured-subagent.test.ts
++++ b/packages/coding-agent/test/task/structured-subagent.test.ts
+@@ -37,6 +37,7 @@ function session(
+ 		maxDepth?: number;
+ 		isolationMode?: "none" | "worktree";
+ 		isolationApply?: boolean;
++		repoRoot?: string;
+ 		modelRoles?: Record<string, string>;
+ 	} = {},
+ ): ToolSession {
+@@ -48,6 +49,7 @@ function session(
+ 			"task.maxRecursionDepth": options.maxDepth ?? 2,
+ 			"task.isolation.mode": options.isolationMode ?? "none",
+ 			"task.enableLsp": true,
++			...(options.repoRoot ? { "task.isolation.repoRoot": options.repoRoot } : {}),
+ 			...(options.modelRoles ? { modelRoles: options.modelRoles } : {}),
+ 			...(options.isolationApply !== undefined ? { "task.isolation.apply": options.isolationApply } : {}),
+ 		}),
+@@ -435,6 +437,19 @@ describe("structured subagent primitive", () => {
+ 		expect(artifactsDirsFromRegistry()).toEqual([]);
+ 	});
+ 
++	it("uses per-call repoRoot before session repoRoot", async () => {
++		mockDiscovery();
++		const prepare = vi.spyOn(isolationRunner, "prepareIsolationContext").mockResolvedValue({ repoRoot: "/tmp" } as never);
++		vi.spyOn(executorModule, "runSubprocess").mockResolvedValue(result());
++		await runStructuredSubagent(
++			request({
++				session: session({ isolationMode: "worktree", repoRoot: "/session/root" }),
++				isolation: { requested: true, repoRoot: "/call/root" },
++			}),
++		);
++		expect(prepare).toHaveBeenCalledWith("/tmp", "/call/root");
++	});
++
+ 	it("reuses a cached output manager across concurrent allocations and sanitizes artifact ids", async () => {
+ 		mockDiscovery();
+ 		const sharedSession = session();
+diff --git a/packages/coding-agent/test/task/wire-schema.test.ts b/packages/coding-agent/test/task/wire-schema.test.ts
+index 8f81f68..eb41d77 100644
+--- a/packages/coding-agent/test/task/wire-schema.test.ts
++++ b/packages/coding-agent/test/task/wire-schema.test.ts
+@@ -58,6 +58,12 @@ describe("task wire schema", () => {
+ 		}
+ 	});
+ 
++	it("accepts explicit repoRoot on flat calls", () => {
++		const parsed = taskSchema({ agent: "scout", task: "map the repo", repoRoot: "../target" });
++		expect(parsed instanceof type.errors).toBe(false);
++		if (!(parsed instanceof type.errors)) expect(parsed.repoRoot).toBe("../target");
++	});
++
+ 	it("defaults a missing agent to 'task'", () => {
+ 		const parsed = taskSchema({ task: "x" });
+ 		expect(parsed instanceof type.errors).toBe(false);
+diff --git a/packages/natives/native/index.js b/packages/natives/native/index.js
+index 4d4e156..c5491f2 100644
+--- a/packages/natives/native/index.js
++++ b/packages/natives/native/index.js
+@@ -15,15 +15,23 @@ import { adaptDesktopSession } from "./desktop-adapter.js";
+  */
+ 
+ const nativeBindings = loadNative();
++
++// Android: audio/live/webrtc modules are excluded from native addon.
++// Provide stub classes that throw a clear error instead of undefined TypeError.
++function _unsupported(name) {
++  return class {
++    constructor() { throw new Error(`${name} is not available on Android/Termux`); }
++  };
++}
+ // --- generated native exports (do not edit) ---
+ // classes
+-export const AudioCapture = nativeBindings.AudioCapture;
+-export const AudioPlayback = nativeBindings.AudioPlayback;
++export const AudioCapture = nativeBindings.AudioCapture ?? _unsupported("AudioCapture");
++export const AudioPlayback = nativeBindings.AudioPlayback ?? _unsupported("AudioPlayback");
+ export const DesktopSession = adaptDesktopSession(nativeBindings.DesktopSession);
+ export const DiffStream = nativeBindings.DiffStream;
+ export const FileLock = nativeBindings.FileLock;
+ export const HighlightStream = nativeBindings.HighlightStream;
+-export const LiveWebRtcPeer = nativeBindings.LiveWebRtcPeer;
++export const LiveWebRtcPeer = nativeBindings.LiveWebRtcPeer ?? _unsupported("LiveWebRtcPeer");
+ export const MacAppearanceObserver = nativeBindings.MacAppearanceObserver;
+ export const MacOSPowerAssertion = nativeBindings.MacOSPowerAssertion;
+ export const Process = nativeBindings.Process;
+@@ -36,7 +44,7 @@ export const VcsRepo = nativeBindings.VcsRepo;
+ 
+ // functions
+ export const __ompInstallTokioRuntime = nativeBindings.__ompInstallTokioRuntime;
+-export const __piNativesV18_0_11 = nativeBindings.__piNativesV18_0_11;
++export const __piNativesV18_0_9 = nativeBindings.__piNativesV18_0_9;
+ export const astEdit = nativeBindings.astEdit;
+ export const astGrep = nativeBindings.astGrep;
+ export const astMatch = nativeBindings.astMatch;
+@@ -51,7 +59,6 @@ export const diffLines = nativeBindings.diffLines;
+ export const diffWords = nativeBindings.diffWords;
+ export const enclosingBlockBoundaries = nativeBindings.enclosingBlockBoundaries;
+ export const encodeSixel = nativeBindings.encodeSixel;
+-export const execReplace = nativeBindings.execReplace;
+ export const executeShell = nativeBindings.executeShell;
+ export const extractSegments = nativeBindings.extractSegments;
+ export const fuzzyFind = nativeBindings.fuzzyFind;
+diff --git a/packages/natives/native/loader-state.js b/packages/natives/native/loader-state.js
+index 5c07c41..c3dcf18 100644
+--- a/packages/natives/native/loader-state.js
++++ b/packages/natives/native/loader-state.js
+@@ -4,7 +4,7 @@ import { createRequire } from "node:module";
+ import * as os from "node:os";
+ import * as path from "node:path";
+ import * as zlib from "node:zlib";
+-import packageJson from "../package.json" with { type: "json" };
++const packageJson = createRequire(import.meta.url)("../package.json");
+ import { embeddedAddon } from "./embedded-addon.js";
+ 
+ /**
+@@ -31,7 +31,7 @@ import { embeddedAddon } from "./embedded-addon.js";
+  * post-build `--reset` stub) is the authoritative compiled-mode signal.
+  */
+ 
+-const SUPPORTED_PLATFORMS = ["linux-x64", "linux-arm64", "darwin-x64", "darwin-arm64", "win32-x64"];
++const SUPPORTED_PLATFORMS = ["linux-x64", "linux-arm64", "android-arm64", "darwin-x64", "darwin-arm64", "win32-x64"];
+ 
+ /**
+  * Streaming startup marker, enabled by `PI_DEBUG_STARTUP`. Local copy of the
+diff --git a/packages/utils/src/android-system.ts b/packages/utils/src/android-system.ts
+new file mode 100644
+index 0000000..93385e3
+--- /dev/null
++++ b/packages/utils/src/android-system.ts
+@@ -0,0 +1,121 @@
++import { spawn } from "node:child_process";
++import fs from "node:fs";
++
++export function isAndroidEnvironment(
++	platform: NodeJS.Platform = process.platform,
++	env: Record<string, string | undefined> = process.env as Record<string, string | undefined>,
++): boolean {
++	if (platform === "android") return true;
++	if (env.TERMUX_VERSION !== undefined) return true;
++	if (env.PREFIX?.includes("com.termux")) return true;
++	return false;
++}
++
++let wakeLockRefCount = 0;
++
++async function runTermuxCommand(cmd: string, args: string[]): Promise<boolean> {
++	if (!isAndroidEnvironment()) return false;
++	return await new Promise<boolean>(resolve => {
++		let child: ReturnType<typeof spawn>;
++		try {
++			child = spawn(cmd, args, { stdio: "ignore", detached: true });
++		} catch {
++			resolve(false);
++			return;
++		}
++		let settled = false;
++		const done = (ok: boolean) => {
++			if (settled) return;
++			settled = true;
++			resolve(ok);
++		};
++		child.on("error", () => done(false));
++		child.on("close", code => done(code === 0));
++		// Do not claim success merely because spawn() succeeded; wait for exit code.
++		try {
++			child.unref();
++		} catch {}
++		const t = setTimeout(() => done(false), 5000);
++		// @ts-ignore - unref may not exist on Timeout in some runtimes
++		t.unref?.();
++	});
++}
++
++export async function acquireWakeLock(): Promise<boolean> {
++	if (!isAndroidEnvironment()) return false;
++	wakeLockRefCount++;
++	if (wakeLockRefCount > 1) {
++		return true;
++	}
++	const ok = await runTermuxCommand("termux-wake-lock", []);
++	if (!ok) {
++		wakeLockRefCount = Math.max(0, wakeLockRefCount - 1);
++		return false;
++	}
++	return true;
++}
++
++export async function releaseWakeLock(): Promise<boolean> {
++	if (!isAndroidEnvironment()) return false;
++	if (wakeLockRefCount <= 0) return false;
++	wakeLockRefCount--;
++	if (wakeLockRefCount > 0) {
++		return true;
++	}
++	const ok = await runTermuxCommand("termux-wake-unlock", []);
++	return ok;
++}
++
++/**
++ * Best-effort OOM score adjustment. Returns true only if the write succeeded.
++ * Callers must not assume protection if this returns false.
++ */
++export function adjustOomScore(score: number | null = -500): boolean {
++	if (!isAndroidEnvironment()) return false;
++	if (score === null || score === undefined) return false;
++	try {
++		const clamped = Math.max(-1000, Math.min(1000, Math.round(score)));
++		fs.writeFileSync("/proc/self/oom_score_adj", String(clamped));
++		return true;
++	} catch {
++		return false;
++	}
++}
++
++export function getWakeLockRefCountForTest(): number {
++	return wakeLockRefCount;
++}
++
++export function resetWakeLockForTest(): void {
++	wakeLockRefCount = 0;
++}
++
++export interface AndroidNotificationOptions {
++	id?: string;
++	title: string;
++	body: string;
++	channel?: string;
++	priority?: "high" | "low" | "default";
++}
++
++export async function sendAndroidNotification(options: AndroidNotificationOptions): Promise<boolean> {
++	if (!isAndroidEnvironment()) return false;
++	// Notifications are best-effort: do not claim success unless termux-notification exits 0.
++	const args: string[] = [];
++	if (options.id) args.push("--id", options.id);
++	args.push("--title", options.title);
++	args.push("--content", options.body);
++	if (options.priority) args.push("--priority", options.priority);
++	// channel is optional, default channel used if omitted
++	if (options.channel) args.push("--channel", options.channel);
++	return await runTermuxCommand("termux-notification", args);
++}
++
++/**
++ * Fire-and-forget wrapper that never throws and does not claim success synchronously.
++ * Useful for lifecycle hooks where awaiting the notification would block teardown.
++ */
++export function sendAndroidNotificationFireAndForget(options: AndroidNotificationOptions): void {
++	void sendAndroidNotification(options).catch(() => {});
++}
++
+diff --git a/packages/utils/src/index.ts b/packages/utils/src/index.ts
+index 547bf7e..40b20c5 100644
+--- a/packages/utils/src/index.ts
++++ b/packages/utils/src/index.ts
+@@ -59,3 +59,5 @@ export function structuredCloneJSON<T>(value: T): T {
+ 	}
+ 	return JSON.parse(JSON.stringify(value)) as T;
+ }
++
++export * from "./android-system";
