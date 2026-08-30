@@ -46,3 +46,12 @@ jobs:
         run: python3 android/scripts/verify-overlay.py
       - name: Validate release inputs
         run: python3 android/scripts/check-release-inputs.py
+      - uses: ./.github/actions/bun-install
+      - name: Type check applied patch queue
+        run: bun run ci:check:full
+      - name: Run applied overlay tests
+        run: |
+          bun test packages/natives/test/gen-enums.test.ts
+          bun test packages/coding-agent/test/tools/browser-android.test.ts
+          bun test packages/coding-agent/test/custom-autolearn.test.ts
+          bun test packages/coding-agent/test/autolearn-managed-skills.test.ts

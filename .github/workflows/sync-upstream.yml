@@ -64,7 +64,16 @@ jobs:
             echo "error: fetched upstream tip is not a 40-character SHA: $upstream_tip" >&2
             exit 1
           fi
-          printf '%s\n' "$upstream_tip" > android/UPSTREAM_COMMIT
+          current_pin=$(tr -d '[:space:]' < android/UPSTREAM_COMMIT)
+          if [[ "$current_pin" != "$upstream_tip" ]]; then
+            echo "error: upstream advanced from $current_pin to $upstream_tip; regenerate and commit clean-upstream patches before sync" >&2
+            exit 1
+          fi
+          if ! git merge-base --is-ancestor "$current_pin" upstream/main; then
+            echo "error: recorded upstream commit is not an ancestor of upstream/main: $current_pin" >&2
+            exit 1
+          fi
+          printf '%s\n' "$current_pin" > android/UPSTREAM_COMMIT
         env:
           PUBLISH_UPSTREAM_BRANCH: ${{ vars.PUBLISH_UPSTREAM_BRANCH }}
 

@@ -30,7 +30,11 @@ trap cleanup EXIT
 git remote add official "$UPSTREAM_URL" 2>/dev/null || git remote set-url official "$UPSTREAM_URL"
 git fetch --no-tags official main
 if ! git cat-file -e "$upstream_commit^{commit}" 2>/dev/null; then
-	echo "error: recorded upstream commit is not reachable from official/main: $upstream_commit" >&2
+	echo "error: recorded upstream commit is not reachable: $upstream_commit" >&2
+	exit 1
+fi
+if ! git merge-base --is-ancestor "$upstream_commit" official/main 2>/dev/null; then
+	echo "error: recorded upstream commit is not an ancestor of official/main: $upstream_commit" >&2
 	exit 1
 fi
 

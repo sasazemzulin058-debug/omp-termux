@@ -632,10 +632,10 @@ index b874222..4017ad0 100644
  		// Never interrupt plan-mode review.
 diff --git a/packages/coding-agent/src/autolearn/index.ts b/packages/coding-agent/src/autolearn/index.ts
 new file mode 100644
-index 0000000..40a4514
+index 0000000..f44c675
 --- /dev/null
 +++ b/packages/coding-agent/src/autolearn/index.ts
-@@ -0,0 +1,232 @@
+@@ -0,0 +1,238 @@
 +import * as fs from "node:fs";
 +import * as path from "node:path";
 +import { getAgentDir } from "@oh-my-pi/pi-utils";
@@ -815,24 +815,30 @@ index 0000000..40a4514
 +					}
 +					break;
 +				}
-+				case "approve": {
-+					if (!targetId) {
-+						ctx.ui.notify?.("Usage: /learn approve <candidate-id>", "error");
-+						return;
-+					}
-+					const res = await activeService.ledger.promoteCandidate(targetId, {
-+						memory: ctx.memory,
-+						minPasses: 0,
-+						currentProject,
-+						allowGlobal: true,
-+					});
-+					if (res.success) {
-+						ctx.ui.notify?.(`Candidate ${targetId} approved and promoted.`, "info");
-+					} else {
-+						ctx.ui.notify?.(`Approval failed: ${res.error}`, "error");
-+					}
-+					break;
-+				}
++                case "approve": {
++                    if (!targetId) {
++                        ctx.ui.notify?.("Usage: /learn approve <candidate-id> <reviewed-content>", "error");
++                        return;
++                    }
++                    const reviewedContent = parts.slice(2).join(" ").trim();
++                    if (!reviewedContent) {
++                        ctx.ui.notify?.("Usage: /learn approve <candidate-id> <reviewed-content>", "error");
++                        return;
++                    }
++                    const res = await activeService.ledger.promoteCandidate(targetId, {
++                        memory: ctx.memory,
++                        content: reviewedContent,
++                        minPasses: 0,
++                        currentProject,
++                        allowGlobal: true,
++                    });
++                    if (res.success) {
++                        ctx.ui.notify?.(`Candidate ${targetId} approved and promoted.`, "info");
++                    } else {
++                        ctx.ui.notify?.(`Approval failed: ${res.error}`, "error");
++                    }
++                    break;
++                }
 +				case "delete": {
 +					if (!targetId) {
 +						ctx.ui.notify?.("Usage: /learn delete <candidate-id>", "error");
@@ -1255,7 +1261,7 @@ index 0000000..a0108c1
 +}
 diff --git a/packages/coding-agent/src/autolearn/verifier.ts b/packages/coding-agent/src/autolearn/verifier.ts
 new file mode 100644
-index 0000000..4dfb508
+index 0000000..f1aba61
 --- /dev/null
 +++ b/packages/coding-agent/src/autolearn/verifier.ts
 @@ -0,0 +1,175 @@
@@ -1295,7 +1301,7 @@ index 0000000..4dfb508
 +					: typeof details?.exitCode === "number"
 +						? details.exitCode
 +						: undefined;
-+			return exitCode === 0;
++			return r.isError === false && (exitCode === undefined || exitCode === 0);
 +		},
 +	},
 +	{
@@ -1323,7 +1329,7 @@ index 0000000..4dfb508
 +					: typeof details?.exitCode === "number"
 +						? details.exitCode
 +						: undefined;
-+			return exitCode === 0;
++			return r.isError === false && (exitCode === undefined || exitCode === 0);
 +		},
 +	},
 +];

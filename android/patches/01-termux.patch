@@ -1875,6 +1875,49 @@ index 5c07c41..c3dcf18 100644
  
  /**
   * Streaming startup marker, enabled by `PI_DEBUG_STARTUP`. Local copy of the
+diff --git a/packages/natives/scripts/gen-enums.ts b/packages/natives/scripts/gen-enums.ts
+index 3d42daa..baef7aa 100644
+--- a/packages/natives/scripts/gen-enums.ts
++++ b/packages/natives/scripts/gen-enums.ts
+@@ -74,7 +74,7 @@ function collectMatches(dts: string, re: RegExp): string[] {
+ 	return names;
+ }
+ 
+-function buildGeneratedBlock(dts: string): string {
++export function buildGeneratedBlock(dts: string): string {
+ 	const classes = collectMatches(dts, CLASS_RE);
+ 	const functions = collectMatches(dts, FUNCTION_RE);
+ 	const enums = collectEnums(dts);
+@@ -88,7 +88,11 @@ function buildGeneratedBlock(dts: string): string {
+ 		lines.push("// classes");
+ 		for (const name of classes) {
+ 			const binding =
+-				name === "DesktopSession" ? `adaptDesktopSession(nativeBindings.${name})` : `nativeBindings.${name}`;
++				name === "DesktopSession"
++					? `adaptDesktopSession(nativeBindings.${name})`
++					: name === "AudioCapture" || name === "AudioPlayback" || name === "LiveWebRtcPeer"
++						? `nativeBindings.${name} ?? _unsupported("${name}")`
++						: `nativeBindings.${name}`;
+ 			lines.push(`export const ${name} = ${binding};`);
+ 		}
+ 	}
+diff --git a/packages/natives/test/gen-enums.test.ts b/packages/natives/test/gen-enums.test.ts
+new file mode 100644
+index 0000000..7ef0f53
+--- /dev/null
++++ b/packages/natives/test/gen-enums.test.ts
+@@ -0,0 +1,11 @@
++import { describe, expect, it } from "bun:test";
++import { buildGeneratedBlock } from "../scripts/gen-enums";
++
++describe("native export generation", () => {
++	it("keeps unsupported Android bindings fail-closed", () => {
++		const block = buildGeneratedBlock(`export declare class AudioCapture {}\nexport declare class AudioPlayback {}\nexport declare class LiveWebRtcPeer {}`);
++		expect(block).toContain('nativeBindings.AudioCapture ?? _unsupported("AudioCapture")');
++		expect(block).toContain('nativeBindings.AudioPlayback ?? _unsupported("AudioPlayback")');
++		expect(block).toContain('nativeBindings.LiveWebRtcPeer ?? _unsupported("LiveWebRtcPeer")');
++	});
++});
 diff --git a/packages/utils/src/android-system.ts b/packages/utils/src/android-system.ts
 new file mode 100644
 index 0000000..93385e3
