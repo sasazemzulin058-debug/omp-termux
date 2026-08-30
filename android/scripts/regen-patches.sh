@@ -71,6 +71,7 @@ termux_files = [
     "packages/coding-agent/src/tools/browser/registry.ts",
     "packages/coding-agent/src/tools/browser/shared-daemon.ts",
     "packages/coding-agent/src/utils/clipboard.ts",
+    "packages/coding-agent/test/tools/browser-android.test.ts",
     "packages/coding-agent/test/task/structured-subagent.test.ts",
     "packages/coding-agent/test/task/wire-schema.test.ts",
     "packages/natives/native/index.js",
