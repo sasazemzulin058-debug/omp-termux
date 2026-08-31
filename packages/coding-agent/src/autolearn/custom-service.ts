@@ -43,7 +43,15 @@ export interface CandidateRecord {
 export interface LearningEvent {
 	id: string;
 	candidateId: string;
-	eventType: "observed" | "verified" | "review_requested" | "approved" | "rejected" | "deleted" | "projected" | "rolled_back";
+	eventType:
+		| "observed"
+		| "verified"
+		| "review_requested"
+		| "approved"
+		| "rejected"
+		| "deleted"
+		| "projected"
+		| "rolled_back";
 	payloadJson: string;
 	timestamp: number;
 }
@@ -112,7 +120,11 @@ function bankForScope(scope: string, projectIdentity: string): string {
 	// Use stable basename + hash of full path, matching mnemopi projectBankSegment contract.
 	const hashed = Bun.hash(canonical).toString(36);
 	const baseRaw = path.basename(canonical) || "default";
-	const sanitized = baseRaw.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") || "default";
+	const sanitized =
+		baseRaw
+			.toLowerCase()
+			.replace(/[^a-z0-9]+/g, "-")
+			.replace(/^-|-$/g, "") || "default";
 	return `${sanitized}-${hashed}`.slice(0, 64);
 }
 
@@ -129,11 +141,9 @@ function normalizeFailureClass(raw: string): string {
 
 export class CustomAutolearnService {
 	readonly #db: Database;
-	readonly #agentDir: string;
 	readonly #dbPath: string;
 
 	constructor(agentDir: string = getAgentDir()) {
-		this.#agentDir = agentDir;
 		this.#dbPath = path.join(agentDir, "learn.db");
 		// Ensure agent dir exists with restrictive perms
 		try {
@@ -150,7 +160,9 @@ export class CustomAutolearnService {
 		} catch {}
 		// Also restrict -wal/-shm if they exist
 		for (const suffix of ["-wal", "-shm"]) {
-			try { fs.chmodSync(this.#dbPath + suffix, 0o600); } catch {}
+			try {
+				fs.chmodSync(this.#dbPath + suffix, 0o600);
+			} catch {}
 		}
 	}
 
@@ -231,7 +243,9 @@ export class CustomAutolearnService {
 		} catch {}
 		// Migration: learning_events must be append-only without FK cascade (preserve audit on candidate delete)
 		try {
-			const row = this.#db.prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name='learning_events'").get() as { sql: string } | undefined;
+			const row = this.#db
+				.prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name='learning_events'")
+				.get() as { sql: string } | undefined;
 			if (row?.sql?.includes("FOREIGN KEY")) {
 				this.#db.exec("PRAGMA foreign_keys = OFF;");
 				this.#db.exec("ALTER TABLE learning_events RENAME TO learning_events_old;");
@@ -244,7 +258,9 @@ export class CustomAutolearnService {
 						timestamp INTEGER NOT NULL
 					);
 				`);
-				this.#db.exec("INSERT INTO learning_events (id, candidate_id, event_type, payload_json, timestamp) SELECT id, candidate_id, event_type, payload_json, timestamp FROM learning_events_old;");
+				this.#db.exec(
+					"INSERT INTO learning_events (id, candidate_id, event_type, payload_json, timestamp) SELECT id, candidate_id, event_type, payload_json, timestamp FROM learning_events_old;",
+				);
 				this.#db.exec("DROP TABLE learning_events_old;");
 				this.#db.exec("PRAGMA foreign_keys = ON;");
 			}
@@ -255,7 +271,9 @@ export class CustomAutolearnService {
 	ensureEpisode(episodeId: string, projectIdentity: string, sessionId: string): void {
 		const exists = this.#db.prepare("SELECT id FROM episodes WHERE id = ?").get(episodeId);
 		if (exists) return;
-		this.#db.prepare("INSERT INTO episodes (id, project_identity, session_id, created_at) VALUES (?, ?, ?, ?)").run(episodeId, projectIdentity, sessionId, Date.now());
+		this.#db
+			.prepare("INSERT INTO episodes (id, project_identity, session_id, created_at) VALUES (?, ?, ?, ?)")
+			.run(episodeId, projectIdentity, sessionId, Date.now());
 	}
 
 	observeCandidate(data: {
@@ -318,7 +336,20 @@ export class CustomAutolearnService {
 		return candidate;
 	}
 
-	recordVerifierResult(candidateId: string, verifierName: string, structuredResult: { verified: boolean; summary: string; toolCallId: string; expectedCommand: string; failureFingerprint: string; projectIdentity: string; sessionId: string; episodeId: string }): boolean {
+	recordVerifierResult(
+		candidateId: string,
+		verifierName: string,
+		structuredResult: {
+			verified: boolean;
+			summary: string;
+			toolCallId: string;
+			expectedCommand: string;
+			failureFingerprint: string;
+			projectIdentity: string;
+			sessionId: string;
+			episodeId: string;
+		},
+	): boolean {
 		const candidate = this.getCandidate(candidateId);
 		if (!candidate) return false;
 		// Strict contract: require exact toolCallId, expectedCommand, failure fingerprint, canonical project, session/episode identity.
@@ -331,7 +362,11 @@ export class CustomAutolearnService {
 		if (!expectedAllowlisted && !verifierAllowlisted) return false;
 		// If verifierName differs from expectedCommand, both must be allowlisted or they must match.
 		if (verifierName !== structuredResult.expectedCommand && !verifierAllowlisted) return false;
-		if (!structuredResult.failureFingerprint || structuredResult.failureFingerprint !== candidate.failureDigest) return false;
+		if (
+			!structuredResult.failureFingerprint ||
+			structuredResult.failureFingerprint !== candidate.failureDigest
+		)
+			return false;
 		// Canonical project identity comparison uses normalized absolute paths.
 		const normalizedProject = canonicalProjectIdentity(structuredResult.projectIdentity);
 		const candidateProject = canonicalProjectIdentity(candidate.projectIdentity);
@@ -347,9 +382,23 @@ export class CustomAutolearnService {
 
 		// Record verifier result linkage
 		const vrId = `vr_${computeOpaqueDigest(`${candidateId}:${verifierName}:${now}`)}`;
-		this.#db.prepare(`INSERT INTO verifier_results (id, candidate_id, verifier_name, tool_call_id, failure_fingerprint, project_identity, session_id, episode_id, summary_digest, verified, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
-			vrId, candidateId, verifierName, candidate.toolCallId, candidate.failureDigest, candidate.projectIdentity, candidate.sessionId, candidate.episodeId, verifierDigest, 1, now
-		);
+		this.#db
+			.prepare(
+				`INSERT INTO verifier_results (id, candidate_id, verifier_name, tool_call_id, failure_fingerprint, project_identity, session_id, episode_id, summary_digest, verified, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			)
+			.run(
+				vrId,
+				candidateId,
+				verifierName,
+				candidate.toolCallId,
+				candidate.failureDigest,
+				candidate.projectIdentity,
+				candidate.sessionId,
+				candidate.episodeId,
+				verifierDigest,
+				1,
+				now,
+			);
 
 		const stmt = this.#db.prepare(`
 			UPDATE candidates
@@ -483,7 +532,7 @@ export class CustomAutolearnService {
 
 	projectToMnemopi(candidateId: string, mnemopiId: string, mnemopiBank?: string): boolean {
 		const cand = this.getCandidate(candidateId);
-		if (!cand || cand.status !== "approved" || !cand.reviewedContent) return false;
+		if (cand?.status !== "approved" || !cand.reviewedContent) return false;
 		const bank = mnemopiBank ?? bankForScope(cand.scope, cand.projectIdentity);
 		this.#db.prepare("INSERT OR REPLACE INTO projection_references (candidate_id, project_identity, scope, mnemopi_id, mnemopi_bank, created_at) VALUES (?, ?, ?, ?, ?, ?)").run(candidateId, cand.projectIdentity, cand.scope, mnemopiId, bank, Date.now());
 		try { this.#recordEvent(candidateId, "projected", { mnemopiId, bank }); } catch {}
@@ -499,7 +548,7 @@ export class CustomAutolearnService {
 		mnemopi: { rememberScoped: (content: string, opts: { scope: string; source: string }) => string | undefined; editScopedMemory?: (op: string, id: string) => unknown },
 	): Promise<{ ok: boolean; mnemopiId?: string; error?: string }> {
 		const cand = this.getCandidate(candidateId);
-		if (!cand || cand.status !== "approved" || !cand.reviewedContent) return { ok: false, error: "candidate not approved" };
+		if (cand?.status !== "approved" || !cand.reviewedContent) return { ok: false, error: "candidate not approved" };
 		const redacted = redactSensitiveText(cand.reviewedContent);
 		const bank = bankForScope(cand.scope, cand.projectIdentity);
 		// External save crash window: uncertain operations become needs_review, not success.
@@ -542,7 +591,7 @@ export class CustomAutolearnService {
 				else if (r1 && typeof r1 === "object" && "status" in (r1 as Record<string, unknown>)) {
 					const status = (r1 as Record<string, unknown>).status;
 					// not_found means already absent -> treat as success; otherwise must be deleted/invalidated
-					if (status !== "deleted" && status !== "not_found" && status !== "invalidated") forgetError = new Error("forget status uncertain: " + String(status));
+					if (status !== "deleted" && status !== "not_found" && status !== "invalidated") forgetError = new Error(`forget status uncertain: ${String(status)}`);
 					if (status === "not_editable") forgetError = new Error("forget not_editable: memory may remain");
 				}
 			} catch (e) { forgetError = e; }
@@ -551,7 +600,7 @@ export class CustomAutolearnService {
 				if (r2 === false) invalidateError = new Error("invalidate returned false");
 				else if (r2 && typeof r2 === "object" && "status" in (r2 as Record<string, unknown>)) {
 					const status = (r2 as Record<string, unknown>).status;
-					if (status !== "invalidated" && status !== "deleted" && status !== "not_found") invalidateError = new Error("invalidate status uncertain: " + String(status));
+					if (status !== "invalidated" && status !== "deleted" && status !== "not_found") invalidateError = new Error(`invalidate status uncertain: ${String(status)}`);
 					if (status === "not_editable") invalidateError = new Error("invalidate not_editable: memory may remain");
 				}
 			} catch (e) { invalidateError = e; }
@@ -585,7 +634,7 @@ export class CustomAutolearnService {
 				if (r1 === false) forgetError = new Error("forget returned false");
 				else if (r1 && typeof r1 === "object" && "status" in (r1 as Record<string, unknown>)) {
 					const status = (r1 as Record<string, unknown>).status;
-					if (status !== "deleted" && status !== "not_found" && status !== "invalidated") forgetError = new Error("forget status uncertain: " + String(status));
+					if (status !== "deleted" && status !== "not_found" && status !== "invalidated") forgetError = new Error(`forget status uncertain: ${String(status)}`);
 				}
 			} catch (e) { forgetError = e; }
 			try {
@@ -593,7 +642,7 @@ export class CustomAutolearnService {
 				if (r2 === false) invalidateError = new Error("invalidate returned false");
 				else if (r2 && typeof r2 === "object" && "status" in (r2 as Record<string, unknown>)) {
 					const status = (r2 as Record<string, unknown>).status;
-					if (status !== "invalidated" && status !== "deleted" && status !== "not_found") invalidateError = new Error("invalidate status uncertain: " + String(status));
+					if (status !== "invalidated" && status !== "deleted" && status !== "not_found") invalidateError = new Error(`invalidate status uncertain: ${String(status)}`);
 				}
 			} catch (e) { invalidateError = e; }
 			if (forgetError !== null || invalidateError !== null) {
@@ -615,7 +664,7 @@ export class CustomAutolearnService {
 		deps: { writeManagedSkill: (i: { name: string; description: string; body: string; action: "create" | "update" }) => Promise<{ path: string }> }
 	): Promise<{ ok: boolean; path?: string; error?: string }> {
 		const cand = this.getCandidate(candidateId);
-		if (!cand || cand.status !== "approved" || !cand.reviewedContent) return { ok: false, error: "candidate not approved" };
+		if (cand?.status !== "approved" || !cand.reviewedContent) return { ok: false, error: "candidate not approved" };
 		const reviewed = redactSensitiveText(cand.reviewedContent);
 		const body = (input.body ?? reviewed).trim();
 		if (!body || body.startsWith("Verified resolution for")) return { ok: false, error: "Meaningful reviewed procedure required" };

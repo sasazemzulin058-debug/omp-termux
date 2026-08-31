@@ -12,11 +12,11 @@
  */
 import { logger } from "@oh-my-pi/pi-utils";
 import type { Settings } from "../config/settings";
-import { resolveAutolearnMode } from "./custom-service";
 import autolearnGuidance from "../prompts/system/autolearn-guidance.md" with { type: "text" };
 import autolearnGuidanceLearn from "../prompts/system/autolearn-guidance-learn.md" with { type: "text" };
 import autolearnNudgeAutoContinue from "../prompts/system/autolearn-nudge-autocontinue.md" with { type: "text" };
 import type { AgentSession, AgentSessionEvent } from "../session/agent-session";
+import { resolveAutolearnMode } from "./custom-service";
 
 const AUTOLEARN_NUDGE_AUTOCONTINUE = autolearnNudgeAutoContinue.trim();
 const DEFAULT_MIN_TOOL_CALLS = 5;

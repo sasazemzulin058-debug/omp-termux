@@ -6,8 +6,8 @@
 
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { CustomAutolearnService, resolveAutolearnMode, canonicalProjectIdentity, getAgentDir } from "./custom-service";
 import type { ExtensionFactory } from "../extensibility/extensions";
+import { CustomAutolearnService, canonicalProjectIdentity, getAgentDir, resolveAutolearnMode } from "./custom-service";
 
 export type LearnCommand = "status" | "view" | "approve" | "reject" | "delete" | "rollback" | "sweep" | "config";
 
@@ -73,7 +73,11 @@ export async function handleLearnCommand(
 				const candidates = svc.listCandidates(projectIdentity);
 				const byStatus: Record<string, number> = {};
 				for (const c of candidates) byStatus[c.status] = (byStatus[c.status] ?? 0) + 1;
-				return { ok: true, message: `Learn status (mode=${mode}, scope project=${projectIdentity}): ${JSON.stringify(byStatus)}`, data: byStatus };
+				return {
+					ok: true,
+					message: `Learn status (mode=${mode}, scope project=${projectIdentity}): ${JSON.stringify(byStatus)}`,
+					data: byStatus,
+				};
 			}
 			case "view": {
 				const id = args[1];
@@ -91,17 +95,30 @@ export async function handleLearnCommand(
 			case "approve": {
 				const id = args[1];
 				const reviewed = args.slice(2).join(" ");
-				if (!id || !reviewed) return { ok: false, message: "Usage: /learn approve <candidate-id> <reviewed-content>" };
+				if (!id || !reviewed)
+					return { ok: false, message: "Usage: /learn approve <candidate-id> <reviewed-content>" };
 				const res = svc.approveCandidate(id, reviewed, projectIdentity);
 				if (!res.success) return { ok: false, message: res.error ?? "Approve failed" };
 				// Project exact redacted reviewed content via scoped Mnemopi when available. Uses stored scope/project/bank.
 				if (options?.mnemopi) {
-					const proj = await svc.projectToMnemopiReal(id, options.mnemopi as unknown as { rememberScoped: (c: string, o: { scope: string; source: string }) => string | undefined });
+					const proj = await svc.projectToMnemopiReal(
+						id,
+						options.mnemopi as unknown as {
+							rememberScoped: (c: string, o: { scope: string; source: string }) => string | undefined;
+						},
+					);
 					if (!proj.ok) {
-						return { ok: false, message: `Approved ${id} but projection failed: ${proj.error}; candidate reset to needs_review` };
+						return {
+							ok: false,
+							message: `Approved ${id} but projection failed: ${proj.error}; candidate reset to needs_review`,
+						};
 					}
 					const stored = svc.getProjection(id);
-					return { ok: true, message: `Approved ${id} projected ${proj.mnemopiId} (bank=${stored?.bank ?? "unknown"})`, data: { mnemopiId: proj.mnemopiId, bank: stored?.bank } };
+					return {
+						ok: true,
+						message: `Approved ${id} projected ${proj.mnemopiId} (bank=${stored?.bank ?? "unknown"})`,
+						data: { mnemopiId: proj.mnemopiId, bank: stored?.bank },
+					};
 				}
 				return { ok: true, message: `Approved ${id}` };
 			}
@@ -117,13 +134,20 @@ export async function handleLearnCommand(
 				// Use stored scope/project/bank and preserve projection reference on uncertain backend failure.
 				const proj = svc.getProjection(id);
 				if (proj && options?.mnemopi) {
-					const ok = svc.deleteCandidateWithMnemopi(id, projectIdentity, options.mnemopi as unknown as { editScopedMemory: (op: string, id: string) => unknown });
+					const ok = svc.deleteCandidateWithMnemopi(
+						id,
+						projectIdentity,
+						options.mnemopi as unknown as { editScopedMemory: (op: string, id: string) => unknown },
+					);
 					if (!ok) {
 						// Conservative: backend failure keeps projection; check if still present
 						const still = svc.getProjection(id);
 						const cand = svc.getCandidate(id);
 						if (still || cand) {
-							return { ok: false, message: `Delete failed: ${id} (mnemopi backend uncertain; projection preserved, status=${cand?.status ?? "unknown"})` };
+							return {
+								ok: false,
+								message: `Delete failed: ${id} (mnemopi backend uncertain; projection preserved, status=${cand?.status ?? "unknown"})`,
+							};
 						}
 						return { ok: false, message: `Delete failed: ${id}` };
 					}
@@ -132,10 +156,15 @@ export async function handleLearnCommand(
 				if (proj && !options?.mnemopi) {
 					// Without mnemopi handle, cannot safely clean scoped memory; treat as uncertain -> preserve.
 					// Fall back to conservative check: if projected, require mnemopi
-					return { ok: false, message: `Delete failed: ${id} (projected memory requires mnemopi backend; retry with active session)` };
+					return {
+						ok: false,
+						message: `Delete failed: ${id} (projected memory requires mnemopi backend; retry with active session)`,
+					};
 				}
 				const ok = svc.deleteCandidate(id, projectIdentity);
-				return ok ? { ok: true, message: `Deleted ${id} (tombstoned)` } : { ok: false, message: `Delete failed: ${id}` };
+				return ok
+					? { ok: true, message: `Deleted ${id} (tombstoned)` }
+					: { ok: false, message: `Delete failed: ${id}` };
 			}
 			case "rollback": {
 				const id = args[1];
@@ -144,13 +173,23 @@ export async function handleLearnCommand(
 				const proj = svc.getProjection(id);
 				if (!proj) return { ok: false, message: `Rollback failed: ${id} (no projection)` };
 				if (!options?.mnemopi) {
-					return { ok: false, message: `Rollback failed: ${id} (mnemopi backend required for projected rollback; projection preserved)` };
+					return {
+						ok: false,
+						message: `Rollback failed: ${id} (mnemopi backend required for projected rollback; projection preserved)`,
+					};
 				}
-				const ok = svc.rollbackCandidateWithMnemopi(id, projectIdentity, options.mnemopi as unknown as { editScopedMemory: (op: string, id: string) => unknown });
+				const ok = svc.rollbackCandidateWithMnemopi(
+					id,
+					projectIdentity,
+					options.mnemopi as unknown as { editScopedMemory: (op: string, id: string) => unknown },
+				);
 				if (!ok) {
 					const still = svc.getProjection(id);
 					if (still) {
-						return { ok: false, message: `Rollback failed: ${id} (mnemopi backend uncertain; projection preserved)` };
+						return {
+							ok: false,
+							message: `Rollback failed: ${id} (mnemopi backend uncertain; projection preserved)`,
+						};
 					}
 					return { ok: false, message: `Rollback failed: ${id} (tombstoned or scope mismatch)` };
 				}
@@ -166,7 +205,9 @@ export async function handleLearnCommand(
 			}
 		}
 	} finally {
-		try { svc.close(); } catch {}
+		try {
+			svc.close();
+		} catch {}
 	}
 	return { ok: false, message: "unhandled" };
 }
@@ -180,7 +221,8 @@ export async function handleLearnCommand(
  */
 export const createLearnExtension: ExtensionFactory = api => {
 	api.registerCommand("learn", {
-		description: "Custom autolearn: status/view/approve/reject/delete/rollback/sweep/config (custom mode only; uses scoped Mnemopi)",
+		description:
+			"Custom autolearn: status/view/approve/reject/delete/rollback/sweep/config (custom mode only; uses scoped Mnemopi)",
 		getArgumentCompletions(argumentPrefix: string): import("@oh-my-pi/pi-tui").AutocompleteItem[] | null {
 			const subcommands = ["status", "view", "approve", "reject", "delete", "rollback", "sweep", "config"];
 			const trimmed = argumentPrefix.trim();
@@ -226,7 +268,9 @@ export const createLearnExtension: ExtensionFactory = api => {
 			ctx.ui.notify(result.message, result.ok ? "info" : "error");
 			if (result.data) {
 				// For status/view, present data via notify detail as well
-				try { ctx.ui.notify(JSON.stringify(result.data).slice(0, 2048), "info"); } catch {}
+				try {
+					ctx.ui.notify(JSON.stringify(result.data).slice(0, 2048), "info");
+				} catch {}
 			}
 		},
 	});

@@ -60,7 +60,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          toolchain="$(sed -n 's/^channel *= *"\([^"]*\)".*/\1/p' rust-toolchain.toml | head -n1)"
+          toolchain="$(sed -n 's/^channel *= *"\([^"\]*\)".*/\1/p' rust-toolchain.toml | sed -n '1p')"
           if [ -z "$toolchain" ]; then
             echo "::error::could not read channel from rust-toolchain.toml"
             exit 1
@@ -93,7 +93,7 @@ jobs:
           fi
           ndk_root="${ANDROID_NDK_ROOT:-${ANDROID_NDK_HOME:-${{ steps.setup-ndk.outputs.ndk-path }}}}"
           echo "Resolved NDK root: $ndk_root"
-          ls -la "$ndk_root/toolchains/llvm/prebuilt/linux-x86_64/bin/" | head -n 20
+          sed -n '1,20p' "$ndk_root/toolchains/llvm/prebuilt/linux-x86_64/bin/" || true
           test -x "$ndk_root/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android35-clang" || test -x "$ndk_root/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android34-clang" || test -x "$ndk_root/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android21-clang" || { echo "::error::NDK clang toolchain not found in $ndk_root"; exit 1; }
       - name: Android native build (Bazel if available, else cargo check)
         shell: bash
@@ -127,7 +127,7 @@ jobs:
           done
           if [ -z "${CC_aarch64_linux_android:-}" ]; then
             echo "::error::No aarch64-linux-android clang found in $ndk_root/toolchains/llvm/prebuilt/linux-x86_64/bin/"
-            ls "$ndk_root/toolchains/llvm/prebuilt/linux-x86_64/bin/" | grep -E "aarch64" | head -n 20
+            find "$ndk_root/toolchains/llvm/prebuilt/linux-x86_64/bin/" -maxdepth 1 -type f -name '*aarch64*' -print | sed -n '1,20p' || true
             exit 1
           fi
           # Detect whether repository provides an upstream-compatible Android Bazel target
@@ -137,7 +137,8 @@ jobs:
             # Use bazelisk if available; this branch only runs when the repo actually declares the target
             if command -v bazelisk >/dev/null 2>&1; then
               # Try to build any Android-tagged native if it exists; fail honestly if it does not compile
-              bazelisk build --config=ci //crates/... --platforms=//bazel/platforms:linux-arm64 2>&1 | head -n 100 || true
+              bazelisk build --config=ci //crates/... --platforms=//bazel/platforms:linux-arm64 >"$RUNNER_TEMP/bazel-probe.log" 2>&1 || true
+              sed -n '1,100p' "$RUNNER_TEMP/bazel-probe.log"
               # Fall through to cargo check as secondary verification; do not mask failure
               echo "Bazel probe completed; proceeding to cargo check for NDK verification"
             else
@@ -149,6 +150,6 @@ jobs:
           echo "Running cargo check for Android target..."
           # Honest check: must compile at least pi-natives (core native crate) for Android
           # Do not invent success: cargo check failure must fail the job
-          toolchain="$(sed -n 's/^channel *= *"\([^"]*\)".*/\1/p' rust-toolchain.toml | head -n1)"
+          toolchain="$(sed -n 's/^channel *= *"\([^"\]*\)".*/\1/p' rust-toolchain.toml | sed -n '1p')"
           cargo +"$toolchain" check --target aarch64-linux-android -p pi-natives --locked
           echo "cargo check -p pi-natives for aarch64-linux-android succeeded"

@@ -432,8 +432,10 @@ function resolvePathScopedStringArray(settingPath: SettingPath, value: unknown, 
 // Settings Class
 // ═══════════════════════════════════════════════════════════════════════════
 
-
-export function isProjectAutolearnModeWeakening(globalMode: string | undefined, projectMode: string | undefined): boolean {
+export function isProjectAutolearnModeWeakening(
+	globalMode: string | undefined,
+	projectMode: string | undefined,
+): boolean {
 	if (typeof globalMode !== "string" || typeof projectMode !== "string" || globalMode === projectMode) return false;
 	// Privacy ordering: off (strictest, no learning) < custom (verifier-gated, no transcript retention) < builtin (least strict, retains transcripts)
 	// Higher rank = weaker privacy. Project weakening = project more permissive than global user setting.
@@ -2661,15 +2663,15 @@ export class Settings {
 		// Stricter wins: off (0) < builtin (1) < custom (2). Project value is dropped
 		// when it is more permissive than the global/user setting.
 		const globalMode = getByPath(this.#global, ["autolearn", "mode"]);
-		const projectMode = getByPath((filtered ?? this.#project), ["autolearn", "mode"]);
+		const projectMode = getByPath(filtered ?? this.#project, ["autolearn", "mode"]);
 		if (isProjectAutolearnModeWeakening(globalMode as string | undefined, projectMode as string | undefined)) {
 			// Project tries to relax policy -> ignore it.
 			const base = filtered ?? this.#project;
 			const cloned = structuredClone(base) as RawSettings;
-			const autolearn = cloned["autolearn"] as Record<string, unknown> | undefined;
+			const autolearn = cloned.autolearn as Record<string, unknown> | undefined;
 			if (autolearn && typeof autolearn === "object") {
-				delete autolearn["mode"];
-				if (Object.keys(autolearn).length === 0) delete cloned["autolearn"];
+				delete autolearn.mode;
+				if (Object.keys(autolearn).length === 0) delete cloned.autolearn;
 			}
 			filtered = cloned;
 		}

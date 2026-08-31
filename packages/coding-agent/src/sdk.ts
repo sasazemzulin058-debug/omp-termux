@@ -49,9 +49,9 @@ import {
 } from "./advisor";
 import { AsyncJobManager } from "./async";
 import { AutoLearnController, buildAutoLearnInstructions } from "./autolearn/controller";
-import { createAutoresearchExtension } from "./autoresearch";
 import { CustomAutolearnController } from "./autolearn/custom-controller";
 import { createLearnExtension } from "./autolearn/learn-commands";
+import { createAutoresearchExtension } from "./autoresearch";
 import { loadCapability } from "./capability";
 import { type Rule, ruleCapability, setActiveRules } from "./capability/rule";
 import { bucketRules } from "./capability/rule-buckets";
@@ -4102,7 +4102,11 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		// mid-session DISABLE. The subscription lives for the session's lifetime; the
 		// reference is intentionally discarded (the listener retains it).
 		if (!restrictToolNames) {
-			if ((settings.get("autolearn.mode") === "builtin" || (settings.get("autolearn.mode") === undefined && settings.get("autolearn.enabled") === true)) && taskDepth === 0) {
+			if (
+				(settings.get("autolearn.mode") === "builtin" ||
+					(settings.get("autolearn.mode") === undefined && settings.get("autolearn.enabled") === true)) &&
+				taskDepth === 0
+			) {
 				await logger.time("startMemoryStartupTask", startMemoryBackend);
 				new AutoLearnController({
 					session,

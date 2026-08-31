@@ -83,14 +83,24 @@ export function buildGeneratedBlock(dts: string): string {
 	}
 
 	const lines: string[] = [];
-	const androidUnsupported = new Set(["AudioCapture", "AudioPlayback", "LiveWebRtcPeer", "copyToClipboard", "readImageFromClipboard"]);
-	const androidStub = (name: string) => `(() => { const v = nativeBindings.${name}; if (v !== undefined) return v; const err = () => { throw new Error("Native ${name} is unsupported on Android/Termux"); }; return new Proxy(err, { construct: err, apply: err, get(_t, p) { if (p === "then") return undefined; return err; } }); })()`;
+	const androidUnsupported = new Set([
+		"AudioCapture",
+		"AudioPlayback",
+		"LiveWebRtcPeer",
+		"copyToClipboard",
+		"readImageFromClipboard",
+	]);
+	const androidStub = (name: string) =>
+		`(() => { const v = nativeBindings.${name}; if (v !== undefined) return v; const err = () => { throw new Error("Native ${name} is unsupported on Android/Termux"); }; return new Proxy(err, { construct: err, apply: err, get(_t, p) { if (p === "then") return undefined; return err; } }); })()`;
 	if (classes.length > 0) {
 		lines.push("// classes");
 		for (const name of classes) {
 			if (androidUnsupported.has(name)) {
-				const binding = name === "DesktopSession" ? `adaptDesktopSession(nativeBindings.${name})` : `nativeBindings.${name}`;
-				lines.push(`export const ${name} = (() => { const v = ${binding}; if (v !== undefined) return v; const err = () => { throw new Error("Native ${name} is unsupported on Android/Termux"); }; return new Proxy(err, { construct: err, apply: err, get(_t, p){ if(p==="then") return undefined; return err; } }); })();`);
+				const binding =
+					name === "DesktopSession" ? `adaptDesktopSession(nativeBindings.${name})` : `nativeBindings.${name}`;
+				lines.push(
+					`export const ${name} = (() => { const v = ${binding}; if (v !== undefined) return v; const err = () => { throw new Error("Native ${name} is unsupported on Android/Termux"); }; return new Proxy(err, { construct: err, apply: err, get(_t, p){ if(p==="then") return undefined; return err; } }); })();`,
+				);
 			} else {
 				const binding =
 					name === "DesktopSession" ? `adaptDesktopSession(nativeBindings.${name})` : `nativeBindings.${name}`;

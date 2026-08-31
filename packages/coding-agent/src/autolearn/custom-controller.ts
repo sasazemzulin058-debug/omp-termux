@@ -42,7 +42,11 @@ function extractStructuredVerifierProof(result: unknown): StructuredVerifierProo
 	if (typeof payload === "string") {
 		const trimmed = payload.trim();
 		if ((trimmed.startsWith("{") && trimmed.endsWith("}")) || (trimmed.startsWith("[") && trimmed.endsWith("]"))) {
-			try { payload = JSON.parse(trimmed); } catch { return null; }
+			try {
+				payload = JSON.parse(trimmed);
+			} catch {
+				return null;
+			}
 		} else {
 			return null;
 		}
@@ -51,9 +55,12 @@ function extractStructuredVerifierProof(result: unknown): StructuredVerifierProo
 	const obj = payload as Record<string, unknown>;
 	let cand: Record<string, unknown> | null = null;
 	if (typeof obj.verified === "boolean") cand = obj;
-	else if (obj.structured && typeof (obj.structured as Record<string, unknown>).verified === "boolean") cand = obj.structured as Record<string, unknown>;
-	else if (obj.data && typeof (obj.data as Record<string, unknown>).verified === "boolean") cand = obj.data as Record<string, unknown>;
-	else if (obj.verifierResult && typeof (obj.verifierResult as Record<string, unknown>).verified === "boolean") cand = obj.verifierResult as Record<string, unknown>;
+	else if (obj.structured && typeof (obj.structured as Record<string, unknown>).verified === "boolean")
+		cand = obj.structured as Record<string, unknown>;
+	else if (obj.data && typeof (obj.data as Record<string, unknown>).verified === "boolean")
+		cand = obj.data as Record<string, unknown>;
+	else if (obj.verifierResult && typeof (obj.verifierResult as Record<string, unknown>).verified === "boolean")
+		cand = obj.verifierResult as Record<string, unknown>;
 	else if (typeof obj.content === "string") {
 		try {
 			const inner = JSON.parse(obj.content);
@@ -100,12 +107,19 @@ export class CustomAutolearnController {
 	#episodeId: string;
 	#observedCount = 0;
 
-	constructor(options: { session: AgentSession; settings: Settings; agentDir?: string; svcFactory?: (dir: string) => CustomAutolearnService }) {
+	constructor(options: {
+		session: AgentSession;
+		settings: Settings;
+		agentDir?: string;
+		svcFactory?: (dir: string) => CustomAutolearnService;
+	}) {
 		this.#session = options.session;
 		this.#settings = options.settings;
 		this.#agentDir = options.agentDir;
 		this.#svcFactory = options.svcFactory;
-		this.#episodeId = (this.#session as unknown as { sessionId?: string }).sessionId ?? `ep_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+		this.#episodeId =
+			(this.#session as unknown as { sessionId?: string }).sessionId ??
+			`ep_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
 		this.#session.subscribe(event => this.#onEvent(event));
 	}
 
@@ -182,7 +196,15 @@ export class CustomAutolearnController {
 		// Never treat repository-controlled output keywords as proof: verified must be explicit true already enforced.
 		try {
 			// Find target candidate by exact toolCallId linkage; fingerprint must also match (service enforces)
-			const candidates = svc.listCandidates(projectIdentity).filter(c => c.sessionId === sessionId && c.episodeId === episodeId && c.status === "pending" && c.toolCallId === proof.toolCallId);
+			const candidates = svc
+				.listCandidates(projectIdentity)
+				.filter(
+					c =>
+						c.sessionId === sessionId &&
+						c.episodeId === episodeId &&
+						c.status === "pending" &&
+						c.toolCallId === proof.toolCallId,
+				);
 			const target = candidates.find(c => c.failureDigest === proof.failureFingerprint) ?? candidates[0];
 			if (!target) return;
 			if (target.failureDigest !== proof.failureFingerprint) return;
@@ -201,6 +223,8 @@ export class CustomAutolearnController {
 
 	/** For tests: close underlying service if created. */
 	close(): void {
-		try { this.#svc?.close(); } catch {}
+		try {
+			this.#svc?.close();
+		} catch {}
 	}
 }
