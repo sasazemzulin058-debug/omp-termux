@@ -74,11 +74,10 @@ function collectMatches(dts: string, re: RegExp): string[] {
 	return names;
 }
 
-function buildGeneratedBlock(dts: string): string {
+export function buildGeneratedBlock(dts: string): string {
 	const classes = collectMatches(dts, CLASS_RE);
 	const functions = collectMatches(dts, FUNCTION_RE);
 	const enums = collectEnums(dts);
-
 	if (classes.length === 0 && functions.length === 0 && enums.length === 0) {
 		throw new Error("No public symbols found in index.d.ts — check napi build output");
 	}

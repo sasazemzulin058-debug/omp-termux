@@ -294,8 +294,12 @@ export async function resolveEffectiveSubagentPolicy(
 	// from different sources: the expansion below discards the alias, and the
 	// child's inherited retry-fallback chain is keyed off the role.
 	const { patterns: modelOverride, role: modelRole } = resolveAgentModelSelection(modelResolution);
-	const isolationMode = request.session.settings.get("task.isolation.mode");
-	const isIsolated = request.isolation?.requested === true;
+	const hasExplicitRepoRoot = request.isolation?.repoRoot !== undefined;
+	// Explicit repoRoot must not be ignored when isolated is omitted: force isolation/root setup or reject invalid shape.
+	const isIsolated = request.isolation?.requested === true || hasExplicitRepoRoot;
+	if (hasExplicitRepoRoot && request.isolation?.requested === false) {
+		throw new StructuredSubagentError("preflight", "Explicit repoRoot requires isolation; do not set isolated:false with repoRoot.");
+	}
 	if (isIsolated && isolationMode === "none") {
 		throw new StructuredSubagentError(
 			"preflight",

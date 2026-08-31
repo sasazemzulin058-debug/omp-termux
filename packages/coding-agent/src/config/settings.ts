@@ -435,7 +435,9 @@ function resolvePathScopedStringArray(settingPath: SettingPath, value: unknown, 
 
 export function isProjectAutolearnModeWeakening(globalMode: string | undefined, projectMode: string | undefined): boolean {
 	if (typeof globalMode !== "string" || typeof projectMode !== "string" || globalMode === projectMode) return false;
-	const rank = (m: string) => (m === "off" ? 0 : m === "builtin" ? 1 : m === "custom" ? 2 : 99);
+	// Privacy ordering: off (strictest, no learning) < custom (verifier-gated, no transcript retention) < builtin (least strict, retains transcripts)
+	// Higher rank = weaker privacy. Project weakening = project more permissive than global user setting.
+	const rank = (m: string) => (m === "off" ? 0 : m === "custom" ? 1 : m === "builtin" ? 2 : 99);
 	return rank(projectMode) > rank(globalMode);
 }
 

@@ -40,7 +40,7 @@ describe("learn slash commands termux", () => {
 	it("enforces scope on view/approve", async () => {
 		const svc = new CustomAutolearnService(dir);
 		const cand = svc.observeCandidate({ episodeId: "ep1", sessionId: "s1", projectIdentity: canonicalProjectIdentity(cwd), toolName: "bash", toolCallId: "tc1", failureMessage: "fail" });
-		svc.recordVerifierResult(cand.id, "cargo test", { verified: true, summary: "ok" });
+		svc.recordVerifierResult(cand.id, "cargo test", { verified: true, summary: "ok", toolCallId: "tc1", expectedCommand: "cargo test", failureFingerprint: cand.failureDigest, projectIdentity: canonicalProjectIdentity(cwd), sessionId: "s1", episodeId: "ep1" });
 		svc.close();
 		// Wrong project should be rejected
 		const otherCwd = fs.mkdtempSync(path.join(os.tmpdir(), "omp-learn-other-"));
@@ -52,7 +52,7 @@ describe("learn slash commands termux", () => {
 	it("approve rejects synthetic content", async () => {
 		const svc = new CustomAutolearnService(dir);
 		const cand = svc.observeCandidate({ episodeId: "ep2", sessionId: "s1", projectIdentity: canonicalProjectIdentity(cwd), toolName: "bash", toolCallId: "tc2", failureMessage: "fail" });
-		svc.recordVerifierResult(cand.id, "bun test", { verified: true, summary: "ok" });
+		svc.recordVerifierResult(cand.id, "bun test", { verified: true, summary: "ok", toolCallId: "tc2", expectedCommand: "bun test", failureFingerprint: cand.failureDigest, projectIdentity: canonicalProjectIdentity(cwd), sessionId: "s1", episodeId: "ep2" });
 		svc.close();
 		const res = await handleLearnCommand(["approve", cand.id, "Verified resolution for xyz"], settingsFor("custom"), cwd, { agentDir: dir });
 		expect(res.ok).toBe(false);
@@ -66,5 +66,16 @@ describe("learn slash commands termux", () => {
 		const sweep = await handleLearnCommand(["sweep"], settingsFor("custom"), cwd, { agentDir: dir });
 		expect(sweep.ok).toBe(true);
 		expect(sweep.message).toContain("Swept");
+	});
+	it("sweep blocked unless custom mode", async () => {
+		// Even with existing DB, off/builtin must block sweep
+		const svc = new CustomAutolearnService(dir);
+		svc.observeCandidate({ episodeId: "ep-sweep", sessionId: "s1", projectIdentity: canonicalProjectIdentity(cwd), toolName: "bash", toolCallId: "tc-sweep", failureMessage: "fail" });
+		svc.close();
+		const offRes = await handleLearnCommand(["sweep"], settingsFor("off"), cwd, { agentDir: dir });
+		expect(offRes.ok).toBe(false);
+		expect(offRes.message).toMatch(/blocked.*custom/i);
+		const builtinRes = await handleLearnCommand(["sweep"], settingsFor("builtin"), cwd, { agentDir: dir });
+		expect(builtinRes.ok).toBe(false);
 	});
 });

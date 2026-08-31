@@ -35,11 +35,26 @@ describe("custom autolearn termux slice", () => {
   it("observe -> verifier -> approve lifecycle with CAS", () => {
     const cand = svc.observeCandidate({ episodeId: "ep1", sessionId: "sess1", projectIdentity: "/repo/a", toolName: "bash", toolCallId: "tc1", failureMessage: "fail x" });
     expect(cand.status).toBe("pending");
+    const strict = (summary: string) => ({
+      verified: true as const,
+      summary,
+      toolCallId: "tc1",
+      expectedCommand: "cargo test",
+      failureFingerprint: cand.failureDigest,
+      projectIdentity: "/repo/a",
+      sessionId: "sess1",
+      episodeId: "ep1",
+    });
     // Unallowlisted verifier should not promote
-    expect(svc.recordVerifierResult(cand.id, "unknown-verifier", { verified: true, summary: "ok" })).toBe(false);
+    expect(svc.recordVerifierResult(cand.id, "unknown-verifier", { verified: true, summary: "ok", toolCallId: "tc1", expectedCommand: "unknown-verifier", failureFingerprint: cand.failureDigest, projectIdentity: "/repo/a", sessionId: "sess1", episodeId: "ep1" } as any)).toBe(false);
     expect(svc.getCandidate(cand.id)?.status).toBe("pending");
-    // Allowlisted verifier promotes to needs_review
-    expect(svc.recordVerifierResult(cand.id, "cargo test", { verified: true, summary: "passed 1" })).toBe(true);
+    // Mismatched toolCallId must not promote
+    expect(svc.recordVerifierResult(cand.id, "cargo test", { ...strict("passed 1"), toolCallId: "wrong" })).toBe(false);
+    expect(svc.getCandidate(cand.id)?.status).toBe("pending");
+    // Mismatched fingerprint must not promote
+    expect(svc.recordVerifierResult(cand.id, "cargo test", { ...strict("passed 1"), failureFingerprint: "bad" })).toBe(false);
+    // Allowlisted verifier with exact linkage promotes to needs_review
+    expect(svc.recordVerifierResult(cand.id, "cargo test", strict("passed 1"))).toBe(true);
     expect(svc.getCandidate(cand.id)?.status).toBe("needs_review");
     // Synthetic content rejected
     expect(svc.approveCandidate(cand.id, "Verified resolution for x", "/repo/a").success).toBe(false);
@@ -51,7 +66,17 @@ describe("custom autolearn termux slice", () => {
 
   it("enforces project scope", () => {
     const cand = svc.observeCandidate({ episodeId: "ep2", sessionId: "sess1", projectIdentity: "/repo/a", toolName: "bash", toolCallId: "tc2", failureMessage: "fail" });
-    svc.recordVerifierResult(cand.id, "cargo test", { verified: true, summary: "ok" });
+    const strict = {
+      verified: true as const,
+      summary: "ok",
+      toolCallId: "tc2",
+      expectedCommand: "cargo test",
+      failureFingerprint: cand.failureDigest,
+      projectIdentity: "/repo/a",
+      sessionId: "sess1",
+      episodeId: "ep2",
+    };
+    svc.recordVerifierResult(cand.id, "cargo test", strict);
     expect(svc.approveCandidate(cand.id, "real content", "/repo/b").success).toBe(false);
   });
 

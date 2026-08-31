@@ -1,7 +1,8 @@
 import { describe, it, expect } from "bun:test";
 function isProjectAutolearnModeWeakening(globalMode: string | undefined, projectMode: string | undefined): boolean {
 	if (typeof globalMode !== "string" || typeof projectMode !== "string" || globalMode === projectMode) return false;
-	const rank = (m: string) => (m === "off" ? 0 : m === "builtin" ? 1 : m === "custom" ? 2 : 99);
+	// Privacy ordering: off (strictest) < custom (verifier-gated, no transcript) < builtin (least strict)
+	const rank = (m: string) => (m === "off" ? 0 : m === "custom" ? 1 : m === "builtin" ? 2 : 99);
 	return rank(projectMode) > rank(globalMode);
 }
 
@@ -11,14 +12,14 @@ describe("project config cannot weaken stricter user policy", () => {
 		expect(isProjectAutolearnModeWeakening("off", "builtin")).toBe(true);
 		expect(isProjectAutolearnModeWeakening("off", "off")).toBe(false);
 	});
-	it("global builtin blocks custom but allows off", () => {
-		expect(isProjectAutolearnModeWeakening("builtin", "custom")).toBe(true);
-		expect(isProjectAutolearnModeWeakening("builtin", "off")).toBe(false);
-		expect(isProjectAutolearnModeWeakening("builtin", "builtin")).toBe(false);
-	});
-	it("global custom allows anything stricter", () => {
+	it("global custom blocks builtin but allows off", () => {
+		expect(isProjectAutolearnModeWeakening("custom", "builtin")).toBe(true);
 		expect(isProjectAutolearnModeWeakening("custom", "off")).toBe(false);
-		expect(isProjectAutolearnModeWeakening("custom", "builtin")).toBe(false);
+		expect(isProjectAutolearnModeWeakening("custom", "custom")).toBe(false);
+	});
+	it("global builtin allows anything stricter", () => {
+		expect(isProjectAutolearnModeWeakening("builtin", "off")).toBe(false);
+		expect(isProjectAutolearnModeWeakening("builtin", "custom")).toBe(false);
 	});
 	it("undefined global allows project", () => {
 		expect(isProjectAutolearnModeWeakening(undefined, "custom")).toBe(false);

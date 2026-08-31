@@ -50,6 +50,8 @@ import {
 import { AsyncJobManager } from "./async";
 import { AutoLearnController, buildAutoLearnInstructions } from "./autolearn/controller";
 import { createAutoresearchExtension } from "./autoresearch";
+import { CustomAutolearnController } from "./autolearn/custom-controller";
+import { createLearnExtension } from "./autolearn/learn-commands";
 import { loadCapability } from "./capability";
 import { type Rule, ruleCapability, setActiveRules } from "./capability/rule";
 import { bucketRules } from "./capability/rule-buckets";
@@ -2080,6 +2082,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 
 			inlineExtensions.push(...(options.extensions ?? []));
 			inlineExtensions.push(createAutoresearchExtension);
+			inlineExtensions.push(createLearnExtension);
 			if (customTools.length > 0) {
 				inlineExtensions.push(createCustomToolsExtension(customTools, customToolSourcePaths));
 			}
@@ -4106,6 +4109,9 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 					settings,
 					capture: content => session.runAutolearnCapture(signal => runAutoLearnCapture(content, signal)),
 				});
+			} else if (settings.get("autolearn.mode") === "custom" && taskDepth === 0) {
+				void logger.time("startMemoryStartupTask", startMemoryBackend);
+				new CustomAutolearnController({ session, settings });
 			} else {
 				void logger.time("startMemoryStartupTask", startMemoryBackend);
 			}
