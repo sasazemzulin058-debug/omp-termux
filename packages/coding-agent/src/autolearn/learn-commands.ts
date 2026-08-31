@@ -5,7 +5,7 @@
 
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { CustomAutolearnService, resolveAutolearnMode, canonicalProjectIdentity } from "./custom-service";
+import { CustomAutolearnService, resolveAutolearnMode, canonicalProjectIdentity, getAgentDir } from "./custom-service";
 
 export type LearnCommand = "status" | "view" | "approve" | "reject" | "delete" | "rollback" | "sweep" | "config";
 
@@ -13,16 +13,6 @@ export interface LearnCommandResult {
 	ok: boolean;
 	message: string;
 	data?: unknown;
-}
-
-function getAgentDir(): string {
-	const home = process.env.HOME ?? process.env.USERPROFILE ?? "/tmp";
-	return path.join(home, ".omp", "agent");
-}
-
-function shouldGateDb(settings: { get(key: string): unknown }): boolean {
-	const mode = resolveAutolearnMode(settings);
-	return mode !== "custom";
 }
 
 function dbExists(agentDir: string): boolean {
@@ -42,8 +32,8 @@ export async function handleLearnCommand(
 	}
 
 	// Enforce mode/scope/no DB off/builtin: do not create DB when mode is off or builtin.
-	if (shouldGateDb(settings)) {
-		const mode = resolveAutolearnMode(settings);
+	const mode = resolveAutolearnMode(settings);
+	if (mode !== "custom") {
 		const exists = dbExists(options?.agentDir ?? getAgentDir());
 		if (!exists) {
 			// Never create DB file
@@ -73,7 +63,7 @@ export async function handleLearnCommand(
 				const candidates = svc.listCandidates(projectIdentity);
 				const byStatus: Record<string, number> = {};
 				for (const c of candidates) byStatus[c.status] = (byStatus[c.status] ?? 0) + 1;
-				return { ok: true, message: `Learn status (mode=${resolveAutolearnMode(settings as unknown as { get(key: string): unknown })}, scope project=${projectIdentity}): ${JSON.stringify(byStatus)}`, data: byStatus };
+				return { ok: true, message: `Learn status (mode=${mode}, scope project=${projectIdentity}): ${JSON.stringify(byStatus)}`, data: byStatus };
 			}
 			case "view": {
 				const id = args[1];

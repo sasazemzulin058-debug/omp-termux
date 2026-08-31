@@ -2660,21 +2660,16 @@ export class Settings {
 		// when it is more permissive than the global/user setting.
 		const globalMode = getByPath(this.#global, ["autolearn", "mode"]);
 		const projectMode = getByPath((filtered ?? this.#project), ["autolearn", "mode"]);
-		if (typeof globalMode === "string" && typeof projectMode === "string" && globalMode !== projectMode) {
-			const rank = (m: string) => (m === "off" ? 0 : m === "builtin" ? 1 : m === "custom" ? 2 : 99);
-			const gr = rank(globalMode);
-			const pr = rank(projectMode);
-			if (pr > gr) {
-				// Project tries to relax policy -> ignore it.
-				const base = filtered ?? this.#project;
-				const cloned = structuredClone(base) as RawSettings;
-				const autolearn = cloned["autolearn"] as Record<string, unknown> | undefined;
-				if (autolearn && typeof autolearn === "object") {
-					delete autolearn["mode"];
-					if (Object.keys(autolearn).length === 0) delete cloned["autolearn"];
-				}
-				filtered = cloned;
+		if (isProjectAutolearnModeWeakening(globalMode as string | undefined, projectMode as string | undefined)) {
+			// Project tries to relax policy -> ignore it.
+			const base = filtered ?? this.#project;
+			const cloned = structuredClone(base) as RawSettings;
+			const autolearn = cloned["autolearn"] as Record<string, unknown> | undefined;
+			if (autolearn && typeof autolearn === "object") {
+				delete autolearn["mode"];
+				if (Object.keys(autolearn).length === 0) delete cloned["autolearn"];
 			}
+			filtered = cloned;
 		}
 		return filtered ?? this.#project;
 	}

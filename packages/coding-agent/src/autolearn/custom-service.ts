@@ -12,12 +12,11 @@
 
 import { Database } from "bun:sqlite";
 import * as fs from "node:fs";
+import * as os from "node:os";
 import * as path from "node:path";
-import * as osFallback from "node:os";
-import * as pathFallback from "node:path";
-function getAgentDir(): string {
-  const home = osFallback.homedir();
-  return pathFallback.join(home, ".omp", "agent");
+
+export function getAgentDir(): string {
+	return path.join(os.homedir(), ".omp", "agent");
 }
 
 export type AutolearnMode = "off" | "builtin" | "custom";
