@@ -188,6 +188,19 @@ jobs:
           export RANLIB_aarch64_linux_android="$real_ranlib"
           export AR="$real_ar"
           export RANLIB="$real_ranlib"
+          cat > "$wrapper_dir/aarch64-linux-android${chosen_api}-ar" <<AR_WRAPPER_EOF
+          #!/bin/sh
+          exec "$real_ar" "$@"
+          AR_WRAPPER_EOF
+          chmod +x "$wrapper_dir/aarch64-linux-android${chosen_api}-ar"
+          cat > "$wrapper_dir/aarch64-linux-android${chosen_api}-ranlib" <<RANLIB_WRAPPER_EOF
+          #!/bin/sh
+          exec "$real_ranlib" "$@"
+          RANLIB_WRAPPER_EOF
+          chmod +x "$wrapper_dir/aarch64-linux-android${chosen_api}-ranlib"
+          export PATH="$wrapper_dir:$PATH"
+          export AR_aarch64_linux_android="$wrapper_dir/aarch64-linux-android${chosen_api}-ar"
+          export RANLIB_aarch64_linux_android="$wrapper_dir/aarch64-linux-android${chosen_api}-ranlib"
           echo "Using NDK clang wrapper for API $chosen_api: $CC_aarch64_linux_android -> $real_clang --target=aarch64-linux-android${chosen_api}"
           # Verify wrapper and real clang are executable pipefail-safe
           "$CC_aarch64_linux_android" --version 2>&1 | sed -n '1,5p' || true
