@@ -6,8 +6,8 @@
 
 use std::io::Cursor;
 
+#[cfg(not(target_os = "android"))]
 use arboard::{Clipboard, Error as ClipboardError, ImageData};
-use image::{DynamicImage, ImageFormat, RgbaImage};
 use napi::{JsString, bindgen_prelude::*};
 use napi_derive::napi;
 
@@ -22,6 +22,7 @@ pub struct ClipboardImage {
 	pub mime_type: String,
 }
 
+#[cfg(not(target_os = "android"))]
 fn encode_png(image: ImageData<'_>) -> Result<Vec<u8>> {
 	let width = u32::try_from(image.width)
 		.map_err(|_| Error::from_reason("Clipboard image width overflow"))?;

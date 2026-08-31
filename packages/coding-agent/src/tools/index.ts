@@ -4,6 +4,7 @@ import type { FetchImpl, ImageContent, Model, ServiceTierByFamily, ToolChoice } 
 import { logger } from "@oh-my-pi/pi-utils";
 import type { AsyncJobManager } from "../async/job-manager";
 import { resolveAutolearnMode } from "../autolearn/custom-service";
+import type { Rule } from "../capability/rule";
 import type { EffectiveExtensionRoots } from "../capability/types";
 import type { PromptTemplate } from "../config/prompt-templates";
 import type { Settings } from "../config/settings";
