@@ -44,7 +44,6 @@ for path, needle in checks.items():
 
 browser_checks = {
     "packages/coding-agent/src/tools/browser/launch.ts": ["systemChromiumCandidates", "ensureChromiumExecutable"],
-    "packages/coding-agent/src/tools/browser.ts": ["ensureChromiumExecutable"],
     "packages/coding-agent/src/tools/browser/registry.ts": ["executablePath?: string"],
     "packages/coding-agent/src/tools/browser/shared-daemon.ts": ["specHash"],
     "packages/coding-agent/src/config/settings-schema.ts": ['"browser.executablePath"'],
