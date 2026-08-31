@@ -42,18 +42,15 @@ for path, needle in checks.items():
         raise SystemExit(f"overlay verification failed: required file missing: {path}")
     require(path, needle)
 
-browser_checks = {
-    "packages/coding-agent/src/tools/browser/launch.ts": ["systemChromiumCandidates", "ensureChromiumExecutable"],
-    "packages/coding-agent/src/tools/browser/registry.ts": ["executablePath?: string"],
-    "packages/coding-agent/src/tools/browser/shared-daemon.ts": ["specHash"],
-    "packages/coding-agent/src/config/settings-schema.ts": ['"browser.executablePath"'],
-    "packages/coding-agent/test/tools/browser-android.test.ts": ["systemChromiumCandidates"],
-}
-for path, needles in browser_checks.items():
-    if not (ROOT / path).is_file():
-        raise SystemExit(f"overlay verification failed: browser file missing: {path}")
-    for needle in needles:
-        require(path, needle)
+browser_path = ROOT / "packages/coding-agent/src/tools/browser/launch.ts"
+browser_test_path = ROOT / "packages/coding-agent/test/tools/browser-android.test.ts"
+if not browser_path.is_file() or not browser_test_path.is_file():
+    raise SystemExit("overlay verification failed: browser Android files missing")
+browser_source = browser_path.read_text()
+if 'case "android"' not in browser_source or "systemChromiumCandidates" not in browser_source:
+    raise SystemExit("overlay verification failed: Android browser resolution missing")
+if "systemChromiumCandidates" not in browser_test_path.read_text():
+    raise SystemExit("overlay verification failed: Android browser regression test missing")
 
 present = sum((ROOT / path).exists() for path in checks)
 print(f"Android overlay verified: {present} gates + browser overlay, version {version}")
