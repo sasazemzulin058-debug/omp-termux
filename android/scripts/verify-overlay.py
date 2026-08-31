@@ -43,12 +43,12 @@ for path, needle in checks.items():
     require(path, needle)
 
 browser_checks = {
-    "packages/coding-agent/src/tools/browser/launch.ts": ["systemChromiumCandidates", "resolveHeadlessExecutable"],
-    "packages/coding-agent/src/tools/browser.ts": ["resolveHeadlessExecutable"],
+    "packages/coding-agent/src/tools/browser/launch.ts": ["systemChromiumCandidates", "ensureChromiumExecutable"],
+    "packages/coding-agent/src/tools/browser.ts": ["ensureChromiumExecutable"],
     "packages/coding-agent/src/tools/browser/registry.ts": ["executablePath?: string"],
     "packages/coding-agent/src/tools/browser/shared-daemon.ts": ["specHash"],
     "packages/coding-agent/src/config/settings-schema.ts": ['"browser.executablePath"'],
-    "packages/coding-agent/test/tools/browser-android.test.ts": ["resolveHeadlessExecutable"],
+    "packages/coding-agent/test/tools/browser-android.test.ts": ["systemChromiumCandidates"],
 }
 for path, needles in browser_checks.items():
     if not (ROOT / path).is_file():
