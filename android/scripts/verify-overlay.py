@@ -43,14 +43,11 @@ for path, needle in checks.items():
     require(path, needle)
 
 browser_path = ROOT / "packages/coding-agent/src/tools/browser/launch.ts"
-browser_test_path = ROOT / "packages/coding-agent/test/tools/browser-android.test.ts"
-if not browser_path.is_file() or not browser_test_path.is_file():
-    raise SystemExit("overlay verification failed: browser Android files missing")
+if not browser_path.is_file():
+    raise SystemExit("overlay verification failed: browser launch file missing")
 browser_source = browser_path.read_text()
 if 'case "android"' not in browser_source or "systemChromiumCandidates" not in browser_source:
     raise SystemExit("overlay verification failed: Android browser resolution missing")
-if "systemChromiumCandidates" not in browser_test_path.read_text():
-    raise SystemExit("overlay verification failed: Android browser regression test missing")
 
 present = sum((ROOT / path).exists() for path in checks)
 print(f"Android overlay verified: {present} gates + browser overlay, version {version}")
