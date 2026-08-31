@@ -135,6 +135,18 @@ jobs:
           CMAKE_GENERATOR: Ninja
           CARGO_INCREMENTAL: "false"
           CARGO_TERM_COLOR: always
+          # Deterministic Android target toolchain for cmake/cc-rs (audiopus_sys/ring).
+          # build-android-ci.sh also exports these from the resolved NDK path, but
+          # seeding them here prevents setup-ndk PATH wrappers/host cc contamination
+          # before the script runs and documents the API-24 aarch64 contract.
+          CMAKE_C_COMPILER: ${{ steps.ndk.outputs.ndk-path }}/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android24-clang
+          CMAKE_CXX_COMPILER: ${{ steps.ndk.outputs.ndk-path }}/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android24-clang++
+          CMAKE_AR: ${{ steps.ndk.outputs.ndk-path }}/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-ar
+          CMAKE_RANLIB: ${{ steps.ndk.outputs.ndk-path }}/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-ranlib
+          TARGET_CC: ${{ steps.ndk.outputs.ndk-path }}/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android24-clang
+          TARGET_CXX: ${{ steps.ndk.outputs.ndk-path }}/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android24-clang++
+          TARGET_AR: ${{ steps.ndk.outputs.ndk-path }}/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-ar
+          TARGET_RANLIB: ${{ steps.ndk.outputs.ndk-path }}/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-ranlib
         run: bash android/scripts/build-android-ci.sh
 
       - name: Verify native addon artifact naming and checksum
