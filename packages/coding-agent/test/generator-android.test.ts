@@ -69,6 +69,43 @@ export declare enum MyEnum { A = "a" }
 		expect(content).toContain("new Proxy(err");
 	});
 
+
+	it("pi-natives Cargo gates pi-voice and keeps desktop audio on other platforms", async () => {
+		const cargoPath = path.resolve(import.meta.dir, "../../../crates/pi-natives/Cargo.toml");
+		const cargo = await fs.promises.readFile(cargoPath, "utf8");
+		// No unconditional pi-voice in [dependencies] — must be gated
+		const depsSection = cargo.split("[target.")[0];
+		expect(depsSection).not.toContain("pi-voice.workspace");
+		// Gated section must contain pi-voice and arboard together
+		expect(cargo).toContain('[target.\'cfg(not(target_os = "android"))\'.dependencies]');
+		expect(cargo).toContain("pi-voice.workspace = true");
+		expect(cargo).toContain("arboard.workspace = true");
+		// Ensure we didn't accidentally remove desktop audio deps
+		expect(cargo).toContain("pi-walker.workspace");
+	});
+
+	it("audio and live Rust sources avoid unconditional pi_voice import and keep fail-loud messages", async () => {
+		const audioPath = path.resolve(import.meta.dir, "../../../crates/pi-natives/src/audio.rs");
+		const livePath = path.resolve(import.meta.dir, "../../../crates/pi-natives/src/live.rs");
+		const audio = await fs.promises.readFile(audioPath, "utf8");
+		const live = await fs.promises.readFile(livePath, "utf8");
+		for (const src of [audio, live]) {
+			// Every `use pi_voice` must be gated by cfg(not android) on preceding line
+			const gatedUses = (src.match(/#\[cfg\(not\(target_os = "android"\)\)\]\s*\nuse pi_voice/g) ?? []).length;
+			const totalUses = (src.match(/use pi_voice/g) ?? []).length;
+			expect(gatedUses).toBe(totalUses);
+			expect(totalUses).toBeGreaterThan(0);
+		}
+		// Audio stubs keep exact error strings
+		expect(audio).toContain('Native AudioCapture is unsupported on Android/Termux');
+		expect(audio).toContain('Native AudioPlayback is unsupported on Android/Termux');
+		// Live stubs keep exact error string without importing pi_voice on Android
+		expect(live).toContain('LiveWebRtcPeer is unsupported on Android/Termux');
+		// Ensure Android stubs do not pull audiopus via pi_voice types
+		// Live private field must be gated, not always Arc<LivePeerCore>
+		expect(live).toContain('#[cfg(target_os = "android")]');
+		expect(live).toContain('#[cfg(not(target_os = "android"))]');
+	});
 	it("loader-state includes android-arm64 platform", async () => {
 		const loader = await fs.promises.readFile(
 			path.resolve(import.meta.dir, "../../natives/native/loader-state.js"),
