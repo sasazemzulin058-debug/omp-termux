@@ -2743,6 +2743,8 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			settings,
 			localProtocolOptions,
 			() => (hasSession ? session.getAsyncJobSnapshot() : null),
+			agentDir,
+			() => (hasSession ? session.getMnemopiSessionState() : undefined),
 		);
 
 		credentialDisabledTarget = extensionRunner;
@@ -4114,8 +4116,15 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 					capture: content => session.runAutolearnCapture(signal => runAutoLearnCapture(content, signal)),
 				});
 			} else if (settings.get("autolearn.mode") === "custom" && taskDepth === 0) {
-				void logger.time("startMemoryStartupTask", startMemoryBackend);
-				new CustomAutolearnController({ session, settings });
+				await logger.time("startMemoryStartupTask", startMemoryBackend);
+				const customCtrl = new CustomAutolearnController({ session, settings, agentDir });
+				// Production recovery: invoke after Mnemopi session state becomes available, before normal /learn mutations, same agentDir/session scope
+				try {
+					const mnemopiState = (session as unknown as { getMnemopiSessionState?: () => unknown }).getMnemopiSessionState?.();
+					customCtrl.recoverPendingIntents(mnemopiState as never);
+				} catch (e) {
+					logger.warn("custom autolearn startup recovery failed", { error: String(e).slice(0, 512) });
+				}
 			} else {
 				void logger.time("startMemoryStartupTask", startMemoryBackend);
 			}

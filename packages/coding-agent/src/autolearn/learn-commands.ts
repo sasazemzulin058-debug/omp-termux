@@ -7,8 +7,8 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import type { ExtensionFactory } from "../extensibility/extensions";
-import { CustomAutolearnService, canonicalProjectIdentity, getAgentDir, resolveAutolearnMode } from "./custom-service";
-
+import { CustomAutolearnService, resolveProjectIdentity, getAgentDir, resolveAutolearnMode } from "./custom-service";
+import { settings as globalSettings } from "../config/settings";
 export type LearnCommand = "status" | "view" | "approve" | "reject" | "delete" | "rollback" | "sweep" | "config";
 
 export interface LearnCommandResult {
@@ -66,7 +66,7 @@ export async function handleLearnCommand(
 	}
 
 	try {
-		const projectIdentity = canonicalProjectIdentity(cwd);
+		const projectIdentity = resolveProjectIdentity(cwd);
 
 		switch (cmd) {
 			case "status": {
@@ -97,30 +97,41 @@ export async function handleLearnCommand(
 				const reviewed = args.slice(2).join(" ");
 				if (!id || !reviewed)
 					return { ok: false, message: "Usage: /learn approve <candidate-id> <reviewed-content>" };
+				// When Mnemopi unavailable, preserve reviewed candidate in retryable projection_pending state
+				if (!options?.mnemopi) {
+					const staged = svc.stageForRetry(id, reviewed, projectIdentity);
+					if (!staged.success) return { ok: false, message: staged.error ?? "Stage failed" };
+					const cand = svc.getCandidate(id);
+					return {
+						ok: false,
+						message: `Approved ${id} staged for projection (Mnemopi unavailable); candidate preserved as ${cand?.status ?? "unknown"} for retry`,
+						data: { pending: true, status: cand?.status },
+					};
+				}
 				const res = svc.approveCandidate(id, reviewed, projectIdentity);
 				if (!res.success) return { ok: false, message: res.error ?? "Approve failed" };
 				// Project exact redacted reviewed content via scoped Mnemopi when available. Uses stored scope/project/bank.
-				if (options?.mnemopi) {
-					const proj = await svc.projectToMnemopiReal(
-						id,
-						options.mnemopi as unknown as {
-							rememberScoped: (c: string, o: { scope: string; source: string }) => string | undefined;
-						},
-					);
-					if (!proj.ok) {
-						return {
-							ok: false,
-							message: `Approved ${id} but projection failed: ${proj.error}; candidate reset to needs_review`,
-						};
-					}
-					const stored = svc.getProjection(id);
+				const proj = await svc.projectToMnemopiReal(
+					id,
+					options.mnemopi as unknown as {
+						rememberScoped: (c: string, o: { scope: string; source: string }) => string | undefined;
+						getScopedRetainTarget?: () => { bank: string } | null | undefined;
+						getScopedMemory?: (id: string) => { bank: string } | null | undefined;
+					},
+				);
+				if (!proj.ok) {
+					const cand = svc.getCandidate(id);
 					return {
-						ok: true,
-						message: `Approved ${id} projected ${proj.mnemopiId} (bank=${stored?.bank ?? "unknown"})`,
-						data: { mnemopiId: proj.mnemopiId, bank: stored?.bank },
+						ok: false,
+						message: `Approved ${id} but projection failed: ${proj.error}; candidate preserved as ${cand?.status ?? "unknown"} for retry`,
 					};
 				}
-				return { ok: true, message: `Approved ${id}` };
+				const stored = svc.getProjection(id);
+				return {
+					ok: true,
+					message: `Approved ${id} projected ${proj.mnemopiId} (bank=${stored?.bank ?? "unknown"})`,
+					data: { mnemopiId: proj.mnemopiId, bank: stored?.bank },
+				};
 			}
 			case "reject": {
 				const id = args[1];
@@ -236,38 +247,34 @@ export const createLearnExtension: ExtensionFactory = api => {
 		async handler(args, ctx): Promise<void> {
 			const raw = args.trim();
 			const splitArgs = raw.length === 0 ? [] : raw.split(/\s+/);
-			// Resolve settings from global proxy (initialized via Settings.init) and mnemopi from context memory/session
+			// Direct session-scoped injection via ExtensionRunner context (no global registry).
+			// Preserves per-session settings / Mnemopi retain/recall banks / episode/project scope.
 			let settingsObj: { get(key: string): unknown } = { get: () => undefined };
-			try {
-				const mod = await import("../config/settings");
-				// Use global settings proxy which reflects current session's settings
-				settingsObj = (mod as unknown as { settings: typeof settingsObj }).settings ?? settingsObj;
-			} catch {}
-			// Try to resolve scoped mnemopi handle from extension context
 			let mnemopi: LearnCommandOptions["mnemopi"] = null;
+			let agentDir: string | undefined;
 			try {
-				// Attempt to get MnemopiSessionState via ctx.memory or via dynamic session lookup
-				const anyCtx = ctx as unknown as Record<string, unknown>;
-				// If ctx has a direct helper (future runner may expose it), use it
-				const maybeState = (anyCtx.getMnemopiSessionState as (() => unknown) | undefined)?.();
-				if (maybeState && typeof (maybeState as Record<string, unknown>).rememberScoped === "function") {
-					mnemopi = maybeState as unknown as LearnCommandOptions["mnemopi"];
-				} else if (ctx.memory) {
-					// MemoryRuntimeContext does not expose rememberScoped directly, but we can attempt to bridge via global state
-					// Fallback: try to import getMnemopiSessionState and scan for session matching cwd (best-effort)
-					try {
-						const { getMnemopiSessionState } = await import("../mnemopi/state");
-						// Attempt to locate session via sessionManager id - use global session registry if available by inspecting memory object closure
-						// As a last resort, leave mnemopi null and handleLearnCommand will operate without projection (conservative block for projected ops)
-						void getMnemopiSessionState;
-					} catch {}
+				const anyCtx = ctx as unknown as {
+					settings?: { get(key: string): unknown };
+					agentDir?: string;
+					getMnemopiSessionState?: () => unknown;
+				};
+				if (anyCtx.settings && typeof anyCtx.settings.get === "function") {
+					settingsObj = anyCtx.settings;
+				} else if (typeof globalSettings.get === "function") {
+					settingsObj = globalSettings;
+				}
+				if (typeof anyCtx.agentDir === "string" && anyCtx.agentDir.length > 0) {
+					agentDir = anyCtx.agentDir;
+				}
+				const st = anyCtx.getMnemopiSessionState?.() as Record<string, unknown> | null | undefined;
+				if (st && typeof st.rememberScoped === "function") {
+					mnemopi = st as unknown as LearnCommandOptions["mnemopi"];
 				}
 			} catch {}
 			const cwd = ctx.cwd;
-			const result = await handleLearnCommand(splitArgs, settingsObj, cwd, { mnemopi: mnemopi ?? undefined });
+			const result = await handleLearnCommand(splitArgs, settingsObj, cwd, { agentDir, mnemopi: mnemopi ?? undefined });
 			ctx.ui.notify(result.message, result.ok ? "info" : "error");
 			if (result.data) {
-				// For status/view, present data via notify detail as well
 				try {
 					ctx.ui.notify(JSON.stringify(result.data).slice(0, 2048), "info");
 				} catch {}
