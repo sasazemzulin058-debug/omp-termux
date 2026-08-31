@@ -2,7 +2,7 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    branches: [main, verified-release-9690622]
     paths-ignore:
       - .github/VOUCHED.td
   pull_request:
@@ -51,7 +51,12 @@ jobs:
         run: bun run --cwd packages/coding-agent check:types
       - name: Run applied overlay tests
         run: |
-          bun test ./packages/natives/test/gen-enums.test.ts
-          bun test ./packages/coding-agent/test/tools/browser-android.test.ts
-          bun test ./packages/coding-agent/test/custom-autolearn.test.ts
-          bun test ./packages/coding-agent/test/autolearn-managed-skills.test.ts
+          bun test ./packages/coding-agent/test/android-helpers.test.ts
+          bun test ./packages/coding-agent/test/custom-controller-termux.test.ts
+          bun test ./packages/coding-agent/test/custom-service-termux.test.ts
+          bun test ./packages/coding-agent/test/custom-service-extended.test.ts
+          bun test ./packages/coding-agent/test/generator-android.test.ts
+          bun test ./packages/coding-agent/test/learn-commands-termux.test.ts
+          bun test ./packages/coding-agent/test/repo-root-isolation.test.ts
+          bun test ./packages/coding-agent/test/reviewer-fixes-termux.test.ts
+          bun test ./packages/coding-agent/test/settings-policy.test.ts
