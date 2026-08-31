@@ -190,12 +190,12 @@ jobs:
           export RANLIB="$real_ranlib"
           cat > "$wrapper_dir/aarch64-linux-android${chosen_api}-ar" <<AR_WRAPPER_EOF
           #!/bin/sh
-          exec "$real_ar" "$@"
+          exec "$real_ar" "\$@"
           AR_WRAPPER_EOF
           chmod +x "$wrapper_dir/aarch64-linux-android${chosen_api}-ar"
           cat > "$wrapper_dir/aarch64-linux-android${chosen_api}-ranlib" <<RANLIB_WRAPPER_EOF
           #!/bin/sh
-          exec "$real_ranlib" "$@"
+          exec "$real_ranlib" "\$@"
           RANLIB_WRAPPER_EOF
           chmod +x "$wrapper_dir/aarch64-linux-android${chosen_api}-ranlib"
           export PATH="$wrapper_dir:$PATH"
