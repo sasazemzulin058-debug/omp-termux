@@ -69,7 +69,6 @@ export declare enum MyEnum { A = "a" }
 		expect(content).toContain("new Proxy(err");
 	});
 
-
 	it("pi-natives Cargo gates pi-voice and keeps desktop audio on other platforms", async () => {
 		const cargoPath = path.resolve(import.meta.dir, "../../../crates/pi-natives/Cargo.toml");
 		const cargo = await fs.promises.readFile(cargoPath, "utf8");
@@ -77,7 +76,7 @@ export declare enum MyEnum { A = "a" }
 		const depsSection = cargo.split("[target.")[0];
 		expect(depsSection).not.toContain("pi-voice.workspace");
 		// Gated section must contain pi-voice and arboard together
-		expect(cargo).toContain('[target.\'cfg(not(target_os = "android"))\'.dependencies]');
+		expect(cargo).toContain("[target.'cfg(not(target_os = \"android\"))'.dependencies]");
 		expect(cargo).toContain("pi-voice.workspace = true");
 		expect(cargo).toContain("arboard.workspace = true");
 		// Ensure we didn't accidentally remove desktop audio deps
@@ -97,14 +96,14 @@ export declare enum MyEnum { A = "a" }
 			expect(totalUses).toBeGreaterThan(0);
 		}
 		// Audio stubs keep exact error strings
-		expect(audio).toContain('Native AudioCapture is unsupported on Android/Termux');
-		expect(audio).toContain('Native AudioPlayback is unsupported on Android/Termux');
+		expect(audio).toContain("Native AudioCapture is unsupported on Android/Termux");
+		expect(audio).toContain("Native AudioPlayback is unsupported on Android/Termux");
 		// Live stubs keep exact error string without importing pi_voice on Android
-		expect(live).toContain('LiveWebRtcPeer is unsupported on Android/Termux');
+		expect(live).toContain("LiveWebRtcPeer is unsupported on Android/Termux");
 		// Ensure Android stubs do not pull audiopus via pi_voice types
 		// Live private field must be gated, not always Arc<LivePeerCore>
-		expect(live).toContain('#[cfg(target_os = "android")]');
-		expect(live).toContain('#[cfg(not(target_os = "android"))]');
+		expect(live).toContain("#[cfg(target_os = \"android\")]");
+		expect(live).toContain("#[cfg(not(target_os = \"android\"))]");
 	});
 	it("loader-state includes android-arm64 platform", async () => {
 		const loader = await fs.promises.readFile(
