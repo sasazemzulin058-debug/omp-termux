@@ -4,10 +4,13 @@
 //! Performs text copy synchronously so macOS writes run on the caller thread.
 //! This avoids worker-thread `AppKit` pasteboard warnings in CLI contexts.
 
+#[cfg(not(target_os = "android"))]
 use std::io::Cursor;
 
 #[cfg(not(target_os = "android"))]
 use arboard::{Clipboard, Error as ClipboardError, ImageData};
+#[cfg(not(target_os = "android"))]
+use image::{DynamicImage, ImageFormat, RgbaImage};
 use napi::{JsString, bindgen_prelude::*};
 use napi_derive::napi;
 
@@ -34,6 +37,7 @@ fn encode_png(image: ImageData<'_>) -> Result<Vec<u8>> {
 	rgba_to_png(buffer)
 }
 
+#[cfg(not(target_os = "android"))]
 fn rgba_to_png(buffer: RgbaImage) -> Result<Vec<u8>> {
 	let capacity = (buffer
 		.width()
@@ -65,6 +69,7 @@ fn rgba_to_png(buffer: RgbaImage) -> Result<Vec<u8>> {
 		          tests cover it on every host"
 	)
 )]
+#[cfg(not(target_os = "android"))]
 fn dib_to_png(dib: &[u8]) -> Result<Vec<u8>> {
 	const FILE_HEADER_SIZE: u64 = 14;
 	const INFO_HEADER_SIZE: u64 = 40;
@@ -185,8 +190,7 @@ fn set_clipboard_text(text: &str) -> Result<()> {
 /// macOS / Windows: the OS retains clipboard contents after the writing process
 /// exits, so a transient `Clipboard` is sufficient. Keeping the write on the
 /// calling thread also avoids worker-thread `AppKit` pasteboard warnings on
-/// macOS.
-#[cfg(not(target_os = "linux"))]
+#[cfg(all(not(target_os = "linux"), not(target_os = "android")))]
 fn set_clipboard_text(text: &str) -> Result<()> {
 	let mut clipboard = Clipboard::new()
 		.map_err(|err| Error::from_reason(format!("Failed to access clipboard: {err}")))?;
