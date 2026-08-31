@@ -432,6 +432,13 @@ function resolvePathScopedStringArray(settingPath: SettingPath, value: unknown, 
 // Settings Class
 // ═══════════════════════════════════════════════════════════════════════════
 
+
+export function isProjectAutolearnModeWeakening(globalMode: string | undefined, projectMode: string | undefined): boolean {
+	if (typeof globalMode !== "string" || typeof projectMode !== "string" || globalMode === projectMode) return false;
+	const rank = (m: string) => (m === "off" ? 0 : m === "builtin" ? 1 : m === "custom" ? 2 : 99);
+	return rank(projectMode) > rank(globalMode);
+}
+
 export class Settings {
 	#configPath: string | null;
 	#cwd: string;
@@ -2634,17 +2641,42 @@ export class Settings {
 	// ─────────────────────────────────────────────────────────────────────────
 
 	#projectSettingsForMerge(): RawSettings {
+		let filtered: RawSettings | undefined;
 		const projectRoles = getByPath(this.#project, ["modelRoles"]);
-		if (!isRecord(projectRoles)) return this.#project;
-
-		let filteredRoles: Record<string, unknown> | undefined;
-		for (const role in projectRoles) {
-			if (!Object.hasOwn(projectRoles, role) || modelRoleValueFromUnknown(projectRoles[role]) !== undefined)
-				continue;
-			filteredRoles ??= { ...projectRoles };
-			delete filteredRoles[role];
+		if (isRecord(projectRoles)) {
+			let filteredRoles: Record<string, unknown> | undefined;
+			for (const role in projectRoles) {
+				if (!Object.hasOwn(projectRoles, role) || modelRoleValueFromUnknown(projectRoles[role]) !== undefined)
+					continue;
+				filteredRoles ??= { ...projectRoles };
+				delete filteredRoles[role];
+			}
+			if (filteredRoles) {
+				filtered = { ...this.#project, modelRoles: filteredRoles };
+			}
 		}
-		return filteredRoles ? { ...this.#project, modelRoles: filteredRoles } : this.#project;
+		// Enforce: project cannot weaken stricter user-level autolearn policy.
+		// Stricter wins: off (0) < builtin (1) < custom (2). Project value is dropped
+		// when it is more permissive than the global/user setting.
+		const globalMode = getByPath(this.#global, ["autolearn", "mode"]);
+		const projectMode = getByPath((filtered ?? this.#project), ["autolearn", "mode"]);
+		if (typeof globalMode === "string" && typeof projectMode === "string" && globalMode !== projectMode) {
+			const rank = (m: string) => (m === "off" ? 0 : m === "builtin" ? 1 : m === "custom" ? 2 : 99);
+			const gr = rank(globalMode);
+			const pr = rank(projectMode);
+			if (pr > gr) {
+				// Project tries to relax policy -> ignore it.
+				const base = filtered ?? this.#project;
+				const cloned = structuredClone(base) as RawSettings;
+				const autolearn = cloned["autolearn"] as Record<string, unknown> | undefined;
+				if (autolearn && typeof autolearn === "object") {
+					delete autolearn["mode"];
+					if (Object.keys(autolearn).length === 0) delete cloned["autolearn"];
+				}
+				filtered = cloned;
+			}
+		}
+		return filtered ?? this.#project;
 	}
 
 	#rebuildMerged(): void {

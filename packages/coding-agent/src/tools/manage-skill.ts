@@ -48,7 +48,7 @@ export class ManageSkillTool implements AgentTool<typeof manageSkillSchema> {
 	constructor(private readonly refreshSkills?: () => Promise<void>) {}
 
 	static createIf(session: ToolSession): ManageSkillTool | null {
-		if (!session.settings.get("autolearn.enabled")) return null;
+		if (resolveAutolearnMode(session.settings) !== "builtin") return null;
 		return new ManageSkillTool(session.refreshSkills);
 	}
 

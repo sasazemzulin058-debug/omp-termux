@@ -136,6 +136,12 @@ fn read_raw_cf_dib() -> Option<Vec<u8>> {
 /// Returns an error if clipboard access fails.
 #[napi]
 pub fn copy_to_clipboard(text: JsString) -> Result<()> {
+	#[cfg(target_os = "android")]
+	{
+		let _ = text;
+		return Err(Error::from_reason("Native arboard clipboard is unsupported on Android/Termux; use Termux/OSC52 clipboard helpers"));
+	}
+	#[cfg(not(target_os = "android"))]
 	set_clipboard_text(&js::utf8(text)?)
 }
 
@@ -198,31 +204,34 @@ fn set_clipboard_text(text: &str) -> Result<()> {
 #[napi]
 pub fn read_image_from_clipboard() -> task::Promise<Option<ClipboardImage>> {
 	task::blocking("clipboard.read_image", (), move |_| -> Result<Option<ClipboardImage>> {
-		let mut clipboard = Clipboard::new()
-			.map_err(|err| Error::from_reason(format!("Failed to access clipboard: {err}")))?;
-		match clipboard.get_image() {
-			Ok(image) => {
-				let bytes = encode_png(image)?;
-				Ok(Some(ClipboardImage {
-					data:      Uint8Array::from(bytes),
-					mime_type: "image/png".to_string(),
-				}))
-			},
-			Err(ClipboardError::ContentNotAvailable) => Ok(None),
-			Err(err) => {
-				// arboard rejects the CF_DIBV5 payloads Qt-based screenshot
-				// tools (PixPin, Snipaste, ...) produce; decode the raw CF_DIB
-				// ourselves before surfacing the error (#3426). A fallback
-				// decode failure keeps the original arboard error.
-				#[cfg(windows)]
-				if let Some(bytes) = read_raw_cf_dib().and_then(|dib| dib_to_png(&dib).ok()) {
-					return Ok(Some(ClipboardImage {
+		#[cfg(target_os = "android")]
+		{
+			Err(Error::from_reason("Native arboard clipboard image read is unsupported on Android/Termux"))
+		}
+		#[cfg(not(target_os = "android"))]
+		{
+			let mut clipboard = Clipboard::new()
+				.map_err(|err| Error::from_reason(format!("Failed to access clipboard: {err}")))?;
+			match clipboard.get_image() {
+				Ok(image) => {
+					let bytes = encode_png(image)?;
+					Ok(Some(ClipboardImage {
 						data:      Uint8Array::from(bytes),
 						mime_type: "image/png".to_string(),
-					}));
-				}
-				Err(Error::from_reason(format!("Failed to read clipboard image: {err}")))
-			},
+					}))
+				},
+				Err(ClipboardError::ContentNotAvailable) => Ok(None),
+				Err(err) => {
+					#[cfg(windows)]
+					if let Some(bytes) = read_raw_cf_dib().and_then(|dib| dib_to_png(&dib).ok()) {
+						return Ok(Some(ClipboardImage {
+							data:      Uint8Array::from(bytes),
+							mime_type: "image/png".to_string(),
+						}));
+					}
+					Err(Error::from_reason(format!("Failed to read clipboard image: {err}")))
+				},
+			}
 		}
 	})
 }

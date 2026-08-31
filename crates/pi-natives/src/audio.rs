@@ -32,12 +32,20 @@ impl AudioCapture {
 		#[napi(ts_arg_type = "(error: Error | null, samples: Float32Array) => void")]
 		on_audio: CaptureCallback,
 	) -> Result<Self> {
-		let stream = CaptureStream::start(sample_rate, move |samples| {
-			on_audio
-				.call(Ok(Float32Array::new(samples.to_vec())), ThreadsafeFunctionCallMode::NonBlocking);
-		})
-		.map_err(napi::Error::from_reason)?;
-		Ok(Self { stream: Mutex::new(Some(stream)) })
+		#[cfg(target_os = "android")]
+		{
+			let _ = (sample_rate, on_audio);
+			return Err(napi::Error::from_reason("Native AudioCapture is unsupported on Android/Termux"));
+		}
+		#[cfg(not(target_os = "android"))]
+		{
+			let stream = CaptureStream::start(sample_rate, move |samples| {
+				on_audio
+					.call(Ok(Float32Array::new(samples.to_vec())), ThreadsafeFunctionCallMode::NonBlocking);
+			})
+			.map_err(napi::Error::from_reason)?;
+			Ok(Self { stream: Mutex::new(Some(stream)) })
+		}
 	}
 
 	/// Stop capture immediately and release the microphone.
@@ -63,11 +71,18 @@ impl AudioPlayback {
 	/// Open the default speaker at the requested logical sample rate.
 	#[napi(constructor)]
 	pub fn new(sample_rate: u32) -> Result<Self> {
-		let stream = PlaybackStream::start(sample_rate).map_err(napi::Error::from_reason)?;
-		let state = stream.state();
-		Ok(Self { stream: Mutex::new(Some(stream)), state })
+		#[cfg(target_os = "android")]
+		{
+			let _ = sample_rate;
+			return Err(napi::Error::from_reason("Native AudioPlayback is unsupported on Android/Termux"));
+		}
+		#[cfg(not(target_os = "android"))]
+		{
+			let stream = PlaybackStream::start(sample_rate).map_err(napi::Error::from_reason)?;
+			let state = stream.state();
+			Ok(Self { stream: Mutex::new(Some(stream)), state })
+		}
 	}
-
 	/// Queue mono floating-point PCM in playback order.
 	#[napi]
 	pub fn write(&self, samples: Float32Array) -> Result<()> {

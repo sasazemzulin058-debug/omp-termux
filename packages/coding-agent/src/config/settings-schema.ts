@@ -2988,6 +2988,18 @@ export const SETTINGS_SCHEMA = {
 	// Auto-Learn (experimental): post-stop nudge to capture lessons to memory
 	// and mint/enhance isolated managed skills under ~/.omp/agent/managed-skills.
 	// Master flag is default-off → zero footprint; sub-flags gate behaviour.
+	"autolearn.mode": {
+		type: "enum",
+		options: ["off", "builtin", "custom"] as const,
+		default: undefined,
+		ui: {
+			tab: "memory",
+			group: "Auto-Learn",
+			label: "Auto-Learn Mode",
+			description:
+				"Controls autolearn engine: 'off' disables all learning, 'builtin' uses standard OMP autolearn, 'custom' activates privacy-safe verifier/ledger autolearn.",
+		},
+	},
 	"autolearn.enabled": {
 		type: "boolean",
 		default: false,
@@ -2996,7 +3008,7 @@ export const SETTINGS_SCHEMA = {
 			group: "Auto-Learn",
 			label: "Auto-Learn (experimental)",
 			description:
-				"After the agent stops, nudge it to capture lessons to memory and create/enhance isolated managed skills",
+				"Legacy enable flag. Used only when autolearn.mode is unset. After the agent stops, nudge it to capture lessons.",
 		},
 	},
 	"autolearn.autoContinue": {

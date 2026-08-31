@@ -68,6 +68,7 @@ export interface StructuredSubagentIsolationControls {
 	requested?: boolean;
 	merge?: "patch" | "branch";
 	apply?: boolean;
+	repoRoot?: string;
 }
 
 /** Identity and presentation metadata supplied by the calling surface. */
@@ -127,8 +128,8 @@ export interface EffectiveSubagentPolicy {
 	modelRole?: string;
 	parentActiveModelPattern?: string;
 	schema: StructuredSubagentSchemaResolution;
-	planMode: boolean;
 	isIsolated: boolean;
+	repoRoot?: string;
 	mergeMode: "patch" | "branch";
 	applyChanges: boolean;
 	enableLsp: boolean;
@@ -312,6 +313,7 @@ export async function resolveEffectiveSubagentPolicy(
 		schema,
 		planMode,
 		isIsolated,
+		repoRoot: request.isolation?.repoRoot,
 		mergeMode: request.isolation?.merge ?? request.session.settings.get("task.isolation.merge"),
 		applyChanges:
 			request.isolation?.apply ??
@@ -578,7 +580,7 @@ export async function runStructuredSubagent(request: StructuredSubagentRequest):
 		let isolationContext: IsolationContext | null = null;
 		if (policy.isIsolated) {
 			try {
-				isolationContext = await prepareIsolationContext(request.session.cwd);
+				isolationContext = await prepareIsolationContext(request.session.cwd, policy.repoRoot);
 			} catch (error) {
 				const message = error instanceof Error ? error.message : String(error);
 				throw new StructuredSubagentError(

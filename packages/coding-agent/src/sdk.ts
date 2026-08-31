@@ -4099,7 +4099,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		// mid-session DISABLE. The subscription lives for the session's lifetime; the
 		// reference is intentionally discarded (the listener retains it).
 		if (!restrictToolNames) {
-			if (settings.get("autolearn.enabled") && taskDepth === 0) {
+			if ((settings.get("autolearn.mode") === "builtin" || (settings.get("autolearn.mode") === undefined && settings.get("autolearn.enabled") === true)) && taskDepth === 0) {
 				await logger.time("startMemoryStartupTask", startMemoryBackend);
 				new AutoLearnController({
 					session,

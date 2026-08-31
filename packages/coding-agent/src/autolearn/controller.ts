@@ -12,6 +12,7 @@
  */
 import { logger } from "@oh-my-pi/pi-utils";
 import type { Settings } from "../config/settings";
+import { resolveAutolearnMode } from "./custom-service";
 import autolearnGuidance from "../prompts/system/autolearn-guidance.md" with { type: "text" };
 import autolearnGuidanceLearn from "../prompts/system/autolearn-guidance-learn.md" with { type: "text" };
 import autolearnNudgeAutoContinue from "../prompts/system/autolearn-nudge-autocontinue.md" with { type: "text" };
@@ -110,7 +111,7 @@ export class AutoLearnController {
 		}
 		// Honor a live opt-out: the subscription outlives the setting, so re-check
 		// the current flag rather than trusting install-time state.
-		if (!this.#settings.get("autolearn.enabled")) return;
+		if (resolveAutolearnMode(this.#settings) !== "builtin") return;
 		const minToolCalls = this.#settings.get("autolearn.minToolCalls") ?? DEFAULT_MIN_TOOL_CALLS;
 		if (toolCalls < minToolCalls) return;
 		// Never interrupt plan-mode review.

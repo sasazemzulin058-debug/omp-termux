@@ -53,6 +53,11 @@ impl LiveWebRtcPeer {
 	/// Start the native media peer and return its SDP offer.
 	#[napi]
 	pub async fn create_offer(&self) -> Result<String> {
+		#[cfg(target_os = "android")]
+		{
+			return Err(napi::Error::from_reason("LiveWebRtcPeer is unsupported on Android/Termux"));
+		}
+		#[cfg(not(target_os = "android"))]
 		self
 			.inner
 			.create_offer()
@@ -63,6 +68,12 @@ impl LiveWebRtcPeer {
 	/// Apply the remote SDP answer returned by Codex signaling.
 	#[napi]
 	pub async fn accept_answer(&self, sdp: String) -> Result<()> {
+		#[cfg(target_os = "android")]
+		{
+			let _ = sdp;
+			return Err(napi::Error::from_reason("LiveWebRtcPeer is unsupported on Android/Termux"));
+		}
+		#[cfg(not(target_os = "android"))]
 		self
 			.inner
 			.accept_answer(sdp)
@@ -73,6 +84,12 @@ impl LiveWebRtcPeer {
 	/// Wait until the `oai-events` data channel is open.
 	#[napi]
 	pub async fn wait_for_open(&self, timeout_ms: Option<u32>) -> Result<()> {
+		#[cfg(target_os = "android")]
+		{
+			let _ = timeout_ms;
+			return Err(napi::Error::from_reason("LiveWebRtcPeer is unsupported on Android/Termux"));
+		}
+		#[cfg(not(target_os = "android"))]
 		self
 			.inner
 			.wait_for_open(timeout_ms.unwrap_or(DEFAULT_OPEN_TIMEOUT_MS))
@@ -83,6 +100,12 @@ impl LiveWebRtcPeer {
 	/// Queue 16 kHz mono floating-point PCM for Opus transmission.
 	#[napi]
 	pub fn push_audio(&self, samples: Float32Array) -> Result<()> {
+		#[cfg(target_os = "android")]
+		{
+			let _ = samples;
+			return Err(napi::Error::from_reason("LiveWebRtcPeer is unsupported on Android/Termux"));
+		}
+		#[cfg(not(target_os = "android"))]
 		self
 			.inner
 			.push_audio(&samples)
@@ -93,6 +116,12 @@ impl LiveWebRtcPeer {
 	/// frames.
 	#[napi]
 	pub fn set_muted(&self, muted: bool) -> Result<()> {
+		#[cfg(target_os = "android")]
+		{
+			let _ = muted;
+			return Err(napi::Error::from_reason("LiveWebRtcPeer is unsupported on Android/Termux"));
+		}
+		#[cfg(not(target_os = "android"))]
 		self
 			.inner
 			.set_muted(muted)

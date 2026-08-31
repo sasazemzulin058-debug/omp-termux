@@ -84,19 +84,30 @@ function buildGeneratedBlock(dts: string): string {
 	}
 
 	const lines: string[] = [];
+	const androidUnsupported = new Set(["AudioCapture", "AudioPlayback", "LiveWebRtcPeer", "copyToClipboard", "readImageFromClipboard"]);
+	const androidStub = (name: string) => `(() => { const v = nativeBindings.${name}; if (v !== undefined) return v; const err = () => { throw new Error("Native ${name} is unsupported on Android/Termux"); }; return new Proxy(err, { construct: err, apply: err, get(_t, p) { if (p === "then") return undefined; return err; } }); })()`;
 	if (classes.length > 0) {
 		lines.push("// classes");
 		for (const name of classes) {
-			const binding =
-				name === "DesktopSession" ? `adaptDesktopSession(nativeBindings.${name})` : `nativeBindings.${name}`;
-			lines.push(`export const ${name} = ${binding};`);
+			if (androidUnsupported.has(name)) {
+				const binding = name === "DesktopSession" ? `adaptDesktopSession(nativeBindings.${name})` : `nativeBindings.${name}`;
+				lines.push(`export const ${name} = (() => { const v = ${binding}; if (v !== undefined) return v; const err = () => { throw new Error("Native ${name} is unsupported on Android/Termux"); }; return new Proxy(err, { construct: err, apply: err, get(_t, p){ if(p==="then") return undefined; return err; } }); })();`);
+			} else {
+				const binding =
+					name === "DesktopSession" ? `adaptDesktopSession(nativeBindings.${name})` : `nativeBindings.${name}`;
+				lines.push(`export const ${name} = ${binding};`);
+			}
 		}
 	}
 	if (functions.length > 0) {
 		if (lines.length > 0) lines.push("");
 		lines.push("// functions");
 		for (const name of functions) {
-			lines.push(`export const ${name} = nativeBindings.${name};`);
+			if (androidUnsupported.has(name)) {
+				lines.push(`export const ${name} = ${androidStub(name)};`);
+			} else {
+				lines.push(`export const ${name} = nativeBindings.${name};`);
+			}
 		}
 	}
 	if (enums.length > 0) {
