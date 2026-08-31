@@ -180,6 +180,14 @@ jobs:
           export CC="$CC_aarch64_linux_android"
           export CXX="$CXX_aarch64_linux_android"
           export CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER="$CC_aarch64_linux_android"
+          real_ar="$ndk_root/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-ar"
+          real_ranlib="$ndk_root/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-ranlib"
+          test -x "$real_ar" || { echo "::error::NDK llvm-ar not found at $real_ar"; exit 1; }
+          test -x "$real_ranlib" || { echo "::error::NDK llvm-ranlib not found at $real_ranlib"; exit 1; }
+          export AR_aarch64_linux_android="$real_ar"
+          export RANLIB_aarch64_linux_android="$real_ranlib"
+          export AR="$real_ar"
+          export RANLIB="$real_ranlib"
           echo "Using NDK clang wrapper for API $chosen_api: $CC_aarch64_linux_android -> $real_clang --target=aarch64-linux-android${chosen_api}"
           # Verify wrapper and real clang are executable pipefail-safe
           "$CC_aarch64_linux_android" --version 2>&1 | sed -n '1,5p' || true

@@ -1,4 +1,5 @@
 import * as path from "node:path";
+import { resolveAutolearnMode } from "../autolearn/custom-service";
 import { type } from "@oh-my-pi/omptype";
 import type { AgentTool, AgentToolResult } from "@oh-my-pi/pi-agent-core";
 import {

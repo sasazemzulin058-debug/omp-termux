@@ -128,6 +128,7 @@ export interface EffectiveSubagentPolicy {
 	modelRole?: string;
 	parentActiveModelPattern?: string;
 	schema: StructuredSubagentSchemaResolution;
+	planMode: boolean;
 	isIsolated: boolean;
 	repoRoot?: string;
 	mergeMode: "patch" | "branch";
@@ -204,7 +205,10 @@ function assertPlanControlsAllowed(request: StructuredSubagentRequest, planMode:
 	const isolation = request.isolation;
 	if (
 		isolation &&
-		(Object.hasOwn(isolation, "requested") || Object.hasOwn(isolation, "apply") || Object.hasOwn(isolation, "merge"))
+		(Object.hasOwn(isolation, "requested") ||
+			Object.hasOwn(isolation, "apply") ||
+			Object.hasOwn(isolation, "merge") ||
+			Object.hasOwn(isolation, "repoRoot"))
 	) {
 		throw new StructuredSubagentError(
 			"preflight",
@@ -294,6 +298,7 @@ export async function resolveEffectiveSubagentPolicy(
 	// from different sources: the expansion below discards the alias, and the
 	// child's inherited retry-fallback chain is keyed off the role.
 	const { patterns: modelOverride, role: modelRole } = resolveAgentModelSelection(modelResolution);
+	const isolationMode = request.session.settings.get("task.isolation.mode");
 	const hasExplicitRepoRoot = request.isolation?.repoRoot !== undefined;
 	// Explicit repoRoot must not be ignored when isolated is omitted: force isolation/root setup or reject invalid shape.
 	const isIsolated = request.isolation?.requested === true || hasExplicitRepoRoot;
