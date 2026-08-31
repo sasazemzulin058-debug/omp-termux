@@ -1,4 +1,5 @@
-import { describe, it, expect } from "bun:test";
+import { describe, expect, it } from "bun:test";
+
 function isProjectAutolearnModeWeakening(globalMode: string | undefined, projectMode: string | undefined): boolean {
 	if (typeof globalMode !== "string" || typeof projectMode !== "string" || globalMode === projectMode) return false;
 	// Privacy ordering: off (strictest) < custom (verifier-gated, no transcript) < builtin (least strict)

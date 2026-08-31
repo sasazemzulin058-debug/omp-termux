@@ -362,10 +362,7 @@ export class CustomAutolearnService {
 		if (!expectedAllowlisted && !verifierAllowlisted) return false;
 		// If verifierName differs from expectedCommand, both must be allowlisted or they must match.
 		if (verifierName !== structuredResult.expectedCommand && !verifierAllowlisted) return false;
-		if (
-			!structuredResult.failureFingerprint ||
-			structuredResult.failureFingerprint !== candidate.failureDigest
-		)
+		if (!structuredResult.failureFingerprint || structuredResult.failureFingerprint !== candidate.failureDigest)
 			return false;
 		// Canonical project identity comparison uses normalized absolute paths.
 		const normalizedProject = canonicalProjectIdentity(structuredResult.projectIdentity);
@@ -413,7 +410,11 @@ export class CustomAutolearnService {
 		}
 		return false;
 	}
-	approveCandidate(candidateId: string, reviewedContent: string, projectIdentity: string): { success: boolean; error?: string } {
+	approveCandidate(
+		candidateId: string,
+		reviewedContent: string,
+		projectIdentity: string,
+	): { success: boolean; error?: string } {
 		const candidate = this.getCandidate(candidateId);
 		if (!candidate) return { success: false, error: `Candidate not found: ${candidateId}` };
 		if (candidate.projectIdentity !== projectIdentity && candidate.scope !== "global") {
@@ -471,12 +472,11 @@ export class CustomAutolearnService {
 		this.#recordEvent(candidateId, "deleted", { projectIdentity: candidate.projectIdentity, scope: candidate.scope });
 		this.#db.transaction(() => {
 			this.#db.prepare("DELETE FROM candidates WHERE id = ?").run(candidateId);
-			this.#db.prepare("INSERT OR REPLACE INTO tombstones (candidate_id, project_identity, scope, deleted_at) VALUES (?, ?, ?, ?)").run(
-				candidateId,
-				candidate.projectIdentity,
-				candidate.scope,
-				now,
-			);
+			this.#db
+				.prepare(
+					"INSERT OR REPLACE INTO tombstones (candidate_id, project_identity, scope, deleted_at) VALUES (?, ?, ?, ?)",
+				)
+				.run(candidateId, candidate.projectIdentity, candidate.scope, now);
 		})();
 		return true;
 	}
@@ -488,23 +488,33 @@ export class CustomAutolearnService {
 		const tomb = this.#db.prepare("SELECT candidate_id FROM tombstones WHERE candidate_id = ?").get(candidateId);
 		if (tomb) return false;
 		// Check projection reference exists
-		const proj = this.#db.prepare("SELECT candidate_id FROM projection_references WHERE candidate_id = ?").get(candidateId) as any;
+		const proj = this.#db
+			.prepare("SELECT candidate_id FROM projection_references WHERE candidate_id = ?")
+			.get(candidateId) as any;
 		if (!proj) return false;
 		this.#db.transaction(() => {
 			this.#db.prepare("DELETE FROM projection_references WHERE candidate_id = ?").run(candidateId);
 			if (candidate) {
-				this.#db.prepare("UPDATE candidates SET status = 'needs_review', version = version + 1, updated_at = ? WHERE id = ?").run(Date.now(), candidateId);
+				this.#db
+					.prepare(
+						"UPDATE candidates SET status = 'needs_review', version = version + 1, updated_at = ? WHERE id = ?",
+					)
+					.run(Date.now(), candidateId);
 			}
 		})();
-		try { this.#recordEvent(candidateId, "rolled_back", {}); } catch {}
+		try {
+			this.#recordEvent(candidateId, "rolled_back", {});
+		} catch {}
 		return true;
 	}
 
 	sweepExpired(): number {
 		const now = Date.now();
-		const rows = this.#db.prepare(`
+		const rows = this.#db
+			.prepare(`
 			SELECT id, project_identity as projectIdentity FROM candidates WHERE (? - created_at) > ttl_ms AND status != 'approved'
-		`).all(now) as { id: string; projectIdentity: string }[];
+		`)
+			.all(now) as { id: string; projectIdentity: string }[];
 
 		let count = 0;
 		for (const row of rows) {
@@ -520,11 +530,17 @@ export class CustomAutolearnService {
 
 	// Restart recovery: never blindly retry uncertain external operation -> needs_review
 	recoverUncertain(): number {
-		const rows = this.#db.prepare("SELECT id FROM candidates WHERE status = 'pending' AND verifier_name IS NOT NULL").all() as { id: string }[];
+		const rows = this.#db
+			.prepare("SELECT id FROM candidates WHERE status = 'pending' AND verifier_name IS NOT NULL")
+			.all() as { id: string }[];
 		let n = 0;
 		for (const r of rows) {
-			this.#db.prepare("UPDATE candidates SET status = 'needs_review', updated_at = ? WHERE id = ?").run(Date.now(), r.id);
-			try { this.#recordEvent(r.id, "review_requested", { reason: "restart_recovery" }); } catch {}
+			this.#db
+				.prepare("UPDATE candidates SET status = 'needs_review', updated_at = ? WHERE id = ?")
+				.run(Date.now(), r.id);
+			try {
+				this.#recordEvent(r.id, "review_requested", { reason: "restart_recovery" });
+			} catch {}
 			n++;
 		}
 		return n;
@@ -534,18 +550,27 @@ export class CustomAutolearnService {
 		const cand = this.getCandidate(candidateId);
 		if (cand?.status !== "approved" || !cand.reviewedContent) return false;
 		const bank = mnemopiBank ?? bankForScope(cand.scope, cand.projectIdentity);
-		this.#db.prepare("INSERT OR REPLACE INTO projection_references (candidate_id, project_identity, scope, mnemopi_id, mnemopi_bank, created_at) VALUES (?, ?, ?, ?, ?, ?)").run(candidateId, cand.projectIdentity, cand.scope, mnemopiId, bank, Date.now());
-		try { this.#recordEvent(candidateId, "projected", { mnemopiId, bank }); } catch {}
+		this.#db
+			.prepare(
+				"INSERT OR REPLACE INTO projection_references (candidate_id, project_identity, scope, mnemopi_id, mnemopi_bank, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+			)
+			.run(candidateId, cand.projectIdentity, cand.scope, mnemopiId, bank, Date.now());
+		try {
+			this.#recordEvent(candidateId, "projected", { mnemopiId, bank });
+		} catch {}
 		return true;
 	}
 
 	/** Real scoped Mnemopi projection: uses full canonical repo identity for bank selection.
-	  *  Returns the mnemopi id on success. Crash window is conservative: any exception
-	  *  leaves candidate as needs_review, not success.
-	  */
+	 *  Returns the mnemopi id on success. Crash window is conservative: any exception
+	 *  leaves candidate as needs_review, not success.
+	 */
 	async projectToMnemopiReal(
 		candidateId: string,
-		mnemopi: { rememberScoped: (content: string, opts: { scope: string; source: string }) => string | undefined; editScopedMemory?: (op: string, id: string) => unknown },
+		mnemopi: {
+			rememberScoped: (content: string, opts: { scope: string; source: string }) => string | undefined;
+			editScopedMemory?: (op: string, id: string) => unknown;
+		},
 	): Promise<{ ok: boolean; mnemopiId?: string; error?: string }> {
 		const cand = this.getCandidate(candidateId);
 		if (cand?.status !== "approved" || !cand.reviewedContent) return { ok: false, error: "candidate not approved" };
@@ -558,25 +583,48 @@ export class CustomAutolearnService {
 			// For testability, we accept any mnemopi that exposes rememberScoped.
 			mnemopiId = mnemopi.rememberScoped(redacted, { scope: "bank", source: "custom-autolearn" });
 		} catch (e) {
-			try { this.#db.prepare("UPDATE candidates SET status = 'needs_review', updated_at = ? WHERE id = ?").run(Date.now(), candidateId); } catch {}
-			return { ok: false, error: e instanceof Error ? e.message.slice(0,512) : String(e).slice(0,512) };
+			try {
+				this.#db
+					.prepare("UPDATE candidates SET status = 'needs_review', updated_at = ? WHERE id = ?")
+					.run(Date.now(), candidateId);
+			} catch {}
+			return { ok: false, error: e instanceof Error ? e.message.slice(0, 512) : String(e).slice(0, 512) };
 		}
 		if (!mnemopiId) {
-			try { this.#db.prepare("UPDATE candidates SET status = 'needs_review', updated_at = ? WHERE id = ?").run(Date.now(), candidateId); } catch {}
+			try {
+				this.#db
+					.prepare("UPDATE candidates SET status = 'needs_review', updated_at = ? WHERE id = ?")
+					.run(Date.now(), candidateId);
+			} catch {}
 			return { ok: false, error: "mnemopi projection failed" };
 		}
 		this.projectToMnemopi(candidateId, mnemopiId, bank);
 		return { ok: true, mnemopiId };
 	}
 
-	getProjection(candidateId: string): { mnemopiId: string; bank: string; scope: string; projectIdentity: string } | null {
-		const row = this.#db.prepare("SELECT candidate_id as candidateId, mnemopi_id as mnemopiId, mnemopi_bank as bank, scope, project_identity as projectIdentity FROM projection_references WHERE candidate_id = ?").get(candidateId) as any;
+	getProjection(
+		candidateId: string,
+	): { mnemopiId: string; bank: string; scope: string; projectIdentity: string } | null {
+		const row = this.#db
+			.prepare(
+				"SELECT candidate_id as candidateId, mnemopi_id as mnemopiId, mnemopi_bank as bank, scope, project_identity as projectIdentity FROM projection_references WHERE candidate_id = ?",
+			)
+			.get(candidateId) as any;
 		if (!row) return null;
-		return { mnemopiId: row.mnemopiId, bank: row.bank ?? bankForScope(row.scope, row.projectIdentity), scope: row.scope, projectIdentity: row.projectIdentity };
+		return {
+			mnemopiId: row.mnemopiId,
+			bank: row.bank ?? bankForScope(row.scope, row.projectIdentity),
+			scope: row.scope,
+			projectIdentity: row.projectIdentity,
+		};
 	}
 
 	/** Delete candidate and its exact Mnemopi projection (scoped to the stored bank). Conservative on failure: preserves projection and marks needs_review if backend is uncertain. */
-	deleteCandidateWithMnemopi(candidateId: string, projectIdentity: string, mnemopi?: { editScopedMemory: (op: string, id: string) => unknown } | null): boolean {
+	deleteCandidateWithMnemopi(
+		candidateId: string,
+		projectIdentity: string,
+		mnemopi?: { editScopedMemory: (op: string, id: string) => unknown } | null,
+	): boolean {
 		const proj = this.getProjection(candidateId);
 		const candidate = this.getCandidate(candidateId);
 		if (!candidate) return false;
@@ -591,23 +639,39 @@ export class CustomAutolearnService {
 				else if (r1 && typeof r1 === "object" && "status" in (r1 as Record<string, unknown>)) {
 					const status = (r1 as Record<string, unknown>).status;
 					// not_found means already absent -> treat as success; otherwise must be deleted/invalidated
-					if (status !== "deleted" && status !== "not_found" && status !== "invalidated") forgetError = new Error(`forget status uncertain: ${String(status)}`);
+					if (status !== "deleted" && status !== "not_found" && status !== "invalidated")
+						forgetError = new Error(`forget status uncertain: ${String(status)}`);
 					if (status === "not_editable") forgetError = new Error("forget not_editable: memory may remain");
 				}
-			} catch (e) { forgetError = e; }
+			} catch (e) {
+				forgetError = e;
+			}
 			try {
 				const r2 = mnemopi.editScopedMemory("invalidate", proj.mnemopiId);
 				if (r2 === false) invalidateError = new Error("invalidate returned false");
 				else if (r2 && typeof r2 === "object" && "status" in (r2 as Record<string, unknown>)) {
 					const status = (r2 as Record<string, unknown>).status;
-					if (status !== "invalidated" && status !== "deleted" && status !== "not_found") invalidateError = new Error(`invalidate status uncertain: ${String(status)}`);
+					if (status !== "invalidated" && status !== "deleted" && status !== "not_found")
+						invalidateError = new Error(`invalidate status uncertain: ${String(status)}`);
 					if (status === "not_editable") invalidateError = new Error("invalidate not_editable: memory may remain");
 				}
-			} catch (e) { invalidateError = e; }
+			} catch (e) {
+				invalidateError = e;
+			}
 			if (forgetError !== null || invalidateError !== null) {
 				// Conservative: do not delete candidate/projection, mark needs_review for manual audit.
-				try { this.#db.prepare("UPDATE candidates SET status = 'needs_review', updated_at = ? WHERE id = ?").run(Date.now(), candidateId); } catch {}
-				try { this.#recordEvent(candidateId, "review_requested", { reason: "mnemopi_delete_uncertain", forgetError: forgetError ? String(forgetError).slice(0,512) : undefined, invalidateError: invalidateError ? String(invalidateError).slice(0,512) : undefined }); } catch {}
+				try {
+					this.#db
+						.prepare("UPDATE candidates SET status = 'needs_review', updated_at = ? WHERE id = ?")
+						.run(Date.now(), candidateId);
+				} catch {}
+				try {
+					this.#recordEvent(candidateId, "review_requested", {
+						reason: "mnemopi_delete_uncertain",
+						forgetError: forgetError ? String(forgetError).slice(0, 512) : undefined,
+						invalidateError: invalidateError ? String(invalidateError).slice(0, 512) : undefined,
+					});
+				} catch {}
 				return false;
 			}
 		}
@@ -620,7 +684,11 @@ export class CustomAutolearnService {
 	}
 
 	/** Rollback candidate and delete its exact Mnemopi bank entry. Conservative on failure: preserves projection and marks needs_review if backend is uncertain. */
-	rollbackCandidateWithMnemopi(candidateId: string, projectIdentity: string, mnemopi?: { editScopedMemory: (op: string, id: string) => unknown } | null): boolean {
+	rollbackCandidateWithMnemopi(
+		candidateId: string,
+		projectIdentity: string,
+		mnemopi?: { editScopedMemory: (op: string, id: string) => unknown } | null,
+	): boolean {
 		const proj = this.getProjection(candidateId);
 		if (!proj) return false;
 		const tomb = this.#db.prepare("SELECT candidate_id FROM tombstones WHERE candidate_id = ?").get(candidateId);
@@ -634,21 +702,37 @@ export class CustomAutolearnService {
 				if (r1 === false) forgetError = new Error("forget returned false");
 				else if (r1 && typeof r1 === "object" && "status" in (r1 as Record<string, unknown>)) {
 					const status = (r1 as Record<string, unknown>).status;
-					if (status !== "deleted" && status !== "not_found" && status !== "invalidated") forgetError = new Error(`forget status uncertain: ${String(status)}`);
+					if (status !== "deleted" && status !== "not_found" && status !== "invalidated")
+						forgetError = new Error(`forget status uncertain: ${String(status)}`);
 				}
-			} catch (e) { forgetError = e; }
+			} catch (e) {
+				forgetError = e;
+			}
 			try {
 				const r2 = mnemopi.editScopedMemory("invalidate", proj.mnemopiId);
 				if (r2 === false) invalidateError = new Error("invalidate returned false");
 				else if (r2 && typeof r2 === "object" && "status" in (r2 as Record<string, unknown>)) {
 					const status = (r2 as Record<string, unknown>).status;
-					if (status !== "invalidated" && status !== "deleted" && status !== "not_found") invalidateError = new Error(`invalidate status uncertain: ${String(status)}`);
+					if (status !== "invalidated" && status !== "deleted" && status !== "not_found")
+						invalidateError = new Error(`invalidate status uncertain: ${String(status)}`);
 				}
-			} catch (e) { invalidateError = e; }
+			} catch (e) {
+				invalidateError = e;
+			}
 			if (forgetError !== null || invalidateError !== null) {
 				// Conservative: do not drop projection reference while memory may remain; request manual review
-				try { this.#db.prepare("UPDATE candidates SET status = 'needs_review', updated_at = ? WHERE id = ?").run(Date.now(), candidateId); } catch {}
-				try { this.#recordEvent(candidateId, "review_requested", { reason: "mnemopi_rollback_uncertain", forgetError: forgetError ? String(forgetError).slice(0,512) : undefined, invalidateError: invalidateError ? String(invalidateError).slice(0,512) : undefined }); } catch {}
+				try {
+					this.#db
+						.prepare("UPDATE candidates SET status = 'needs_review', updated_at = ? WHERE id = ?")
+						.run(Date.now(), candidateId);
+				} catch {}
+				try {
+					this.#recordEvent(candidateId, "review_requested", {
+						reason: "mnemopi_rollback_uncertain",
+						forgetError: forgetError ? String(forgetError).slice(0, 512) : undefined,
+						invalidateError: invalidateError ? String(invalidateError).slice(0, 512) : undefined,
+					});
+				} catch {}
 				return false;
 			}
 		}
@@ -656,22 +740,35 @@ export class CustomAutolearnService {
 	}
 
 	/** Create a managed skill from approved reviewed content through hardened path.
-	  *  Enforces safe name, bounded size, symlink checks, atomic write, audit event, and explicit rollback.
-	  */
+	 *  Enforces safe name, bounded size, symlink checks, atomic write, audit event, and explicit rollback.
+	 */
 	async createSkillFromApprovedCandidate(
 		candidateId: string,
 		input: { name: string; description: string; body?: string },
-		deps: { writeManagedSkill: (i: { name: string; description: string; body: string; action: "create" | "update" }) => Promise<{ path: string }> }
+		deps: {
+			writeManagedSkill: (i: {
+				name: string;
+				description: string;
+				body: string;
+				action: "create" | "update";
+			}) => Promise<{ path: string }>;
+		},
 	): Promise<{ ok: boolean; path?: string; error?: string }> {
 		const cand = this.getCandidate(candidateId);
 		if (cand?.status !== "approved" || !cand.reviewedContent) return { ok: false, error: "candidate not approved" };
 		const reviewed = redactSensitiveText(cand.reviewedContent);
 		const body = (input.body ?? reviewed).trim();
-		if (!body || body.startsWith("Verified resolution for")) return { ok: false, error: "Meaningful reviewed procedure required" };
+		if (!body || body.startsWith("Verified resolution for"))
+			return { ok: false, error: "Meaningful reviewed procedure required" };
 		if (body.length > 64_000) return { ok: false, error: "Skill body exceeds size limit" };
 		// Hardened path is inside writeManagedSkill (safe name, size, symlink, atomic).
 		try {
-			const result = await deps.writeManagedSkill({ name: input.name, description: input.description, body, action: "create" });
+			const result = await deps.writeManagedSkill({
+				name: input.name,
+				description: input.description,
+				body,
+				action: "create",
+			});
 			this.#recordEvent(candidateId, "projected", { skillPath: result.path, skillName: input.name });
 			// Regression: verify file exists and is not symlink before activation.
 			const stat = await fs.promises.lstat(result.path).catch(() => null);
@@ -680,12 +777,13 @@ export class CustomAutolearnService {
 			}
 			return { ok: true, path: result.path };
 		} catch (e) {
-			return { ok: false, error: e instanceof Error ? e.message.slice(0,512) : String(e).slice(0,512) };
+			return { ok: false, error: e instanceof Error ? e.message.slice(0, 512) : String(e).slice(0, 512) };
 		}
 	}
 
 	getCandidate(id: string): CandidateRecord | null {
-		const row = this.#db.prepare(`
+		const row = this.#db
+			.prepare(`
 			SELECT
 				id, episode_id as episodeId, session_id as sessionId, project_identity as projectIdentity,
 				tool_name as toolName, tool_call_id as toolCallId, failure_digest as failureDigest,
@@ -693,13 +791,15 @@ export class CustomAutolearnService {
 				reviewed_content as reviewedContent, version, ttl_ms as ttlMs, created_at as createdAt,
 				updated_at as updatedAt
 			FROM candidates WHERE id = ?
-		`).get(id) as CandidateRecord | null;
+		`)
+			.get(id) as CandidateRecord | null;
 		return row ?? null;
 	}
 
 	listCandidates(projectIdentity?: string): CandidateRecord[] {
 		if (projectIdentity) {
-			return this.#db.prepare(`
+			return this.#db
+				.prepare(`
 				SELECT
 					id, episode_id as episodeId, session_id as sessionId, project_identity as projectIdentity,
 					tool_name as toolName, tool_call_id as toolCallId, failure_digest as failureDigest,
@@ -708,9 +808,11 @@ export class CustomAutolearnService {
 					updated_at as updatedAt
 				FROM candidates WHERE project_identity = ? OR scope = 'global'
 				ORDER BY created_at DESC
-			`).all(projectIdentity) as CandidateRecord[];
+			`)
+				.all(projectIdentity) as CandidateRecord[];
 		}
-		return this.#db.prepare(`
+		return this.#db
+			.prepare(`
 			SELECT
 				id, episode_id as episodeId, session_id as sessionId, project_identity as projectIdentity,
 				tool_name as toolName, tool_call_id as toolCallId, failure_digest as failureDigest,
@@ -719,7 +821,8 @@ export class CustomAutolearnService {
 				updated_at as updatedAt
 			FROM candidates
 			ORDER BY created_at DESC
-		`).all() as CandidateRecord[];
+		`)
+			.all() as CandidateRecord[];
 	}
 
 	#recordEvent(candidateId: string, eventType: LearningEvent["eventType"], payload: Record<string, unknown>): void {

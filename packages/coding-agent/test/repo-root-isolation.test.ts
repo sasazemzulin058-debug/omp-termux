@@ -1,4 +1,4 @@
-import { describe, it, expect } from "bun:test";
+import { describe, expect, it } from "bun:test";
 import * as fs from "node:fs";
 import * as path from "node:path";
 
@@ -25,7 +25,8 @@ describe("explicit repoRoot must not be ignored", () => {
 		// Simulate the validation logic without heavy imports: duplicate the function under test
 		function isRepoRootShapeValid(requested: boolean | undefined, repoRoot: string | undefined): string | undefined {
 			const hasExplicitRepoRoot = repoRoot !== undefined;
-			if (hasExplicitRepoRoot && requested === false) return "Explicit repoRoot requires isolation; do not set isolated:false with repoRoot.";
+			if (hasExplicitRepoRoot && requested === false)
+				return "Explicit repoRoot requires isolation; do not set isolated:false with repoRoot.";
 			return undefined;
 		}
 		expect(isRepoRootShapeValid(false, "/tmp/repo")).toBeDefined();

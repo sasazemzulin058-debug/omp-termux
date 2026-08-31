@@ -1,5 +1,10 @@
-import { describe, it, expect } from "bun:test";
-import { acquireWakeLock, releaseWakeLock, adjustOomScoreAdj, sendAndroidNotification } from "../src/utils/android-helpers";
+import { describe, expect, it } from "bun:test";
+import {
+	acquireWakeLock,
+	adjustOomScoreAdj,
+	releaseWakeLock,
+	sendAndroidNotification,
+} from "../src/utils/android-helpers";
 
 describe("android helpers termux", () => {
 	it("wake-lock reports accurate outcome without secret logs", async () => {

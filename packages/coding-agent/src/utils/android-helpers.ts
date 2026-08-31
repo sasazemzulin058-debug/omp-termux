@@ -91,8 +91,6 @@ export async function adjustOomScoreAdj(score: number): Promise<Outcome> {
 			if (msg.includes("EACCES") || msg.includes("EPERM") || msg.includes("permission")) {
 				return { ok: false, error: `OOM adjust denied: ${msg.slice(0, 200)}` };
 			}
-			// Other errors try next file
-			continue;
 		}
 	}
 	return { ok: false, error: "OOM adjust not available or denied" };

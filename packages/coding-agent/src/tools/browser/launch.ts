@@ -376,7 +376,7 @@ function systemChromiumCandidates(
 			);
 			break;
 		}
-			case "android": {
+		case "android": {
 			// Termux on Android: Chromium installed via pkg lives under $PREFIX
 			// (/data/data/com.termux/files/usr). Honor PUPPETEER_EXECUTABLE_PATH already
 			// handled above, then probe Termux pkg paths and PATH.

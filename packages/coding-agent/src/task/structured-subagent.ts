@@ -298,7 +298,10 @@ export async function resolveEffectiveSubagentPolicy(
 	// Explicit repoRoot must not be ignored when isolated is omitted: force isolation/root setup or reject invalid shape.
 	const isIsolated = request.isolation?.requested === true || hasExplicitRepoRoot;
 	if (hasExplicitRepoRoot && request.isolation?.requested === false) {
-		throw new StructuredSubagentError("preflight", "Explicit repoRoot requires isolation; do not set isolated:false with repoRoot.");
+		throw new StructuredSubagentError(
+			"preflight",
+			"Explicit repoRoot requires isolation; do not set isolated:false with repoRoot.",
+		);
 	}
 	if (isIsolated && isolationMode === "none") {
 		throw new StructuredSubagentError(

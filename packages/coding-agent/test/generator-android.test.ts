@@ -1,4 +1,4 @@
-import { describe, it, expect } from "bun:test";
+import { describe, expect, it } from "bun:test";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { buildGeneratedBlock, generateEnumExports } from "../../natives/scripts/gen-enums";
@@ -70,7 +70,10 @@ export declare enum MyEnum { A = "a" }
 	});
 
 	it("loader-state includes android-arm64 platform", async () => {
-		const loader = await fs.promises.readFile(path.resolve(import.meta.dir, "../../natives/native/loader-state.js"), "utf8");
+		const loader = await fs.promises.readFile(
+			path.resolve(import.meta.dir, "../../natives/native/loader-state.js"),
+			"utf8",
+		);
 		expect(loader).toContain("android-arm64");
 	});
 });

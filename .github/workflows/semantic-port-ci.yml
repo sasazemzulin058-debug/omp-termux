@@ -71,14 +71,14 @@ jobs:
           rustup target add aarch64-linux-android --toolchain "$toolchain"
           rustc --version
           cargo --version
-          rustup target list --installed | grep -q "aarch64-linux-android" || { echo "::error::aarch64-linux-android target not installed"; exit 1; }
+          rustup target list --installed > "$RUNNER_TEMP/rust-targets.txt" 2>&1 || true
+          cat "$RUNNER_TEMP/rust-targets.txt" 2>&1 | sed -n '1,20p' || true
+          grep -q "aarch64-linux-android" "$RUNNER_TEMP/rust-targets.txt" || { echo "::error::aarch64-linux-android target not installed"; exit 1; }
       - name: Setup Android NDK
         uses: nttld/setup-ndk@v1
         id: setup-ndk
         with:
           ndk-version: ${{ env.NDK_VERSION }}
-          add-to-path: true
-          local-cache: true
       - name: Verify NDK
         shell: bash
         run: |
@@ -93,53 +93,105 @@ jobs:
           fi
           ndk_root="${ANDROID_NDK_ROOT:-${ANDROID_NDK_HOME:-${{ steps.setup-ndk.outputs.ndk-path }}}}"
           echo "Resolved NDK root: $ndk_root"
-          sed -n '1,20p' "$ndk_root/toolchains/llvm/prebuilt/linux-x86_64/bin/" || true
+          # If wrapper NDK lacks real clang, prefer SDK NDK that contains it
+          if [ ! -x "$ndk_root/toolchains/llvm/prebuilt/linux-x86_64/bin/clang" ]; then
+            for cand in "${ANDROID_NDK_ROOT:-}" "${ANDROID_NDK_HOME:-}" "${{ steps.setup-ndk.outputs.ndk-path }}"; do
+              if [ -n "$cand" ] && [ -x "$cand/toolchains/llvm/prebuilt/linux-x86_64/bin/clang" ]; then
+                ndk_root="$cand"
+                echo "Corrected NDK root to real clang location: $ndk_root"
+                break
+              fi
+            done
+          fi
+          ls -1 "$ndk_root/toolchains/llvm/prebuilt/linux-x86_64/bin" 2>&1 | sed -n '1,20p' || true
+          test -x "$ndk_root/toolchains/llvm/prebuilt/linux-x86_64/bin/clang" || { echo "::error::NDK clang not found at $ndk_root/toolchains/llvm/prebuilt/linux-x86_64/bin/clang"; ls -1 "$ndk_root/toolchains/llvm/prebuilt/linux-x86_64/bin" 2>&1 | sed -n '1,50p' || true; exit 1; }
+          test -x "$ndk_root/toolchains/llvm/prebuilt/linux-x86_64/bin/clang++" || { echo "::error::NDK clang++ not found at $ndk_root/toolchains/llvm/prebuilt/linux-x86_64/bin/clang++"; exit 1; }
+          # At least one aarch64 wrapper or ability to use --target should exist; show available aarch64 files pipefail-safe
+          find "$ndk_root/toolchains/llvm/prebuilt/linux-x86_64/bin" -maxdepth 1 -type f -name 'aarch64-linux-android*clang*' -print 2>&1 | sed -n '1,20p' || true
+          if [ -d "/usr/local/lib/android/sdk/ndk" ]; then
+            ls -1 "/usr/local/lib/android/sdk/ndk" 2>&1 | sed -n '1,20p' || true
+          fi
           test -x "$ndk_root/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android35-clang" || test -x "$ndk_root/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android34-clang" || test -x "$ndk_root/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android21-clang" || { echo "::error::NDK clang toolchain not found in $ndk_root"; exit 1; }
       - name: Android native build (Bazel if available, else cargo check)
         shell: bash
-        env:
-          ANDROID_NDK_ROOT: ${{ env.ANDROID_NDK_ROOT }}
-          ANDROID_NDK_HOME: ${{ env.ANDROID_NDK_HOME }}
         run: |
           set -euo pipefail
           ndk_root="${ANDROID_NDK_ROOT:-${ANDROID_NDK_HOME:-}}"
           if [ -z "$ndk_root" ]; then
-            # Fallback to action output path (nttld/setup-ndk sets ANDROID_NDK_ROOT but also exposes ndk-path)
             ndk_root="${{ steps.setup-ndk.outputs.ndk-path }}"
           fi
           if [ -z "$ndk_root" ]; then
             echo "::error::NDK root not set; cannot configure Android toolchain"
             exit 1
           fi
+          # Prefer real NDK with actual clang if wrapper path is broken
+          if [ ! -x "$ndk_root/toolchains/llvm/prebuilt/linux-x86_64/bin/clang" ]; then
+            for cand in "${ANDROID_NDK_ROOT:-}" "${ANDROID_NDK_HOME:-}" "${{ steps.setup-ndk.outputs.ndk-path }}"; do
+              if [ -n "$cand" ] && [ -x "$cand/toolchains/llvm/prebuilt/linux-x86_64/bin/clang" ]; then
+                ndk_root="$cand"
+                echo "Corrected NDK root to real clang location: $ndk_root"
+                break
+              fi
+            done
+          fi
+          if [ ! -x "$ndk_root/toolchains/llvm/prebuilt/linux-x86_64/bin/clang" ]; then
+            echo "::error::real NDK clang not found at $ndk_root/toolchains/llvm/prebuilt/linux-x86_64/bin/clang"
+            ls -1 "$ndk_root/toolchains/llvm/prebuilt/linux-x86_64/bin" 2>&1 | sed -n '1,50p' || true
+            find "$ndk_root/toolchains/llvm/prebuilt/linux-x86_64/bin" -maxdepth 1 -type f -name 'aarch64*' -print 2>&1 | sed -n '1,20p' || true
+            exit 1
+          fi
+          if [ ! -x "$ndk_root/toolchains/llvm/prebuilt/linux-x86_64/bin/clang++" ]; then
+            echo "::error::real NDK clang++ not found at $ndk_root/toolchains/llvm/prebuilt/linux-x86_64/bin/clang++"
+            exit 1
+          fi
           export ANDROID_NDK_ROOT="$ndk_root"
           export ANDROID_NDK_HOME="$ndk_root"
           export NDK_HOME="$ndk_root"
-          # Expose NDK clang as cargo's linker for aarch64-linux-android
-          # Probe for a usable API level clang wrapper (prefer 35, fallback to 34/33/30/26/21)
+          real_clang="$ndk_root/toolchains/llvm/prebuilt/linux-x86_64/bin/clang"
+          real_clangpp="$ndk_root/toolchains/llvm/prebuilt/linux-x86_64/bin/clang++"
+          echo "Real NDK clang: $real_clang"
+          ls -1 "$ndk_root/toolchains/llvm/prebuilt/linux-x86_64/bin" 2>&1 | sed -n '1,20p' || true
+          # Create temporary wrapper that invokes real clang with explicit Android target
+          wrapper_dir="$RUNNER_TEMP/ndk-clang-wrapper"
+          mkdir -p "$wrapper_dir"
+          chosen_api=""
           for api in 35 34 33 30 29 28 27 26 24 23 21; do
-            if [ -x "$ndk_root/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android${api}-clang" ]; then
-              export CC_aarch64_linux_android="$ndk_root/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android${api}-clang"
-              export CXX_aarch64_linux_android="$ndk_root/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android${api}-clang++"
-              export CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER="$CC_aarch64_linux_android"
-              echo "Using NDK clang for API $api: $CC_aarch64_linux_android"
+            # Prefer API level where sysroot exists or wrapper already present; otherwise still create for highest
+            if [ -x "$ndk_root/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android${api}-clang" ] || [ "$api" = "35" ]; then
+              chosen_api="$api"
               break
             fi
           done
-          if [ -z "${CC_aarch64_linux_android:-}" ]; then
-            echo "::error::No aarch64-linux-android clang found in $ndk_root/toolchains/llvm/prebuilt/linux-x86_64/bin/"
-            find "$ndk_root/toolchains/llvm/prebuilt/linux-x86_64/bin/" -maxdepth 1 -type f -name '*aarch64*' -print | sed -n '1,20p' || true
-            exit 1
+          if [ -z "$chosen_api" ]; then
+            chosen_api="35"
           fi
+          cat > "$wrapper_dir/aarch64-linux-android${chosen_api}-clang" <<WRAPPER_EOF
+          #!/bin/sh
+          exec "$real_clang" --target=aarch64-linux-android${chosen_api} "\$@"
+          WRAPPER_EOF
+          chmod +x "$wrapper_dir/aarch64-linux-android${chosen_api}-clang"
+          cat > "$wrapper_dir/aarch64-linux-android${chosen_api}-clang++" <<WRAPPER_EOF
+          #!/bin/sh
+          exec "$real_clangpp" --target=aarch64-linux-android${chosen_api} "\$@"
+          WRAPPER_EOF
+          chmod +x "$wrapper_dir/aarch64-linux-android${chosen_api}-clang++"
+          export CC_aarch64_linux_android="$wrapper_dir/aarch64-linux-android${chosen_api}-clang"
+          export CXX_aarch64_linux_android="$wrapper_dir/aarch64-linux-android${chosen_api}-clang++"
+          export CC="$CC_aarch64_linux_android"
+          export CXX="$CXX_aarch64_linux_android"
+          export CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER="$CC_aarch64_linux_android"
+          echo "Using NDK clang wrapper for API $chosen_api: $CC_aarch64_linux_android -> $real_clang --target=aarch64-linux-android${chosen_api}"
+          # Verify wrapper and real clang are executable pipefail-safe
+          "$CC_aarch64_linux_android" --version 2>&1 | sed -n '1,5p' || true
+          test -x "$CC_aarch64_linux_android" || { echo "::error::wrapper clang not executable at $CC_aarch64_linux_android"; exit 1; }
+          test -x "$real_clang" || { echo "::error::real clang not executable at $real_clang"; exit 1; }
           # Detect whether repository provides an upstream-compatible Android Bazel target
           # (no such target exists in current upstream; this is the honest fallback path)
           if grep -R -q "aarch64-linux-android" MODULE.bazel bazel/ BUILD.bazel 2>/dev/null; then
             echo "Detected Bazel Android target in MODULE.bazel/bazel/ — attempting Bazel build"
-            # Use bazelisk if available; this branch only runs when the repo actually declares the target
             if command -v bazelisk >/dev/null 2>&1; then
-              # Try to build any Android-tagged native if it exists; fail honestly if it does not compile
               bazelisk build --config=ci //crates/... --platforms=//bazel/platforms:linux-arm64 >"$RUNNER_TEMP/bazel-probe.log" 2>&1 || true
-              sed -n '1,100p' "$RUNNER_TEMP/bazel-probe.log"
-              # Fall through to cargo check as secondary verification; do not mask failure
+              sed -n '1,100p' "$RUNNER_TEMP/bazel-probe.log" || true
               echo "Bazel probe completed; proceeding to cargo check for NDK verification"
             else
               echo "::warning::bazelisk not found, skipping Bazel probe and using cargo check"
@@ -148,8 +200,6 @@ jobs:
             echo "No Bazel Android target found (expected for current upstream) — using cargo check with NDK"
           fi
           echo "Running cargo check for Android target..."
-          # Honest check: must compile at least pi-natives (core native crate) for Android
-          # Do not invent success: cargo check failure must fail the job
           toolchain="$(sed -n 's/^channel *= *"\([^"\]*\)".*/\1/p' rust-toolchain.toml | sed -n '1p')"
           cargo +"$toolchain" check --target aarch64-linux-android -p pi-natives --locked
           echo "cargo check -p pi-natives for aarch64-linux-android succeeded"

@@ -69,7 +69,9 @@ export async function getRepoRoot(cwd: string, explicitRepoRoot?: string): Promi
 			const canonicalTarget = path.resolve(targetPath);
 			const canonicalResolved = path.resolve(resolvedRoot);
 			if (canonicalTarget !== canonicalResolved && !canonicalTarget.startsWith(canonicalResolved + path.sep)) {
-				throw new Error(`Explicit repoRoot '${explicitRepoRoot}' does not match resolved git repository '${resolvedRoot}'.`);
+				throw new Error(
+					`Explicit repoRoot '${explicitRepoRoot}' does not match resolved git repository '${resolvedRoot}'.`,
+				);
 			}
 		}
 		return resolvedRoot;

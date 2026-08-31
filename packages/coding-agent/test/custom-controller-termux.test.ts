@@ -1,7 +1,7 @@
-import { describe, it, expect } from "bun:test";
+import { describe, expect, it } from "bun:test";
 import * as fs from "node:fs";
-import * as path from "node:path";
 import * as os from "node:os";
+import * as path from "node:path";
 import { CustomAutolearnService, canonicalProjectIdentity } from "../src/autolearn/custom-service";
 
 describe("custom autolearn controller wiring termux", () => {
@@ -30,7 +30,14 @@ describe("custom autolearn controller wiring termux", () => {
 		const cwd = "/tmp/fake-proj";
 		const proj = canonicalProjectIdentity(cwd);
 		const svc = new CustomAutolearnService(dir);
-		const cand = svc.observeCandidate({ episodeId: "ep-ctrl", sessionId: "sess-ctrl", projectIdentity: proj, toolName: "bash", toolCallId: "tc-ctrl-1", failureMessage: "bounded failure" });
+		const cand = svc.observeCandidate({
+			episodeId: "ep-ctrl",
+			sessionId: "sess-ctrl",
+			projectIdentity: proj,
+			toolName: "bash",
+			toolCallId: "tc-ctrl-1",
+			failureMessage: "bounded failure",
+		});
 		expect(cand.failureDigest).toHaveLength(16);
 		const ok = svc.recordVerifierResult(cand.id, "cargo test", {
 			verified: true,
@@ -49,7 +56,9 @@ describe("custom autolearn controller wiring termux", () => {
 		expect(svc.projectToMnemopi(cand.id, "mem-ctrl")).toBe(true);
 		expect(svc.getProjection(cand.id)?.mnemopiId).toBe("mem-ctrl");
 		svc.close();
-		try { fs.rmSync(dir, { recursive: true, force: true }); } catch {}
+		try {
+			fs.rmSync(dir, { recursive: true, force: true });
+		} catch {}
 	});
 
 	it("controller bounds candidates per episode (unit simulation)", async () => {
@@ -57,7 +66,14 @@ describe("custom autolearn controller wiring termux", () => {
 		const svc = new CustomAutolearnService(dir);
 		const proj = canonicalProjectIdentity("/tmp/bounded");
 		for (let i = 0; i < 25; i++) {
-			svc.observeCandidate({ episodeId: "ep-bound", sessionId: "sess-bound", projectIdentity: proj, toolName: "bash", toolCallId: `tc-${i}`, failureMessage: `fail ${i}` });
+			svc.observeCandidate({
+				episodeId: "ep-bound",
+				sessionId: "sess-bound",
+				projectIdentity: proj,
+				toolName: "bash",
+				toolCallId: `tc-${i}`,
+				failureMessage: `fail ${i}`,
+			});
 		}
 		const all = svc.listCandidates(proj);
 		expect(all.length).toBe(25);
@@ -65,6 +81,8 @@ describe("custom autolearn controller wiring termux", () => {
 		const ctrl = await fs.promises.readFile(ctrlPath, "utf8");
 		expect(ctrl).toContain("MAX_CANDIDATES_PER_EPISODE = 20");
 		svc.close();
-		try { fs.rmSync(dir, { recursive: true, force: true }); } catch {}
+		try {
+			fs.rmSync(dir, { recursive: true, force: true });
+		} catch {}
 	});
 });
