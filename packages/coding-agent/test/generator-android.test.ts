@@ -102,8 +102,8 @@ export declare enum MyEnum { A = "a" }
 		expect(live).toContain("LiveWebRtcPeer is unsupported on Android/Termux");
 		// Ensure Android stubs do not pull audiopus via pi_voice types
 		// Live private field must be gated, not always Arc<LivePeerCore>
-		expect(live).toContain("#[cfg(target_os = \"android\")]");
-		expect(live).toContain("#[cfg(not(target_os = \"android\"))]");
+		expect(live).toContain('#[cfg(target_os = "android")]');
+		expect(live).toContain('#[cfg(not(target_os = "android"))]');
 	});
 	it("loader-state includes android-arm64 platform", async () => {
 		const loader = await fs.promises.readFile(
