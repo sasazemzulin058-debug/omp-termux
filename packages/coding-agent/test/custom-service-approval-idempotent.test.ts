@@ -51,10 +51,15 @@ describe("approval idempotent / projection orphan regression", () => {
 				expect(c).toContain("android pidfd");
 				return "mem_dup_1";
 			},
-			getScopedMemoryInBank: (_id: string, _bank: string) => ({ bank: svc.getProjection(cand.id)?.bank ?? "unknown" }),
+			getScopedMemoryInBank: (_id: string, _bank: string) => ({
+				bank: svc.getProjection(cand.id)?.bank ?? "unknown",
+			}),
 			getScopedRetainTarget: () => ({ bank: svc.getProjection(cand.id)?.bank ?? "unknown" }),
 		} as unknown as {
-			rememberScopedIdempotent: (c: string, o: { scope: string; source: string; idempotencyKey: string }) => string | undefined;
+			rememberScopedIdempotent: (
+				c: string,
+				o: { scope: string; source: string; idempotencyKey: string },
+			) => string | undefined;
 			getScopedMemoryInBank: (id: string, bank: string) => { bank: string } | null | undefined;
 			getScopedRetainTarget: () => { bank: string } | null | undefined;
 		};
@@ -135,7 +140,12 @@ describe("approval idempotent / projection orphan regression", () => {
 		svc.approveCandidate(cand.id, contentA, canon);
 		const firstProj = await svc.projectToMnemopiReal(cand.id, {
 			rememberScopedIdempotent: () => "mem_change_1",
-		} as unknown as { rememberScopedIdempotent: (c: string, o: { scope: string; source: string; idempotencyKey: string }) => string | undefined });
+		} as unknown as {
+			rememberScopedIdempotent: (
+				c: string,
+				o: { scope: string; source: string; idempotencyKey: string },
+			) => string | undefined;
+		});
 		expect(firstProj.ok).toBe(true);
 		expect(svc.getProjection(cand.id)?.mnemopiId).toBe("mem_change_1");
 

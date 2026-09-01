@@ -161,11 +161,19 @@ function findByIdempotency(beam: BeamMemoryState, source: string, idempotencyKey
 	// Two-tier: search working_memory then episodic_memory; episodic preserves key during consolidation.
 	for (const table of ["working_memory", "episodic_memory"] as const) {
 		try {
-			const row = beam.db.query(`SELECT id FROM ${table} WHERE source = ? AND (idempotency_key = ? OR json_extract(metadata_json, '$.idempotency_key') = ?) LIMIT 1`).get(source, idempotencyKey, idempotencyKey) as { id: string } | null | undefined;
+			const row = beam.db
+				.query(
+					`SELECT id FROM ${table} WHERE source = ? AND (idempotency_key = ? OR json_extract(metadata_json, '$.idempotency_key') = ?) LIMIT 1`,
+				)
+				.get(source, idempotencyKey, idempotencyKey) as { id: string } | null | undefined;
 			if (row?.id) return row.id;
 		} catch {
 			try {
-				const row = beam.db.query(`SELECT id FROM ${table} WHERE source = ? AND json_extract(metadata_json, '$.idempotency_key') = ? LIMIT 1`).get(source, idempotencyKey) as { id: string } | null | undefined;
+				const row = beam.db
+					.query(
+						`SELECT id FROM ${table} WHERE source = ? AND json_extract(metadata_json, '$.idempotency_key') = ? LIMIT 1`,
+					)
+					.get(source, idempotencyKey) as { id: string } | null | undefined;
 				if (row?.id) return row.id;
 			} catch {}
 		}
@@ -173,7 +181,9 @@ function findByIdempotency(beam: BeamMemoryState, source: string, idempotencyKey
 	return null;
 }
 
-function extractRowIdempotencyKey(row: { idempotency_key?: string | null; metadata_json?: string | null } | null | undefined): string | null {
+function extractRowIdempotencyKey(
+	row: { idempotency_key?: string | null; metadata_json?: string | null } | null | undefined,
+): string | null {
 	if (typeof row?.idempotency_key === "string" && row.idempotency_key.trim()) return row.idempotency_key.trim();
 	if (row?.metadata_json) {
 		try {
@@ -184,7 +194,6 @@ function extractRowIdempotencyKey(row: { idempotency_key?: string | null; metada
 	}
 	return null;
 }
-
 
 function findDuplicate(beam: BeamMemoryState, content: string): string | null {
 	using statement = beam.db.prepare("SELECT id FROM working_memory WHERE content = ? AND session_id = ? LIMIT 1");
@@ -477,11 +486,23 @@ export function remember(beam: BeamMemoryState, content: string, options: StoreR
 	const channelId = options.channelId ?? options.channel_id ?? beam.channelId;
 	const rawMetadata = options.metadata ?? null;
 	// Idempotency key: explicit option wins, else metadata field
-	const metaRecord = rawMetadata && typeof rawMetadata === "object" && !Array.isArray(rawMetadata) ? (rawMetadata as Record<string, unknown>) : null;
-	const idempotencyKeyRaw = options.idempotencyKey ?? options.idempotency_key ?? metaRecord?.["idempotency_key"] ?? metaRecord?.["idempotencyKey"];
-	const idempotencyKey = typeof idempotencyKeyRaw === "string" && idempotencyKeyRaw.trim() ? idempotencyKeyRaw.trim() : null;
+	const metaRecord =
+		rawMetadata && typeof rawMetadata === "object" && !Array.isArray(rawMetadata)
+			? (rawMetadata as Record<string, unknown>)
+			: null;
+	const idempotencyKeyRaw =
+		options.idempotencyKey ??
+		options.idempotency_key ??
+		metaRecord?.["idempotency_key"] ??
+		metaRecord?.["idempotencyKey"];
+	const idempotencyKey =
+		typeof idempotencyKeyRaw === "string" && idempotencyKeyRaw.trim() ? idempotencyKeyRaw.trim() : null;
 	const metadata: Metadata | null = idempotencyKey
-		? (metaRecord ? (metaRecord["idempotency_key"] === idempotencyKey ? rawMetadata : { ...metaRecord, idempotency_key: idempotencyKey }) : { idempotency_key: idempotencyKey }) as Metadata
+		? ((metaRecord
+				? metaRecord["idempotency_key"] === idempotencyKey
+					? rawMetadata
+					: { ...metaRecord, idempotency_key: idempotencyKey }
+				: { idempotency_key: idempotencyKey }) as Metadata)
 		: rawMetadata;
 	const embedText = embeddingText(content, options);
 	// Deterministic idempotent dedup: source + idempotency_key exact match returns existing id without new write (transactional)
@@ -502,7 +523,12 @@ export function remember(beam: BeamMemoryState, content: string, options: StoreR
 			// fall through to keyed insert so each source+key gets its own row (avoid clobbering).
 			let existingKey: string | null = null;
 			try {
-				const row = beam.db.query("SELECT idempotency_key, metadata_json FROM working_memory WHERE id = ? LIMIT 1").get(existingId) as { idempotency_key?: string | null; metadata_json?: string | null } | null | undefined;
+				const row = beam.db
+					.query("SELECT idempotency_key, metadata_json FROM working_memory WHERE id = ? LIMIT 1")
+					.get(existingId) as
+					| { idempotency_key?: string | null; metadata_json?: string | null }
+					| null
+					| undefined;
 				existingKey = extractRowIdempotencyKey(row);
 			} catch {}
 			if (existingKey && existingKey !== idempotencyKey) {
@@ -515,7 +541,10 @@ export function remember(beam: BeamMemoryState, content: string, options: StoreR
 					try {
 						race = findByIdempotency(beam, source, idempotencyKey);
 					} catch {}
-					if (race && race !== existingId) { finalId = race; return; }
+					if (race && race !== existingId) {
+						finalId = race;
+						return;
+					}
 					try {
 						beam.db.run(
 							`
@@ -561,7 +590,10 @@ export function remember(beam: BeamMemoryState, content: string, options: StoreR
 						try {
 							after = findByIdempotency(beam, source, idempotencyKey);
 						} catch {}
-						if (after) { finalId = after; return; }
+						if (after) {
+							finalId = after;
+							return;
+						}
 						throw e;
 					}
 				});
@@ -634,7 +666,10 @@ export function remember(beam: BeamMemoryState, content: string, options: StoreR
 		let finalId: string | null = null;
 		transaction(beam.db, () => {
 			const raceExisting = findByIdempotency(beam, source, idempotencyKey);
-			if (raceExisting) { finalId = raceExisting; return; }
+			if (raceExisting) {
+				finalId = raceExisting;
+				return;
+			}
 			try {
 				beam.db.run(
 					`
@@ -667,7 +702,10 @@ export function remember(beam: BeamMemoryState, content: string, options: StoreR
 			} catch (e) {
 				// Unique violation on idempotency_key race or legacy path: return existing
 				const after = findByIdempotency(beam, source, idempotencyKey);
-				if (after) { finalId = after; return; }
+				if (after) {
+					finalId = after;
+					return;
+				}
 				throw e;
 			}
 		});
@@ -675,9 +713,20 @@ export function remember(beam: BeamMemoryState, content: string, options: StoreR
 		if (insertedId) {
 			addTemporalAnnotations(beam, insertedId, timestamp, source);
 			const extractionSource = options.extractText ?? options.extract_text ?? content;
-			proactiveLinkIfEnabled(beam, insertedId, extractionSource, Boolean(options.extractEntities ?? options.extract_entities));
+			proactiveLinkIfEnabled(
+				beam,
+				insertedId,
+				extractionSource,
+				Boolean(options.extractEntities ?? options.extract_entities),
+			);
 			trimWorkingMemory(beam);
-			emitEvent(beam, "MEMORY_ADDED", { memoryId: insertedId, content, source, importance, metadata: metadata ?? undefined });
+			emitEvent(beam, "MEMORY_ADDED", {
+				memoryId: insertedId,
+				content,
+				source,
+				importance,
+				metadata: metadata ?? undefined,
+			});
 			scheduleEmbedding(beam, [{ memoryId: insertedId, content: embedText }]);
 			if (options.extract === true) scheduleFactExtraction(beam, insertedId, extractionSource);
 			invalidateCaches(beam);

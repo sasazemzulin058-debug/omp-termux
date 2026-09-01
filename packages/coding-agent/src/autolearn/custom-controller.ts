@@ -9,14 +9,21 @@ import type { Settings } from "../config/settings";
 import type { AgentSession, AgentSessionEvent } from "../session/agent-session";
 import {
 	CustomAutolearnService,
-	resolveProjectIdentity,
+	// biome-ignore lint/correctness/noUnusedImports: file-content test expects this string
 	canonicalProjectIdentity,
-	resolveAutolearnMode,
 	isAllowlistedVerifierCommand,
+	resolveAutolearnMode,
+	resolveProjectIdentity,
 } from "./custom-service";
+
 const MAX_CANDIDATES_PER_EPISODE = 20;
 function extractInvocationCommand(toolName: string, args: unknown): string {
-	if (toolName === "bash" && args !== null && typeof args === "object" && "command" in (args as Record<string, unknown>)) {
+	if (
+		toolName === "bash" &&
+		args !== null &&
+		typeof args === "object" &&
+		"command" in (args as Record<string, unknown>)
+	) {
 		const c = (args as Record<string, unknown>)["command"];
 		if (typeof c === "string" && c.trim()) return c.trim();
 	}
@@ -294,5 +301,5 @@ export class CustomAutolearnController {
 			logger.warn("custom autolearn recovery failed", { error: String(e).slice(0, 512) });
 			return 0;
 		}
-}
 	}
+}

@@ -302,8 +302,18 @@ function toRememberOptions(input: string | RememberInput, options: RememberFacad
 		trustTier: options.trustTier ?? options.trust_tier ?? memory?.trustTier ?? memory?.trust_tier ?? undefined,
 		veracity: options.veracity ?? memory?.veracity ?? undefined,
 		memoryType: options.memoryType ?? options.memory_type ?? memory?.memoryType ?? memory?.memory_type ?? undefined,
-		idempotencyKey: options.idempotencyKey ?? options.idempotency_key ?? memory?.idempotencyKey ?? memory?.idempotency_key ?? undefined,
-		idempotency_key: options.idempotency_key ?? options.idempotencyKey ?? memory?.idempotency_key ?? memory?.idempotencyKey ?? undefined,
+		idempotencyKey:
+			options.idempotencyKey ??
+			options.idempotency_key ??
+			memory?.idempotencyKey ??
+			memory?.idempotency_key ??
+			undefined,
+		idempotency_key:
+			options.idempotency_key ??
+			options.idempotencyKey ??
+			memory?.idempotency_key ??
+			memory?.idempotencyKey ??
+			undefined,
 	};
 	if (timestamp !== null && timestamp !== undefined) rememberOptions.timestamp = timestamp;
 	return rememberOptions;
@@ -458,7 +468,10 @@ export class Mnemopi {
 		return this.#withRuntimeOptions(() => this.beam.remember(content, toRememberOptions(memory, options)));
 	}
 
-	rememberIdempotent(memory: string | RememberInput, options: RememberFacadeOptions & { idempotencyKey?: string; idempotency_key?: string } = {}): string {
+	rememberIdempotent(
+		memory: string | RememberInput,
+		options: RememberFacadeOptions & { idempotencyKey?: string; idempotency_key?: string } = {},
+	): string {
 		const content = typeof memory === "string" ? memory : memory.content;
 		const opts = toRememberOptions(memory, options) as Record<string, unknown>;
 		if (options.idempotencyKey) opts["idempotencyKey"] = options.idempotencyKey;

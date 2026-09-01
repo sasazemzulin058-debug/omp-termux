@@ -160,7 +160,10 @@ export function isAllowlistedVerifierCommand(command: string): boolean {
 // Require deterministic idempotent operation or exact lookup by candidate/content digest.
 // getScopedMemory/editScopedMemory are cross-bank first-hit; require exact-bank resolver/edit before mutation.
 export interface MnemopiIdempotentWriteCapability {
-	rememberScopedIdempotent: (content: string, opts: { scope: string; source: string; idempotencyKey: string; targetBank?: string }) => string | undefined;
+	rememberScopedIdempotent: (
+		content: string,
+		opts: { scope: string; source: string; idempotencyKey: string; targetBank?: string },
+	) => string | undefined;
 }
 
 export interface MnemopiExactBankReadCapability {
@@ -168,7 +171,11 @@ export interface MnemopiExactBankReadCapability {
 }
 
 export interface MnemopiExactBankEditCapability {
-	editScopedMemoryInBank: (op: string, id: string, bank: string) => { status: string; bank?: string; store?: string } | unknown;
+	editScopedMemoryInBank: (
+		op: string,
+		id: string,
+		bank: string,
+	) => { status: string; bank?: string; store?: string } | unknown;
 }
 
 export interface MnemopiBankAccessibilityCapability {
@@ -178,7 +185,10 @@ export interface MnemopiBankAccessibilityCapability {
 
 export type MnemopiProjectionClient = {
 	rememberScoped?: (content: string, opts: { scope: string; source: string }) => string | undefined;
-	rememberScopedIdempotent?: (content: string, opts: { scope: string; source: string; idempotencyKey: string; targetBank?: string }) => string | undefined;
+	rememberScopedIdempotent?: (
+		content: string,
+		opts: { scope: string; source: string; idempotencyKey: string; targetBank?: string },
+	) => string | undefined;
 	getScopedMemory?: (id: string) => { bank: string } | null | undefined;
 	getScopedMemoryInBank?: (id: string, bank: string) => { bank: string } | null | undefined;
 	editScopedMemory?: (op: string, id: string) => unknown;
@@ -216,8 +226,12 @@ export function isBankAccessibleForClient(client: unknown, bank: string): boolea
 	return null;
 }
 
-
-export function computeIdempotencyKey(candidateId: string, content: string, scope: string, projectIdentity: string): string {
+export function computeIdempotencyKey(
+	candidateId: string,
+	content: string,
+	scope: string,
+	projectIdentity: string,
+): string {
 	return computeOpaqueDigest(`${candidateId}\0${content}\0${scope}\0${projectIdentity}`);
 }
 
@@ -345,7 +359,12 @@ export class CustomAutolearnService {
 			try {
 				const rows = this.#db
 					.prepare("SELECT candidate_id, project_identity, scope, mnemopi_bank FROM projection_references")
-					.all() as { candidate_id: string; project_identity: string; scope: string; mnemopi_bank: string | null }[];
+					.all() as {
+					candidate_id: string;
+					project_identity: string;
+					scope: string;
+					mnemopi_bank: string | null;
+				}[];
 				for (const r of rows) {
 					const current = r.mnemopi_bank;
 					if (current != null && typeof current === "string" && current.trim() !== "") {
@@ -355,7 +374,9 @@ export class CustomAutolearnService {
 					const expected = r.scope === "global" ? "default" : bankForScope(r.scope, r.project_identity);
 					if (!expected?.trim()) continue;
 					if (current === expected) continue;
-					this.#db.prepare("UPDATE projection_references SET mnemopi_bank = ? WHERE candidate_id = ?").run(expected, r.candidate_id);
+					this.#db
+						.prepare("UPDATE projection_references SET mnemopi_bank = ? WHERE candidate_id = ?")
+						.run(expected, r.candidate_id);
 				}
 			} catch {}
 		} catch {}
@@ -565,13 +586,19 @@ export class CustomAutolearnService {
 		// projection_pending: verify digest, preserve reference/pending state on same content
 		if (candidate.status === "projection_pending" && existingDigest) {
 			if (existingDigest !== incomingDigest) {
-				return { success: false, error: "already staged with projection; content changed — requires rollback before re-approval" };
+				return {
+					success: false,
+					error: "already staged with projection; content changed — requires rollback before re-approval",
+				};
 			}
 			return { success: true };
 		}
 		// Gate: only needs_review/projection_pending can be approved; pending/rejected cannot approve
 		if (candidate.status !== "needs_review" && candidate.status !== "projection_pending") {
-			return { success: false, error: `Candidate status ${candidate.status} not eligible for approve (requires needs_review)` };
+			return {
+				success: false,
+				error: `Candidate status ${candidate.status} not eligible for approve (requires needs_review)`,
+			};
 		}
 		// Crash-safe: persist reviewed_content and projection_pending durably before external Mnemopi write.
 		// Approved only after confirmed durable reference in projectToMnemopiReal.
@@ -584,7 +611,10 @@ export class CustomAutolearnService {
 		`);
 		const result = stmt.run(cleanContent, now, candidateId, candidate.version);
 		if (result.changes > 0) {
-			this.#recordEvent(candidateId, "approved", { contentDigest: computeOpaqueDigest(cleanContent), pendingProjection: true });
+			this.#recordEvent(candidateId, "approved", {
+				contentDigest: computeOpaqueDigest(cleanContent),
+				pendingProjection: true,
+			});
 			return { success: true };
 		}
 		return { success: false, error: "Concurrent modification or status changed" };
@@ -720,14 +750,25 @@ export class CustomAutolearnService {
 	 * Keeps candidate in a retryable projection_pending state with reviewedContent.
 	 * Idempotent: never demotes an already approved/projected candidate; preserves existing projection reference.
 	 */
-	stageForRetry(candidateId: string, reviewedContent: string, projectIdentity: string): { success: boolean; error?: string } {
+	stageForRetry(
+		candidateId: string,
+		reviewedContent: string,
+		projectIdentity: string,
+	): { success: boolean; error?: string } {
 		const candidate = this.getCandidate(candidateId);
 		if (!candidate) return { success: false, error: `Candidate not found: ${candidateId}` };
 		if (candidate.projectIdentity !== projectIdentity && candidate.scope !== "global") {
 			return { success: false, error: "Unauthorized project scope" };
 		}
-		if (candidate.status !== "needs_review" && candidate.status !== "approved" && candidate.status !== "projection_pending") {
-			return { success: false, error: `Candidate status ${candidate.status} not eligible for stage (requires needs_review)` };
+		if (
+			candidate.status !== "needs_review" &&
+			candidate.status !== "approved" &&
+			candidate.status !== "projection_pending"
+		) {
+			return {
+				success: false,
+				error: `Candidate status ${candidate.status} not eligible for stage (requires needs_review)`,
+			};
 		}
 		const tomb = this.#db.prepare("SELECT candidate_id FROM tombstones WHERE candidate_id = ?").get(candidateId);
 		if (tomb) return { success: false, error: "Candidate deleted (tombstoned)" };
@@ -745,10 +786,14 @@ export class CustomAutolearnService {
 		// Idempotent / fail-closed handling for candidates with existing projection
 		if (proj) {
 			if (existingDigest && incomingDigest === existingDigest) return { success: true };
-			const msg = candidate.status === "approved"
-				? "already projected; content changed — requires rollback before re-approval"
-				: "already staged with projection; content changed — requires rollback before re-approval";
-			return { success: false, error: existingDigest ? msg : "already staged with projection; requires rollback before re-approval" };
+			const msg =
+				candidate.status === "approved"
+					? "already projected; content changed — requires rollback before re-approval"
+					: "already staged with projection; content changed — requires rollback before re-approval";
+			return {
+				success: false,
+				error: existingDigest ? msg : "already staged with projection; requires rollback before re-approval",
+			};
 		}
 
 		// Approved without projection: idempotent if same content
@@ -781,14 +826,18 @@ export class CustomAutolearnService {
 		opts?: { targetBank?: string },
 	): Promise<{ ok: boolean; mnemopiId?: string; error?: string }> {
 		const cand = this.getCandidate(candidateId);
-		if ((cand?.status !== "approved" && cand?.status !== "projection_pending") || !cand.reviewedContent) return { ok: false, error: "candidate not approved" };
+		if ((cand?.status !== "approved" && cand?.status !== "projection_pending") || !cand.reviewedContent)
+			return { ok: false, error: "candidate not approved" };
 		const redacted = redactSensitiveText(cand.reviewedContent);
 		let targetBank: string | null = null;
 		if (opts?.targetBank && typeof opts.targetBank === "string" && opts.targetBank.trim()) {
 			targetBank = opts.targetBank.trim();
 		} else {
 			try {
-				const h = mnemopi as unknown as { getScopedRetainTarget?: () => { bank: string } | null | undefined; bank?: unknown };
+				const h = mnemopi as unknown as {
+					getScopedRetainTarget?: () => { bank: string } | null | undefined;
+					bank?: unknown;
+				};
 				const retain = h.getScopedRetainTarget?.();
 				if (retain && typeof retain.bank === "string" && retain.bank.trim()) {
 					targetBank = retain.bank.trim();
@@ -804,16 +853,28 @@ export class CustomAutolearnService {
 		const existing = this.getProjection(candidateId);
 		if (existing) {
 			if (existing.bank !== targetBank) {
-				return { ok: false, error: `already projected with different bank ${existing.bank} != ${targetBank}; requires rollback` };
+				return {
+					ok: false,
+					error: `already projected with different bank ${existing.bank} != ${targetBank}; requires rollback`,
+				};
 			}
 			if (hasExactBankReadCapability(mnemopi)) {
 				try {
-					const memExisting = (mnemopi as MnemopiExactBankReadCapability).getScopedMemoryInBank(existing.mnemopiId, targetBank);
+					const memExisting = (mnemopi as MnemopiExactBankReadCapability).getScopedMemoryInBank(
+						existing.mnemopiId,
+						targetBank,
+					);
 					if (!memExisting || typeof memExisting.bank !== "string" || !memExisting.bank.trim()) {
-						return { ok: false, error: "existing projection not confirmed: missing bank/reference; requires rollback" };
+						return {
+							ok: false,
+							error: "existing projection not confirmed: missing bank/reference; requires rollback",
+						};
 					}
 					if (memExisting.bank !== targetBank) {
-						return { ok: false, error: `existing bank ${existing.bank} != actual memory bank ${memExisting.bank}; requires rollback` };
+						return {
+							ok: false,
+							error: `existing bank ${existing.bank} != actual memory bank ${memExisting.bank}; requires rollback`,
+						};
 					}
 				} catch (e) {
 					return { ok: false, error: e instanceof Error ? e.message.slice(0, 512) : String(e).slice(0, 512) };
@@ -821,10 +882,15 @@ export class CustomAutolearnService {
 			} else if (typeof (mnemopi as unknown as { getScopedMemory?: unknown }).getScopedMemory === "function") {
 				// Cross-bank fallback: if it returns foreign bank, fail closed; if missing capability, we still check but do not trust for same-ID foreign
 				try {
-					const h2 = mnemopi as unknown as { getScopedMemory?: (id: string) => { bank: string } | null | undefined };
+					const h2 = mnemopi as unknown as {
+						getScopedMemory?: (id: string) => { bank: string } | null | undefined;
+					};
 					const memExisting = h2.getScopedMemory?.(existing.mnemopiId);
 					if (memExisting && typeof memExisting.bank === "string" && memExisting.bank.trim() !== targetBank) {
-						return { ok: false, error: `existing bank ${existing.bank} != actual memory bank ${memExisting.bank}; requires rollback (cross-bank)` };
+						return {
+							ok: false,
+							error: `existing bank ${existing.bank} != actual memory bank ${memExisting.bank}; requires rollback (cross-bank)`,
+						};
 					}
 					if (!memExisting || typeof memExisting.bank !== "string" || !memExisting.bank.trim()) {
 						// Without exact capability we cannot confirm; preserve needs_review instead of claiming success?
@@ -837,11 +903,17 @@ export class CustomAutolearnService {
 			}
 			// Preserve existing reference; set approved atomically before return so durable reconciliation does not leave projection_pending
 			try {
-				this.#db.prepare("UPDATE candidates SET status = 'approved', updated_at = ? WHERE id = ? AND status = 'projection_pending'").run(Date.now(), candidateId);
+				this.#db
+					.prepare(
+						"UPDATE candidates SET status = 'approved', updated_at = ? WHERE id = ? AND status = 'projection_pending'",
+					)
+					.run(Date.now(), candidateId);
 			} catch {}
 			// Clean any stale projection intent
 			try {
-				this.#db.prepare("DELETE FROM operation_intents WHERE candidate_id = ? AND operation = 'projection'").run(candidateId);
+				this.#db
+					.prepare("DELETE FROM operation_intents WHERE candidate_id = ? AND operation = 'projection'")
+					.run(candidateId);
 			} catch {}
 			return { ok: true, mnemopiId: existing.mnemopiId };
 		}
@@ -853,47 +925,103 @@ export class CustomAutolearnService {
 				const candForRecovery = this.getCandidate(candidateId);
 				if (!candForRecovery || !candForRecovery.reviewedContent) {
 					try {
-						this.#db.prepare("UPDATE candidates SET status = 'needs_review', updated_at = ? WHERE id = ?").run(Date.now(), candidateId);
+						this.#db
+							.prepare("UPDATE candidates SET status = 'needs_review', updated_at = ? WHERE id = ?")
+							.run(Date.now(), candidateId);
 					} catch {}
-					return { ok: false, error: "sentinel recovery: missing candidate or reviewed content; intent preserved" };
+					return {
+						ok: false,
+						error: "sentinel recovery: missing candidate or reviewed content; intent preserved",
+					};
 				}
 				if (!hasIdempotentWriteCapability(mnemopi)) {
 					try {
-						this.#db.prepare("UPDATE candidates SET status = 'needs_review', updated_at = ? WHERE id = ?").run(Date.now(), candidateId);
+						this.#db
+							.prepare("UPDATE candidates SET status = 'needs_review', updated_at = ? WHERE id = ?")
+							.run(Date.now(), candidateId);
 					} catch {}
-					return { ok: false, error: "sentinel recovery requires idempotent capability rememberScopedIdempotent; intent preserved for retry" };
+					return {
+						ok: false,
+						error: "sentinel recovery requires idempotent capability rememberScopedIdempotent; intent preserved for retry",
+					};
 				}
 				const redactedRecovery = redactSensitiveText(candForRecovery.reviewedContent);
-				const idempotencyKeyRecovery = computeIdempotencyKey(candidateId, redactedRecovery, candForRecovery.scope, candForRecovery.projectIdentity);
-				const targetBankRecovery = pendingIntent.mnemopiBank?.trim() ? pendingIntent.mnemopiBank.trim() : bankForScope(candForRecovery.scope, candForRecovery.projectIdentity);
+				const idempotencyKeyRecovery = computeIdempotencyKey(
+					candidateId,
+					redactedRecovery,
+					candForRecovery.scope,
+					candForRecovery.projectIdentity,
+				);
+				const targetBankRecovery = pendingIntent.mnemopiBank?.trim()
+					? pendingIntent.mnemopiBank.trim()
+					: bankForScope(candForRecovery.scope, candForRecovery.projectIdentity);
 				let recoveredId: string | undefined;
 				try {
-					recoveredId = (mnemopi as MnemopiIdempotentWriteCapability).rememberScopedIdempotent(redactedRecovery, { scope: "bank", source: "custom-autolearn", idempotencyKey: idempotencyKeyRecovery, targetBank: targetBankRecovery });
+					recoveredId = (mnemopi as MnemopiIdempotentWriteCapability).rememberScopedIdempotent(redactedRecovery, {
+						scope: "bank",
+						source: "custom-autolearn",
+						idempotencyKey: idempotencyKeyRecovery,
+						targetBank: targetBankRecovery,
+					});
 				} catch (e) {
 					try {
-						this.#db.prepare("UPDATE candidates SET status = 'needs_review', updated_at = ? WHERE id = ?").run(Date.now(), candidateId);
+						this.#db
+							.prepare("UPDATE candidates SET status = 'needs_review', updated_at = ? WHERE id = ?")
+							.run(Date.now(), candidateId);
 					} catch {}
 					return { ok: false, error: e instanceof Error ? e.message.slice(0, 512) : String(e).slice(0, 512) };
 				}
 				if (!recoveredId || typeof recoveredId !== "string" || !recoveredId.trim()) {
 					try {
-						this.#db.prepare("UPDATE candidates SET status = 'needs_review', updated_at = ? WHERE id = ?").run(Date.now(), candidateId);
+						this.#db
+							.prepare("UPDATE candidates SET status = 'needs_review', updated_at = ? WHERE id = ?")
+							.run(Date.now(), candidateId);
 					} catch {}
 					return { ok: false, error: "sentinel recovery: idempotent write returned no id; intent preserved" };
 				}
 				recoveredId = recoveredId.trim();
 				try {
-					this.#db.prepare("INSERT OR REPLACE INTO operation_intents (candidate_id, operation, project_identity, scope, mnemopi_id, mnemopi_bank, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)").run(candidateId, "projection", candForRecovery.projectIdentity, candForRecovery.scope, recoveredId, targetBankRecovery, Date.now());
+					this.#db
+						.prepare(
+							"INSERT OR REPLACE INTO operation_intents (candidate_id, operation, project_identity, scope, mnemopi_id, mnemopi_bank, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+						)
+						.run(
+							candidateId,
+							"projection",
+							candForRecovery.projectIdentity,
+							candForRecovery.scope,
+							recoveredId,
+							targetBankRecovery,
+							Date.now(),
+						);
 				} catch {}
 				let durableOkRecovery = false;
 				try {
 					this.#db.transaction(() => {
-						this.#db.prepare("UPDATE candidates SET status = 'projection_pending', updated_at = ? WHERE id = ? AND status != 'projection_pending'").run(Date.now(), candidateId);
+						this.#db
+							.prepare(
+								"UPDATE candidates SET status = 'projection_pending', updated_at = ? WHERE id = ? AND status != 'projection_pending'",
+							)
+							.run(Date.now(), candidateId);
 						const ex = this.getProjection(candidateId);
 						if (!ex) {
-							this.#db.prepare("INSERT INTO projection_references (candidate_id, project_identity, scope, mnemopi_id, mnemopi_bank, created_at) VALUES (?, ?, ?, ?, ?, ?)").run(candidateId, candForRecovery.projectIdentity, candForRecovery.scope, recoveredId, targetBankRecovery, Date.now());
+							this.#db
+								.prepare(
+									"INSERT INTO projection_references (candidate_id, project_identity, scope, mnemopi_id, mnemopi_bank, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+								)
+								.run(
+									candidateId,
+									candForRecovery.projectIdentity,
+									candForRecovery.scope,
+									recoveredId,
+									targetBankRecovery,
+									Date.now(),
+								);
 							try {
-								this.#recordEvent(candidateId, "projected", { mnemopiId: recoveredId, bank: targetBankRecovery });
+								this.#recordEvent(candidateId, "projected", {
+									mnemopiId: recoveredId,
+									bank: targetBankRecovery,
+								});
 							} catch {}
 						} else if (ex.mnemopiId !== recoveredId || ex.bank !== targetBankRecovery) {
 							throw new Error("projection conflict during sentinel recovery");
@@ -905,42 +1033,91 @@ export class CustomAutolearnService {
 				}
 				if (!durableOkRecovery) {
 					try {
-						this.#db.prepare("UPDATE candidates SET status = 'needs_review', updated_at = ? WHERE id = ?").run(Date.now(), candidateId);
+						this.#db
+							.prepare("UPDATE candidates SET status = 'needs_review', updated_at = ? WHERE id = ?")
+							.run(Date.now(), candidateId);
 					} catch {}
-					return { ok: false, error: "sentinel recovery: projection persistence failed; intent updated with recovered id for retry" };
+					return {
+						ok: false,
+						error: "sentinel recovery: projection persistence failed; intent updated with recovered id for retry",
+					};
 				}
 				if (hasExactBankReadCapability(mnemopi)) {
 					let mem: { bank: string } | null | undefined;
 					try {
-						mem = (mnemopi as MnemopiExactBankReadCapability).getScopedMemoryInBank(recoveredId, targetBankRecovery);
+						mem = (mnemopi as MnemopiExactBankReadCapability).getScopedMemoryInBank(
+							recoveredId,
+							targetBankRecovery,
+						);
 					} catch (e) {
 						try {
-							this.#db.prepare("UPDATE candidates SET status = 'projection_pending', updated_at = ? WHERE id = ?").run(Date.now(), candidateId);
+							this.#db
+								.prepare("UPDATE candidates SET status = 'projection_pending', updated_at = ? WHERE id = ?")
+								.run(Date.now(), candidateId);
 						} catch {}
 						return { ok: false, error: e instanceof Error ? e.message.slice(0, 512) : String(e).slice(0, 512) };
 					}
 					if (!mem || typeof mem.bank !== "string" || !mem.bank.trim()) {
 						try {
-							this.#db.prepare("UPDATE candidates SET status = 'projection_pending', updated_at = ? WHERE id = ?").run(Date.now(), candidateId);
+							this.#db
+								.prepare("UPDATE candidates SET status = 'projection_pending', updated_at = ? WHERE id = ?")
+								.run(Date.now(), candidateId);
 						} catch {}
 						return { ok: false, error: "sentinel recovery: projection not confirmed: missing bank/reference" };
 					}
 					if (mem.bank !== targetBankRecovery) {
 						try {
-							this.#db.prepare("INSERT OR REPLACE INTO projection_references (candidate_id, project_identity, scope, mnemopi_id, mnemopi_bank, created_at) VALUES (?, ?, ?, ?, ?, ?)").run(candidateId, candForRecovery.projectIdentity, candForRecovery.scope, recoveredId, mem.bank, Date.now());
-							this.#db.prepare("INSERT OR REPLACE INTO operation_intents (candidate_id, operation, project_identity, scope, mnemopi_id, mnemopi_bank, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)").run(candidateId, "projection", candForRecovery.projectIdentity, candForRecovery.scope, recoveredId, mem.bank, Date.now());
-							this.#db.prepare("UPDATE candidates SET status = 'needs_review', updated_at = ? WHERE id = ?").run(Date.now(), candidateId);
+							this.#db
+								.prepare(
+									"INSERT OR REPLACE INTO projection_references (candidate_id, project_identity, scope, mnemopi_id, mnemopi_bank, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+								)
+								.run(
+									candidateId,
+									candForRecovery.projectIdentity,
+									candForRecovery.scope,
+									recoveredId,
+									mem.bank,
+									Date.now(),
+								);
+							this.#db
+								.prepare(
+									"INSERT OR REPLACE INTO operation_intents (candidate_id, operation, project_identity, scope, mnemopi_id, mnemopi_bank, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+								)
+								.run(
+									candidateId,
+									"projection",
+									candForRecovery.projectIdentity,
+									candForRecovery.scope,
+									recoveredId,
+									mem.bank,
+									Date.now(),
+								);
+							this.#db
+								.prepare("UPDATE candidates SET status = 'needs_review', updated_at = ? WHERE id = ?")
+								.run(Date.now(), candidateId);
 						} catch {}
-						return { ok: false, error: `sentinel recovery: stored bank ${targetBankRecovery} != actual write bank ${mem.bank}; preserved actual bank for reconciliation` };
+						return {
+							ok: false,
+							error: `sentinel recovery: stored bank ${targetBankRecovery} != actual write bank ${mem.bank}; preserved actual bank for reconciliation`,
+						};
 					}
 				}
 				try {
-					this.#db.prepare("UPDATE candidates SET status = 'approved', updated_at = ? WHERE id = ?").run(Date.now(), candidateId);
+					this.#db
+						.prepare("UPDATE candidates SET status = 'approved', updated_at = ? WHERE id = ?")
+						.run(Date.now(), candidateId);
 				} catch {
-					return { ok: false, error: "sentinel recovery: status persist failed after durable reference; retry required" };
+					return {
+						ok: false,
+						error: "sentinel recovery: status persist failed after durable reference; retry required",
+					};
 				}
 				try {
-					this.#db.prepare("DELETE FROM operation_intents WHERE candidate_id = ? AND operation IN ('projection', 'projection_cleanup')").run(candidateId);
+					this.#db
+						.prepare(
+							"DELETE FROM operation_intents WHERE candidate_id = ? AND operation IN ('projection', 'projection_cleanup')",
+						)
+						.run(candidateId);
 				} catch {}
 				return { ok: true, mnemopiId: recoveredId };
 			}
@@ -949,12 +1126,17 @@ export class CustomAutolearnService {
 				let confirmed = false;
 				if (hasExactBankReadCapability(mnemopi)) {
 					try {
-						const memForIntent = (mnemopi as MnemopiExactBankReadCapability).getScopedMemoryInBank(pendingIntent.mnemopiId, pendingIntent.mnemopiBank);
+						const memForIntent = (mnemopi as MnemopiExactBankReadCapability).getScopedMemoryInBank(
+							pendingIntent.mnemopiId,
+							pendingIntent.mnemopiBank,
+						);
 						confirmed = memForIntent?.bank?.trim() === pendingIntent.mnemopiBank;
 					} catch {}
 				} else if (typeof (mnemopi as unknown as { getScopedMemory?: unknown }).getScopedMemory === "function") {
 					try {
-						const hh = mnemopi as unknown as { getScopedMemory: (id: string) => { bank: string } | null | undefined };
+						const hh = mnemopi as unknown as {
+							getScopedMemory: (id: string) => { bank: string } | null | undefined;
+						};
 						const memForIntent = hh.getScopedMemory?.(pendingIntent.mnemopiId);
 						confirmed = memForIntent?.bank?.trim() === pendingIntent.mnemopiBank;
 					} catch {}
@@ -964,33 +1146,73 @@ export class CustomAutolearnService {
 						this.#db.transaction(() => {
 							const cur2 = this.getProjection(candidateId);
 							if (!cur2) {
-								this.#db.prepare("INSERT INTO projection_references (candidate_id, project_identity, scope, mnemopi_id, mnemopi_bank, created_at) VALUES (?, ?, ?, ?, ?, ?)").run(candidateId, pendingIntent.projectIdentity, pendingIntent.scope, pendingIntent.mnemopiId, pendingIntent.mnemopiBank, Date.now());
+								this.#db
+									.prepare(
+										"INSERT INTO projection_references (candidate_id, project_identity, scope, mnemopi_id, mnemopi_bank, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+									)
+									.run(
+										candidateId,
+										pendingIntent.projectIdentity,
+										pendingIntent.scope,
+										pendingIntent.mnemopiId,
+										pendingIntent.mnemopiBank,
+										Date.now(),
+									);
 								try {
-									this.#recordEvent(candidateId, "projected", { mnemopiId: pendingIntent.mnemopiId, bank: pendingIntent.mnemopiBank });
+									this.#recordEvent(candidateId, "projected", {
+										mnemopiId: pendingIntent.mnemopiId,
+										bank: pendingIntent.mnemopiBank,
+									});
 								} catch {}
 							}
-							this.#db.prepare("UPDATE candidates SET status = 'approved', updated_at = ? WHERE id = ?").run(Date.now(), candidateId);
-							this.#db.prepare("DELETE FROM operation_intents WHERE candidate_id = ? AND operation = 'projection'").run(candidateId);
+							this.#db
+								.prepare("UPDATE candidates SET status = 'approved', updated_at = ? WHERE id = ?")
+								.run(Date.now(), candidateId);
+							this.#db
+								.prepare("DELETE FROM operation_intents WHERE candidate_id = ? AND operation = 'projection'")
+								.run(candidateId);
 						})();
 						return { ok: true, mnemopiId: pendingIntent.mnemopiId };
 					} catch {}
 				}
 				try {
-					this.#db.prepare("UPDATE candidates SET status = 'needs_review', updated_at = ? WHERE id = ?").run(Date.now(), candidateId);
+					this.#db
+						.prepare("UPDATE candidates SET status = 'needs_review', updated_at = ? WHERE id = ?")
+						.run(Date.now(), candidateId);
 				} catch {}
-				return { ok: false, error: "projection intent with real id pending reconciliation; retry blocked to prevent duplicate; use recoverOperationIntents" };
+				return {
+					ok: false,
+					error: "projection intent with real id pending reconciliation; retry blocked to prevent duplicate; use recoverOperationIntents",
+				};
 			}
 		}
 		// Gate on idempotent capability before any external mutation. No fallback to non-idempotent rememberScoped.
 		if (!hasIdempotentWriteCapability(mnemopi)) {
 			try {
-				this.#db.prepare("UPDATE candidates SET status = 'needs_review', updated_at = ? WHERE id = ?").run(Date.now(), candidateId);
+				this.#db
+					.prepare("UPDATE candidates SET status = 'needs_review', updated_at = ? WHERE id = ?")
+					.run(Date.now(), candidateId);
 			} catch {}
-			return { ok: false, error: "missing idempotent write capability rememberScopedIdempotent; needs_review without external mutation" };
+			return {
+				ok: false,
+				error: "missing idempotent write capability rememberScopedIdempotent; needs_review without external mutation",
+			};
 		}
 		// Durable projection intent before external write: crash leaves pending with intent for retry, never orphan approved
 		try {
-			this.#db.prepare("INSERT OR REPLACE INTO operation_intents (candidate_id, operation, project_identity, scope, mnemopi_id, mnemopi_bank, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)").run(candidateId, "projection", cand.projectIdentity, cand.scope, "__pending_projection__", targetBank, Date.now());
+			this.#db
+				.prepare(
+					"INSERT OR REPLACE INTO operation_intents (candidate_id, operation, project_identity, scope, mnemopi_id, mnemopi_bank, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+				)
+				.run(
+					candidateId,
+					"projection",
+					cand.projectIdentity,
+					cand.scope,
+					"__pending_projection__",
+					targetBank,
+					Date.now(),
+				);
 		} catch {
 			// If intent persist fails, remain pending for retry; do not proceed to external write without durable marker
 			return { ok: false, error: "projection intent persist failed before external write" };
@@ -998,7 +1220,12 @@ export class CustomAutolearnService {
 		const idempotencyKey = computeIdempotencyKey(candidateId, redacted, cand.scope, cand.projectIdentity);
 		let mnemopiId: string | undefined;
 		try {
-			mnemopiId = (mnemopi as MnemopiIdempotentWriteCapability).rememberScopedIdempotent(redacted, { scope: "bank", source: "custom-autolearn", idempotencyKey, targetBank });
+			mnemopiId = (mnemopi as MnemopiIdempotentWriteCapability).rememberScopedIdempotent(redacted, {
+				scope: "bank",
+				source: "custom-autolearn",
+				idempotencyKey,
+				targetBank,
+			});
 		} catch (e) {
 			try {
 				this.#db
@@ -1006,7 +1233,9 @@ export class CustomAutolearnService {
 					.run(Date.now(), candidateId);
 			} catch {}
 			try {
-				this.#db.prepare("DELETE FROM operation_intents WHERE candidate_id = ? AND operation = 'projection'").run(candidateId);
+				this.#db
+					.prepare("DELETE FROM operation_intents WHERE candidate_id = ? AND operation = 'projection'")
+					.run(candidateId);
 			} catch {}
 			return { ok: false, error: e instanceof Error ? e.message.slice(0, 512) : String(e).slice(0, 512) };
 		}
@@ -1017,24 +1246,36 @@ export class CustomAutolearnService {
 					.run(Date.now(), candidateId);
 			} catch {}
 			try {
-				this.#db.prepare("DELETE FROM operation_intents WHERE candidate_id = ? AND operation = 'projection'").run(candidateId);
+				this.#db
+					.prepare("DELETE FROM operation_intents WHERE candidate_id = ? AND operation = 'projection'")
+					.run(candidateId);
 			} catch {}
 			return { ok: false, error: "mnemopi projection failed: no id returned" };
 		}
 		// Update durable intent with actual mnemopiId before local persist, so crash after external write can be reconciled
 		try {
-			this.#db.prepare("INSERT OR REPLACE INTO operation_intents (candidate_id, operation, project_identity, scope, mnemopi_id, mnemopi_bank, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)").run(candidateId, "projection", cand.projectIdentity, cand.scope, mnemopiId, targetBank, Date.now());
+			this.#db
+				.prepare(
+					"INSERT OR REPLACE INTO operation_intents (candidate_id, operation, project_identity, scope, mnemopi_id, mnemopi_bank, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+				)
+				.run(candidateId, "projection", cand.projectIdentity, cand.scope, mnemopiId, targetBank, Date.now());
 		} catch {}
 		// Durable: persist returned ID + target bank before verification so retry can reconcile/delete and never orphan.
 		// Fail-closed: if local durable persistence fails, never report success; attempt compensated external cleanup after durable fallback intent.
 		let durableOk = false;
 		try {
 			this.#db.transaction(() => {
-				this.#db.prepare("UPDATE candidates SET status = 'projection_pending', updated_at = ? WHERE id = ? AND status != 'projection_pending'").run(Date.now(), candidateId);
+				this.#db
+					.prepare(
+						"UPDATE candidates SET status = 'projection_pending', updated_at = ? WHERE id = ? AND status != 'projection_pending'",
+					)
+					.run(Date.now(), candidateId);
 				const ex = this.getProjection(candidateId);
 				if (!ex) {
 					this.#db
-						.prepare("INSERT INTO projection_references (candidate_id, project_identity, scope, mnemopi_id, mnemopi_bank, created_at) VALUES (?, ?, ?, ?, ?, ?)")
+						.prepare(
+							"INSERT INTO projection_references (candidate_id, project_identity, scope, mnemopi_id, mnemopi_bank, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+						)
 						.run(candidateId, cand.projectIdentity, cand.scope, mnemopiId, targetBank, Date.now());
 					try {
 						this.#recordEvent(candidateId, "projected", { mnemopiId, bank: targetBank });
@@ -1051,7 +1292,19 @@ export class CustomAutolearnService {
 			// Try to persist a fallback intent so a future retry/recovery can clean up the orphan
 			let fallbackPersisted = false;
 			try {
-				const fr = this.#db.prepare("INSERT OR REPLACE INTO operation_intents (candidate_id, operation, project_identity, scope, mnemopi_id, mnemopi_bank, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)").run(candidateId, "projection_cleanup", cand.projectIdentity, cand.scope, mnemopiId, targetBank, Date.now());
+				const fr = this.#db
+					.prepare(
+						"INSERT OR REPLACE INTO operation_intents (candidate_id, operation, project_identity, scope, mnemopi_id, mnemopi_bank, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+					)
+					.run(
+						candidateId,
+						"projection_cleanup",
+						cand.projectIdentity,
+						cand.scope,
+						mnemopiId,
+						targetBank,
+						Date.now(),
+					);
 				const ch = (fr as unknown as { changes?: number })?.changes;
 				fallbackPersisted = typeof ch === "number" ? ch === 1 : true;
 				if (typeof ch === "number" && ch !== 1) fallbackPersisted = false;
@@ -1061,28 +1314,50 @@ export class CustomAutolearnService {
 			if (fallbackPersisted && hasExactBankEditCapability(mnemopi)) {
 				try {
 					const projCleanup = { mnemopiId, bank: targetBank };
-					const cleaned = this.#cleanMnemopiProjection(candidateId, projCleanup, mnemopi as unknown as MnemopiProjectionClient, "projection_cleanup");
+					const cleaned = this.#cleanMnemopiProjection(
+						candidateId,
+						projCleanup,
+						mnemopi as unknown as MnemopiProjectionClient,
+						"projection_cleanup",
+					);
 					if (cleaned) {
 						try {
-							this.#db.prepare("DELETE FROM operation_intents WHERE candidate_id = ? AND operation = 'projection_cleanup' AND mnemopi_id = ? AND mnemopi_bank = ?").run(candidateId, mnemopiId, targetBank);
+							this.#db
+								.prepare(
+									"DELETE FROM operation_intents WHERE candidate_id = ? AND operation = 'projection_cleanup' AND mnemopi_id = ? AND mnemopi_bank = ?",
+								)
+								.run(candidateId, mnemopiId, targetBank);
 						} catch {}
 						try {
 							// Preserve first valid reference: delete only if row matches compensated id and bank
 							const cur = this.getProjection(candidateId);
 							if (cur && cur.mnemopiId === mnemopiId && cur.bank === targetBank) {
-								this.#db.prepare("DELETE FROM projection_references WHERE candidate_id = ? AND mnemopi_id = ? AND mnemopi_bank = ?").run(candidateId, mnemopiId, targetBank);
+								this.#db
+									.prepare(
+										"DELETE FROM projection_references WHERE candidate_id = ? AND mnemopi_id = ? AND mnemopi_bank = ?",
+									)
+									.run(candidateId, mnemopiId, targetBank);
 							}
 						} catch {}
 						try {
-							this.#db.prepare("DELETE FROM operation_intents WHERE candidate_id = ? AND operation = 'projection' AND mnemopi_bank = ?").run(candidateId, targetBank);
+							this.#db
+								.prepare(
+									"DELETE FROM operation_intents WHERE candidate_id = ? AND operation = 'projection' AND mnemopi_bank = ?",
+								)
+								.run(candidateId, targetBank);
 						} catch {}
 					}
 				} catch {}
 			}
 			try {
-				this.#db.prepare("UPDATE candidates SET status = 'needs_review', updated_at = ? WHERE id = ?").run(Date.now(), candidateId);
+				this.#db
+					.prepare("UPDATE candidates SET status = 'needs_review', updated_at = ? WHERE id = ?")
+					.run(Date.now(), candidateId);
 			} catch {}
-			return { ok: false, error: "projection persistence failed: local durable reference not persisted; external memory may require manual reconciliation" };
+			return {
+				ok: false,
+				error: "projection persistence failed: local durable reference not persisted; external memory may require manual reconciliation",
+			};
 		}
 		if (hasExactBankReadCapability(mnemopi)) {
 			let mem: { bank: string } | null | undefined;
@@ -1090,23 +1365,40 @@ export class CustomAutolearnService {
 				mem = (mnemopi as MnemopiExactBankReadCapability).getScopedMemoryInBank(mnemopiId, targetBank);
 			} catch (e) {
 				try {
-					this.#db.prepare("UPDATE candidates SET status = 'projection_pending', updated_at = ? WHERE id = ?").run(Date.now(), candidateId);
+					this.#db
+						.prepare("UPDATE candidates SET status = 'projection_pending', updated_at = ? WHERE id = ?")
+						.run(Date.now(), candidateId);
 				} catch {}
 				return { ok: false, error: e instanceof Error ? e.message.slice(0, 512) : String(e).slice(0, 512) };
 			}
 			if (!mem || typeof mem.bank !== "string" || !mem.bank.trim()) {
 				try {
-					this.#db.prepare("UPDATE candidates SET status = 'projection_pending', updated_at = ? WHERE id = ?").run(Date.now(), candidateId);
+					this.#db
+						.prepare("UPDATE candidates SET status = 'projection_pending', updated_at = ? WHERE id = ?")
+						.run(Date.now(), candidateId);
 				} catch {}
 				return { ok: false, error: "mnemopi projection not confirmed: missing bank/reference" };
 			}
 			if (mem.bank !== targetBank) {
 				try {
-					this.#db.prepare("INSERT OR REPLACE INTO projection_references (candidate_id, project_identity, scope, mnemopi_id, mnemopi_bank, created_at) VALUES (?, ?, ?, ?, ?, ?)").run(candidateId, cand.projectIdentity, cand.scope, mnemopiId, mem.bank, Date.now());
-					this.#db.prepare("INSERT OR REPLACE INTO operation_intents (candidate_id, operation, project_identity, scope, mnemopi_id, mnemopi_bank, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)").run(candidateId, "projection", cand.projectIdentity, cand.scope, mnemopiId, mem.bank, Date.now());
-					this.#db.prepare("UPDATE candidates SET status = 'needs_review', updated_at = ? WHERE id = ?").run(Date.now(), candidateId);
+					this.#db
+						.prepare(
+							"INSERT OR REPLACE INTO projection_references (candidate_id, project_identity, scope, mnemopi_id, mnemopi_bank, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+						)
+						.run(candidateId, cand.projectIdentity, cand.scope, mnemopiId, mem.bank, Date.now());
+					this.#db
+						.prepare(
+							"INSERT OR REPLACE INTO operation_intents (candidate_id, operation, project_identity, scope, mnemopi_id, mnemopi_bank, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+						)
+						.run(candidateId, "projection", cand.projectIdentity, cand.scope, mnemopiId, mem.bank, Date.now());
+					this.#db
+						.prepare("UPDATE candidates SET status = 'needs_review', updated_at = ? WHERE id = ?")
+						.run(Date.now(), candidateId);
 				} catch {}
-				return { ok: false, error: `stored bank ${targetBank} != actual write bank ${mem.bank}; preserved actual bank for reconciliation` };
+				return {
+					ok: false,
+					error: `stored bank ${targetBank} != actual write bank ${mem.bank}; preserved actual bank for reconciliation`,
+				};
 			}
 		} else if (typeof (mnemopi as unknown as { getScopedMemory?: unknown }).getScopedMemory === "function") {
 			let mem: { bank: string } | null | undefined;
@@ -1115,42 +1407,68 @@ export class CustomAutolearnService {
 				mem = h2.getScopedMemory?.(mnemopiId);
 			} catch (e) {
 				try {
-					this.#db.prepare("UPDATE candidates SET status = 'projection_pending', updated_at = ? WHERE id = ?").run(Date.now(), candidateId);
+					this.#db
+						.prepare("UPDATE candidates SET status = 'projection_pending', updated_at = ? WHERE id = ?")
+						.run(Date.now(), candidateId);
 				} catch {}
 				return { ok: false, error: e instanceof Error ? e.message.slice(0, 512) : String(e).slice(0, 512) };
 			}
 			if (!mem || typeof mem.bank !== "string" || !mem.bank.trim()) {
 				try {
-					this.#db.prepare("UPDATE candidates SET status = 'projection_pending', updated_at = ? WHERE id = ?").run(Date.now(), candidateId);
+					this.#db
+						.prepare("UPDATE candidates SET status = 'projection_pending', updated_at = ? WHERE id = ?")
+						.run(Date.now(), candidateId);
 				} catch {}
 				return { ok: false, error: "mnemopi projection not confirmed: missing bank/reference" };
 			}
 			if (mem.bank !== targetBank) {
 				try {
-					this.#db.prepare("INSERT OR REPLACE INTO projection_references (candidate_id, project_identity, scope, mnemopi_id, mnemopi_bank, created_at) VALUES (?, ?, ?, ?, ?, ?)").run(candidateId, cand.projectIdentity, cand.scope, mnemopiId, mem.bank, Date.now());
-					this.#db.prepare("INSERT OR REPLACE INTO operation_intents (candidate_id, operation, project_identity, scope, mnemopi_id, mnemopi_bank, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)").run(candidateId, "projection", cand.projectIdentity, cand.scope, mnemopiId, mem.bank, Date.now());
-					this.#db.prepare("UPDATE candidates SET status = 'needs_review', updated_at = ? WHERE id = ?").run(Date.now(), candidateId);
+					this.#db
+						.prepare(
+							"INSERT OR REPLACE INTO projection_references (candidate_id, project_identity, scope, mnemopi_id, mnemopi_bank, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+						)
+						.run(candidateId, cand.projectIdentity, cand.scope, mnemopiId, mem.bank, Date.now());
+					this.#db
+						.prepare(
+							"INSERT OR REPLACE INTO operation_intents (candidate_id, operation, project_identity, scope, mnemopi_id, mnemopi_bank, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+						)
+						.run(candidateId, "projection", cand.projectIdentity, cand.scope, mnemopiId, mem.bank, Date.now());
+					this.#db
+						.prepare("UPDATE candidates SET status = 'needs_review', updated_at = ? WHERE id = ?")
+						.run(Date.now(), candidateId);
 				} catch {}
-				return { ok: false, error: `stored bank ${targetBank} != actual write bank ${mem.bank}; preserved actual bank for reconciliation` };
+				return {
+					ok: false,
+					error: `stored bank ${targetBank} != actual write bank ${mem.bank}; preserved actual bank for reconciliation`,
+				};
 			}
 		}
 		// Ensure projection reference exists (already persisted durable before verification); verify idempotence.
 		const existingAfter = this.getProjection(candidateId);
 		if (!existingAfter || existingAfter.mnemopiId !== mnemopiId) {
 			const inserted = this.projectToMnemopi(candidateId, mnemopiId, targetBank);
-			if (!inserted && (!this.getProjection(candidateId) || this.getProjection(candidateId)?.mnemopiId !== mnemopiId)) {
+			if (
+				!inserted &&
+				(!this.getProjection(candidateId) || this.getProjection(candidateId)?.mnemopiId !== mnemopiId)
+			) {
 				return { ok: false, error: "projection already exists; requires rollback before re-projection" };
 			}
 		}
 		try {
-			this.#db.prepare("UPDATE candidates SET status = 'approved', updated_at = ? WHERE id = ?").run(Date.now(), candidateId);
+			this.#db
+				.prepare("UPDATE candidates SET status = 'approved', updated_at = ? WHERE id = ?")
+				.run(Date.now(), candidateId);
 		} catch {
 			// If final status flip fails, keep projection_pending for retry reconciliation; do not report success as approved
 			return { ok: false, error: "projection status persist failed after durable reference; retry required" };
 		}
 		// Success: clear durable projection intents
 		try {
-			this.#db.prepare("DELETE FROM operation_intents WHERE candidate_id = ? AND operation IN ('projection', 'projection_cleanup')").run(candidateId);
+			this.#db
+				.prepare(
+					"DELETE FROM operation_intents WHERE candidate_id = ? AND operation IN ('projection', 'projection_cleanup')",
+				)
+				.run(candidateId);
 		} catch {}
 		return { ok: true, mnemopiId };
 	}
@@ -1192,7 +1510,9 @@ export class CustomAutolearnService {
 		const isProjectionCleanup = actionReason.includes("projection_cleanup");
 		const markUncertain = (reason: string, details?: Record<string, unknown>): false => {
 			try {
-				this.#db.prepare("UPDATE candidates SET status = 'needs_review', updated_at = ? WHERE id = ?").run(Date.now(), candidateId);
+				this.#db
+					.prepare("UPDATE candidates SET status = 'needs_review', updated_at = ? WHERE id = ?")
+					.run(Date.now(), candidateId);
 			} catch {}
 			try {
 				this.#recordEvent(candidateId, "review_requested", { reason, ...details });
@@ -1230,7 +1550,12 @@ export class CustomAutolearnService {
 			return true;
 		}
 		// For projection_cleanup with null, fall through to edit attempt for explicit confirmation.
-		if (exactHit !== undefined && exactHit !== null && typeof exactHit === "object" && "bank" in (exactHit as Record<string, unknown>)) {
+		if (
+			exactHit !== undefined &&
+			exactHit !== null &&
+			typeof exactHit === "object" &&
+			"bank" in (exactHit as Record<string, unknown>)
+		) {
 			const b = (exactHit as Record<string, unknown>)["bank"];
 			if (typeof b === "string" && b.trim() !== proj.bank) {
 				// Foreign bank hit for exact query should not happen, but treat as mismatch -> do not mutate foreign
@@ -1239,9 +1564,15 @@ export class CustomAutolearnService {
 		}
 		// If exact read threw or returned undefined, we proceed to edit but will still require bank-matched success.
 
-		const runOpInBank = (op: "forget" | "invalidate"): { ok: boolean; status?: string; bank?: string; err?: string } => {
+		const runOpInBank = (
+			op: "forget" | "invalidate",
+		): { ok: boolean; status?: string; bank?: string; err?: string } => {
 			try {
-				const res = (mnemopi as MnemopiExactBankEditCapability).editScopedMemoryInBank(op, proj.mnemopiId, proj.bank);
+				const res = (mnemopi as MnemopiExactBankEditCapability).editScopedMemoryInBank(
+					op,
+					proj.mnemopiId,
+					proj.bank,
+				);
 				if (!res || typeof res !== "object" || !("status" in (res as Record<string, unknown>))) {
 					return { ok: false, err: `${op} returned non-object or missing status` };
 				}
@@ -1288,9 +1619,10 @@ export class CustomAutolearnService {
 		}
 
 		// Any other forget status (not_editable, unexpected) -> fail closed, preserve projection
-		return markUncertain(actionReason, { forgetError: `forget status ${String(fRes.status)} bank=${String(fRes.bank)}` });
+		return markUncertain(actionReason, {
+			forgetError: `forget status ${String(fRes.status)} bank=${String(fRes.bank)}`,
+		});
 	}
-
 
 	/** Delete candidate and its exact Mnemopi projection (scoped to the stored bank). Conservative on failure: preserves projection and marks needs_review if backend is uncertain.
 	 *  Durable: persists operation intent before external call so crash between intent and external/local commit can be reconciled on restart.
@@ -1308,7 +1640,9 @@ export class CustomAutolearnService {
 		if (proj) {
 			if (!proj.bank || !proj.mnemopiId) {
 				try {
-					this.#db.prepare("UPDATE candidates SET status = 'needs_review', updated_at = ? WHERE id = ?").run(Date.now(), candidateId);
+					this.#db
+						.prepare("UPDATE candidates SET status = 'needs_review', updated_at = ? WHERE id = ?")
+						.run(Date.now(), candidateId);
 				} catch {}
 				try {
 					this.#recordEvent(candidateId, "review_requested", { reason: "missing_projection_bank" });
@@ -1317,7 +1651,9 @@ export class CustomAutolearnService {
 			}
 			if (!mnemopi) {
 				try {
-					this.#db.prepare("UPDATE candidates SET status = 'projection_pending', updated_at = ? WHERE id = ?").run(Date.now(), candidateId);
+					this.#db
+						.prepare("UPDATE candidates SET status = 'projection_pending', updated_at = ? WHERE id = ?")
+						.run(Date.now(), candidateId);
 				} catch {}
 				try {
 					this.#recordEvent(candidateId, "review_requested", { reason: "mnemopi_required_for_delete" });
@@ -1331,7 +1667,15 @@ export class CustomAutolearnService {
 					.prepare(
 						"INSERT OR REPLACE INTO operation_intents (candidate_id, operation, project_identity, scope, mnemopi_id, mnemopi_bank, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
 					)
-					.run(candidateId, "delete", candidate.projectIdentity, candidate.scope, proj.mnemopiId, proj.bank, Date.now());
+					.run(
+						candidateId,
+						"delete",
+						candidate.projectIdentity,
+						candidate.scope,
+						proj.mnemopiId,
+						proj.bank,
+						Date.now(),
+					);
 				const ch = (r as unknown as { changes?: number })?.changes;
 				intentPersisted = typeof ch === "number" ? ch === 1 : true;
 				if (typeof ch === "number" && ch !== 1) intentPersisted = false;
@@ -1340,21 +1684,33 @@ export class CustomAutolearnService {
 			}
 			if (!intentPersisted) {
 				try {
-					this.#db.prepare("UPDATE candidates SET status = 'needs_review', updated_at = ? WHERE id = ?").run(Date.now(), candidateId);
+					this.#db
+						.prepare("UPDATE candidates SET status = 'needs_review', updated_at = ? WHERE id = ?")
+						.run(Date.now(), candidateId);
 				} catch {}
 				try {
-					this.#recordEvent(candidateId, "review_requested", { reason: "intent_persist_failed", operation: "delete" });
+					this.#recordEvent(candidateId, "review_requested", {
+						reason: "intent_persist_failed",
+						operation: "delete",
+					});
 				} catch {}
 				return false;
 			}
 			try {
-				this.#recordEvent(candidateId, "delete_intent", { operation: "delete", mnemopiId: proj.mnemopiId, bank: proj.bank });
+				this.#recordEvent(candidateId, "delete_intent", {
+					operation: "delete",
+					mnemopiId: proj.mnemopiId,
+					bank: proj.bank,
+				});
 			} catch {}
 			const ok = this.#cleanMnemopiProjection(candidateId, proj, mnemopi, "mnemopi_delete_uncertain");
 			if (!ok) return false;
 			// External succeeded: perform local deletion and clear intent atomically
 			this.#db.transaction(() => {
-				this.#recordEvent(candidateId, "deleted", { projectIdentity: candidate.projectIdentity, scope: candidate.scope });
+				this.#recordEvent(candidateId, "deleted", {
+					projectIdentity: candidate.projectIdentity,
+					scope: candidate.scope,
+				});
 				this.#db.prepare("DELETE FROM candidates WHERE id = ?").run(candidateId);
 				this.#db
 					.prepare(
@@ -1392,7 +1748,9 @@ export class CustomAutolearnService {
 		if (proj.projectIdentity !== projectIdentity && proj.scope !== "global") return false;
 		if (!mnemopi) {
 			try {
-				this.#db.prepare("UPDATE candidates SET status = 'projection_pending', updated_at = ? WHERE id = ?").run(Date.now(), candidateId);
+				this.#db
+					.prepare("UPDATE candidates SET status = 'projection_pending', updated_at = ? WHERE id = ?")
+					.run(Date.now(), candidateId);
 			} catch {}
 			try {
 				this.#recordEvent(candidateId, "review_requested", { reason: "mnemopi_required_for_rollback" });
@@ -1416,15 +1774,24 @@ export class CustomAutolearnService {
 		}
 		if (!intentPersisted) {
 			try {
-				this.#db.prepare("UPDATE candidates SET status = 'needs_review', updated_at = ? WHERE id = ?").run(Date.now(), candidateId);
+				this.#db
+					.prepare("UPDATE candidates SET status = 'needs_review', updated_at = ? WHERE id = ?")
+					.run(Date.now(), candidateId);
 			} catch {}
 			try {
-				this.#recordEvent(candidateId, "review_requested", { reason: "intent_persist_failed", operation: "rollback" });
+				this.#recordEvent(candidateId, "review_requested", {
+					reason: "intent_persist_failed",
+					operation: "rollback",
+				});
 			} catch {}
 			return false;
 		}
 		try {
-			this.#recordEvent(candidateId, "rollback_intent", { operation: "rollback", mnemopiId: proj.mnemopiId, bank: proj.bank });
+			this.#recordEvent(candidateId, "rollback_intent", {
+				operation: "rollback",
+				mnemopiId: proj.mnemopiId,
+				bank: proj.bank,
+			});
 		} catch {}
 		const ok = this.#cleanMnemopiProjection(candidateId, proj, mnemopi, "mnemopi_rollback_uncertain");
 		if (!ok) return false;
@@ -1433,7 +1800,9 @@ export class CustomAutolearnService {
 			this.#db.prepare("DELETE FROM projection_references WHERE candidate_id = ?").run(candidateId);
 			if (candidate) {
 				this.#db
-					.prepare("UPDATE candidates SET status = 'needs_review', version = version + 1, updated_at = ? WHERE id = ?")
+					.prepare(
+						"UPDATE candidates SET status = 'needs_review', version = version + 1, updated_at = ? WHERE id = ?",
+					)
 					.run(Date.now(), candidateId);
 			}
 			this.#db.prepare("DELETE FROM operation_intents WHERE candidate_id = ?").run(candidateId);
@@ -1444,14 +1813,28 @@ export class CustomAutolearnService {
 		return true;
 	}
 
-	getOperationIntent(candidateId: string): { operation: string; projectIdentity: string; scope: string; mnemopiId: string; mnemopiBank: string; createdAt: number } | null {
+	getOperationIntent(candidateId: string): {
+		operation: string;
+		projectIdentity: string;
+		scope: string;
+		mnemopiId: string;
+		mnemopiBank: string;
+		createdAt: number;
+	} | null {
 		try {
 			const row = this.#db
 				.prepare(
 					"SELECT candidate_id as candidateId, operation, project_identity as projectIdentity, scope, mnemopi_id as mnemopiId, mnemopi_bank as mnemopiBank, created_at as createdAt FROM operation_intents WHERE candidate_id = ?",
 				)
 				.get(candidateId) as
-				| { operation: string; projectIdentity: string; scope: string; mnemopiId: string; mnemopiBank: string; createdAt: number }
+				| {
+						operation: string;
+						projectIdentity: string;
+						scope: string;
+						mnemopiId: string;
+						mnemopiBank: string;
+						createdAt: number;
+				  }
 				| undefined;
 			if (!row) return null;
 			return {
@@ -1467,10 +1850,19 @@ export class CustomAutolearnService {
 		}
 	}
 	recoverOperationIntents(mnemopi?: MnemopiProjectionClient | null): number {
-		let rows: { candidate_id: string; operation: string; project_identity: string; scope: string; mnemopi_id: string; mnemopi_bank: string }[] = [];
+		let rows: {
+			candidate_id: string;
+			operation: string;
+			project_identity: string;
+			scope: string;
+			mnemopi_id: string;
+			mnemopi_bank: string;
+		}[] = [];
 		try {
 			rows = this.#db
-				.prepare("SELECT candidate_id, operation, project_identity, scope, mnemopi_id, mnemopi_bank FROM operation_intents")
+				.prepare(
+					"SELECT candidate_id, operation, project_identity, scope, mnemopi_id, mnemopi_bank FROM operation_intents",
+				)
 				.all() as typeof rows;
 		} catch {
 			return 0;
@@ -1516,9 +1908,15 @@ export class CustomAutolearnService {
 			const clearIntent = (op?: string, id?: string, bank?: string): void => {
 				try {
 					if (id && bank) {
-						this.#db.prepare("DELETE FROM operation_intents WHERE candidate_id = ? AND mnemopi_id = ? AND mnemopi_bank = ?").run(candidateId, id, bank);
+						this.#db
+							.prepare(
+								"DELETE FROM operation_intents WHERE candidate_id = ? AND mnemopi_id = ? AND mnemopi_bank = ?",
+							)
+							.run(candidateId, id, bank);
 					} else if (op) {
-						this.#db.prepare("DELETE FROM operation_intents WHERE candidate_id = ? AND operation = ?").run(candidateId, op);
+						this.#db
+							.prepare("DELETE FROM operation_intents WHERE candidate_id = ? AND operation = ?")
+							.run(candidateId, op);
 					} else {
 						this.#db.prepare("DELETE FROM operation_intents WHERE candidate_id = ?").run(candidateId);
 					}
@@ -1530,7 +1928,11 @@ export class CustomAutolearnService {
 					if (!cur) {
 						this.#db.prepare("DELETE FROM projection_references WHERE candidate_id = ?").run(candidateId);
 					} else if (!id || (cur.mnemopiId === id && (!bank || cur.bank === bank))) {
-						this.#db.prepare("DELETE FROM projection_references WHERE candidate_id = ? AND mnemopi_id = ? AND mnemopi_bank = ?").run(candidateId, cur.mnemopiId, cur.bank);
+						this.#db
+							.prepare(
+								"DELETE FROM projection_references WHERE candidate_id = ? AND mnemopi_id = ? AND mnemopi_bank = ?",
+							)
+							.run(candidateId, cur.mnemopiId, cur.bank);
 					}
 				} catch {}
 			};
@@ -1559,7 +1961,11 @@ export class CustomAutolearnService {
 					if (cand.status === "projection_pending" && curProj && curProj.mnemopiId !== "__pending_projection__") {
 						clearIntent("projection");
 						try {
-							this.#db.prepare("UPDATE candidates SET status = 'approved', updated_at = ? WHERE id = ? AND status = 'projection_pending'").run(Date.now(), candidateId);
+							this.#db
+								.prepare(
+									"UPDATE candidates SET status = 'approved', updated_at = ? WHERE id = ? AND status = 'projection_pending'",
+								)
+								.run(Date.now(), candidateId);
 						} catch {}
 						recovered++;
 						continue;
@@ -1569,29 +1975,50 @@ export class CustomAutolearnService {
 					if (cand && cand.reviewedContent && mnemopi && hasIdempotentWriteCapability(mnemopi)) {
 						const redactedRec = redactSensitiveText(cand.reviewedContent);
 						const keyRec = computeIdempotencyKey(candidateId, redactedRec, cand.scope, cand.projectIdentity);
-						const bankRec = r.mnemopi_bank?.trim() ? r.mnemopi_bank.trim() : bankForScope(cand.scope, cand.projectIdentity);
+						const bankRec = r.mnemopi_bank?.trim()
+							? r.mnemopi_bank.trim()
+							: bankForScope(cand.scope, cand.projectIdentity);
 						let recId: string | undefined;
 						try {
-							recId = (mnemopi as MnemopiIdempotentWriteCapability).rememberScopedIdempotent(redactedRec, { scope: "bank", source: "custom-autolearn", idempotencyKey: keyRec, targetBank: bankRec });
+							recId = (mnemopi as MnemopiIdempotentWriteCapability).rememberScopedIdempotent(redactedRec, {
+								scope: "bank",
+								source: "custom-autolearn",
+								idempotencyKey: keyRec,
+								targetBank: bankRec,
+							});
 						} catch {}
 						if (recId && typeof recId === "string" && recId.trim()) {
 							recId = recId.trim();
 							try {
-								this.#db.prepare("INSERT OR REPLACE INTO operation_intents (candidate_id, operation, project_identity, scope, mnemopi_id, mnemopi_bank, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)").run(candidateId, "projection", r.project_identity, r.scope, recId, bankRec, Date.now());
+								this.#db
+									.prepare(
+										"INSERT OR REPLACE INTO operation_intents (candidate_id, operation, project_identity, scope, mnemopi_id, mnemopi_bank, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+									)
+									.run(candidateId, "projection", r.project_identity, r.scope, recId, bankRec, Date.now());
 							} catch {}
 							try {
 								this.#db.transaction(() => {
 									const cur2 = this.getProjection(candidateId);
 									if (!cur2) {
-										this.#db.prepare("INSERT INTO projection_references (candidate_id, project_identity, scope, mnemopi_id, mnemopi_bank, created_at) VALUES (?, ?, ?, ?, ?, ?)").run(candidateId, r.project_identity, r.scope, recId, bankRec, Date.now());
+										this.#db
+											.prepare(
+												"INSERT INTO projection_references (candidate_id, project_identity, scope, mnemopi_id, mnemopi_bank, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+											)
+											.run(candidateId, r.project_identity, r.scope, recId, bankRec, Date.now());
 										try {
 											this.#recordEvent(candidateId, "projected", { mnemopiId: recId, bank: bankRec });
 										} catch {}
 									} else if (cur2.mnemopiId !== recId || cur2.bank !== bankRec) {
 										throw new Error("projection conflict during sentinel recovery");
 									}
-									this.#db.prepare("UPDATE candidates SET status = 'approved', updated_at = ? WHERE id = ?").run(Date.now(), candidateId);
-									this.#db.prepare("DELETE FROM operation_intents WHERE candidate_id = ? AND operation = 'projection'").run(candidateId);
+									this.#db
+										.prepare("UPDATE candidates SET status = 'approved', updated_at = ? WHERE id = ?")
+										.run(Date.now(), candidateId);
+									this.#db
+										.prepare(
+											"DELETE FROM operation_intents WHERE candidate_id = ? AND operation = 'projection'",
+										)
+										.run(candidateId);
 								})();
 								recovered++;
 							} catch {}
@@ -1604,14 +2031,23 @@ export class CustomAutolearnService {
 				if (curProj) {
 					if (curProj.mnemopiId === r.mnemopi_id && curProj.bank === r.mnemopi_bank) {
 						try {
-							this.#db.prepare("UPDATE candidates SET status = 'approved', updated_at = ? WHERE id = ? AND status = 'projection_pending'").run(Date.now(), candidateId);
+							this.#db
+								.prepare(
+									"UPDATE candidates SET status = 'approved', updated_at = ? WHERE id = ? AND status = 'projection_pending'",
+								)
+								.run(Date.now(), candidateId);
 						} catch {}
 						clearIntent("projection");
 						recovered++;
 						continue;
 					}
 					if (!mnemopi) continue;
-					const ok = this.#cleanMnemopiProjection(candidateId, { mnemopiId: r.mnemopi_id, bank: r.mnemopi_bank }, mnemopi, "projection_cleanup_retry");
+					const ok = this.#cleanMnemopiProjection(
+						candidateId,
+						{ mnemopiId: r.mnemopi_id, bank: r.mnemopi_bank },
+						mnemopi,
+						"projection_cleanup_retry",
+					);
 					if (ok) {
 						clearIntent("projection", r.mnemopi_id, r.mnemopi_bank);
 						recovered++;
@@ -1622,20 +2058,26 @@ export class CustomAutolearnService {
 				let confirmed = false;
 				if (hasExactBankReadCapability(mnemopi)) {
 					try {
-						const hit = (mnemopi as MnemopiExactBankReadCapability).getScopedMemoryInBank(r.mnemopi_id, r.mnemopi_bank);
+						const hit = (mnemopi as MnemopiExactBankReadCapability).getScopedMemoryInBank(
+							r.mnemopi_id,
+							r.mnemopi_bank,
+						);
 						if (hit && typeof hit === "object" && "bank" in (hit as Record<string, unknown>)) {
 							const b = (hit as Record<string, unknown>)["bank"];
 							if (typeof b === "string" && b.trim() === r.mnemopi_bank) confirmed = true;
-						} else if (hit && typeof (hit as { bank?: unknown }).bank === "string" && (hit as { bank: string }).bank === r.mnemopi_bank) {
+						} else if (
+							hit &&
+							typeof (hit as { bank?: unknown }).bank === "string" &&
+							(hit as { bank: string }).bank === r.mnemopi_bank
+						) {
 							confirmed = true;
 						}
 					} catch {}
 				} else if (typeof (mnemopi as unknown as { getScopedMemory?: unknown }).getScopedMemory === "function") {
 					try {
-						const hit = (mnemopi as unknown as { getScopedMemory: (id: string) => unknown }).getScopedMemory(r.mnemopi_id) as
-							| { bank?: string }
-							| null
-							| undefined;
+						const hit = (mnemopi as unknown as { getScopedMemory: (id: string) => unknown }).getScopedMemory(
+							r.mnemopi_id,
+						) as { bank?: string } | null | undefined;
 						if (hit && typeof hit === "object" && "bank" in (hit as Record<string, unknown>)) {
 							const b = (hit as Record<string, unknown>)["bank"];
 							if (typeof b === "string" && b.trim() === r.mnemopi_bank) confirmed = true;
@@ -1648,16 +2090,25 @@ export class CustomAutolearnService {
 							const cur2 = this.getProjection(candidateId);
 							if (!cur2) {
 								this.#db
-									.prepare("INSERT INTO projection_references (candidate_id, project_identity, scope, mnemopi_id, mnemopi_bank, created_at) VALUES (?, ?, ?, ?, ?, ?)")
+									.prepare(
+										"INSERT INTO projection_references (candidate_id, project_identity, scope, mnemopi_id, mnemopi_bank, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+									)
 									.run(candidateId, r.project_identity, r.scope, r.mnemopi_id, r.mnemopi_bank, Date.now());
 								try {
-									this.#recordEvent(candidateId, "projected", { mnemopiId: r.mnemopi_id, bank: r.mnemopi_bank });
+									this.#recordEvent(candidateId, "projected", {
+										mnemopiId: r.mnemopi_id,
+										bank: r.mnemopi_bank,
+									});
 								} catch {}
 							} else if (cur2.mnemopiId !== r.mnemopi_id || cur2.bank !== r.mnemopi_bank) {
 								throw new Error("projection conflict during reconciliation");
 							}
-							this.#db.prepare("UPDATE candidates SET status = 'approved', updated_at = ? WHERE id = ?").run(Date.now(), candidateId);
-							this.#db.prepare("DELETE FROM operation_intents WHERE candidate_id = ? AND operation = 'projection'").run(candidateId);
+							this.#db
+								.prepare("UPDATE candidates SET status = 'approved', updated_at = ? WHERE id = ?")
+								.run(Date.now(), candidateId);
+							this.#db
+								.prepare("DELETE FROM operation_intents WHERE candidate_id = ? AND operation = 'projection'")
+								.run(candidateId);
 						})();
 						recovered++;
 					} catch {}
@@ -1666,12 +2117,17 @@ export class CustomAutolearnService {
 				let absent = false;
 				if (hasExactBankReadCapability(mnemopi)) {
 					try {
-						const hit2 = (mnemopi as MnemopiExactBankReadCapability).getScopedMemoryInBank(r.mnemopi_id, r.mnemopi_bank);
+						const hit2 = (mnemopi as MnemopiExactBankReadCapability).getScopedMemoryInBank(
+							r.mnemopi_id,
+							r.mnemopi_bank,
+						);
 						if (hit2 == null) absent = true;
 					} catch {}
 				} else if (typeof (mnemopi as unknown as { getScopedMemory?: unknown }).getScopedMemory === "function") {
 					try {
-						const hit2 = (mnemopi as unknown as { getScopedMemory: (id: string) => unknown }).getScopedMemory(r.mnemopi_id);
+						const hit2 = (mnemopi as unknown as { getScopedMemory: (id: string) => unknown }).getScopedMemory(
+							r.mnemopi_id,
+						);
 						if (hit2 == null) absent = true;
 						else if (typeof hit2 === "object" && hit2 !== null && "bank" in (hit2 as Record<string, unknown>)) {
 							const bb = (hit2 as Record<string, unknown>)["bank"];
@@ -1686,17 +2142,30 @@ export class CustomAutolearnService {
 				if (absent) {
 					clearIntent("projection", r.mnemopi_id, r.mnemopi_bank);
 					try {
-						this.#db.prepare("UPDATE candidates SET status = 'needs_review', updated_at = ? WHERE id = ? AND status = 'projection_pending'").run(Date.now(), candidateId);
+						this.#db
+							.prepare(
+								"UPDATE candidates SET status = 'needs_review', updated_at = ? WHERE id = ? AND status = 'projection_pending'",
+							)
+							.run(Date.now(), candidateId);
 					} catch {}
 					recovered++;
 					continue;
 				}
-				const ok2 = this.#cleanMnemopiProjection(candidateId, { mnemopiId: r.mnemopi_id, bank: r.mnemopi_bank }, mnemopi, "projection_cleanup_retry");
+				const ok2 = this.#cleanMnemopiProjection(
+					candidateId,
+					{ mnemopiId: r.mnemopi_id, bank: r.mnemopi_bank },
+					mnemopi,
+					"projection_cleanup_retry",
+				);
 				if (ok2) {
 					clearIntent("projection", r.mnemopi_id, r.mnemopi_bank);
 					deleteMatchingProjRef(r.mnemopi_id, r.mnemopi_bank);
 					try {
-						this.#db.prepare("UPDATE candidates SET status = 'needs_review', updated_at = ? WHERE id = ? AND status = 'projection_pending'").run(Date.now(), candidateId);
+						this.#db
+							.prepare(
+								"UPDATE candidates SET status = 'needs_review', updated_at = ? WHERE id = ? AND status = 'projection_pending'",
+							)
+							.run(Date.now(), candidateId);
 					} catch {}
 					recovered++;
 				}
@@ -1705,7 +2174,9 @@ export class CustomAutolearnService {
 			if (r.operation === "delete") {
 				if (!mnemopi) {
 					try {
-						this.#db.prepare("UPDATE candidates SET status = 'projection_pending', updated_at = ? WHERE id = ?").run(Date.now(), candidateId);
+						this.#db
+							.prepare("UPDATE candidates SET status = 'projection_pending', updated_at = ? WHERE id = ?")
+							.run(Date.now(), candidateId);
 					} catch {}
 					continue;
 				}
@@ -1721,26 +2192,41 @@ export class CustomAutolearnService {
 				}
 				try {
 					this.#db.transaction(() => {
-						this.#recordEvent(candidateId, "deleted", { projectIdentity: cand.projectIdentity, scope: cand.scope });
+						this.#recordEvent(candidateId, "deleted", {
+							projectIdentity: cand.projectIdentity,
+							scope: cand.scope,
+						});
 						this.#db.prepare("DELETE FROM candidates WHERE id = ?").run(candidateId);
 						this.#db
-							.prepare("INSERT OR REPLACE INTO tombstones (candidate_id, project_identity, scope, deleted_at) VALUES (?, ?, ?, ?)")
+							.prepare(
+								"INSERT OR REPLACE INTO tombstones (candidate_id, project_identity, scope, deleted_at) VALUES (?, ?, ?, ?)",
+							)
 							.run(candidateId, cand.projectIdentity, cand.scope, Date.now());
 						// Preserve first valid reference: delete only matching row
 						const cur = this.getProjection(candidateId);
 						if (cur && cur.mnemopiId === r.mnemopi_id && cur.bank === r.mnemopi_bank) {
-							this.#db.prepare("DELETE FROM projection_references WHERE candidate_id = ? AND mnemopi_id = ? AND mnemopi_bank = ?").run(candidateId, r.mnemopi_id, r.mnemopi_bank);
+							this.#db
+								.prepare(
+									"DELETE FROM projection_references WHERE candidate_id = ? AND mnemopi_id = ? AND mnemopi_bank = ?",
+								)
+								.run(candidateId, r.mnemopi_id, r.mnemopi_bank);
 						} else if (!cur) {
 							this.#db.prepare("DELETE FROM projection_references WHERE candidate_id = ?").run(candidateId);
 						}
-						this.#db.prepare("DELETE FROM operation_intents WHERE candidate_id = ? AND mnemopi_id = ? AND mnemopi_bank = ?").run(candidateId, r.mnemopi_id, r.mnemopi_bank);
+						this.#db
+							.prepare(
+								"DELETE FROM operation_intents WHERE candidate_id = ? AND mnemopi_id = ? AND mnemopi_bank = ?",
+							)
+							.run(candidateId, r.mnemopi_id, r.mnemopi_bank);
 					})();
 					recovered++;
 				} catch {}
 			} else if (r.operation === "rollback") {
 				if (!mnemopi) {
 					try {
-						this.#db.prepare("UPDATE candidates SET status = 'projection_pending', updated_at = ? WHERE id = ?").run(Date.now(), candidateId);
+						this.#db
+							.prepare("UPDATE candidates SET status = 'projection_pending', updated_at = ? WHERE id = ?")
+							.run(Date.now(), candidateId);
 					} catch {}
 					continue;
 				}
@@ -1751,16 +2237,32 @@ export class CustomAutolearnService {
 						// Preserve first valid reference check: delete only matching
 						const cur = this.getProjection(candidateId);
 						if (cur && cur.mnemopiId === r.mnemopi_id && cur.bank === r.mnemopi_bank) {
-							this.#db.prepare("DELETE FROM projection_references WHERE candidate_id = ? AND mnemopi_id = ? AND mnemopi_bank = ?").run(candidateId, r.mnemopi_id, r.mnemopi_bank);
+							this.#db
+								.prepare(
+									"DELETE FROM projection_references WHERE candidate_id = ? AND mnemopi_id = ? AND mnemopi_bank = ?",
+								)
+								.run(candidateId, r.mnemopi_id, r.mnemopi_bank);
 						} else if (!cur) {
 							this.#db.prepare("DELETE FROM projection_references WHERE candidate_id = ?").run(candidateId);
 						} else {
 							// Different valid reference exists, preserve it, just clear intent
-							this.#db.prepare("DELETE FROM operation_intents WHERE candidate_id = ? AND mnemopi_id = ? AND mnemopi_bank = ?").run(candidateId, r.mnemopi_id, r.mnemopi_bank);
+							this.#db
+								.prepare(
+									"DELETE FROM operation_intents WHERE candidate_id = ? AND mnemopi_id = ? AND mnemopi_bank = ?",
+								)
+								.run(candidateId, r.mnemopi_id, r.mnemopi_bank);
 							return;
 						}
-						this.#db.prepare("UPDATE candidates SET status = 'needs_review', version = version + 1, updated_at = ? WHERE id = ?").run(Date.now(), candidateId);
-						this.#db.prepare("DELETE FROM operation_intents WHERE candidate_id = ? AND mnemopi_id = ? AND mnemopi_bank = ?").run(candidateId, r.mnemopi_id, r.mnemopi_bank);
+						this.#db
+							.prepare(
+								"UPDATE candidates SET status = 'needs_review', version = version + 1, updated_at = ? WHERE id = ?",
+							)
+							.run(Date.now(), candidateId);
+						this.#db
+							.prepare(
+								"DELETE FROM operation_intents WHERE candidate_id = ? AND mnemopi_id = ? AND mnemopi_bank = ?",
+							)
+							.run(candidateId, r.mnemopi_id, r.mnemopi_bank);
 					})();
 					try {
 						this.#recordEvent(candidateId, "rolled_back", {});
@@ -1770,7 +2272,9 @@ export class CustomAutolearnService {
 			} else if (r.operation === "projection_cleanup") {
 				if (!mnemopi) {
 					try {
-						this.#db.prepare("UPDATE candidates SET status = 'needs_review', updated_at = ? WHERE id = ?").run(Date.now(), candidateId);
+						this.#db
+							.prepare("UPDATE candidates SET status = 'needs_review', updated_at = ? WHERE id = ?")
+							.run(Date.now(), candidateId);
 					} catch {}
 					continue;
 				}

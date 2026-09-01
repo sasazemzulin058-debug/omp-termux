@@ -233,20 +233,23 @@ function findScopedIdempotent(mem: Mnemopi, source: string, key: string): string
 	for (const table of ["working_memory", "episodic_memory"] as const) {
 		try {
 			const row = mem.beam.db
-				.prepare(`SELECT id FROM ${table} WHERE source = ? AND (idempotency_key = ? OR json_extract(metadata_json, '$.idempotency_key') = ?) LIMIT 1`)
+				.prepare(
+					`SELECT id FROM ${table} WHERE source = ? AND (idempotency_key = ? OR json_extract(metadata_json, '$.idempotency_key') = ?) LIMIT 1`,
+				)
 				.get(source, key, key) as { id: string } | null | undefined;
 			if (row?.id) return row.id;
 		} catch {}
 		try {
 			const row = mem.beam.db
-				.prepare(`SELECT id FROM ${table} WHERE source = ? AND json_extract(metadata_json, '$.idempotency_key') = ? LIMIT 1`)
+				.prepare(
+					`SELECT id FROM ${table} WHERE source = ? AND json_extract(metadata_json, '$.idempotency_key') = ? LIMIT 1`,
+				)
 				.get(source, key) as { id: string } | null | undefined;
 			if (row?.id) return row.id;
 		} catch {}
 	}
 	return null;
 }
-
 
 export class MnemopiSessionState {
 	sessionId: string;
@@ -482,7 +485,6 @@ export class MnemopiSessionState {
 		return this.rememberInScope(memory, options);
 	}
 
-
 	/** Exact-bank helper: return the scoped memory for a specific bank, or undefined if not in session scope. */
 	getScopedTargetForBank(bank: string): MnemopiScopedMemory | undefined {
 		const trimmed = bank.trim();
@@ -501,7 +503,10 @@ export class MnemopiSessionState {
 	}
 
 	/** Typed exact-bank accessibility result. Discriminates inaccessible vs absent. */
-	getScopedMemoryInBankWithAccessibility(id: string, bank: string): { accessible: false; bank: string } | { accessible: true; hit: MnemopiScopedMemoryHit | null; bank: string } {
+	getScopedMemoryInBankWithAccessibility(
+		id: string,
+		bank: string,
+	): { accessible: false; bank: string } | { accessible: true; hit: MnemopiScopedMemoryHit | null; bank: string } {
 		const trimmed = bank.trim();
 		const target = this.getScopedTargetForBank(trimmed);
 		if (!target) return { accessible: false, bank: trimmed };
@@ -531,7 +536,6 @@ export class MnemopiSessionState {
 		};
 	}
 
-
 	/**
 	 * Deterministic idempotent scoped write.
 	 * Finds existing working memory with matching source + idempotencyKey in the target bank
@@ -541,13 +545,22 @@ export class MnemopiSessionState {
 	 */
 	rememberScopedIdempotent(
 		content: string,
-		options: { scope: string; source: string; idempotencyKey: string; targetBank?: string; importance?: number; metadata?: Record<string, unknown> },
+		options: {
+			scope: string;
+			source: string;
+			idempotencyKey: string;
+			targetBank?: string;
+			importance?: number;
+			metadata?: Record<string, unknown>;
+		},
 	): string | undefined {
 		try {
 			const source = options.source?.trim();
 			const key = options.idempotencyKey?.trim();
 			if (!content || !source || !key) {
-				logger.warn("Mnemopi: rememberScopedIdempotent missing required fields", { bank: options.targetBank ?? this.scoped.retain.bank });
+				logger.warn("Mnemopi: rememberScopedIdempotent missing required fields", {
+					bank: options.targetBank ?? this.scoped.retain.bank,
+				});
 				return undefined;
 			}
 			const targetBank = options.targetBank?.trim() ? options.targetBank.trim() : this.scoped.retain.bank;

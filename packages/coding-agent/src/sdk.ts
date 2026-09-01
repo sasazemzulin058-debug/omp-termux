@@ -4120,7 +4120,9 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				const customCtrl = new CustomAutolearnController({ session, settings, agentDir });
 				// Production recovery: invoke after Mnemopi session state becomes available, before normal /learn mutations, same agentDir/session scope
 				try {
-					const mnemopiState = (session as unknown as { getMnemopiSessionState?: () => unknown }).getMnemopiSessionState?.();
+					const mnemopiState = (
+						session as unknown as { getMnemopiSessionState?: () => unknown }
+					).getMnemopiSessionState?.();
 					customCtrl.recoverPendingIntents(mnemopiState as never);
 				} catch (e) {
 					logger.warn("custom autolearn startup recovery failed", { error: String(e).slice(0, 512) });

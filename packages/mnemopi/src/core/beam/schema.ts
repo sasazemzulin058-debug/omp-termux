@@ -22,7 +22,9 @@ function runAll(db: Database, statements: readonly string[]): void {
 }
 function tableExistsForMigration(db: Database, table: string): boolean {
 	try {
-		const row = db.query("SELECT 1 FROM sqlite_master WHERE type IN ('table','virtual table') AND name = ? LIMIT 1").get(table) as unknown;
+		const row = db
+			.query("SELECT 1 FROM sqlite_master WHERE type IN ('table','virtual table') AND name = ? LIMIT 1")
+			.get(table) as unknown;
 		return row != null;
 	} catch {
 		return false;
@@ -38,35 +40,91 @@ function countRowsForMigration(db: Database, sql: string, ...params: unknown[]):
 }
 function reconcileIdempotencyDuplicates(db: Database, table: "working_memory" | "episodic_memory"): void {
 	try {
-		db.run(`UPDATE ${table} SET idempotency_key = json_extract(metadata_json, '$.idempotency_key') WHERE idempotency_key IS NULL AND json_extract(metadata_json, '$.idempotency_key') IS NOT NULL AND json_extract(metadata_json, '$.idempotency_key') != ''`);
+		db.run(
+			`UPDATE ${table} SET idempotency_key = json_extract(metadata_json, '$.idempotency_key') WHERE idempotency_key IS NULL AND json_extract(metadata_json, '$.idempotency_key') IS NOT NULL AND json_extract(metadata_json, '$.idempotency_key') != ''`,
+		);
 	} catch {}
 	try {
-		const dupes = db.query(`SELECT source, idempotency_key, COUNT(*) as cnt, MIN(rowid) as keep_rowid FROM ${table} WHERE idempotency_key IS NOT NULL AND idempotency_key != '' GROUP BY source, idempotency_key HAVING cnt > 1`).all() as Array<{ source: string; idempotency_key: string; cnt: number; keep_rowid: number }>;
+		const dupes = db
+			.query(
+				`SELECT source, idempotency_key, COUNT(*) as cnt, MIN(rowid) as keep_rowid FROM ${table} WHERE idempotency_key IS NOT NULL AND idempotency_key != '' GROUP BY source, idempotency_key HAVING cnt > 1`,
+			)
+			.all() as Array<{ source: string; idempotency_key: string; cnt: number; keep_rowid: number }>;
 		if (dupes.length > 0) {
-			console.warn(`[beam] ${table} idempotency duplicates detected: ${dupes.map((d) => `${d.source}:${d.idempotency_key} x${d.cnt}`).join("; ")} - deterministic reconciliation keeping earliest row`);
+			console.warn(
+				`[beam] ${table} idempotency duplicates detected: ${dupes.map(d => `${d.source}:${d.idempotency_key} x${d.cnt}`).join("; ")} - deterministic reconciliation keeping earliest row`,
+			);
 			for (const d of dupes) {
 				try {
-					const rows = db.query(`SELECT id, rowid FROM ${table} WHERE source = ? AND idempotency_key = ? ORDER BY rowid ASC`).all(d.source, d.idempotency_key) as Array<{ id: string; rowid: number }>;
+					const rows = db
+						.query(`SELECT id, rowid FROM ${table} WHERE source = ? AND idempotency_key = ? ORDER BY rowid ASC`)
+						.all(d.source, d.idempotency_key) as Array<{ id: string; rowid: number }>;
 					if (rows.length <= 1) continue;
 					const keep = rows[0]!;
 					const dupRows = rows.slice(1);
 					const dupIds = dupRows.map(r => r.id);
 					const dupPlaceholders = dupIds.map(() => "?").join(", ");
-					const memoriaTables = ["memoria_facts", "memoria_instructions", "memoria_kg", "memoria_preferences", "memoria_timelines"] as const;
-					const hasLinked = memoriaTables.some(mt => tableExistsForMigration(db, mt) && countRowsForMigration(db, `SELECT COUNT(*) as c FROM ${mt} WHERE source_memory_id IN (${dupPlaceholders})`, ...dupIds) > 0)
-						|| (tableExistsForMigration(db, "facts") && countRowsForMigration(db, `SELECT COUNT(*) as c FROM facts WHERE source_msg_id IN (${dupPlaceholders})`, ...dupIds) > 0)
-						|| (tableExistsForMigration(db, "annotations") && countRowsForMigration(db, `SELECT COUNT(*) as c FROM annotations WHERE memory_id IN (${dupPlaceholders})`, ...dupIds) > 0)
-						|| (tableExistsForMigration(db, "memory_embeddings") && countRowsForMigration(db, `SELECT COUNT(*) as c FROM memory_embeddings WHERE memory_id IN (${dupPlaceholders})`, ...dupIds) > 0)
-						|| (tableExistsForMigration(db, "gists") && (() => {
-							const dupGistIds = dupIds.map(id => `gist_${id}`);
-							const gistPh = dupGistIds.map(() => "?").join(", ");
-							return countRowsForMigration(db, `SELECT COUNT(*) as c FROM gists WHERE memory_id IN (${dupPlaceholders}) OR id IN (${gistPh})`, ...dupIds, ...dupGistIds) > 0;
-						})())
-						|| (tableExistsForMigration(db, "graph_edges") && (() => {
-							const allRefs = [...dupIds, ...dupIds.map(id => `gist_${id}`)];
-							const refPh = allRefs.map(() => "?").join(", ");
-							return countRowsForMigration(db, `SELECT COUNT(*) as c FROM graph_edges WHERE source IN (${refPh}) OR target IN (${refPh})`, ...allRefs, ...allRefs) > 0;
-						})());
+					const memoriaTables = [
+						"memoria_facts",
+						"memoria_instructions",
+						"memoria_kg",
+						"memoria_preferences",
+						"memoria_timelines",
+					] as const;
+					const hasLinked =
+						memoriaTables.some(
+							mt =>
+								tableExistsForMigration(db, mt) &&
+								countRowsForMigration(
+									db,
+									`SELECT COUNT(*) as c FROM ${mt} WHERE source_memory_id IN (${dupPlaceholders})`,
+									...dupIds,
+								) > 0,
+						) ||
+						(tableExistsForMigration(db, "facts") &&
+							countRowsForMigration(
+								db,
+								`SELECT COUNT(*) as c FROM facts WHERE source_msg_id IN (${dupPlaceholders})`,
+								...dupIds,
+							) > 0) ||
+						(tableExistsForMigration(db, "annotations") &&
+							countRowsForMigration(
+								db,
+								`SELECT COUNT(*) as c FROM annotations WHERE memory_id IN (${dupPlaceholders})`,
+								...dupIds,
+							) > 0) ||
+						(tableExistsForMigration(db, "memory_embeddings") &&
+							countRowsForMigration(
+								db,
+								`SELECT COUNT(*) as c FROM memory_embeddings WHERE memory_id IN (${dupPlaceholders})`,
+								...dupIds,
+							) > 0) ||
+						(tableExistsForMigration(db, "gists") &&
+							(() => {
+								const dupGistIds = dupIds.map(id => `gist_${id}`);
+								const gistPh = dupGistIds.map(() => "?").join(", ");
+								return (
+									countRowsForMigration(
+										db,
+										`SELECT COUNT(*) as c FROM gists WHERE memory_id IN (${dupPlaceholders}) OR id IN (${gistPh})`,
+										...dupIds,
+										...dupGistIds,
+									) > 0
+								);
+							})()) ||
+						(tableExistsForMigration(db, "graph_edges") &&
+							(() => {
+								const allRefs = [...dupIds, ...dupIds.map(id => `gist_${id}`)];
+								const refPh = allRefs.map(() => "?").join(", ");
+								return (
+									countRowsForMigration(
+										db,
+										`SELECT COUNT(*) as c FROM graph_edges WHERE source IN (${refPh}) OR target IN (${refPh})`,
+										...allRefs,
+										...allRefs,
+									) > 0
+								);
+							})());
 					// Transactionally repoint linked artifacts to keep id, then delete duplicates.
 					// If repoint fails, abort deletion for this group to avoid silent loss (fail closed).
 					try {
@@ -74,24 +132,44 @@ function reconcileIdempotencyDuplicates(db: Database, table: "working_memory" | 
 						if (hasLinked) {
 							for (const mt of memoriaTables) {
 								if (!tableExistsForMigration(db, mt)) continue;
-								db.run(`UPDATE ${mt} SET source_memory_id = ? WHERE source_memory_id IN (${dupPlaceholders})`, [keep.id, ...dupIds]);
+								db.run(`UPDATE ${mt} SET source_memory_id = ? WHERE source_memory_id IN (${dupPlaceholders})`, [
+									keep.id,
+									...dupIds,
+								]);
 							}
 							if (tableExistsForMigration(db, "facts")) {
-								db.run(`UPDATE facts SET source_msg_id = ? WHERE source_msg_id IN (${dupPlaceholders})`, [keep.id, ...dupIds]);
+								db.run(`UPDATE facts SET source_msg_id = ? WHERE source_msg_id IN (${dupPlaceholders})`, [
+									keep.id,
+									...dupIds,
+								]);
 							}
 							if (tableExistsForMigration(db, "annotations")) {
 								// Transactional annotation conflict merge before repoint:
 								// keep's (kind,value) wins; delete colliding dup rows first, then dedup within dup set,
 								// then repoint remaining. Preserves one canonical row, no silent loss of keep.
-								db.run(`DELETE FROM annotations WHERE memory_id IN (${dupPlaceholders}) AND EXISTS (SELECT 1 FROM annotations ka WHERE ka.memory_id = ? AND ka.kind = annotations.kind AND ka.value = annotations.value)`, [keep.id, ...dupIds]);
+								db.run(
+									`DELETE FROM annotations WHERE memory_id IN (${dupPlaceholders}) AND EXISTS (SELECT 1 FROM annotations ka WHERE ka.memory_id = ? AND ka.kind = annotations.kind AND ka.value = annotations.value)`,
+									[keep.id, ...dupIds],
+								);
 								if (dupIds.length > 1) {
-									db.run(`DELETE FROM annotations WHERE memory_id IN (${dupPlaceholders}) AND id NOT IN (SELECT MIN(id) FROM annotations WHERE memory_id IN (${dupPlaceholders}) GROUP BY kind, value)`, [...dupIds, ...dupIds]);
+									db.run(
+										`DELETE FROM annotations WHERE memory_id IN (${dupPlaceholders}) AND id NOT IN (SELECT MIN(id) FROM annotations WHERE memory_id IN (${dupPlaceholders}) GROUP BY kind, value)`,
+										[...dupIds, ...dupIds],
+									);
 								}
-								db.run(`UPDATE OR IGNORE annotations SET memory_id = ? WHERE memory_id IN (${dupPlaceholders})`, [keep.id, ...dupIds]);
+								db.run(
+									`UPDATE OR IGNORE annotations SET memory_id = ? WHERE memory_id IN (${dupPlaceholders})`,
+									[keep.id, ...dupIds],
+								);
 								db.run(`DELETE FROM annotations WHERE memory_id IN (${dupPlaceholders})`, [...dupIds]);
 							}
 							if (tableExistsForMigration(db, "memory_embeddings")) {
-								const keepHas = countRowsForMigration(db, "SELECT COUNT(*) as c FROM memory_embeddings WHERE memory_id = ?", keep.id) > 0;
+								const keepHas =
+									countRowsForMigration(
+										db,
+										"SELECT COUNT(*) as c FROM memory_embeddings WHERE memory_id = ?",
+										keep.id,
+									) > 0;
 								if (keepHas) {
 									db.run(`DELETE FROM memory_embeddings WHERE memory_id IN (${dupPlaceholders})`, [...dupIds]);
 								} else if (dupIds.length > 0) {
@@ -107,85 +185,202 @@ function reconcileIdempotencyDuplicates(db: Database, table: "working_memory" | 
 							if (tableExistsForMigration(db, "gists")) {
 								const dupGistIds = dupIds.map(id => `gist_${id}`);
 								const keepGistId = `gist_${keep.id}`;
-								const existingDupGistIds = dupGistIds.filter(gid => countRowsForMigration(db, "SELECT COUNT(*) as c FROM gists WHERE id = ?", gid) > 0);
-								const keepGistExists = countRowsForMigration(db, "SELECT COUNT(*) as c FROM gists WHERE id = ?", keepGistId) > 0;
+								const existingDupGistIds = dupGistIds.filter(
+									gid => countRowsForMigration(db, "SELECT COUNT(*) as c FROM gists WHERE id = ?", gid) > 0,
+								);
+								const keepGistExists =
+									countRowsForMigration(db, "SELECT COUNT(*) as c FROM gists WHERE id = ?", keepGistId) > 0;
 								if (existingDupGistIds.length > 0) {
 									const targetGistId = keepGistExists ? keepGistId : existingDupGistIds[0]!;
 									const sourceGistIds = keepGistExists ? existingDupGistIds : existingDupGistIds.slice(1);
 									for (const dupId of sourceGistIds) {
-										const targetRow = db.query("SELECT text, timestamp, participants_json, location, emotion, time_scope FROM gists WHERE id = ?").get(targetGistId) as { text: string; timestamp: string | null; participants_json: string | null; location: string | null; emotion: string | null; time_scope: string | null } | null | undefined;
-										const dupRow = db.query("SELECT text, timestamp, participants_json, location, emotion, time_scope FROM gists WHERE id = ?").get(dupId) as { text: string; timestamp: string | null; participants_json: string | null; location: string | null; emotion: string | null; time_scope: string | null } | null | undefined;
+										const targetRow = db
+											.query(
+												"SELECT text, timestamp, participants_json, location, emotion, time_scope FROM gists WHERE id = ?",
+											)
+											.get(targetGistId) as
+											| {
+													text: string;
+													timestamp: string | null;
+													participants_json: string | null;
+													location: string | null;
+													emotion: string | null;
+													time_scope: string | null;
+											  }
+											| null
+											| undefined;
+										const dupRow = db
+											.query(
+												"SELECT text, timestamp, participants_json, location, emotion, time_scope FROM gists WHERE id = ?",
+											)
+											.get(dupId) as
+											| {
+													text: string;
+													timestamp: string | null;
+													participants_json: string | null;
+													location: string | null;
+													emotion: string | null;
+													time_scope: string | null;
+											  }
+											| null
+											| undefined;
 										if (targetRow && dupRow) {
 											let mergedParticipants = targetRow.participants_json;
 											try {
-												const a = targetRow.participants_json ? JSON.parse(targetRow.participants_json) : [];
+												const a = targetRow.participants_json
+													? JSON.parse(targetRow.participants_json)
+													: [];
 												const b = dupRow.participants_json ? JSON.parse(dupRow.participants_json) : [];
 												if (Array.isArray(a) && Array.isArray(b)) {
 													const merged = [...new Set([...(a as unknown[]), ...(b as unknown[])])];
 													if (merged.length > a.length) mergedParticipants = JSON.stringify(merged);
 												}
 											} catch {}
-											const mergedLocation = targetRow.location && String(targetRow.location).trim() ? targetRow.location : dupRow.location;
-											const mergedEmotion = targetRow.emotion && String(targetRow.emotion).trim() ? targetRow.emotion : dupRow.emotion;
-											const mergedTimeScope = targetRow.time_scope && String(targetRow.time_scope).trim() ? targetRow.time_scope : dupRow.time_scope;
-											const mergedText = targetRow.text && String(targetRow.text).trim() ? targetRow.text : dupRow.text;
-											const mergedTimestamp = targetRow.timestamp && String(targetRow.timestamp).trim() ? targetRow.timestamp : dupRow.timestamp;
-											db.run("UPDATE gists SET text = ?, timestamp = ?, participants_json = ?, location = ?, emotion = ?, time_scope = ? WHERE id = ?", [mergedText, mergedTimestamp, mergedParticipants, mergedLocation, mergedEmotion, mergedTimeScope, targetGistId]);
+											const mergedLocation =
+												targetRow.location && String(targetRow.location).trim()
+													? targetRow.location
+													: dupRow.location;
+											const mergedEmotion =
+												targetRow.emotion && String(targetRow.emotion).trim()
+													? targetRow.emotion
+													: dupRow.emotion;
+											const mergedTimeScope =
+												targetRow.time_scope && String(targetRow.time_scope).trim()
+													? targetRow.time_scope
+													: dupRow.time_scope;
+											const mergedText =
+												targetRow.text && String(targetRow.text).trim() ? targetRow.text : dupRow.text;
+											const mergedTimestamp =
+												targetRow.timestamp && String(targetRow.timestamp).trim()
+													? targetRow.timestamp
+													: dupRow.timestamp;
+											db.run(
+												"UPDATE gists SET text = ?, timestamp = ?, participants_json = ?, location = ?, emotion = ?, time_scope = ? WHERE id = ?",
+												[
+													mergedText,
+													mergedTimestamp,
+													mergedParticipants,
+													mergedLocation,
+													mergedEmotion,
+													mergedTimeScope,
+													targetGistId,
+												],
+											);
 										}
 										db.run("DELETE FROM gists WHERE id = ?", [dupId]);
 									}
 									if (!keepGistExists) {
-										db.run("UPDATE gists SET id = ?, memory_id = ? WHERE id = ?", [keepGistId, keep.id, targetGistId]);
+										db.run("UPDATE gists SET id = ?, memory_id = ? WHERE id = ?", [
+											keepGistId,
+											keep.id,
+											targetGistId,
+										]);
 									}
 								}
-								const leftoverGistCnt = countRowsForMigration(db, `SELECT COUNT(*) as c FROM gists WHERE memory_id IN (${dupPlaceholders}) AND id != ?`, ...dupIds, keepGistId);
+								const leftoverGistCnt = countRowsForMigration(
+									db,
+									`SELECT COUNT(*) as c FROM gists WHERE memory_id IN (${dupPlaceholders}) AND id != ?`,
+									...dupIds,
+									keepGistId,
+								);
 								if (leftoverGistCnt > 0) {
-									db.run(`UPDATE gists SET memory_id = ? WHERE memory_id IN (${dupPlaceholders}) AND id != ?`, [keep.id, ...dupIds, keepGistId]);
+									db.run(
+										`UPDATE gists SET memory_id = ? WHERE memory_id IN (${dupPlaceholders}) AND id != ?`,
+										[keep.id, ...dupIds, keepGistId],
+									);
 								}
 							}
 							if (tableExistsForMigration(db, "graph_edges")) {
 								// Handle UNIQUE(source,target,edge_type) conflicts consistently: delete colliding
 								// dup edges that would duplicate keep, dedup within dup, then repoint with OR IGNORE.
-								db.run(`DELETE FROM graph_edges WHERE source IN (${dupPlaceholders}) AND EXISTS (SELECT 1 FROM graph_edges ka WHERE ka.source = ? AND ka.target = graph_edges.target AND ka.edge_type = graph_edges.edge_type)`, [keep.id, ...dupIds]);
+								db.run(
+									`DELETE FROM graph_edges WHERE source IN (${dupPlaceholders}) AND EXISTS (SELECT 1 FROM graph_edges ka WHERE ka.source = ? AND ka.target = graph_edges.target AND ka.edge_type = graph_edges.edge_type)`,
+									[keep.id, ...dupIds],
+								);
 								if (dupIds.length > 1) {
-									db.run(`DELETE FROM graph_edges WHERE source IN (${dupPlaceholders}) AND id NOT IN (SELECT MIN(id) FROM graph_edges WHERE source IN (${dupPlaceholders}) GROUP BY target, edge_type)`, [...dupIds, ...dupIds]);
+									db.run(
+										`DELETE FROM graph_edges WHERE source IN (${dupPlaceholders}) AND id NOT IN (SELECT MIN(id) FROM graph_edges WHERE source IN (${dupPlaceholders}) GROUP BY target, edge_type)`,
+										[...dupIds, ...dupIds],
+									);
 								}
-								db.run(`UPDATE OR IGNORE graph_edges SET source = ? WHERE source IN (${dupPlaceholders})`, [keep.id, ...dupIds]);
+								db.run(`UPDATE OR IGNORE graph_edges SET source = ? WHERE source IN (${dupPlaceholders})`, [
+									keep.id,
+									...dupIds,
+								]);
 								db.run(`DELETE FROM graph_edges WHERE source IN (${dupPlaceholders})`, [...dupIds]);
-								db.run(`DELETE FROM graph_edges WHERE target IN (${dupPlaceholders}) AND EXISTS (SELECT 1 FROM graph_edges ka WHERE ka.target = ? AND ka.source = graph_edges.source AND ka.edge_type = graph_edges.edge_type)`, [keep.id, ...dupIds]);
+								db.run(
+									`DELETE FROM graph_edges WHERE target IN (${dupPlaceholders}) AND EXISTS (SELECT 1 FROM graph_edges ka WHERE ka.target = ? AND ka.source = graph_edges.source AND ka.edge_type = graph_edges.edge_type)`,
+									[keep.id, ...dupIds],
+								);
 								if (dupIds.length > 1) {
-									db.run(`DELETE FROM graph_edges WHERE target IN (${dupPlaceholders}) AND id NOT IN (SELECT MIN(id) FROM graph_edges WHERE target IN (${dupPlaceholders}) GROUP BY source, edge_type)`, [...dupIds, ...dupIds]);
+									db.run(
+										`DELETE FROM graph_edges WHERE target IN (${dupPlaceholders}) AND id NOT IN (SELECT MIN(id) FROM graph_edges WHERE target IN (${dupPlaceholders}) GROUP BY source, edge_type)`,
+										[...dupIds, ...dupIds],
+									);
 								}
-								db.run(`UPDATE OR IGNORE graph_edges SET target = ? WHERE target IN (${dupPlaceholders})`, [keep.id, ...dupIds]);
+								db.run(`UPDATE OR IGNORE graph_edges SET target = ? WHERE target IN (${dupPlaceholders})`, [
+									keep.id,
+									...dupIds,
+								]);
 								db.run(`DELETE FROM graph_edges WHERE target IN (${dupPlaceholders})`, [...dupIds]);
 								const dupGistIds = dupIds.map(id => `gist_${id}`);
 								const keepGistId = `gist_${keep.id}`;
 								if (dupGistIds.length > 0) {
 									const gistPh = dupGistIds.map(() => "?").join(", ");
-									db.run(`DELETE FROM graph_edges WHERE source IN (${gistPh}) AND EXISTS (SELECT 1 FROM graph_edges ka WHERE ka.source = ? AND ka.target = graph_edges.target AND ka.edge_type = graph_edges.edge_type)`, [keepGistId, ...dupGistIds]);
+									db.run(
+										`DELETE FROM graph_edges WHERE source IN (${gistPh}) AND EXISTS (SELECT 1 FROM graph_edges ka WHERE ka.source = ? AND ka.target = graph_edges.target AND ka.edge_type = graph_edges.edge_type)`,
+										[keepGistId, ...dupGistIds],
+									);
 									if (dupGistIds.length > 1) {
-										db.run(`DELETE FROM graph_edges WHERE source IN (${gistPh}) AND id NOT IN (SELECT MIN(id) FROM graph_edges WHERE source IN (${gistPh}) GROUP BY target, edge_type)`, [...dupGistIds, ...dupGistIds]);
+										db.run(
+											`DELETE FROM graph_edges WHERE source IN (${gistPh}) AND id NOT IN (SELECT MIN(id) FROM graph_edges WHERE source IN (${gistPh}) GROUP BY target, edge_type)`,
+											[...dupGistIds, ...dupGistIds],
+										);
 									}
-									db.run(`UPDATE OR IGNORE graph_edges SET source = ? WHERE source IN (${gistPh})`, [keepGistId, ...dupGistIds]);
+									db.run(`UPDATE OR IGNORE graph_edges SET source = ? WHERE source IN (${gistPh})`, [
+										keepGistId,
+										...dupGistIds,
+									]);
 									db.run(`DELETE FROM graph_edges WHERE source IN (${gistPh})`, [...dupGistIds]);
-									db.run(`DELETE FROM graph_edges WHERE target IN (${gistPh}) AND EXISTS (SELECT 1 FROM graph_edges ka WHERE ka.target = ? AND ka.source = graph_edges.source AND ka.edge_type = graph_edges.edge_type)`, [keepGistId, ...dupGistIds]);
+									db.run(
+										`DELETE FROM graph_edges WHERE target IN (${gistPh}) AND EXISTS (SELECT 1 FROM graph_edges ka WHERE ka.target = ? AND ka.source = graph_edges.source AND ka.edge_type = graph_edges.edge_type)`,
+										[keepGistId, ...dupGistIds],
+									);
 									if (dupGistIds.length > 1) {
-										db.run(`DELETE FROM graph_edges WHERE target IN (${gistPh}) AND id NOT IN (SELECT MIN(id) FROM graph_edges WHERE target IN (${gistPh}) GROUP BY source, edge_type)`, [...dupGistIds, ...dupGistIds]);
+										db.run(
+											`DELETE FROM graph_edges WHERE target IN (${gistPh}) AND id NOT IN (SELECT MIN(id) FROM graph_edges WHERE target IN (${gistPh}) GROUP BY source, edge_type)`,
+											[...dupGistIds, ...dupGistIds],
+										);
 									}
-									db.run(`UPDATE OR IGNORE graph_edges SET target = ? WHERE target IN (${gistPh})`, [keepGistId, ...dupGistIds]);
+									db.run(`UPDATE OR IGNORE graph_edges SET target = ? WHERE target IN (${gistPh})`, [
+										keepGistId,
+										...dupGistIds,
+									]);
 									db.run(`DELETE FROM graph_edges WHERE target IN (${gistPh})`, [...dupGistIds]);
 								}
 								// Repoint graph edges that reference facts which were repointed: fact_ids themselves unchanged, no action needed.
 							}
 						}
-						db.run(`DELETE FROM ${table} WHERE source = ? AND idempotency_key = ? AND rowid != ?`, [d.source, d.idempotency_key, d.keep_rowid]);
+						db.run(`DELETE FROM ${table} WHERE source = ? AND idempotency_key = ? AND rowid != ?`, [
+							d.source,
+							d.idempotency_key,
+							d.keep_rowid,
+						]);
 						db.exec("COMMIT");
 					} catch (txErr) {
-						try { db.exec("ROLLBACK"); } catch {}
-						console.warn(`[beam] ${table} duplicate reconciliation aborted for ${d.source}:${d.idempotency_key} - linked artifacts require manual resolution`, txErr);
+						try {
+							db.exec("ROLLBACK");
+						} catch {}
+						console.warn(
+							`[beam] ${table} duplicate reconciliation aborted for ${d.source}:${d.idempotency_key} - linked artifacts require manual resolution`,
+							txErr,
+						);
 					}
 				} catch (groupErr) {
-					console.warn(`[beam] ${table} duplicate group handling failed for ${d.source}:${d.idempotency_key}`, groupErr);
+					console.warn(
+						`[beam] ${table} duplicate group handling failed for ${d.source}:${d.idempotency_key}`,
+						groupErr,
+					);
 				}
 			}
 		}
@@ -193,8 +388,6 @@ function reconcileIdempotencyDuplicates(db: Database, table: "working_memory" | 
 		if (e instanceof Error && !e.message.includes("no such column") && !e.message.includes("no such table")) throw e;
 	}
 }
-
-
 
 export function initBeam(db: Database): void {
 	db.run(`
@@ -604,9 +797,19 @@ export function initBeam(db: Database): void {
 	addColumnIfMissing(db, "episodic_memory", "idempotency_key", "TEXT DEFAULT NULL");
 	reconcileIdempotencyDuplicates(db, "working_memory");
 	reconcileIdempotencyDuplicates(db, "episodic_memory");
-	db.run("CREATE INDEX IF NOT EXISTS idx_wm_idempotency ON working_memory(idempotency_key) WHERE idempotency_key IS NOT NULL");
-	db.run("CREATE INDEX IF NOT EXISTS idx_wm_idempotency_source ON working_memory(source, idempotency_key) WHERE idempotency_key IS NOT NULL");
-	db.run("CREATE INDEX IF NOT EXISTS idx_em_idempotency ON episodic_memory(idempotency_key) WHERE idempotency_key IS NOT NULL");
-	db.run("CREATE UNIQUE INDEX IF NOT EXISTS idx_wm_source_idempotency_unique ON working_memory(source, idempotency_key) WHERE idempotency_key IS NOT NULL AND idempotency_key != ''");
-	db.run("CREATE UNIQUE INDEX IF NOT EXISTS idx_em_source_idempotency_unique ON episodic_memory(source, idempotency_key) WHERE idempotency_key IS NOT NULL AND idempotency_key != ''");
+	db.run(
+		"CREATE INDEX IF NOT EXISTS idx_wm_idempotency ON working_memory(idempotency_key) WHERE idempotency_key IS NOT NULL",
+	);
+	db.run(
+		"CREATE INDEX IF NOT EXISTS idx_wm_idempotency_source ON working_memory(source, idempotency_key) WHERE idempotency_key IS NOT NULL",
+	);
+	db.run(
+		"CREATE INDEX IF NOT EXISTS idx_em_idempotency ON episodic_memory(idempotency_key) WHERE idempotency_key IS NOT NULL",
+	);
+	db.run(
+		"CREATE UNIQUE INDEX IF NOT EXISTS idx_wm_source_idempotency_unique ON working_memory(source, idempotency_key) WHERE idempotency_key IS NOT NULL AND idempotency_key != ''",
+	);
+	db.run(
+		"CREATE UNIQUE INDEX IF NOT EXISTS idx_em_source_idempotency_unique ON episodic_memory(source, idempotency_key) WHERE idempotency_key IS NOT NULL AND idempotency_key != ''",
+	);
 }

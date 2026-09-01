@@ -1183,7 +1183,10 @@ export class ExtensionRunner {
 			// Injected per-session fields for learn command (fail-closed when absent)
 			...((this.settings ? { settings: this.settings } : {}) as Record<string, unknown>),
 			...((this.agentDir ? { agentDir: this.agentDir } : {}) as Record<string, unknown>),
-			...((this.getMnemopiSessionStateFn ? { getMnemopiSessionState: this.getMnemopiSessionStateFn } : {}) as Record<string, unknown>),
+			...((this.getMnemopiSessionStateFn ? { getMnemopiSessionState: this.getMnemopiSessionStateFn } : {}) as Record<
+				string,
+				unknown
+			>),
 			setInterval: (callback, ms, ...args) => this.#managedTimers.setInterval(callback, ms, ...args),
 			setTimeout: (callback, ms, ...args) => this.#managedTimers.setTimeout(callback, ms, ...args),
 			clearTimer: timer => this.#managedTimers.clear(timer),

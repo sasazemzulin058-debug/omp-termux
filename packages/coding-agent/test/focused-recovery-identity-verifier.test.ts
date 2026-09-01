@@ -2,12 +2,19 @@ import { describe, expect, it } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { CustomAutolearnService, resolveProjectIdentity, isAllowlistedVerifierCommand, bankForScope } from "../src/autolearn/custom-service";
 import { CustomAutolearnController } from "../src/autolearn/custom-controller";
+import {
+	bankForScope,
+	CustomAutolearnService,
+	isAllowlistedVerifierCommand,
+	resolveProjectIdentity,
+} from "../src/autolearn/custom-service";
 import { handleLearnCommand } from "../src/autolearn/learn-commands";
 
 function settingsFor(mode: string) {
-	return { get: (k: string) => (k === "autolearn.mode" ? mode : undefined) } as unknown as { get(key: string): unknown };
+	return { get: (k: string) => (k === "autolearn.mode" ? mode : undefined) } as unknown as {
+		get(key: string): unknown;
+	};
 }
 
 describe("focused recovery identity verifier", () => {
@@ -17,8 +24,25 @@ describe("focused recovery identity verifier", () => {
 		const proj = resolveProjectIdentity(cwd);
 		// Create svc and candidate with durable intent left (simulate crash before local commit)
 		const svc = new CustomAutolearnService(dir);
-		const cand = svc.observeCandidate({ episodeId: "ep-s", sessionId: "sess-s", projectIdentity: proj, toolName: "bash", toolCallId: "tc-s", failureMessage: "fail s", scope: "project" });
-		svc.recordVerifierResult(cand.id, "bun test", { verified: true, summary: "ok", toolCallId: "tc-s", expectedCommand: "bun test", failureFingerprint: cand.failureDigest, projectIdentity: proj, sessionId: "sess-s", episodeId: "ep-s" });
+		const cand = svc.observeCandidate({
+			episodeId: "ep-s",
+			sessionId: "sess-s",
+			projectIdentity: proj,
+			toolName: "bash",
+			toolCallId: "tc-s",
+			failureMessage: "fail s",
+			scope: "project",
+		});
+		svc.recordVerifierResult(cand.id, "bun test", {
+			verified: true,
+			summary: "ok",
+			toolCallId: "tc-s",
+			expectedCommand: "bun test",
+			failureFingerprint: cand.failureDigest,
+			projectIdentity: proj,
+			sessionId: "sess-s",
+			episodeId: "ep-s",
+		});
 		svc.approveCandidate(cand.id, "reviewed startup", proj);
 		const targetBank = bankForScope("project", proj);
 		const mnemopiOk: unknown = {
@@ -73,8 +97,12 @@ describe("focused recovery identity verifier", () => {
 		expect(svc2.getOperationIntent(cand.id)).toBeNull();
 		svc2.close();
 		ctrl.close();
-		try { fs.rmSync(dir, { recursive: true, force: true }); } catch {}
-		try { fs.rmSync(cwd, { recursive: true, force: true }); } catch {}
+		try {
+			fs.rmSync(dir, { recursive: true, force: true });
+		} catch {}
+		try {
+			fs.rmSync(cwd, { recursive: true, force: true });
+		} catch {}
 	});
 
 	it("shared repository-root identity: /learn in subdirectory authorizes candidates stored by controller", async () => {
@@ -100,7 +128,13 @@ describe("focused recovery identity verifier", () => {
 			svcFactory: (d: string) => new CustomAutolearnService(d) as never,
 		});
 		// Controller observes failure from subdir; should store with repoRoot identity
-		handler({ type: "tool_execution_end", toolName: "bash", toolCallId: "tc-shared", isError: true, result: "fail shared" });
+		handler({
+			type: "tool_execution_end",
+			toolName: "bash",
+			toolCallId: "tc-shared",
+			isError: true,
+			result: "fail shared",
+		});
 		const rootIdentity = resolveProjectIdentity(repoRoot);
 		const subIdentity = resolveProjectIdentity(subdir);
 		expect(rootIdentity).toBe(subIdentity);
@@ -117,7 +151,16 @@ describe("focused recovery identity verifier", () => {
 		const svc2 = new CustomAutolearnService(dir2);
 		const cand2 = svc2.listCandidates(rootIdentity).find(c => c.toolCallId === "tc-shared")!;
 		// Need verifier to make needs_review
-		svc2.recordVerifierResult(cand2.id, "bun test", { verified: true, summary: "ok", toolCallId: "tc-shared", expectedCommand: "bun test", failureFingerprint: cand2.failureDigest, projectIdentity: rootIdentity, sessionId: "sess-shared", episodeId: ctrl.episodeId });
+		svc2.recordVerifierResult(cand2.id, "bun test", {
+			verified: true,
+			summary: "ok",
+			toolCallId: "tc-shared",
+			expectedCommand: "bun test",
+			failureFingerprint: cand2.failureDigest,
+			projectIdentity: rootIdentity,
+			sessionId: "sess-shared",
+			episodeId: ctrl.episodeId,
+		});
 		svc2.close();
 		// Now /learn view from subdir should succeed (authorized)
 		const viewRes = await handleLearnCommand(["view", cand2.id], settings as never, subdir, { agentDir });
@@ -129,9 +172,15 @@ describe("focused recovery identity verifier", () => {
 		expect(viewOther.ok).toBe(false);
 		expect(viewOther.message).toMatch(/Unauthorized/);
 		ctrl.close();
-		try { fs.rmSync(agentDir, { recursive: true, force: true }); } catch {}
-		try { fs.rmSync(repoRoot, { recursive: true, force: true }); } catch {}
-		try { fs.rmSync(otherCwd, { recursive: true, force: true }); } catch {}
+		try {
+			fs.rmSync(agentDir, { recursive: true, force: true });
+		} catch {}
+		try {
+			fs.rmSync(repoRoot, { recursive: true, force: true });
+		} catch {}
+		try {
+			fs.rmSync(otherCwd, { recursive: true, force: true });
+		} catch {}
 	});
 
 	it("post-success crash idempotence: bankless not_found with confirmed absence clears intent", async () => {
@@ -139,8 +188,25 @@ describe("focused recovery identity verifier", () => {
 		const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "omp-idempotent-cwd-"));
 		const proj = resolveProjectIdentity(cwd);
 		const svc = new CustomAutolearnService(dir);
-		const cand = svc.observeCandidate({ episodeId: "ep-idem", sessionId: "sess-idem", projectIdentity: proj, toolName: "bash", toolCallId: "tc-idem", failureMessage: "fail idem", scope: "project" });
-		svc.recordVerifierResult(cand.id, "bun test", { verified: true, summary: "ok", toolCallId: "tc-idem", expectedCommand: "bun test", failureFingerprint: cand.failureDigest, projectIdentity: proj, sessionId: "sess-idem", episodeId: "ep-idem" });
+		const cand = svc.observeCandidate({
+			episodeId: "ep-idem",
+			sessionId: "sess-idem",
+			projectIdentity: proj,
+			toolName: "bash",
+			toolCallId: "tc-idem",
+			failureMessage: "fail idem",
+			scope: "project",
+		});
+		svc.recordVerifierResult(cand.id, "bun test", {
+			verified: true,
+			summary: "ok",
+			toolCallId: "tc-idem",
+			expectedCommand: "bun test",
+			failureFingerprint: cand.failureDigest,
+			projectIdentity: proj,
+			sessionId: "sess-idem",
+			episodeId: "ep-idem",
+		});
 		svc.approveCandidate(cand.id, "reviewed idem", proj);
 		const targetBank = bankForScope("project", proj);
 		const mnemopiOk: unknown = {
@@ -152,7 +218,7 @@ describe("focused recovery identity verifier", () => {
 		expect(r.ok).toBe(true);
 		// Simulate crash window: external delete succeeded but local transaction never ran. So we manually leave intent + candidate + projection, but external memory already gone.
 		// Directly insert operation_intent as if deleteCandidateWithMnemopi persisted intent before crash
-		const db = (svc as unknown as { _db?: unknown }) as never;
+		const db = svc as unknown as { _db?: unknown } as never;
 		// Use delete that throws to create intent, then close and reopen to simulate crash (intent remains)
 		let failOnce = true;
 		const mnemopiCrash: unknown = {
@@ -184,8 +250,12 @@ describe("focused recovery identity verifier", () => {
 		expect(svc2.getCandidate(cand.id)).toBeNull();
 		svc2.close();
 		svc.close();
-		try { fs.rmSync(dir, { recursive: true, force: true }); } catch {}
-		try { fs.rmSync(cwd, { recursive: true, force: true }); } catch {}
+		try {
+			fs.rmSync(dir, { recursive: true, force: true });
+		} catch {}
+		try {
+			fs.rmSync(cwd, { recursive: true, force: true });
+		} catch {}
 	});
 
 	it("bankless not_found without confirmation remains uncertain (no introspection)", async () => {
@@ -193,8 +263,25 @@ describe("focused recovery identity verifier", () => {
 		const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "omp-uncertain-cwd-"));
 		const proj = resolveProjectIdentity(cwd);
 		const svc = new CustomAutolearnService(dir);
-		const cand = svc.observeCandidate({ episodeId: "ep-unc", sessionId: "sess-unc", projectIdentity: proj, toolName: "bash", toolCallId: "tc-unc", failureMessage: "fail unc", scope: "project" });
-		svc.recordVerifierResult(cand.id, "bun test", { verified: true, summary: "ok", toolCallId: "tc-unc", expectedCommand: "bun test", failureFingerprint: cand.failureDigest, projectIdentity: proj, sessionId: "sess-unc", episodeId: "ep-unc" });
+		const cand = svc.observeCandidate({
+			episodeId: "ep-unc",
+			sessionId: "sess-unc",
+			projectIdentity: proj,
+			toolName: "bash",
+			toolCallId: "tc-unc",
+			failureMessage: "fail unc",
+			scope: "project",
+		});
+		svc.recordVerifierResult(cand.id, "bun test", {
+			verified: true,
+			summary: "ok",
+			toolCallId: "tc-unc",
+			expectedCommand: "bun test",
+			failureFingerprint: cand.failureDigest,
+			projectIdentity: proj,
+			sessionId: "sess-unc",
+			episodeId: "ep-unc",
+		});
 		svc.approveCandidate(cand.id, "reviewed unc", proj);
 		const targetBank = bankForScope("project", proj);
 		const mnemopiOk: unknown = {
@@ -224,8 +311,12 @@ describe("focused recovery identity verifier", () => {
 		expect(svc.getCandidate(cand.id)).not.toBeNull();
 		expect(svc.getOperationIntent(cand.id)).not.toBeNull();
 		svc.close();
-		try { fs.rmSync(dir, { recursive: true, force: true }); } catch {}
-		try { fs.rmSync(cwd, { recursive: true, force: true }); } catch {}
+		try {
+			fs.rmSync(dir, { recursive: true, force: true });
+		} catch {}
+		try {
+			fs.rmSync(cwd, { recursive: true, force: true });
+		} catch {}
 	});
 
 	it("verifier command with args normalizes allowlist but preserves full digest", async () => {
@@ -243,19 +334,57 @@ describe("focused recovery identity verifier", () => {
 		const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "omp-verifier-args-cwd-"));
 		const proj = resolveProjectIdentity(cwd);
 		const svc = new CustomAutolearnService(dir);
-		const cand = svc.observeCandidate({ episodeId: "ep-arg", sessionId: "sess-arg", projectIdentity: proj, toolName: "bash", toolCallId: "tc-arg", failureMessage: "fail arg", scope: "project" });
+		const cand = svc.observeCandidate({
+			episodeId: "ep-arg",
+			sessionId: "sess-arg",
+			projectIdentity: proj,
+			toolName: "bash",
+			toolCallId: "tc-arg",
+			failureMessage: "fail arg",
+			scope: "project",
+		});
 		// Controller would have captured actual command "bun test path/to/file.ts" and proof expectedCommand same; service should accept
-		const proof = { verified: true, summary: "ok args", toolCallId: "tc-arg", expectedCommand: "bun test path/to/file.ts", failureFingerprint: cand.failureDigest, projectIdentity: proj, sessionId: "sess-arg", episodeId: "ep-arg" } as const;
+		const proof = {
+			verified: true,
+			summary: "ok args",
+			toolCallId: "tc-arg",
+			expectedCommand: "bun test path/to/file.ts",
+			failureFingerprint: cand.failureDigest,
+			projectIdentity: proj,
+			sessionId: "sess-arg",
+			episodeId: "ep-arg",
+		} as const;
 		const ok = svc.recordVerifierResult(cand.id, "bun test path/to/file.ts", proof as never);
 		expect(ok).toBe(true);
 		expect(svc.getCandidate(cand.id)?.status).toBe("needs_review");
 		expect(svc.getCandidate(cand.id)?.verifierName).toBe("bun test path/to/file.ts");
 		// Exact proof linkage still required: mismatched fingerprint should fail
-		const cand2 = svc.observeCandidate({ episodeId: "ep-arg2", sessionId: "sess-arg", projectIdentity: proj, toolName: "bash", toolCallId: "tc-arg2", failureMessage: "fail arg2", scope: "project" });
-		const badProof = { verified: true, summary: "ok", toolCallId: "tc-arg2", expectedCommand: "bun test path/to/file.ts", failureFingerprint: "wrong-digest", projectIdentity: proj, sessionId: "sess-arg", episodeId: "ep-arg2" } as const;
+		const cand2 = svc.observeCandidate({
+			episodeId: "ep-arg2",
+			sessionId: "sess-arg",
+			projectIdentity: proj,
+			toolName: "bash",
+			toolCallId: "tc-arg2",
+			failureMessage: "fail arg2",
+			scope: "project",
+		});
+		const badProof = {
+			verified: true,
+			summary: "ok",
+			toolCallId: "tc-arg2",
+			expectedCommand: "bun test path/to/file.ts",
+			failureFingerprint: "wrong-digest",
+			projectIdentity: proj,
+			sessionId: "sess-arg",
+			episodeId: "ep-arg2",
+		} as const;
 		expect(svc.recordVerifierResult(cand2.id, "bun test path/to/file.ts", badProof as never)).toBe(false);
 		svc.close();
-		try { fs.rmSync(dir, { recursive: true, force: true }); } catch {}
-		try { fs.rmSync(cwd, { recursive: true, force: true }); } catch {}
+		try {
+			fs.rmSync(dir, { recursive: true, force: true });
+		} catch {}
+		try {
+			fs.rmSync(cwd, { recursive: true, force: true });
+		} catch {}
 	});
 });

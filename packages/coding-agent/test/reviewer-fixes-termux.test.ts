@@ -268,7 +268,10 @@ describe("reviewer fixes termux", () => {
 		svc.close();
 		const remembered: { content: string; opts: unknown }[] = [];
 		const mockMnemopi = {
-			rememberScopedIdempotent: (content: string, opts: { scope: string; source: string; idempotencyKey: string }) => {
+			rememberScopedIdempotent: (
+				content: string,
+				opts: { scope: string; source: string; idempotencyKey: string },
+			) => {
 				remembered.push({ content, opts });
 				return "mem_approve_1";
 			},

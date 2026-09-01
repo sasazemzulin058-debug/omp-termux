@@ -405,8 +405,14 @@ export function consolidateToEpisodic(
 	let preservedSource: string | null = null;
 	if (sourceWmIds.length === 1) {
 		try {
-			const row = beam.db.query("SELECT source, idempotency_key, metadata_json FROM working_memory WHERE id = ? LIMIT 1").get(sourceWmIds[0]) as { source?: string; idempotency_key?: string | null; metadata_json?: string | null } | null | undefined;
-			const colKey = typeof row?.idempotency_key === "string" && row.idempotency_key.trim() ? row.idempotency_key.trim() : null;
+			const row = beam.db
+				.query("SELECT source, idempotency_key, metadata_json FROM working_memory WHERE id = ? LIMIT 1")
+				.get(sourceWmIds[0]) as
+				| { source?: string; idempotency_key?: string | null; metadata_json?: string | null }
+				| null
+				| undefined;
+			const colKey =
+				typeof row?.idempotency_key === "string" && row.idempotency_key.trim() ? row.idempotency_key.trim() : null;
 			let metaKey: string | null = null;
 			if (!colKey && row?.metadata_json) {
 				try {
@@ -484,7 +490,9 @@ export function consolidateToEpisodic(
 		} else if (isUniqueConflict) {
 			if (episodicKey && episodicSource) {
 				try {
-					const existing = beam.db.query("SELECT id FROM episodic_memory WHERE source = ? AND idempotency_key = ? LIMIT 1").get(episodicSource, episodicKey) as { id: string } | null | undefined;
+					const existing = beam.db
+						.query("SELECT id FROM episodic_memory WHERE source = ? AND idempotency_key = ? LIMIT 1")
+						.get(episodicSource, episodicKey) as { id: string } | null | undefined;
 					if (existing?.id) return existing.id;
 				} catch {}
 			}

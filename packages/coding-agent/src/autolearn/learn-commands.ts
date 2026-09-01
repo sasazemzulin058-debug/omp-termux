@@ -6,9 +6,15 @@
 
 import * as fs from "node:fs";
 import * as path from "node:path";
-import type { ExtensionFactory } from "../extensibility/extensions";
-import { CustomAutolearnService, resolveProjectIdentity, getAgentDir, resolveAutolearnMode, type MnemopiProjectionClient } from "./custom-service";
 import { settings as globalSettings } from "../config/settings";
+import type { ExtensionFactory } from "../extensibility/extensions";
+import {
+	CustomAutolearnService,
+	getAgentDir,
+	type MnemopiProjectionClient,
+	resolveAutolearnMode,
+	resolveProjectIdentity,
+} from "./custom-service";
 export type LearnCommand = "status" | "view" | "approve" | "reject" | "delete" | "rollback" | "sweep" | "config";
 
 export interface LearnCommandResult {
@@ -108,10 +114,7 @@ export async function handleLearnCommand(
 				const res = svc.approveCandidate(id, reviewed, projectIdentity);
 				if (!res.success) return { ok: false, message: res.error ?? "Approve failed" };
 				// Project exact redacted reviewed content via scoped Mnemopi when available. Uses stored scope/project/bank.
-				const proj = await svc.projectToMnemopiReal(
-					id,
-					options.mnemopi as unknown as MnemopiProjectionClient,
-				);
+				const proj = await svc.projectToMnemopiReal(id, options.mnemopi as unknown as MnemopiProjectionClient);
 				if (!proj.ok) {
 					const cand = svc.getCandidate(id);
 					return {
@@ -265,7 +268,10 @@ export const createLearnExtension: ExtensionFactory = api => {
 				}
 			} catch {}
 			const cwd = ctx.cwd;
-			const result = await handleLearnCommand(splitArgs, settingsObj, cwd, { agentDir, mnemopi: mnemopi ?? undefined });
+			const result = await handleLearnCommand(splitArgs, settingsObj, cwd, {
+				agentDir,
+				mnemopi: mnemopi ?? undefined,
+			});
 			ctx.ui.notify(result.message, result.ok ? "info" : "error");
 			if (result.data) {
 				try {

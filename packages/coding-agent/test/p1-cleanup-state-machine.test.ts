@@ -2,11 +2,11 @@ import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { CustomAutolearnService, canonicalProjectIdentity } from "../src/autolearn/custom-service";
 import { CustomAutolearnController } from "../src/autolearn/custom-controller";
-import type { AgentSession } from "../src/session/agent-session";
-import type { Settings } from "../src/config/settings";
+import { CustomAutolearnService, canonicalProjectIdentity } from "../src/autolearn/custom-service";
 import { handleLearnCommand } from "../src/autolearn/learn-commands";
+import type { Settings } from "../src/config/settings";
+import type { AgentSession } from "../src/session/agent-session";
 
 describe("P1 cleanup state machine", () => {
 	let dir: string;
@@ -20,13 +20,36 @@ describe("P1 cleanup state machine", () => {
 		svc = new CustomAutolearnService(dir);
 	});
 	afterEach(() => {
-		try { svc.close(); } catch {}
-		try { fs.rmSync(dir, { recursive: true, force: true }); } catch {}
-		try { fs.rmSync(cwdDir, { recursive: true, force: true }); } catch {}
+		try {
+			svc.close();
+		} catch {}
+		try {
+			fs.rmSync(dir, { recursive: true, force: true });
+		} catch {}
+		try {
+			fs.rmSync(cwdDir, { recursive: true, force: true });
+		} catch {}
 	});
 	function makeProjectedCandidate(): { id: string; bank: string } {
-		const cand = svc.observeCandidate({ episodeId: "ep1", sessionId: "sess1", projectIdentity: pid, toolName: "bash", toolCallId: "tc1", failureMessage: "fail1", scope: "project" });
-		svc.recordVerifierResult(cand.id, "bun test", { verified: true, summary: "ok", toolCallId: "tc1", expectedCommand: "bun test", failureFingerprint: cand.failureDigest, projectIdentity: pid, sessionId: "sess1", episodeId: "ep1" });
+		const cand = svc.observeCandidate({
+			episodeId: "ep1",
+			sessionId: "sess1",
+			projectIdentity: pid,
+			toolName: "bash",
+			toolCallId: "tc1",
+			failureMessage: "fail1",
+			scope: "project",
+		});
+		svc.recordVerifierResult(cand.id, "bun test", {
+			verified: true,
+			summary: "ok",
+			toolCallId: "tc1",
+			expectedCommand: "bun test",
+			failureFingerprint: cand.failureDigest,
+			projectIdentity: pid,
+			sessionId: "sess1",
+			episodeId: "ep1",
+		});
 		svc.approveCandidate(cand.id, "reviewed fix", pid);
 		svc.projectToMnemopi(cand.id, "mem1");
 		const proj = svc.getProjection(cand.id);
@@ -36,7 +59,7 @@ describe("P1 cleanup state machine", () => {
 
 	it("working forget deleted with correct bank confirms without calling invalidate", () => {
 		const { id, bank } = makeProjectedCandidate();
-		let calls: string[] = [];
+		const calls: string[] = [];
 		const mock = {
 			getScopedMemoryInBank: (mid: string, b: string) => (mid && b === bank ? { bank } : null),
 			editScopedMemoryInBank: (op: string, _mid: string, _bank: string) => {
@@ -55,7 +78,7 @@ describe("P1 cleanup state machine", () => {
 
 	it("episodic not_found -> invalidate success", () => {
 		const { id, bank } = makeProjectedCandidate();
-		let calls: string[] = [];
+		const calls: string[] = [];
 		const mock = {
 			getScopedMemoryInBank: (mid: string, b: string) => (mid && b === bank ? { bank } : null),
 			editScopedMemoryInBank: (op: string, _mid: string, _bank: string) => {
@@ -89,7 +112,8 @@ describe("P1 cleanup state machine", () => {
 		const { id, bank } = makeProjectedCandidate();
 		const mock = {
 			getScopedMemoryInBank: (mid: string, b: string) => (mid && b === bank ? { bank } : null),
-			editScopedMemoryInBank: (op: string, _id: string, _bank: string) => (op === "forget" ? { status: "not_found", bank, store: "episodic" } : { status: "not_found" }),
+			editScopedMemoryInBank: (op: string, _id: string, _bank: string) =>
+				op === "forget" ? { status: "not_found", bank, store: "episodic" } : { status: "not_found" },
 		};
 		const ok = svc.rollbackCandidateWithMnemopi(id, pid, mock);
 		expect(ok).toBe(false);
@@ -100,7 +124,8 @@ describe("P1 cleanup state machine", () => {
 		const { id, bank } = makeProjectedCandidate();
 		const mock = {
 			getScopedMemoryInBank: (mid: string, b: string) => (mid && b === bank ? { bank } : null),
-			editScopedMemoryInBank: (op: string, _id: string, _bank: string) => (op === "forget" ? { status: "deleted", bank: "other-bank", store: "working" } : { status: "not_found" }),
+			editScopedMemoryInBank: (op: string, _id: string, _bank: string) =>
+				op === "forget" ? { status: "deleted", bank: "other-bank", store: "working" } : { status: "not_found" },
 		};
 		const ok = svc.deleteCandidateWithMnemopi(id, pid, mock);
 		expect(ok).toBe(false);
@@ -109,7 +134,7 @@ describe("P1 cleanup state machine", () => {
 
 	it("forget not_editable fails without calling invalidate", () => {
 		const { id, bank } = makeProjectedCandidate();
-		let calls: string[] = [];
+		const calls: string[] = [];
 		const mock = {
 			getScopedMemoryInBank: (mid: string, b: string) => (mid && b === bank ? { bank } : null),
 			editScopedMemoryInBank: (op: string, _mid: string, _bank: string) => {
@@ -126,7 +151,7 @@ describe("P1 cleanup state machine", () => {
 
 	it("bankless forget does not fallback to banked invalidate - mixed response regression", () => {
 		const { id, bank } = makeProjectedCandidate();
-		let calls: string[] = [];
+		const calls: string[] = [];
 		const mock = {
 			getScopedMemoryInBank: (mid: string, b: string) => (mid && b === bank ? { bank } : null),
 			editScopedMemoryInBank: (op: string, _mid: string, _bank: string) => {
@@ -183,7 +208,10 @@ describe("controller DB scope isolated agentDir", () => {
 		expect(capturedAgentDir).toBe(isolated);
 		expect(fs.existsSync(path.join(isolated, "learn.db"))).toBe(true);
 		expect(fs.existsSync(globalDbPath)).toBe(false);
-		const res = await handleLearnCommand(["status"], settings as unknown as { get(key: string): unknown }, cwd, { agentDir: isolated, mnemopi: null });
+		const res = await handleLearnCommand(["status"], settings as unknown as { get(key: string): unknown }, cwd, {
+			agentDir: isolated,
+			mnemopi: null,
+		});
 		expect(res.ok).toBe(true);
 		const svc2 = new CustomAutolearnService(isolated);
 		const cands = svc2.listCandidates(canonicalProjectIdentity(cwd));
