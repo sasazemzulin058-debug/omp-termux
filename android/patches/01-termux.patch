@@ -850,7 +850,7 @@ index c039bb9b5e..1c775045d0 100644
  	use std::{
  		collections::HashSet,
 diff --git a/packages/coding-agent/src/task/index.ts b/packages/coding-agent/src/task/index.ts
-index 38d7d4f38c..36a0115d82 100644
+index 38d7d4f38c..9c5bfa4298 100644
 --- a/packages/coding-agent/src/task/index.ts
 +++ b/packages/coding-agent/src/task/index.ts
 @@ -276,6 +276,7 @@ function resolveSpawnItems(params: TaskParams): TaskItem[] {
@@ -873,14 +873,12 @@ index 38d7d4f38c..36a0115d82 100644
  	if (params.context !== undefined) spawn.context = params.context;
  	if ("outputSchema" in item) spawn.outputSchema = item.outputSchema;
  	if ("schemaMode" in item) spawn.schemaMode = item.schemaMode;
-@@ -663,7 +669,9 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
+@@ -663,7 +669,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
  			...(Object.hasOwn(params, "outputSchema") ? { outputSchema: params.outputSchema } : {}),
  			...(Object.hasOwn(params, "schemaMode") ? { schemaMode: params.schemaMode } : {}),
  			...(params.effort !== undefined ? { effort: params.effort } : {}),
 -			...("isolated" in params ? { isolation: { requested: params.isolated } } : {}),
-+			...("isolated" in params || "repoRoot" in params
-+				? { isolation: { requested: params.isolated, repoRoot: params.repoRoot } }
-+				: {}),
++			...(params.isolated === true ? { isolation: { requested: true, repoRoot: params.repoRoot } } : {}),
  			blockedAgent: this.#blockedAgent,
  			enableLsp: (this.session.enableLsp ?? true) && this.session.settings.get("task.enableLsp"),
  			enableIrc: isIrcEnabled(this.session.settings, this.session.taskDepth ?? 0),
@@ -900,7 +898,7 @@ index 71d12b08ba..64a791f013 100644
  	return { repoRoot, baseline };
  }
 diff --git a/packages/coding-agent/src/task/structured-subagent.ts b/packages/coding-agent/src/task/structured-subagent.ts
-index e5189d0a00..2cea7d6e42 100644
+index e5189d0a00..8c43471222 100644
 --- a/packages/coding-agent/src/task/structured-subagent.ts
 +++ b/packages/coding-agent/src/task/structured-subagent.ts
 @@ -68,6 +68,7 @@ export interface StructuredSubagentIsolationControls {
@@ -927,7 +925,7 @@ index e5189d0a00..2cea7d6e42 100644
 +		(Object.hasOwn(isolation, "requested") ||
 +			Object.hasOwn(isolation, "apply") ||
 +			Object.hasOwn(isolation, "merge") ||
-+			Object.hasOwn(isolation, "repoRoot"))
++			(isolation.requested === true && Object.hasOwn(isolation, "repoRoot")))
  	) {
  		throw new StructuredSubagentError(
  			"preflight",
@@ -935,7 +933,7 @@ index e5189d0a00..2cea7d6e42 100644
  		schema,
  		planMode,
  		isIsolated,
-+		repoRoot: request.isolation?.repoRoot,
++		repoRoot: isIsolated ? request.isolation?.repoRoot : undefined,
  		mergeMode: request.isolation?.merge ?? request.session.settings.get("task.isolation.merge"),
  		applyChanges:
  			request.isolation?.apply ??
