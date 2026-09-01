@@ -274,7 +274,7 @@ export class CustomAutolearnController {
 	}
 
 	/** Production startup recovery: invoke durable operation intent reconciliation with current Mnemopi state and same agentDir scope. */
-	recoverPendingIntents(mnemopi?: { editScopedMemory: (op: string, id: string) => unknown; getScopedMemory?: (id: string) => unknown } | null): number {
+	recoverPendingIntents(mnemopi?: MnemopiProjectionClient | null): number {
 		const svc = this.#ensureService();
 		if (!svc) return 0;
 		let state: unknown = mnemopi;

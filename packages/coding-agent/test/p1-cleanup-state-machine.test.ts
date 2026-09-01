@@ -38,13 +38,14 @@ describe("P1 cleanup state machine", () => {
 		const { id, bank } = makeProjectedCandidate();
 		let calls: string[] = [];
 		const mock = {
-			editScopedMemory: (op: string, _mid: string) => {
+			getScopedMemoryInBank: (mid: string, b: string) => (mid && b === bank ? { bank } : null),
+			editScopedMemoryInBank: (op: string, _mid: string, _bank: string) => {
 				calls.push(op);
 				if (op === "forget") return { status: "deleted", bank, store: "working" };
 				// should not be called; if called return bankless to make failure visible
 				return { status: "not_found" };
 			},
-		} as unknown as { editScopedMemory: (op: string, id: string) => unknown };
+		} as unknown as { editScopedMemoryInBank: (op: string, id: string, _bank: string) => unknown };
 		const ok = svc.deleteCandidateWithMnemopi(id, pid, mock);
 		expect(ok).toBe(true);
 		expect(calls).toEqual(["forget"]);
@@ -56,13 +57,14 @@ describe("P1 cleanup state machine", () => {
 		const { id, bank } = makeProjectedCandidate();
 		let calls: string[] = [];
 		const mock = {
-			editScopedMemory: (op: string, _mid: string) => {
+			getScopedMemoryInBank: (mid: string, b: string) => (mid && b === bank ? { bank } : null),
+			editScopedMemoryInBank: (op: string, _mid: string, _bank: string) => {
 				calls.push(op);
 				if (op === "forget") return { status: "not_found", bank, store: "episodic" };
 				if (op === "invalidate") return { status: "invalidated", bank, store: "episodic" };
 				return { status: "not_found" };
 			},
-		} as unknown as { editScopedMemory: (op: string, id: string) => unknown };
+		} as unknown as { editScopedMemoryInBank: (op: string, id: string, _bank: string) => unknown };
 		const ok = svc.deleteCandidateWithMnemopi(id, pid, mock);
 		expect(ok).toBe(true);
 		expect(calls).toEqual(["forget", "invalidate"]);
@@ -74,7 +76,8 @@ describe("P1 cleanup state machine", () => {
 		const beforeProj = svc.getProjection(id);
 		expect(beforeProj).not.toBeNull();
 		const mock = {
-			editScopedMemory: () => ({ status: "not_found" }),
+			getScopedMemoryInBank: (mid: string, b: string) => (mid && b === bank ? { bank } : null),
+			editScopedMemoryInBank: () => ({ status: "not_found" }),
 		};
 		const ok = svc.deleteCandidateWithMnemopi(id, pid, mock);
 		expect(ok).toBe(false);
@@ -85,7 +88,8 @@ describe("P1 cleanup state machine", () => {
 	it("bankless invalidate after not_found fails closed", () => {
 		const { id, bank } = makeProjectedCandidate();
 		const mock = {
-			editScopedMemory: (op: string) => (op === "forget" ? { status: "not_found", bank, store: "episodic" } : { status: "not_found" }),
+			getScopedMemoryInBank: (mid: string, b: string) => (mid && b === bank ? { bank } : null),
+			editScopedMemoryInBank: (op: string, _id: string, _bank: string) => (op === "forget" ? { status: "not_found", bank, store: "episodic" } : { status: "not_found" }),
 		};
 		const ok = svc.rollbackCandidateWithMnemopi(id, pid, mock);
 		expect(ok).toBe(false);
@@ -95,7 +99,8 @@ describe("P1 cleanup state machine", () => {
 	it("forget bank mismatch fails closed even on deleted", () => {
 		const { id, bank } = makeProjectedCandidate();
 		const mock = {
-			editScopedMemory: (op: string) => (op === "forget" ? { status: "deleted", bank: "other-bank", store: "working" } : { status: "not_found" }),
+			getScopedMemoryInBank: (mid: string, b: string) => (mid && b === bank ? { bank } : null),
+			editScopedMemoryInBank: (op: string, _id: string, _bank: string) => (op === "forget" ? { status: "deleted", bank: "other-bank", store: "working" } : { status: "not_found" }),
 		};
 		const ok = svc.deleteCandidateWithMnemopi(id, pid, mock);
 		expect(ok).toBe(false);
@@ -106,12 +111,13 @@ describe("P1 cleanup state machine", () => {
 		const { id, bank } = makeProjectedCandidate();
 		let calls: string[] = [];
 		const mock = {
-			editScopedMemory: (op: string, _mid: string) => {
+			getScopedMemoryInBank: (mid: string, b: string) => (mid && b === bank ? { bank } : null),
+			editScopedMemoryInBank: (op: string, _mid: string, _bank: string) => {
 				calls.push(op);
 				if (op === "forget") return { status: "not_editable", bank, store: "fact" };
 				return { status: "invalidated", bank };
 			},
-		} as unknown as { editScopedMemory: (op: string, id: string) => unknown };
+		} as unknown as { editScopedMemoryInBank: (op: string, id: string, _bank: string) => unknown };
 		const ok = svc.deleteCandidateWithMnemopi(id, pid, mock);
 		expect(ok).toBe(false);
 		expect(calls).toEqual(["forget"]);
@@ -122,13 +128,14 @@ describe("P1 cleanup state machine", () => {
 		const { id, bank } = makeProjectedCandidate();
 		let calls: string[] = [];
 		const mock = {
-			editScopedMemory: (op: string, _mid: string) => {
+			getScopedMemoryInBank: (mid: string, b: string) => (mid && b === bank ? { bank } : null),
+			editScopedMemoryInBank: (op: string, _mid: string, _bank: string) => {
 				calls.push(op);
 				if (op === "forget") return { status: "not_found" };
 				if (op === "invalidate") return { status: "invalidated", bank, store: "episodic" };
 				return { status: "not_found" };
 			},
-		} as unknown as { editScopedMemory: (op: string, id: string) => unknown };
+		} as unknown as { editScopedMemoryInBank: (op: string, id: string, _bank: string) => unknown };
 		const ok = svc.deleteCandidateWithMnemopi(id, pid, mock);
 		expect(ok).toBe(false);
 		expect(calls).toEqual(["forget"]);

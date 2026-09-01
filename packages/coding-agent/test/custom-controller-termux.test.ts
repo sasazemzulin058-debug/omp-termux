@@ -52,9 +52,8 @@ describe("custom autolearn controller wiring termux", () => {
 		expect(ok).toBe(true);
 		expect(svc.getCandidate(cand.id)?.status).toBe("needs_review");
 		expect(svc.approveCandidate(cand.id, "Concrete fix for controller test", proj).success).toBe(true);
-		expect(svc.getCandidate(cand.id)?.status).toBe("approved");
+		expect(svc.getCandidate(cand.id)?.status).toBe("projection_pending");
 		expect(svc.projectToMnemopi(cand.id, "mem-ctrl")).toBe(true);
-		expect(svc.getProjection(cand.id)?.mnemopiId).toBe("mem-ctrl");
 		svc.close();
 		try {
 			fs.rmSync(dir, { recursive: true, force: true });

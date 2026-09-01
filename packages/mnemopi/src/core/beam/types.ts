@@ -118,6 +118,9 @@ export interface RememberOptions {
 	source?: string;
 	importance?: number;
 	metadata?: Metadata | null;
+	// Deterministic idempotent write for custom autolearn: exact source + idempotencyKey dedup before insert.
+	idempotencyKey?: string;
+	idempotency_key?: string;
 	extract?: boolean;
 	extractEntities?: boolean;
 	/**

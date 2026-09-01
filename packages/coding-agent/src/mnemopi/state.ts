@@ -229,6 +229,25 @@ export interface MnemopiSessionStateOptions {
 	hasRecalledForFirstTurn?: boolean;
 }
 
+function findScopedIdempotent(mem: Mnemopi, source: string, key: string): string | null {
+	for (const table of ["working_memory", "episodic_memory"] as const) {
+		try {
+			const row = mem.beam.db
+				.prepare(`SELECT id FROM ${table} WHERE source = ? AND (idempotency_key = ? OR json_extract(metadata_json, '$.idempotency_key') = ?) LIMIT 1`)
+				.get(source, key, key) as { id: string } | null | undefined;
+			if (row?.id) return row.id;
+		} catch {}
+		try {
+			const row = mem.beam.db
+				.prepare(`SELECT id FROM ${table} WHERE source = ? AND json_extract(metadata_json, '$.idempotency_key') = ? LIMIT 1`)
+				.get(source, key) as { id: string } | null | undefined;
+			if (row?.id) return row.id;
+		} catch {}
+	}
+	return null;
+}
+
+
 export class MnemopiSessionState {
 	sessionId: string;
 	readonly config: MnemopiBackendConfig;
@@ -461,6 +480,174 @@ export class MnemopiSessionState {
 
 	rememberScoped(memory: MnemopiRememberInput, options: MnemopiRememberOptions = {}): string | undefined {
 		return this.rememberInScope(memory, options);
+	}
+
+
+	/** Exact-bank helper: return the scoped memory for a specific bank, or undefined if not in session scope. */
+	getScopedTargetForBank(bank: string): MnemopiScopedMemory | undefined {
+		const trimmed = bank.trim();
+		if (!trimmed) return undefined;
+		const targets = dedupeScopedTargets([
+			this.scoped.retain,
+			...this.scoped.recall,
+			...(this.scoped.global ? [this.scoped.global] : []),
+		]);
+		return targets.find(t => t.bank === trimmed);
+	}
+
+	/** Typed accessibility check: true if bank is in session scope, false if inaccessible. */
+	isBankAccessible(bank: string): boolean {
+		return this.getScopedTargetForBank(bank) != null;
+	}
+
+	/** Typed exact-bank accessibility result. Discriminates inaccessible vs absent. */
+	getScopedMemoryInBankWithAccessibility(id: string, bank: string): { accessible: false; bank: string } | { accessible: true; hit: MnemopiScopedMemoryHit | null; bank: string } {
+		const trimmed = bank.trim();
+		const target = this.getScopedTargetForBank(trimmed);
+		if (!target) return { accessible: false, bank: trimmed };
+		const raw = target.memory.get(id) as MnemopiStoredMemoryRow | null;
+		if (!raw) return { accessible: true, hit: null, bank: target.bank };
+		const store: MnemopiMemoryStore =
+			raw.memory_store === "episodic" || raw.memory_store === "fact" ? raw.memory_store : "working";
+		return {
+			accessible: true,
+			bank: target.bank,
+			hit: {
+				bank: target.bank,
+				store,
+				row: {
+					id: typeof raw.id === "string" ? raw.id : id,
+					content: typeof raw.content === "string" ? raw.content : "",
+					source: typeof raw.source === "string" ? raw.source : null,
+					timestamp: typeof raw.timestamp === "string" ? raw.timestamp : null,
+					importance: typeof raw.importance === "number" ? raw.importance : null,
+					veracity: typeof raw.veracity === "string" ? raw.veracity : null,
+					created_at: typeof raw.created_at === "string" ? raw.created_at : null,
+					session_id: typeof raw.session_id === "string" ? raw.session_id : null,
+					memory_type: typeof raw.memory_type === "string" ? raw.memory_type : null,
+					metadata: raw.metadata ?? raw.metadata_json ?? null,
+				},
+			},
+		};
+	}
+
+
+	/**
+	 * Deterministic idempotent scoped write.
+	 * Finds existing working memory with matching source + idempotencyKey in the target bank
+	 * (column or metadata_json fallback) and returns its id without creating a duplicate.
+	 * Otherwise writes exactly once, persisting idempotency_key column + metadata for future dedup.
+	 * Never inspects or mutates another bank.
+	 */
+	rememberScopedIdempotent(
+		content: string,
+		options: { scope: string; source: string; idempotencyKey: string; targetBank?: string; importance?: number; metadata?: Record<string, unknown> },
+	): string | undefined {
+		try {
+			const source = options.source?.trim();
+			const key = options.idempotencyKey?.trim();
+			if (!content || !source || !key) {
+				logger.warn("Mnemopi: rememberScopedIdempotent missing required fields", { bank: options.targetBank ?? this.scoped.retain.bank });
+				return undefined;
+			}
+			const targetBank = options.targetBank?.trim() ? options.targetBank.trim() : this.scoped.retain.bank;
+			const target = this.getScopedTargetForBank(targetBank);
+			if (!target) {
+				logger.warn("Mnemopi: rememberScopedIdempotent bank not in scope", { bank: targetBank });
+				return undefined;
+			}
+			// Exact-bank idempotency lookup: source + idempotency_key (column or JSON fallback)
+			const existingId = findScopedIdempotent(target.memory, source, key);
+			if (existingId) return existingId;
+
+			// Write exactly once to the exact bank, persisting key in both column and metadata
+			const metadata = { ...(options.metadata ?? {}), idempotency_key: key } as Record<string, unknown>;
+			try {
+				const id = target.memory.remember(content, {
+					source,
+					scope: options.scope,
+					importance: options.importance,
+					metadata: metadata as never,
+					idempotencyKey: key,
+				} as never);
+				return id;
+			} catch (e) {
+				// Race: another writer inserted same key concurrently; return existing
+				const race = findScopedIdempotent(target.memory, source, key);
+				if (race) return race;
+				throw e;
+			}
+		} catch (error) {
+			logger.warn("Mnemopi: rememberScopedIdempotent failed", {
+				bank: options.targetBank ?? this.scoped.retain.bank,
+				error: String(error),
+			});
+			return undefined;
+		}
+	}
+
+	/** Exact-bank read: never inspects another bank. Returns null if id not in that bank. */
+	getScopedMemoryInBank(id: string, bank: string): MnemopiScopedMemoryHit | null {
+		const target = this.getScopedTargetForBank(bank);
+		if (!target) return null;
+		const raw = target.memory.get(id) as MnemopiStoredMemoryRow | null;
+		if (!raw) return null;
+		const store: MnemopiMemoryStore =
+			raw.memory_store === "episodic" || raw.memory_store === "fact" ? raw.memory_store : "working";
+		return {
+			bank: target.bank,
+			store,
+			row: {
+				id: typeof raw.id === "string" ? raw.id : id,
+				content: typeof raw.content === "string" ? raw.content : "",
+				source: typeof raw.source === "string" ? raw.source : null,
+				timestamp: typeof raw.timestamp === "string" ? raw.timestamp : null,
+				importance: typeof raw.importance === "number" ? raw.importance : null,
+				veracity: typeof raw.veracity === "string" ? raw.veracity : null,
+				created_at: typeof raw.created_at === "string" ? raw.created_at : null,
+				session_id: typeof raw.session_id === "string" ? raw.session_id : null,
+				memory_type: typeof raw.memory_type === "string" ? raw.memory_type : null,
+				metadata: raw.metadata ?? raw.metadata_json ?? null,
+			},
+		};
+	}
+
+	/** Exact-bank edit: never mutates another bank. Task spec: (op, id, bank). Optional 4th options param for update/invalidate. */
+	editScopedMemoryInBank(
+		op: MnemopiMemoryEditOperation,
+		id: string,
+		bank: string,
+		options: MnemopiMemoryEditOptions = {},
+	): MnemopiMemoryEditResult {
+		const trimmedBank = bank?.trim();
+		if (!trimmedBank) return { status: "not_found" };
+		const target = this.getScopedTargetForBank(trimmedBank);
+		if (!target) return { status: "not_found" };
+		const row = target.memory.get(id) as MnemopiStoredMemoryRow | null;
+		if (!row) return { status: "not_found", bank: target.bank };
+		const store: MnemopiMemoryStore =
+			row.memory_store === "episodic" || row.memory_store === "fact" ? row.memory_store : "working";
+		const resultContext: Pick<MnemopiMemoryEditResult, "bank" | "store"> = { bank: target.bank, store };
+		if (store === "fact") {
+			return { status: "not_editable", ...resultContext };
+		}
+		if ((op === "update" || op === "forget") && store !== "working") {
+			return { status: "not_found", ...resultContext };
+		}
+		if (op === "update") {
+			if (target.memory.update(id, options.content ?? null, options.importance ?? null)) {
+				return { status: "updated", ...resultContext };
+			}
+			return { status: "not_found", ...resultContext };
+		}
+		if (op === "forget") {
+			if (target.memory.forget(id)) return { status: "deleted", ...resultContext };
+			return { status: "not_found", ...resultContext };
+		}
+		if (target.memory.beam.invalidate(id, options.replacementId ?? null)) {
+			return { status: "invalidated", ...resultContext };
+		}
+		return { status: "not_found", ...resultContext };
 	}
 
 	async recallForContext(query: string): Promise<string | undefined> {

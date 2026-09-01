@@ -103,7 +103,7 @@ describe("custom autolearn extended termux", () => {
 			episodeId: "ep3",
 		});
 			svc.approveCandidate(cand.id, "Meaningful content for projection", canon);
-		const fakeFail = { rememberScoped: () => undefined };
+		const fakeFail = { rememberScopedIdempotent: () => undefined };
 		const res = await svc.projectToMnemopiReal(cand.id, fakeFail as any);
 		expect(res.ok).toBe(false);
 		expect(svc.getCandidate(cand.id)?.status).toBe("needs_review");
@@ -135,9 +135,10 @@ describe("custom autolearn extended termux", () => {
 		// Mock mnemopi that records deletes with exact bank
 		const deleted: string[] = [];
 		const mockMnemopi = {
-			editScopedMemory: (op: string, id: string) => {
+			getScopedMemoryInBank: (id: string, b: string) => (id && b === projBank ? { bank: projBank } : null),
+			editScopedMemoryInBank: (op: string, id: string, _bank: string) => {
 				deleted.push(`${op}:${id}`);
-				return { status: "deleted", bank: projBank };
+				return { status: "deleted", bank: _bank };
 			},
 		};
 		const ok = svc.deleteCandidateWithMnemopi(cand.id, canon, mockMnemopi as any);
@@ -175,6 +176,15 @@ describe("custom autolearn extended termux", () => {
 			"Concrete procedure: run cargo test with -- --nocapture and check android pidfd fallback",
 			canon,
 		);
+		expect(svc.getCandidate(cand.id)?.status).toBe("projection_pending");
+		// Crash-safe: project via real Mnemopi to reach approved before skill creation
+		const proj = await svc.projectToMnemopiReal(cand.id, {
+			rememberScopedIdempotent: (c: string) => "mem-skill-" + c.slice(0, 4),
+			getScopedMemoryInBank: (id: string, _bank: string) => ({ bank: "default" }),
+			getScopedRetainTarget: () => ({ bank: "default" }),
+		} as any);
+		expect(proj.ok).toBe(true);
+		expect(svc.getCandidate(cand.id)?.status).toBe("approved");
 		// Mock hardened writer that validates name
 		const mockWriter = {
 			writeManagedSkill: async (input: {
@@ -263,14 +273,14 @@ describe("custom autolearn extended termux", () => {
 		svc.approveCandidate(cand.id, "Conservative fix content", canon);
 		svc.projectToMnemopi(cand.id, "mem_cons");
 		const failingMnemopi = {
-			editScopedMemory: () => {
+			editScopedMemoryInBank: () => {
 				throw new Error("backend down");
 			},
 		};
 		const ok = svc.deleteCandidateWithMnemopi(
 			cand.id,
 			canon,
-			failingMnemopi as unknown as { editScopedMemory: (op: string, id: string) => unknown },
+			failingMnemopi as unknown as { editScopedMemoryInBank: (op: string, id: string, _bank: string) => unknown },
 		);
 		expect(ok).toBe(false);
 		// Candidate must still exist and be needs_review, projection must remain
@@ -324,12 +334,13 @@ describe("custom autolearn extended termux", () => {
 		for (const r of rows) {
 			const proj = svcLegacy.getProjection(r.id)!;
 			const mock = {
-				editScopedMemory: (op: string, id: string) => {
+				getScopedMemoryInBank: (mid: string, b: string) => (mid === r.mem && b === proj.bank ? { bank: proj.bank } : null),
+				editScopedMemoryInBank: (_op: string, id: string, _bank: string) => {
 					expect(id).toBe(r.mem);
-					return { status: "deleted", bank: proj.bank };
+					return { status: "deleted", bank: _bank };
 				},
 			};
-			const ok = svcLegacy.deleteCandidateWithMnemopi(r.id, r.proj, mock as unknown as { editScopedMemory: (op: string, id: string) => unknown });
+			const ok = svcLegacy.deleteCandidateWithMnemopi(r.id, r.proj, mock as unknown as { getScopedMemoryInBank: (id: string, bank: string) => unknown; editScopedMemoryInBank: (op: string, id: string, bank: string) => unknown });
 			expect(ok).toBe(true);
 			expect(svcLegacy.getCandidate(r.id)).toBeNull();
 			expect(svcLegacy.getProjection(r.id)).toBeNull();
@@ -367,8 +378,8 @@ describe("custom autolearn extended termux", () => {
 		expect(defaultProjAfter).not.toBeNull();
 		expect(defaultProjAfter?.bank).toBe(bankForScope("project", defaultProj));
 		// Cleanup eligibility for backfilled row after preserve test
-		const mock2 = { editScopedMemory: (op: string, id: string) => ({ status: "deleted", bank: defaultProjAfter!.bank }) };
-		expect(svc2.deleteCandidateWithMnemopi("cand_default", defaultProj, mock2 as unknown as { editScopedMemory: (op: string, id: string) => unknown })).toBe(true);
+		const mock2 = { getScopedMemoryInBank: (mid: string, b: string) => (b === defaultProjAfter!.bank ? { bank: b } : null), editScopedMemoryInBank: (_op: string, _id: string, _bank: string) => ({ status: "deleted", bank: _bank }) };
+		expect(svc2.deleteCandidateWithMnemopi("cand_default", defaultProj, mock2 as unknown as { editScopedMemoryInBank: (op: string, id: string, _bank: string) => unknown })).toBe(true);
 		svc2.close();
 		try { fs.rmSync(legacyDir, { recursive: true, force: true }); } catch {}
 		try { fs.rmSync(preserveDir, { recursive: true, force: true }); } catch {}

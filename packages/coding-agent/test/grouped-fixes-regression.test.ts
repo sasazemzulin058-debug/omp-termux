@@ -170,9 +170,9 @@ describe("grouped fixes regression", () => {
     // First projection: rememberScoped succeeds but getScopedMemory throws -> uncertain
     let rememberCalls = 0;
     const mnemopiUncertain: unknown = {
-      rememberScoped: () => { rememberCalls++; return "mem-retry-1"; },
+      rememberScopedIdempotent: () => { rememberCalls++; return "mem-retry-1"; },
       getScopedRetainTarget: () => ({ bank: targetBank }),
-      getScopedMemory: () => { throw new Error("transient introspection failure"); },
+      getScopedMemoryInBank: () => { throw new Error("transient introspection failure"); },
     };
     const res1 = await svc.projectToMnemopiReal(cand.id, mnemopiUncertain as never);
     expect(res1.ok).toBe(false);
@@ -182,9 +182,9 @@ describe("grouped fixes regression", () => {
     // Retry: same memory still exists, now getScopedMemory succeeds -> should reconcile without second rememberScoped
     rememberCalls = 0;
     const mnemopiRetry: unknown = {
-      rememberScoped: () => { rememberCalls++; return "mem-retry-2-should-not-be-used"; },
+      rememberScopedIdempotent: () => { rememberCalls++; return "mem-retry-2-should-not-be-used"; },
       getScopedRetainTarget: () => ({ bank: targetBank }),
-      getScopedMemory: (id: string) => {
+      getScopedMemoryInBank: (id: string, _bank: string) => {
         if (id === "mem-retry-1") return { bank: targetBank };
         return null;
       },
@@ -201,9 +201,9 @@ describe("grouped fixes regression", () => {
     svc2.recordVerifierResult(cand2.id, "bun test", { verified: true, summary: "ok", toolCallId: "tc2", expectedCommand: "bun test", failureFingerprint: cand2.failureDigest, projectIdentity: proj, sessionId: "sess2", episodeId: "ep2" });
     svc2.approveCandidate(cand2.id, "reviewed content 2", proj);
     const mnemopiNull: unknown = {
-      rememberScoped: () => "mem-null-1",
+      rememberScopedIdempotent: () => "mem-null-1",
       getScopedRetainTarget: () => ({ bank: targetBank }),
-      getScopedMemory: () => null,
+      getScopedMemoryInBank: () => null,
     };
     const resNull = await svc2.projectToMnemopiReal(cand2.id, mnemopiNull as never);
     expect(resNull.ok).toBe(false);
@@ -227,15 +227,16 @@ describe("grouped fixes regression", () => {
     const targetBank = bankForScope("project", proj);
     const wrongBank = targetBank + "_wrong";
     const mnemopiMismatch: unknown = {
-      rememberScoped: () => "mem-bm-1",
+      rememberScopedIdempotent: () => "mem-bm-1",
       getScopedRetainTarget: () => ({ bank: targetBank }),
-      getScopedMemory: () => ({ bank: wrongBank }),
+      getScopedMemoryInBank: () => ({ bank: wrongBank }),
     };
     const res = await svc.projectToMnemopiReal(cand.id, mnemopiMismatch as never);
     expect(res.ok).toBe(false);
     expect(res.error).toContain("actual write bank");
     expect(svc.getProjection(cand.id)?.mnemopiId).toBe("mem-bm-1");
-    expect(svc.getProjection(cand.id)?.bank).toBe(targetBank);
+    expect(svc.getProjection(cand.id)?.bank).toBe(wrongBank);
+    expect(svc.getOperationIntent(cand.id)?.mnemopiBank).toBe(wrongBank);
     expect(svc.getCandidate(cand.id)?.status).toBe("needs_review");
     svc.close();
     try { fs.rmSync(dir, { recursive: true, force: true }); } catch {}
@@ -304,9 +305,9 @@ describe("grouped fixes regression", () => {
     const targetBank = bankForScope("project", proj);
     // Simulate first projection with missing introspection -> persists projection_pending
     const mnemopiFirst: unknown = {
-      rememberScoped: () => "mem-ar-1",
+      rememberScopedIdempotent: () => "mem-ar-1",
       getScopedRetainTarget: () => ({ bank: targetBank }),
-      getScopedMemory: () => { throw new Error("transient"); },
+      getScopedMemoryInBank: () => { throw new Error("transient"); },
     };
     const r1 = await svc.projectToMnemopiReal(cand.id, mnemopiFirst as never);
     expect(r1.ok).toBe(false);
@@ -314,9 +315,9 @@ describe("grouped fixes regression", () => {
     expect(svc.getProjection(cand.id)?.mnemopiId).toBe("mem-ar-1");
     // Retry should reconcile and set approved
     const mnemopiRetry: unknown = {
-      rememberScoped: () => { throw new Error("should not be called"); },
+      rememberScopedIdempotent: () => { throw new Error("should not be called"); },
       getScopedRetainTarget: () => ({ bank: targetBank }),
-      getScopedMemory: (id: string) => (id === "mem-ar-1" ? { bank: targetBank } : null),
+      getScopedMemoryInBank: (id: string, _bank: string) => (id === "mem-ar-1" ? { bank: targetBank } : null),
     };
     const r2 = await svc.projectToMnemopiReal(cand.id, mnemopiRetry as never);
     expect(r2.ok).toBe(true);
@@ -337,9 +338,9 @@ describe("grouped fixes regression", () => {
     svc.approveCandidate(cand.id, "reviewed no id", proj);
     const targetBank = bankForScope("project", proj);
     const mnemopiNoId: unknown = {
-      rememberScoped: () => undefined,
+      rememberScopedIdempotent: () => undefined,
       getScopedRetainTarget: () => ({ bank: targetBank }),
-      getScopedMemory: () => null,
+      getScopedMemoryInBank: () => null,
     };
     const res = await svc.projectToMnemopiReal(cand.id, mnemopiNoId as never);
     expect(res.ok).toBe(false);
@@ -364,9 +365,9 @@ describe("grouped fixes regression", () => {
     svc.approveCandidate(cand.id, "reviewed delete", proj);
     const targetBank = bankForScope("project", proj);
     const mnemopiOk: unknown = {
-      rememberScoped: () => "mem-del-1",
+      rememberScopedIdempotent: () => "mem-del-1",
       getScopedRetainTarget: () => ({ bank: targetBank }),
-      getScopedMemory: (id: string) => (id === "mem-del-1" ? { bank: targetBank } : null),
+      getScopedMemoryInBank: (id: string, _bank: string) => (id === "mem-del-1" ? { bank: targetBank } : null),
     };
     const r = await svc.projectToMnemopiReal(cand.id, mnemopiOk as never);
     expect(r.ok).toBe(true);
@@ -381,7 +382,7 @@ describe("grouped fixes regression", () => {
     // Instead use public helper to create intent via delete that fails externally
     let cleanCalls = 0;
     const mnemopiFailOnce: unknown = {
-      editScopedMemory: (op: string, _id: string) => {
+      editScopedMemoryInBank: (op: string, _id: string, _bank: string) => {
         cleanCalls++;
         if (cleanCalls === 1) throw new Error("transient external failure");
         return { status: "deleted", bank: targetBank };
@@ -394,7 +395,8 @@ describe("grouped fixes regression", () => {
     expect(svc.getOperationIntent(cand.id)?.mnemopiId).toBe("mem-del-1");
     // Recovery should retry and succeed
     const mnemopiRecover: unknown = {
-      editScopedMemory: () => ({ status: "deleted", bank: targetBank }),
+      getScopedMemoryInBank: (id: string, b: string) => (b === targetBank ? { bank: b } : null),
+      editScopedMemoryInBank: () => ({ status: "deleted", bank: targetBank }),
     };
     const recovered = svc.recoverOperationIntents(mnemopiRecover as never);
     expect(recovered).toBe(1);

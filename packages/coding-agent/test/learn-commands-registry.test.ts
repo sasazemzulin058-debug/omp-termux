@@ -70,7 +70,7 @@ describe("learn registry/dispatcher integration", () => {
 
     // Fake Mnemopi state that writes to in-memory map, preserving bank check
     const fakeMnemopi = {
-      rememberScoped: (content: string, _opts: { scope: string; source: string }) => `mem_${content.slice(0, 8)}`,
+      rememberScopedIdempotent: (content: string, _opts: { scope: string; source: string; idempotencyKey: string }) => `mem_${content.slice(0, 8)}`,
       editScopedMemory: (_op: string, _id: string) => ({ status: "deleted", bank: "p_dummy" }),
       getScopedRetainTarget: () => ({ bank: `p_${projectIdentity.slice(0, 12)}` }),
     };
@@ -275,9 +275,9 @@ describe("learn registry/dispatcher integration", () => {
     svc.approveCandidate(cand.id, "good review", pid);
     // Post-write verification mismatch via getScopedMemory (conservative: retain is authoritative, but write bank mismatch fails)
     const mismatched = {
-      rememberScoped: () => "mem123",
+      rememberScopedIdempotent: () => "mem123",
       getScopedRetainTarget: () => ({ bank: "bankA" }),
-      getScopedMemory: () => ({ bank: "bankB" }),
+      getScopedMemoryInBank: () => ({ bank: "bankB" }),
     };
     const res = await svc.projectToMnemopiReal(cand.id, mismatched as never);
     expect(res.ok).toBe(false);
@@ -385,7 +385,7 @@ describe("learn registry/dispatcher integration", () => {
     svc.approveCandidate(cand.id, "good review", pid);
     // Retain bank that differs from derived should be used as authoritative when provided via opts; previous bug falsely rejected
     const explicit = "custom-base-bank";
-    const mOk = { rememberScoped: ()=>"mem1", getScopedMemory: (id:string)=> ({ bank: explicit }) } as unknown as never;
+    const mOk = { rememberScopedIdempotent: () =>"mem1", getScopedMemoryInBank: (id: string, _bank: string) => ({ bank: explicit }) } as unknown as never;
     const res = await svc.projectToMnemopiReal(cand.id, mOk, { targetBank: explicit });
     expect(res.ok).toBe(true);
     expect(svc.getProjection(cand.id)?.bank).toBe(explicit);
@@ -406,16 +406,16 @@ describe("learn registry/dispatcher integration", () => {
       return c;
     };
     const cNull = mk("tcNull");
-    const rNull = await svc.projectToMnemopiReal(cNull.id, { rememberScoped: ()=> "memNull", getScopedMemory: ()=> null } as unknown as never);
+    const rNull = await svc.projectToMnemopiReal(cNull.id, { rememberScopedIdempotent: () => "memNull", getScopedMemoryInBank: () => null } as unknown as never);
     expect(rNull.ok).toBe(false);
     expect(svc.getCandidate(cNull.id)?.status).toBe("projection_pending");
     expect(svc.getProjection(cNull.id)?.mnemopiId).toBe("memNull");
     const cThrow = mk("tcThrow");
-    const rThrow = await svc.projectToMnemopiReal(cThrow.id, { rememberScoped: ()=> "memThrow", getScopedMemory: ()=> { throw new Error("boom"); } } as unknown as never);
+    const rThrow = await svc.projectToMnemopiReal(cThrow.id, { rememberScopedIdempotent: () => "memThrow", getScopedMemoryInBank: () => { throw new Error("boom"); } } as unknown as never);
     expect(rThrow.ok).toBe(false);
     expect(svc.getCandidate(cThrow.id)?.status).toBe("projection_pending");
     const cNoId = mk("tcNoId");
-    const rNoId = await svc.projectToMnemopiReal(cNoId.id, { rememberScoped: ()=> undefined as unknown as string } as unknown as never);
+    const rNoId = await svc.projectToMnemopiReal(cNoId.id, { rememberScopedIdempotent: () => undefined as unknown as string } as unknown as never);
     expect(rNoId.ok).toBe(false);
     expect(svc.getCandidate(cNoId.id)?.status).toBe("needs_review");
     const cPos = mk("tcPos");
@@ -424,7 +424,7 @@ describe("learn registry/dispatcher integration", () => {
     const retainBank = (svc as unknown as { getCandidate:(id:string)=> { scope:string; projectIdentity:string } });
     // use explicit to avoid mismatch
     const explicitPos = "explicit-bank-pos";
-    const rPos = await svc.projectToMnemopiReal(cPos.id, { rememberScoped: ()=> "memPos", getScopedMemory: (id:string)=> ({ bank: explicitPos }) } as unknown as never, { targetBank: explicitPos });
+    const rPos = await svc.projectToMnemopiReal(cPos.id, { rememberScopedIdempotent: () => "memPos", getScopedMemoryInBank: (id: string, _bank: string) => ({ bank: explicitPos }) } as unknown as never, { targetBank: explicitPos });
     expect(rPos.ok).toBe(true);
     expect(svc.getProjection(cPos.id)?.bank).toBe(explicitPos);
     svc.close();
@@ -450,7 +450,7 @@ describe("learn registry/dispatcher integration", () => {
     expect(after?.status).toBe("projection_pending");
     // Now retry with Mnemopi available and explicit bank
     const explicit = "retry-bank";
-    const mem = { rememberScoped: ()=>"memRetry", getScopedMemory: (id:string)=> ({ bank: explicit }) } as unknown as never;
+    const mem = { rememberScopedIdempotent: () =>"memRetry", getScopedMemoryInBank: (id: string, _bank: string) => ({ bank: explicit }) } as unknown as never;
     const proj = await check.projectToMnemopiReal(c.id, mem, { targetBank: explicit });
     expect(proj.ok).toBe(true);
     expect(check.getProjection(c.id)?.bank).toBe(explicit);
@@ -469,22 +469,22 @@ describe("learn registry/dispatcher integration", () => {
     svc.recordVerifierResult(cand.id, "bun test", { verified:true, summary:"ok", toolCallId:"tcD", expectedCommand:"bun test", failureFingerprint:cand.failureDigest, projectIdentity: pid, sessionId:"sessD", episodeId:"epD" });
     svc.approveCandidate(cand.id, "review D", pid);
     const bank = "bank-for-delete";
-    const memOk = { rememberScoped: ()=>"memD", getScopedMemory: (id:string)=> ({ bank }) } as unknown as never;
+    const memOk = { rememberScopedIdempotent: () =>"memD", getScopedMemoryInBank: (id: string, _bank: string) => ({ bank }) } as unknown as never;
     const proj = await svc.projectToMnemopiReal(cand.id, memOk, { targetBank: bank });
     expect(proj.ok).toBe(true);
     // bankless not_found should be treated as failure (preserve)
-    const notFoundNoBank = { editScopedMemory: (_op:string,_id:string)=> ({ status:"not_found" }) } as unknown as never;
+    const notFoundNoBank = { getScopedMemoryInBank: (id: string, b: string) => (b === bank ? { bank } : null), editScopedMemoryInBank: (_op:string,_id:string, _bank:string)=> ({ status:"not_found" }) } as unknown as never;
     const delFail1 = svc.deleteCandidateWithMnemopi(cand.id, pid, notFoundNoBank);
     expect(delFail1).toBe(false);
     expect(svc.getProjection(cand.id)).not.toBeNull();
     expect(svc.getCandidate(cand.id)).not.toBeNull();
     // not_found with correct bank is also strict failure in new semantics (old-bank risk)
-    const notFoundBank = { editScopedMemory: (_op:string,_id:string)=> ({ status:"not_found", bank }) } as unknown as never;
+    const notFoundBank = { getScopedMemoryInBank: (id: string, b: string) => (b === bank ? { bank } : null), editScopedMemoryInBank: (_op:string,_id:string, _bank:string)=> ({ status:"not_found", bank: _bank }) } as unknown as never;
     const delFail2 = svc.deleteCandidateWithMnemopi(cand.id, pid, notFoundBank);
     expect(delFail2).toBe(false);
     expect(svc.getProjection(cand.id)).not.toBeNull();
     // Correct deleted with matching bank succeeds
-    const okDel = { editScopedMemory: (_op:string,_id:string)=> ({ status:"deleted", bank }) } as unknown as never;
+    const okDel = { getScopedMemoryInBank: (id: string, b: string) => (b === bank ? { bank } : null), editScopedMemoryInBank: (_op:string,_id:string, _bank:string)=> ({ status:"deleted", bank: _bank }) } as unknown as never;
     const delOk = svc.deleteCandidateWithMnemopi(cand.id, pid, okDel);
     expect(delOk).toBe(true);
     expect(svc.getProjection(cand.id)).toBeNull();
@@ -499,7 +499,7 @@ describe("learn registry/dispatcher integration", () => {
     expect(svc.rollbackCandidateWithMnemopi(cand2.id, pid, null)).toBe(false);
     expect(svc.getProjection(cand2.id)).not.toBeNull();
     // Rollback with mismatched bank fails closed
-    const mismatch = { editScopedMemory: (_op:string,_id:string)=> ({ status:"deleted", bank:"other-bank" }) } as unknown as never;
+    const mismatch = { getScopedMemoryInBank: (id: string, b: string) => (b === bank ? { bank } : null), editScopedMemoryInBank: (_op:string,_id:string, _bank:string)=> ({ status:"deleted", bank:"other-bank" }) } as unknown as never;
     expect(svc.rollbackCandidateWithMnemopi(cand2.id, pid, mismatch)).toBe(false);
     expect(svc.getProjection(cand2.id)).not.toBeNull();
     // Rollback with correct bank succeeds

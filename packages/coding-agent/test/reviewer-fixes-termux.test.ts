@@ -268,11 +268,11 @@ describe("reviewer fixes termux", () => {
 		svc.close();
 		const remembered: { content: string; opts: unknown }[] = [];
 		const mockMnemopi = {
-			rememberScoped: (content: string, opts: { scope: string; source: string }) => {
+			rememberScopedIdempotent: (content: string, opts: { scope: string; source: string; idempotencyKey: string }) => {
 				remembered.push({ content, opts });
 				return "mem_approve_1";
 			},
-			editScopedMemory: () => ({ status: "deleted" }),
+			editScopedMemoryInBank: () => ({ status: "deleted" }),
 		};
 		const res = await handleLearnCommand(
 			[
@@ -331,8 +331,8 @@ describe("reviewer fixes termux", () => {
 		svc.projectToMnemopi(cand.id, "mem_pres");
 		svc.close();
 		const failingMnemopi = {
-			rememberScoped: () => "x" as string | undefined,
-			editScopedMemory: () => {
+			rememberScopedIdempotent: () => "x" as string | undefined,
+			editScopedMemoryInBank: () => {
 				throw new Error("backend down");
 			},
 		};

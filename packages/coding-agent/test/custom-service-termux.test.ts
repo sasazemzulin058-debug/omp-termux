@@ -93,10 +93,10 @@ describe("custom autolearn termux slice", () => {
 		expect(svc.getCandidate(cand.id)?.status).toBe("needs_review");
 		// Synthetic content rejected
 		expect(svc.approveCandidate(cand.id, "Verified resolution for x", "/repo/a").success).toBe(false);
-		// Meaningful content approved
+		// Meaningful content approved -> crash-safe pending before external projection
 		const ok = svc.approveCandidate(cand.id, "Fix: ensure pidfd fallback handles android bionic", "/repo/a");
 		expect(ok.success).toBe(true);
-		expect(svc.getCandidate(cand.id)?.status).toBe("approved");
+		expect(svc.getCandidate(cand.id)?.status).toBe("projection_pending");
 	});
 
 	it("enforces project scope", () => {

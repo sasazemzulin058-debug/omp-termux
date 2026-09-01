@@ -46,16 +46,16 @@ describe("approval idempotent / projection orphan regression", () => {
 
 		let writes = 0;
 		const fakeMnemopi = {
-			rememberScoped: (c: string, _o: { scope: string; source: string }) => {
+			rememberScopedIdempotent: (c: string, _o: { scope: string; source: string; idempotencyKey: string }) => {
 				writes++;
 				expect(c).toContain("android pidfd");
 				return "mem_dup_1";
 			},
-			getScopedMemory: (_id: string) => ({ bank: svc.getProjection(cand.id)?.bank ?? "unknown" }),
+			getScopedMemoryInBank: (_id: string, _bank: string) => ({ bank: svc.getProjection(cand.id)?.bank ?? "unknown" }),
 			getScopedRetainTarget: () => ({ bank: svc.getProjection(cand.id)?.bank ?? "unknown" }),
 		} as unknown as {
-			rememberScoped: (c: string, o: { scope: string; source: string }) => string | undefined;
-			getScopedMemory: (id: string) => { bank: string } | null | undefined;
+			rememberScopedIdempotent: (c: string, o: { scope: string; source: string; idempotencyKey: string }) => string | undefined;
+			getScopedMemoryInBank: (id: string, bank: string) => { bank: string } | null | undefined;
 			getScopedRetainTarget: () => { bank: string } | null | undefined;
 		};
 
@@ -78,11 +78,11 @@ describe("approval idempotent / projection orphan regression", () => {
 		// Duplicate projection must not create second memory write and must return same id
 		let secondWrites = 0;
 		const fakeMnemopi2 = {
-			rememberScoped: () => {
+			rememberScopedIdempotent: () => {
 				secondWrites++;
 				return "mem_dup_2";
 			},
-			getScopedMemory: (id: string) => {
+			getScopedMemoryInBank: (id: string, bank: string) => {
 				// Return bank for existing mem id, to confirm reconciliation
 				if (id === "mem_dup_1") return { bank: proj1!.bank };
 				return null;
@@ -134,8 +134,8 @@ describe("approval idempotent / projection orphan regression", () => {
 		const contentA = "Real fix: handle android pidfd fallback";
 		svc.approveCandidate(cand.id, contentA, canon);
 		const firstProj = await svc.projectToMnemopiReal(cand.id, {
-			rememberScoped: () => "mem_change_1",
-		} as unknown as { rememberScoped: (c: string, o: { scope: string; source: string }) => string | undefined });
+			rememberScopedIdempotent: () => "mem_change_1",
+		} as unknown as { rememberScopedIdempotent: (c: string, o: { scope: string; source: string; idempotencyKey: string }) => string | undefined });
 		expect(firstProj.ok).toBe(true);
 		expect(svc.getProjection(cand.id)?.mnemopiId).toBe("mem_change_1");
 
@@ -158,7 +158,8 @@ describe("approval idempotent / projection orphan regression", () => {
 		// After explicit rollback, re-approval with new content succeeds
 		const bank = proj!.bank;
 		const mockMnemopi = {
-			editScopedMemory: () => ({ status: "deleted", bank }),
+			getScopedMemoryInBank: (mid: string, b: string) => (mid && b === bank ? { bank } : null),
+			editScopedMemoryInBank: () => ({ status: "deleted", bank }),
 		} as any;
 		const rolled = svc.rollbackCandidateWithMnemopi(cand.id, canon, mockMnemopi);
 		expect(rolled).toBe(true);

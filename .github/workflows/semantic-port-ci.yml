@@ -34,6 +34,24 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/bun-install
+      - name: Build host native addon
+        shell: bash
+        run: |
+          set -euo pipefail
+          bun --cwd=packages/natives run build
+          echo "Verifying host native addon..."
+          ls -lh packages/natives/native/pi_natives.*.node || true
+          if [ "$(uname -m)" = "x86_64" ]; then
+            if ! ls packages/natives/native/pi_natives.linux-x64-modern.node 1>/dev/null 2>&1 && ! ls packages/natives/native/pi_natives.linux-x64-baseline.node 1>/dev/null 2>&1; then
+              echo "::error::host native addon missing expected Linux artifact (pi_natives.linux-x64-modern.node or baseline) in packages/natives/native"
+              ls -lh packages/natives/native/ || true
+              exit 1
+            fi
+          elif ! ls packages/natives/native/pi_natives.*.node 1>/dev/null 2>&1; then
+            echo "::error::host native addon missing after build (no pi_natives.*.node in packages/natives/native)"
+            ls -R packages/natives/native || true
+            exit 1
+          fi
       - name: Run semantic focused tests
         shell: bash
         run: |
@@ -43,11 +61,22 @@ jobs:
             packages/coding-agent/test/custom-controller-termux.test.ts \
             packages/coding-agent/test/custom-service-termux.test.ts \
             packages/coding-agent/test/custom-service-extended.test.ts \
+            packages/coding-agent/test/custom-service-approval-idempotent.test.ts \
+            packages/coding-agent/test/focused-recovery-identity-verifier.test.ts \
+            packages/coding-agent/test/grouped-fixes-regression.test.ts \
+            packages/coding-agent/test/learn-commands-registry.test.ts \
+            packages/coding-agent/test/p1-cleanup-state-machine.test.ts \
+            packages/coding-agent/test/race-foreign-regression.test.ts \
+            packages/coding-agent/test/final-projection-recovery.test.ts \
             packages/coding-agent/test/generator-android.test.ts \
             packages/coding-agent/test/learn-commands-termux.test.ts \
             packages/coding-agent/test/repo-root-isolation.test.ts \
             packages/coding-agent/test/reviewer-fixes-termux.test.ts \
-            packages/coding-agent/test/settings-policy.test.ts
+            packages/coding-agent/test/settings-policy.test.ts \
+            packages/coding-agent/test/mnemopi-idempotent-exact-bank.test.ts \
+            packages/mnemopi/test/beam-idempotency-concurrent.test.ts \
+            packages/mnemopi/test/beam-p1-keyed-reuse-collision.test.ts \
+            packages/mnemopi/test/beam-p1-gist-rekey-consolidation.test.ts
 
   android-native:
     name: Android native compilation (NDK)

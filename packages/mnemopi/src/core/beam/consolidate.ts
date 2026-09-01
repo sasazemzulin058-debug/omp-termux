@@ -398,35 +398,105 @@ export function consolidateToEpisodic(
 	const timestamp = isoNow();
 	const scope = options.scope ?? "session";
 	const veracity = clampEpisodicVeracity(options.veracity ?? "unknown");
-	const metadata = options.metadata ?? {};
-	beam.db.run(
-		`INSERT INTO episodic_memory
-		 (id, content, source, timestamp, session_id, importance, metadata_json, summary_of,
-		  valid_until, scope, author_id, author_type, channel_id, memory_type, veracity, created_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		[
-			memoryId,
-			summary,
-			source,
-			timestamp,
-			sourceSession(beam),
-			importance,
-			json(metadata),
-			sourceWmIds.join(","),
-			options.validUntil ?? null,
-			scope,
-			beam.authorId,
-			beam.authorType,
-			beam.channelId,
-			"unknown",
-			veracity,
-			timestamp,
-		],
-	);
+	const metadata = { ...(options.metadata ?? {}) } as Record<string, unknown>;
+	// Preserve idempotency_key when consolidating a single idempotent source row:
+	// fetch the source row's key/source so episodic can answer two-tier dedup after working trim.
+	let preservedKey: string | null = null;
+	let preservedSource: string | null = null;
+	if (sourceWmIds.length === 1) {
+		try {
+			const row = beam.db.query("SELECT source, idempotency_key, metadata_json FROM working_memory WHERE id = ? LIMIT 1").get(sourceWmIds[0]) as { source?: string; idempotency_key?: string | null; metadata_json?: string | null } | null | undefined;
+			const colKey = typeof row?.idempotency_key === "string" && row.idempotency_key.trim() ? row.idempotency_key.trim() : null;
+			let metaKey: string | null = null;
+			if (!colKey && row?.metadata_json) {
+				try {
+					const meta = JSON.parse(row.metadata_json as string) as Record<string, unknown>;
+					const mk = meta["idempotency_key"] ?? meta["idempotencyKey"];
+					if (typeof mk === "string" && mk.trim()) metaKey = mk.trim();
+				} catch {}
+			}
+			const finalKey = colKey ?? metaKey;
+			if (finalKey && typeof row?.source === "string" && row.source.trim()) {
+				preservedKey = finalKey;
+				preservedSource = row.source.trim();
+				if (!metadata["idempotency_key"]) metadata["idempotency_key"] = finalKey;
+				if (!metadata["original_source"]) metadata["original_source"] = preservedSource;
+			}
+		} catch {}
+	}
+	const episodicSource = preservedSource ?? source;
+	const episodicKey = preservedKey;
+	try {
+		beam.db.run(
+			`INSERT INTO episodic_memory
+			 (id, content, source, timestamp, session_id, importance, metadata_json, summary_of,
+			  valid_until, scope, author_id, author_type, channel_id, memory_type, veracity, created_at, idempotency_key)
+			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			[
+				memoryId,
+				summary,
+				episodicSource,
+				timestamp,
+				sourceSession(beam),
+				importance,
+				json(metadata),
+				sourceWmIds.join(","),
+				options.validUntil ?? null,
+				scope,
+				beam.authorId,
+				beam.authorType,
+				beam.channelId,
+				"unknown",
+				veracity,
+				timestamp,
+				episodicKey,
+			],
+		);
+	} catch (e) {
+		const msg = e instanceof Error ? e.message : String(e);
+		const isMissingColumn = msg.includes("no such column") || msg.includes("has no column named");
+		const isUniqueConflict = msg.includes("UNIQUE constraint failed") || msg.includes("unique");
+		if (isMissingColumn) {
+			beam.db.run(
+				`INSERT INTO episodic_memory
+				 (id, content, source, timestamp, session_id, importance, metadata_json, summary_of,
+				  valid_until, scope, author_id, author_type, channel_id, memory_type, veracity, created_at)
+				 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+				[
+					memoryId,
+					summary,
+					episodicSource,
+					timestamp,
+					sourceSession(beam),
+					importance,
+					json(metadata),
+					sourceWmIds.join(","),
+					options.validUntil ?? null,
+					scope,
+					beam.authorId,
+					beam.authorType,
+					beam.channelId,
+					"unknown",
+					veracity,
+					timestamp,
+				],
+			);
+		} else if (isUniqueConflict) {
+			if (episodicKey && episodicSource) {
+				try {
+					const existing = beam.db.query("SELECT id FROM episodic_memory WHERE source = ? AND idempotency_key = ? LIMIT 1").get(episodicSource, episodicKey) as { id: string } | null | undefined;
+					if (existing?.id) return existing.id;
+				} catch {}
+			}
+			throw e;
+		} else {
+			throw e;
+		}
+	}
 	extractAndStoreFacts(beam, summary, 0, memoryId);
 	ingestIntoEpisodicGraph(beam, memoryId, summary);
 	scheduleEmbedding(beam, [{ memoryId, content: summary }]);
-	emitEvent(beam, "MEMORY_CONSOLIDATED", memoryId, summary, source, importance, {
+	emitEvent(beam, "MEMORY_CONSOLIDATED", memoryId, summary, episodicSource, importance, {
 		summary_of: [...sourceWmIds],
 		...metadata,
 	});

@@ -7,7 +7,7 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import type { ExtensionFactory } from "../extensibility/extensions";
-import { CustomAutolearnService, resolveProjectIdentity, getAgentDir, resolveAutolearnMode } from "./custom-service";
+import { CustomAutolearnService, resolveProjectIdentity, getAgentDir, resolveAutolearnMode, type MnemopiProjectionClient } from "./custom-service";
 import { settings as globalSettings } from "../config/settings";
 export type LearnCommand = "status" | "view" | "approve" | "reject" | "delete" | "rollback" | "sweep" | "config";
 
@@ -23,10 +23,7 @@ function dbExists(agentDir: string): boolean {
 
 export interface LearnCommandOptions {
 	agentDir?: string;
-	mnemopi?: {
-		rememberScoped: (content: string, opts: { scope: string; source: string }) => string | undefined;
-		editScopedMemory: (op: string, id: string) => unknown;
-	} | null;
+	mnemopi?: MnemopiProjectionClient | null;
 }
 
 export async function handleLearnCommand(
@@ -113,11 +110,7 @@ export async function handleLearnCommand(
 				// Project exact redacted reviewed content via scoped Mnemopi when available. Uses stored scope/project/bank.
 				const proj = await svc.projectToMnemopiReal(
 					id,
-					options.mnemopi as unknown as {
-						rememberScoped: (c: string, o: { scope: string; source: string }) => string | undefined;
-						getScopedRetainTarget?: () => { bank: string } | null | undefined;
-						getScopedMemory?: (id: string) => { bank: string } | null | undefined;
-					},
+					options.mnemopi as unknown as MnemopiProjectionClient,
 				);
 				if (!proj.ok) {
 					const cand = svc.getCandidate(id);
@@ -148,7 +141,7 @@ export async function handleLearnCommand(
 					const ok = svc.deleteCandidateWithMnemopi(
 						id,
 						projectIdentity,
-						options.mnemopi as unknown as { editScopedMemory: (op: string, id: string) => unknown },
+						options.mnemopi as unknown as MnemopiProjectionClient,
 					);
 					if (!ok) {
 						// Conservative: backend failure keeps projection; check if still present
@@ -192,7 +185,7 @@ export async function handleLearnCommand(
 				const ok = svc.rollbackCandidateWithMnemopi(
 					id,
 					projectIdentity,
-					options.mnemopi as unknown as { editScopedMemory: (op: string, id: string) => unknown },
+					options.mnemopi as unknown as MnemopiProjectionClient,
 				);
 				if (!ok) {
 					const still = svc.getProjection(id);

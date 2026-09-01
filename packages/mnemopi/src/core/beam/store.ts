@@ -156,6 +156,36 @@ function invalidateCaches(beam: BeamMemoryState): void {
 	cache._queryCache?.invalidate?.();
 }
 
+function findByIdempotency(beam: BeamMemoryState, source: string, idempotencyKey: string): string | null {
+	// Exact source + idempotency_key match, column first then JSON fallback for pre-migration rows.
+	// Two-tier: search working_memory then episodic_memory; episodic preserves key during consolidation.
+	for (const table of ["working_memory", "episodic_memory"] as const) {
+		try {
+			const row = beam.db.query(`SELECT id FROM ${table} WHERE source = ? AND (idempotency_key = ? OR json_extract(metadata_json, '$.idempotency_key') = ?) LIMIT 1`).get(source, idempotencyKey, idempotencyKey) as { id: string } | null | undefined;
+			if (row?.id) return row.id;
+		} catch {
+			try {
+				const row = beam.db.query(`SELECT id FROM ${table} WHERE source = ? AND json_extract(metadata_json, '$.idempotency_key') = ? LIMIT 1`).get(source, idempotencyKey) as { id: string } | null | undefined;
+				if (row?.id) return row.id;
+			} catch {}
+		}
+	}
+	return null;
+}
+
+function extractRowIdempotencyKey(row: { idempotency_key?: string | null; metadata_json?: string | null } | null | undefined): string | null {
+	if (typeof row?.idempotency_key === "string" && row.idempotency_key.trim()) return row.idempotency_key.trim();
+	if (row?.metadata_json) {
+		try {
+			const meta = JSON.parse(row.metadata_json) as Record<string, unknown>;
+			const mk = meta["idempotency_key"] ?? meta["idempotencyKey"];
+			if (typeof mk === "string" && mk.trim()) return mk.trim();
+		} catch {}
+	}
+	return null;
+}
+
+
 function findDuplicate(beam: BeamMemoryState, content: string): string | null {
 	using statement = beam.db.prepare("SELECT id FROM working_memory WHERE content = ? AND session_id = ? LIMIT 1");
 	const row = statement.get(content, beam.sessionId) as { id: string } | null;
@@ -445,13 +475,113 @@ export function remember(beam: BeamMemoryState, content: string, options: StoreR
 	const authorId = options.authorId ?? options.author_id ?? beam.authorId;
 	const authorType = options.authorType ?? options.author_type ?? beam.authorType;
 	const channelId = options.channelId ?? options.channel_id ?? beam.channelId;
-	const metadata = options.metadata ?? null;
+	const rawMetadata = options.metadata ?? null;
+	// Idempotency key: explicit option wins, else metadata field
+	const metaRecord = rawMetadata && typeof rawMetadata === "object" && !Array.isArray(rawMetadata) ? (rawMetadata as Record<string, unknown>) : null;
+	const idempotencyKeyRaw = options.idempotencyKey ?? options.idempotency_key ?? metaRecord?.["idempotency_key"] ?? metaRecord?.["idempotencyKey"];
+	const idempotencyKey = typeof idempotencyKeyRaw === "string" && idempotencyKeyRaw.trim() ? idempotencyKeyRaw.trim() : null;
+	const metadata: Metadata | null = idempotencyKey
+		? (metaRecord ? (metaRecord["idempotency_key"] === idempotencyKey ? rawMetadata : { ...metaRecord, idempotency_key: idempotencyKey }) : { idempotency_key: idempotencyKey }) as Metadata
+		: rawMetadata;
 	const embedText = embeddingText(content, options);
+	// Deterministic idempotent dedup: source + idempotency_key exact match returns existing id without new write (transactional)
+	if (idempotencyKey) {
+		let existingByKey: string | null = null;
+		try {
+			existingByKey = findByIdempotency(beam, source, idempotencyKey);
+		} catch {}
+		if (existingByKey) return existingByKey;
+	}
 
 	const existingId = findDuplicate(beam, content);
 	if (existingId !== null) {
-		beam.db.run(
-			`
+		if (idempotencyKey) {
+			// Keyed reuse: content-duplicate hit must persist source+idempotency_key atomically.
+			// Otherwise deterministic key lookup misses across restart and inserts a duplicate row.
+			// If the existing content-duplicate already carries a different key, bypass reuse and
+			// fall through to keyed insert so each source+key gets its own row (avoid clobbering).
+			let existingKey: string | null = null;
+			try {
+				const row = beam.db.query("SELECT idempotency_key, metadata_json FROM working_memory WHERE id = ? LIMIT 1").get(existingId) as { idempotency_key?: string | null; metadata_json?: string | null } | null | undefined;
+				existingKey = extractRowIdempotencyKey(row);
+			} catch {}
+			if (existingKey && existingKey !== idempotencyKey) {
+				// Bypass content dedup for this keyed write — fall through to transactional insert below
+			} else {
+				let finalId: string | null = null;
+				let persisted = false;
+				transaction(beam.db, () => {
+					let race: string | null = null;
+					try {
+						race = findByIdempotency(beam, source, idempotencyKey);
+					} catch {}
+					if (race && race !== existingId) { finalId = race; return; }
+					try {
+						beam.db.run(
+							`
+						UPDATE working_memory
+						SET importance = MAX(importance, ?), timestamp = ?, source = ?,
+							valid_until = COALESCE(?, valid_until),
+							scope = COALESCE(?, scope),
+							author_id = COALESCE(?, author_id),
+							author_type = COALESCE(?, author_type),
+							channel_id = COALESCE(?, channel_id),
+							memory_type = COALESCE(?, memory_type),
+							veracity = CASE WHEN ? != 'unknown' THEN ? ELSE veracity END,
+							trust_tier = COALESCE(?, trust_tier),
+							embed_text = COALESCE(?, embed_text),
+							consolidated_at = NULL,
+							idempotency_key = COALESCE(idempotency_key, ?),
+							metadata_json = ?
+						WHERE id = ? AND session_id = ?
+						`,
+							[
+								importance,
+								timestamp,
+								source,
+								validUntil,
+								scope,
+								authorId,
+								authorType,
+								channelId,
+								memoryType,
+								veracity,
+								veracity,
+								trustTier,
+								storedEmbeddingText(content, embedText),
+								idempotencyKey,
+								metadataJson(metadata),
+								existingId,
+								beam.sessionId,
+							],
+						);
+						persisted = true;
+					} catch (e) {
+						let after: string | null = null;
+						try {
+							after = findByIdempotency(beam, source, idempotencyKey);
+						} catch {}
+						if (after) { finalId = after; return; }
+						throw e;
+					}
+				});
+				if (finalId) return finalId;
+				if (persisted) {
+					emitEvent(beam, "MEMORY_UPDATED", {
+						memoryId: existingId,
+						content,
+						source,
+						importance,
+						metadata: metadata ?? undefined,
+					});
+					if (embedText !== content) scheduleEmbedding(beam, [{ memoryId: existingId, content: embedText }]);
+					invalidateCaches(beam);
+					return existingId;
+				}
+			}
+		} else {
+			beam.db.run(
+				`
 				UPDATE working_memory
 				SET importance = MAX(importance, ?), timestamp = ?, source = ?,
 					valid_until = COALESCE(?, valid_until),
@@ -465,64 +595,153 @@ export function remember(beam: BeamMemoryState, content: string, options: StoreR
 					embed_text = COALESCE(?, embed_text),
 					consolidated_at = NULL
 				WHERE id = ? AND session_id = ?
+				`,
+				[
+					importance,
+					timestamp,
+					source,
+					validUntil,
+					scope,
+					authorId,
+					authorType,
+					channelId,
+					memoryType,
+					veracity,
+					veracity,
+					trustTier,
+					storedEmbeddingText(content, embedText),
+					existingId,
+					beam.sessionId,
+				],
+			);
+			emitEvent(beam, "MEMORY_UPDATED", {
+				memoryId: existingId,
+				content,
+				source,
+				importance,
+				metadata: metadata ?? undefined,
+			});
+			if (embedText !== content) scheduleEmbedding(beam, [{ memoryId: existingId, content: embedText }]);
+			invalidateCaches(beam);
+			return existingId;
+		}
+	}
+
+	const memoryId = options.memoryId ?? options.memory_id ?? generateId(content, new Date(timestamp));
+	// Idempotent path: use transaction to make find+insert atomic and handle race where column exists but key collided
+	if (idempotencyKey) {
+		let insertedId: string | null = null;
+		let finalId: string | null = null;
+		transaction(beam.db, () => {
+			const raceExisting = findByIdempotency(beam, source, idempotencyKey);
+			if (raceExisting) { finalId = raceExisting; return; }
+			try {
+				beam.db.run(
+					`
+						INSERT INTO working_memory
+						(id, content, embed_text, source, timestamp, session_id, importance, metadata_json, valid_until, scope,
+						 author_id, author_type, channel_id, veracity, memory_type, trust_tier, idempotency_key)
+						VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+					`,
+					[
+						memoryId,
+						content,
+						storedEmbeddingText(content, embedText),
+						source,
+						timestamp,
+						beam.sessionId,
+						importance,
+						metadataJson(metadata),
+						validUntil,
+						scope,
+						authorId,
+						authorType,
+						channelId,
+						veracity,
+						memoryType,
+						trustTier,
+						idempotencyKey,
+					],
+				);
+				insertedId = memoryId;
+			} catch (e) {
+				// Unique violation on idempotency_key race or legacy path: return existing
+				const after = findByIdempotency(beam, source, idempotencyKey);
+				if (after) { finalId = after; return; }
+				throw e;
+			}
+		});
+		if (finalId) return finalId;
+		if (insertedId) {
+			addTemporalAnnotations(beam, insertedId, timestamp, source);
+			const extractionSource = options.extractText ?? options.extract_text ?? content;
+			proactiveLinkIfEnabled(beam, insertedId, extractionSource, Boolean(options.extractEntities ?? options.extract_entities));
+			trimWorkingMemory(beam);
+			emitEvent(beam, "MEMORY_ADDED", { memoryId: insertedId, content, source, importance, metadata: metadata ?? undefined });
+			scheduleEmbedding(beam, [{ memoryId: insertedId, content: embedText }]);
+			if (options.extract === true) scheduleFactExtraction(beam, insertedId, extractionSource);
+			invalidateCaches(beam);
+			return insertedId;
+		}
+	}
+	// Try column-aware insert; fallback to legacy schema if column missing (migrates on next open)
+	try {
+		beam.db.run(
+			`
+				INSERT INTO working_memory
+				(id, content, embed_text, source, timestamp, session_id, importance, metadata_json, valid_until, scope,
+				 author_id, author_type, channel_id, veracity, memory_type, trust_tier, idempotency_key)
+				VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 			`,
 			[
-				importance,
-				timestamp,
+				memoryId,
+				content,
+				storedEmbeddingText(content, embedText),
 				source,
+				timestamp,
+				beam.sessionId,
+				importance,
+				metadataJson(metadata),
 				validUntil,
 				scope,
 				authorId,
 				authorType,
 				channelId,
+				veracity,
 				memoryType,
-				veracity,
-				veracity,
 				trustTier,
-				storedEmbeddingText(content, embedText),
-				existingId,
-				beam.sessionId,
+				idempotencyKey,
 			],
 		);
-		emitEvent(beam, "MEMORY_UPDATED", {
-			memoryId: existingId,
-			content,
-			source,
-			importance,
-			metadata: metadata ?? undefined,
-		});
-		if (embedText !== content) scheduleEmbedding(beam, [{ memoryId: existingId, content: embedText }]);
-		invalidateCaches(beam);
-		return existingId;
+	} catch {
+		beam.db.run(
+			`
+				INSERT INTO working_memory
+				(id, content, embed_text, source, timestamp, session_id, importance, metadata_json, valid_until, scope,
+				 author_id, author_type, channel_id, veracity, memory_type, trust_tier)
+				VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			`,
+			[
+				memoryId,
+				content,
+				storedEmbeddingText(content, embedText),
+				source,
+				timestamp,
+				beam.sessionId,
+				importance,
+				metadataJson(metadata),
+				validUntil,
+				scope,
+				authorId,
+				authorType,
+				channelId,
+				veracity,
+				memoryType,
+				trustTier,
+			],
+		);
+		// Best-effort legacy column fill via metadata already persisted
 	}
-
-	const memoryId = options.memoryId ?? options.memory_id ?? generateId(content, new Date(timestamp));
-	beam.db.run(
-		`
-			INSERT INTO working_memory
-			(id, content, embed_text, source, timestamp, session_id, importance, metadata_json, valid_until, scope,
-			 author_id, author_type, channel_id, veracity, memory_type, trust_tier)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-		`,
-		[
-			memoryId,
-			content,
-			storedEmbeddingText(content, embedText),
-			source,
-			timestamp,
-			beam.sessionId,
-			importance,
-			metadataJson(metadata),
-			validUntil,
-			scope,
-			authorId,
-			authorType,
-			channelId,
-			veracity,
-			memoryType,
-			trustTier,
-		],
-	);
 	addTemporalAnnotations(beam, memoryId, timestamp, source);
 	// `extractText` lets a caller decouple "what gets stored" from "what facts are
 	// mined". coding-agent retains full multi-author transcripts but wants

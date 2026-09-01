@@ -22,9 +22,9 @@ describe("focused recovery identity verifier", () => {
 		svc.approveCandidate(cand.id, "reviewed startup", proj);
 		const targetBank = bankForScope("project", proj);
 		const mnemopiOk: unknown = {
-			rememberScoped: () => "mem-s",
+			rememberScopedIdempotent: () => "mem-s",
 			getScopedRetainTarget: () => ({ bank: targetBank }),
-			getScopedMemory: (id: string) => (id === "mem-s" ? { bank: targetBank } : null),
+			getScopedMemoryInBank: (id: string, _bank: string) => (id === "mem-s" ? { bank: targetBank } : null),
 		};
 		const r = await svc.projectToMnemopiReal(cand.id, mnemopiOk as never);
 		expect(r.ok).toBe(true);
@@ -32,7 +32,7 @@ describe("focused recovery identity verifier", () => {
 		// Use delete that fails to leave intent, then we will test startup recovery path via controller
 		let first = true;
 		const mnemopiFail: unknown = {
-			editScopedMemory: () => {
+			editScopedMemoryInBank: () => {
 				if (first) {
 					first = false;
 					throw new Error("crash transient");
@@ -55,8 +55,8 @@ describe("focused recovery identity verifier", () => {
 				handler = fn;
 			},
 			getMnemopiSessionState: () => ({
-				editScopedMemory: () => ({ status: "deleted", bank: targetBank }),
-				getScopedMemory: () => null,
+				editScopedMemoryInBank: () => ({ status: "deleted", bank: targetBank }),
+				getScopedMemoryInBank: () => null,
 			}),
 		};
 		const ctrl = new CustomAutolearnController({
@@ -144,9 +144,9 @@ describe("focused recovery identity verifier", () => {
 		svc.approveCandidate(cand.id, "reviewed idem", proj);
 		const targetBank = bankForScope("project", proj);
 		const mnemopiOk: unknown = {
-			rememberScoped: () => "mem-idem",
+			rememberScopedIdempotent: () => "mem-idem",
 			getScopedRetainTarget: () => ({ bank: targetBank }),
-			getScopedMemory: (id: string) => (id === "mem-idem" ? { bank: targetBank } : null),
+			getScopedMemoryInBank: (id: string, _bank: string) => (id === "mem-idem" ? { bank: targetBank } : null),
 		};
 		const r = await svc.projectToMnemopiReal(cand.id, mnemopiOk as never);
 		expect(r.ok).toBe(true);
@@ -156,7 +156,7 @@ describe("focused recovery identity verifier", () => {
 		// Use delete that throws to create intent, then close and reopen to simulate crash (intent remains)
 		let failOnce = true;
 		const mnemopiCrash: unknown = {
-			editScopedMemory: () => {
+			editScopedMemoryInBank: () => {
 				if (failOnce) {
 					failOnce = false;
 					throw new Error("crash before local commit");
@@ -170,8 +170,8 @@ describe("focused recovery identity verifier", () => {
 		// Now simulate process died after successful external delete but before local transaction: external now returns bankless not_found, but memory is gone.
 		// Recovery with introspection confirming absence should clear
 		const mnemopiBankless: unknown = {
-			editScopedMemory: () => ({ status: "not_found" }), // bankless
-			getScopedMemory: (id: string) => null, // confirmed absent in stored bank
+			editScopedMemoryInBank: () => ({ status: "not_found" }), // bankless
+			getScopedMemoryInBank: (id: string, _bank: string) => null, // confirmed absent in stored bank
 		};
 		const recovered = svc.recoverOperationIntents(mnemopiBankless as never);
 		expect(recovered).toBe(1);
@@ -198,14 +198,14 @@ describe("focused recovery identity verifier", () => {
 		svc.approveCandidate(cand.id, "reviewed unc", proj);
 		const targetBank = bankForScope("project", proj);
 		const mnemopiOk: unknown = {
-			rememberScoped: () => "mem-unc",
+			rememberScopedIdempotent: () => "mem-unc",
 			getScopedRetainTarget: () => ({ bank: targetBank }),
-			getScopedMemory: (id: string) => (id === "mem-unc" ? { bank: targetBank } : null),
+			getScopedMemoryInBank: (id: string, _bank: string) => (id === "mem-unc" ? { bank: targetBank } : null),
 		};
 		await svc.projectToMnemopiReal(cand.id, mnemopiOk as never);
 		let failOnce = true;
 		const mnemopiCrash: unknown = {
-			editScopedMemory: () => {
+			editScopedMemoryInBank: () => {
 				if (failOnce) {
 					failOnce = false;
 					throw new Error("crash");
@@ -217,7 +217,7 @@ describe("focused recovery identity verifier", () => {
 		expect(svc.getOperationIntent(cand.id)).not.toBeNull();
 		// Recovery with bankless not_found but no getScopedMemory -> remains uncertain
 		const mnemopiNoIntrospect: unknown = {
-			editScopedMemory: () => ({ status: "not_found" }),
+			editScopedMemoryInBank: () => ({ status: "not_found" }),
 		};
 		const recovered = svc.recoverOperationIntents(mnemopiNoIntrospect as never);
 		expect(recovered).toBe(0);
