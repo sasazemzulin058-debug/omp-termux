@@ -252,7 +252,7 @@ describe("final projection recovery — P1 fixes", () => {
 		});
 		svc.approveCandidate(cand.id, "reviewed ub", proj);
 		const targetBank = bankForScope("project", proj);
-		const actualBank = targetBank + "_actual";
+		const actualBank = `${targetBank}_actual`;
 		expect(targetBank).not.toBe(actualBank);
 		const mnemopiMismatch: unknown = {
 			rememberScopedIdempotent: () => "mem-ub-1",
@@ -277,7 +277,7 @@ describe("final projection recovery — P1 fixes", () => {
 		};
 		// Since projection already exists with actual bank, recovery should not need to do anything but could clear stale intent after manual review
 		// Simulate that candidate is still needs_review with projection existing; recover should leave it for manual but not orphan
-		const recovered = svc.recoverOperationIntents(mnemopiRecovery as never);
+		svc.recoverOperationIntents(mnemopiRecovery as never);
 		// After our mismatch fix, projection reference is actual bank, so no further recovery needed; intent may be cleared by next successful approve or manual rollback
 		// Just ensure we didn't lose actual bank reference
 		expect(svc.getProjection(cand.id)?.bank).toBe(actualBank);
@@ -316,7 +316,7 @@ describe("final projection recovery — P1 fixes", () => {
 		});
 		svc.approveCandidate(cand.id, "reviewed cb", proj);
 		const bankA = bankForScope("project", proj);
-		const bankB = bankA + "-foreign";
+		const bankB = `${bankA}-foreign`;
 		expect(bankA).not.toBe(bankB);
 		const realId = "mem-cross-same-id";
 		{
@@ -340,7 +340,7 @@ describe("final projection recovery — P1 fixes", () => {
 				if (id === realId) return { bank: bankB };
 				return null;
 			},
-			editScopedMemoryInBank: (op: string, _id: string, _bank: string) => {
+			editScopedMemoryInBank: (_op: string, _id: string, _bank: string) => {
 				editCalls++;
 				// Simulate bankless not_found (exact bank lookup unavailable) -> should preserve projection/intent
 				return { status: "not_found" };

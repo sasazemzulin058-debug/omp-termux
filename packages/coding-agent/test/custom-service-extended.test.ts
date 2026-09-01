@@ -3,8 +3,9 @@ import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { bankForScope, CustomAutolearnService, canonicalProjectIdentity } from "../src/autolearn/custom-service";
 import type { MnemopiProjectionClient } from "../src/autolearn/custom-service";
+import { bankForScope, CustomAutolearnService, canonicalProjectIdentity } from "../src/autolearn/custom-service";
+
 describe("custom autolearn extended termux", () => {
 	let dir: string;
 	let svc: CustomAutolearnService;
@@ -337,7 +338,7 @@ describe("custom autolearn extended termux", () => {
 		// Provide reviewed_content so delete/rollback gates pass
 		for (const r of rows) {
 			db.prepare("UPDATE candidates SET reviewed_content = ? WHERE id = ?").run(
-				"reviewed: real fix for " + r.scope,
+				`reviewed: real fix for ${r.scope}`,
 				r.id,
 			);
 		}
@@ -450,7 +451,7 @@ describe("custom autolearn extended termux", () => {
 		expect(defaultProjAfter?.bank).toBe(bankForScope("project", defaultProj));
 		// Cleanup eligibility for backfilled row after preserve test
 		const mock2: MnemopiProjectionClient = {
-			getScopedMemoryInBank: (mid: string, b: string) => (b === defaultProjAfter!.bank ? { bank: b } : null),
+			getScopedMemoryInBank: (_mid: string, b: string) => (b === defaultProjAfter!.bank ? { bank: b } : null),
 			editScopedMemoryInBank: (_op: string, _id: string, _bank: string) => ({ status: "deleted", bank: _bank }),
 		};
 		expect(svc2.deleteCandidateWithMnemopi("cand_default", defaultProj, mock2)).toBe(true);

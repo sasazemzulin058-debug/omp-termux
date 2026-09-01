@@ -368,7 +368,7 @@ describe("grouped fixes regression", () => {
 		});
 		svc.approveCandidate(cand.id, "reviewed bank mismatch", proj);
 		const targetBank = bankForScope("project", proj);
-		const wrongBank = targetBank + "_wrong";
+		const wrongBank = `${targetBank}_wrong`;
 		const mnemopiMismatch: unknown = {
 			rememberScopedIdempotent: () => "mem-bm-1",
 			getScopedRetainTarget: () => ({ bank: targetBank }),
@@ -617,11 +617,10 @@ describe("grouped fixes regression", () => {
 			(svc as unknown as { db: unknown }).constructor;
 		} catch {}
 		// Use direct DB to simulate crash intent left behind
-		const db = svc as unknown as { ["#db"]?: unknown } as unknown;
 		// Instead use public helper to create intent via delete that fails externally
 		let cleanCalls = 0;
 		const mnemopiFailOnce: unknown = {
-			editScopedMemoryInBank: (op: string, _id: string, _bank: string) => {
+			editScopedMemoryInBank: (_op: string, _id: string, _bank: string) => {
 				cleanCalls++;
 				if (cleanCalls === 1) throw new Error("transient external failure");
 				return { status: "deleted", bank: targetBank };
@@ -634,7 +633,7 @@ describe("grouped fixes regression", () => {
 		expect(svc.getOperationIntent(cand.id)?.mnemopiId).toBe("mem-del-1");
 		// Recovery should retry and succeed
 		const mnemopiRecover: unknown = {
-			getScopedMemoryInBank: (id: string, b: string) => (b === targetBank ? { bank: b } : null),
+			getScopedMemoryInBank: (_id: string, b: string) => (b === targetBank ? { bank: b } : null),
 			editScopedMemoryInBank: () => ({ status: "deleted", bank: targetBank }),
 		};
 		const recovered = svc.recoverOperationIntents(mnemopiRecover as never);
@@ -704,7 +703,6 @@ describe("grouped fixes regression", () => {
 			svcFactory: (d: string) => new CustomAutolearnService(d) as never,
 		});
 		// Need to get expo but we reuse svc
-		const candidatesBefore = svc.listCandidates(projViaSubdir).length;
 		expect(fromSubdir?.projectIdentity).toBe(projViaSubdir);
 		svc.close();
 		ctrl.close();

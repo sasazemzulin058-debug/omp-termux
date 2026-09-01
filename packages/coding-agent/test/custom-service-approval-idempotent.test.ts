@@ -87,7 +87,7 @@ describe("approval idempotent / projection orphan regression", () => {
 				secondWrites++;
 				return "mem_dup_2";
 			},
-			getScopedMemoryInBank: (id: string, bank: string) => {
+			getScopedMemoryInBank: (id: string, _bank: string) => {
 				// Return bank for existing mem id, to confirm reconciliation
 				if (id === "mem_dup_1") return { bank: proj1!.bank };
 				return null;

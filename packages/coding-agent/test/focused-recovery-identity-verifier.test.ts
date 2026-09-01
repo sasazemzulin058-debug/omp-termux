@@ -70,14 +70,11 @@ describe("focused recovery identity verifier", () => {
 		svc.close();
 
 		// Simulate SDK startup: new controller with same agentDir and session that has mnemopi state
-		let handler: (e: unknown) => void = () => {};
 		const mockSession: unknown = {
 			sessionId: "sess-s",
 			taskDepth: 0,
 			sessionManager: { getCwd: () => cwd },
-			subscribe: (fn: (e: unknown) => void) => {
-				handler = fn;
-			},
+			subscribe: () => {},
 			getMnemopiSessionState: () => ({
 				editScopedMemoryInBank: () => ({ status: "deleted", bank: targetBank }),
 				getScopedMemoryInBank: () => null,
@@ -218,7 +215,6 @@ describe("focused recovery identity verifier", () => {
 		expect(r.ok).toBe(true);
 		// Simulate crash window: external delete succeeded but local transaction never ran. So we manually leave intent + candidate + projection, but external memory already gone.
 		// Directly insert operation_intent as if deleteCandidateWithMnemopi persisted intent before crash
-		const db = svc as unknown as { _db?: unknown } as never;
 		// Use delete that throws to create intent, then close and reopen to simulate crash (intent remains)
 		let failOnce = true;
 		const mnemopiCrash: unknown = {
@@ -237,7 +233,7 @@ describe("focused recovery identity verifier", () => {
 		// Recovery with introspection confirming absence should clear
 		const mnemopiBankless: unknown = {
 			editScopedMemoryInBank: () => ({ status: "not_found" }), // bankless
-			getScopedMemoryInBank: (id: string, _bank: string) => null, // confirmed absent in stored bank
+			getScopedMemoryInBank: (_id: string, _bank: string) => null, // confirmed absent in stored bank
 		};
 		const recovered = svc.recoverOperationIntents(mnemopiBankless as never);
 		expect(recovered).toBe(1);
