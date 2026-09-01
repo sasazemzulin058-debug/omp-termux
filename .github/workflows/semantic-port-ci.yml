@@ -1,8 +1,8 @@
-name: semantic-port CI
+name: Termux Android CI
 
 on:
   push:
-    branches: [semantic-port-20260831]
+    branches: [termux-18.0.11]
   workflow_dispatch:
 
 env:
