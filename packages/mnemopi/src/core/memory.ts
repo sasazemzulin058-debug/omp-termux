@@ -475,8 +475,8 @@ export class Mnemopi {
 	): string {
 		const content = typeof memory === "string" ? memory : memory.content;
 		const opts = toRememberOptions(memory, options) as Record<string, unknown>;
-		if (options.idempotencyKey) opts["idempotencyKey"] = options.idempotencyKey;
-		if (options.idempotency_key) opts["idempotency_key"] = options.idempotency_key;
+		if (options.idempotencyKey) opts.idempotencyKey = options.idempotencyKey;
+		if (options.idempotency_key) opts.idempotency_key = options.idempotency_key;
 		return this.#withRuntimeOptions(() => this.beam.remember(content, opts as never));
 	}
 

@@ -152,7 +152,7 @@ const ALLOWLISTED_VERIFIERS = new Set(["cargo test", "bun test", "npm test", "py
 export function isAllowlistedVerifierCommand(command: string): boolean {
 	const t = command.trim();
 	for (const v of ALLOWLISTED_VERIFIERS) {
-		if (t === v || t.startsWith(v + " ") || t.startsWith(v + "\t")) return true;
+		if (t === v || t.startsWith(`${v} `) || t.startsWith(`${v}\t`)) return true;
 	}
 	return false;
 }
@@ -1524,13 +1524,13 @@ export class CustomAutolearnService {
 
 		// Strict capability gate: require exact-bank read and edit before any mutation.
 		if (!hasExactBankReadCapability(mnemopi) || !hasExactBankEditCapability(mnemopi)) {
-			return markUncertain(actionReason + "_missing_exact_bank_capability", { expectedBank: proj.bank });
+			return markUncertain(`${actionReason}_missing_exact_bank_capability`, { expectedBank: proj.bank });
 		}
 
 		// Inaccessible bank must be treated as uncertain: never clear local reference/candidate when we cannot inspect the stored bank.
 		const accessible = isBankAccessibleForClient(mnemopi, proj.bank);
 		if (accessible === false) {
-			return markUncertain(actionReason + "_bank_inaccessible", { expectedBank: proj.bank });
+			return markUncertain(`${actionReason}_bank_inaccessible`, { expectedBank: proj.bank });
 		}
 
 		const isBankMatch = (bank?: string): boolean => typeof bank === "string" && bank.trim() === proj.bank;
@@ -1994,36 +1994,41 @@ export class CustomAutolearnService {
 							if (!safeRecId) continue;
 							const safeBankRec = typeof bankRec === "string" ? bankRec : "";
 							if (!safeBankRec) continue;
+							// Fail-closed narrowing: required SQL bindings must be non-empty strings
+							const safeProjectIdentity = typeof r.project_identity === "string" ? r.project_identity.trim() : "";
+							const safeScope = typeof r.scope === "string" ? r.scope.trim() : "";
+							const safeCandidateId = typeof candidateId === "string" ? candidateId.trim() : "";
+							if (!safeCandidateId || !safeProjectIdentity || !safeScope) continue;
 							try {
 								this.#db
 									.prepare(
 										"INSERT OR REPLACE INTO operation_intents (candidate_id, operation, project_identity, scope, mnemopi_id, mnemopi_bank, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
 									)
-									.run(candidateId, "projection", r.project_identity, r.scope, safeRecId, safeBankRec, Date.now());
+									.run(safeCandidateId, "projection", safeProjectIdentity, safeScope, safeRecId, safeBankRec, Date.now());
 							} catch {}
 							try {
 								this.#db.transaction(() => {
-									const cur2 = this.getProjection(candidateId);
+									const cur2 = this.getProjection(safeCandidateId);
 									if (!cur2) {
 										this.#db
 											.prepare(
 												"INSERT INTO projection_references (candidate_id, project_identity, scope, mnemopi_id, mnemopi_bank, created_at) VALUES (?, ?, ?, ?, ?, ?)",
 											)
-											.run(candidateId, r.project_identity, r.scope, safeRecId, safeBankRec, Date.now());
+											.run(safeCandidateId, safeProjectIdentity, safeScope, safeRecId, safeBankRec, Date.now());
 										try {
-											this.#recordEvent(candidateId, "projected", { mnemopiId: safeRecId, bank: safeBankRec });
+											this.#recordEvent(safeCandidateId, "projected", { mnemopiId: safeRecId, bank: safeBankRec });
 										} catch {}
 									} else if (cur2.mnemopiId !== safeRecId || cur2.bank !== safeBankRec) {
 										throw new Error("projection conflict during sentinel recovery");
 									}
 									this.#db
 										.prepare("UPDATE candidates SET status = 'approved', updated_at = ? WHERE id = ?")
-										.run(Date.now(), candidateId);
+										.run(Date.now(), safeCandidateId);
 									this.#db
 										.prepare(
 											"DELETE FROM operation_intents WHERE candidate_id = ? AND operation = 'projection'",
 										)
-										.run(candidateId);
+										.run(safeCandidateId);
 								})();
 								recovered++;
 							} catch {}

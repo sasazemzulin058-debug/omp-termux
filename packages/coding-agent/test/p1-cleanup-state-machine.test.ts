@@ -101,17 +101,16 @@ describe("P1 cleanup state machine", () => {
 		expect(beforeProj).not.toBeNull();
 		const mock: MnemopiProjectionClient = {
 			getScopedMemoryInBank: (mid: string, b: string) => (mid && b === bank ? { bank } : null),
-			editScopedMemoryInBank: () => ({ status: "not_found" }),
+			editScopedMemoryInBank: (_op: string, _mid: string, _bank: string) => ({ status: "not_found" }),
 		};
 		const ok = svc.deleteCandidateWithMnemopi(id, pid, mock);
 		expect(ok).toBe(false);
 		expect(svc.getProjection(id)).not.toBeNull();
 		expect(svc.getCandidate(id)?.status).toBe("needs_review");
 	});
-
 	it("bankless invalidate after not_found fails closed", () => {
 		const { id, bank } = makeProjectedCandidate();
-		const mock = {
+		const mock: MnemopiProjectionClient = {
 			getScopedMemoryInBank: (mid: string, b: string) => (mid && b === bank ? { bank } : null),
 			editScopedMemoryInBank: (op: string, _id: string, _bank: string) =>
 				op === "forget" ? { status: "not_found", bank, store: "episodic" } : { status: "not_found" },
@@ -123,7 +122,7 @@ describe("P1 cleanup state machine", () => {
 
 	it("forget bank mismatch fails closed even on deleted", () => {
 		const { id, bank } = makeProjectedCandidate();
-		const mock = {
+		const mock: MnemopiProjectionClient = {
 			getScopedMemoryInBank: (mid: string, b: string) => (mid && b === bank ? { bank } : null),
 			editScopedMemoryInBank: (op: string, _id: string, _bank: string) =>
 				op === "forget" ? { status: "deleted", bank: "other-bank", store: "working" } : { status: "not_found" },
@@ -136,24 +135,23 @@ describe("P1 cleanup state machine", () => {
 	it("forget not_editable fails without calling invalidate", () => {
 		const { id, bank } = makeProjectedCandidate();
 		const calls: string[] = [];
-		const mock = {
+		const mock: MnemopiProjectionClient = {
 			getScopedMemoryInBank: (mid: string, b: string) => (mid && b === bank ? { bank } : null),
 			editScopedMemoryInBank: (op: string, _mid: string, _bank: string) => {
 				calls.push(op);
 				if (op === "forget") return { status: "not_editable", bank, store: "fact" };
 				return { status: "invalidated", bank };
 			},
-		} as unknown as { editScopedMemoryInBank: (op: string, id: string, _bank: string) => unknown };
+		};
 		const ok = svc.deleteCandidateWithMnemopi(id, pid, mock);
 		expect(ok).toBe(false);
 		expect(calls).toEqual(["forget"]);
 		expect(svc.getProjection(id)).not.toBeNull();
 	});
-
 	it("bankless forget does not fallback to banked invalidate - mixed response regression", () => {
 		const { id, bank } = makeProjectedCandidate();
 		const calls: string[] = [];
-		const mock = {
+		const mock: MnemopiProjectionClient = {
 			getScopedMemoryInBank: (mid: string, b: string) => (mid && b === bank ? { bank } : null),
 			editScopedMemoryInBank: (op: string, _mid: string, _bank: string) => {
 				calls.push(op);
@@ -161,7 +159,7 @@ describe("P1 cleanup state machine", () => {
 				if (op === "invalidate") return { status: "invalidated", bank, store: "episodic" };
 				return { status: "not_found" };
 			},
-		} as unknown as { editScopedMemoryInBank: (op: string, id: string, _bank: string) => unknown };
+		};
 		const ok = svc.deleteCandidateWithMnemopi(id, pid, mock);
 		expect(ok).toBe(false);
 		expect(calls).toEqual(["forget"]);

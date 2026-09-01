@@ -332,7 +332,7 @@ describe("final projection recovery — P1 fixes", () => {
 		expect(svc.getCandidate(cand.id)?.status).toBe("projection_pending");
 
 		let editCalls = 0;
-		const mnemopiCross: unknown = {
+		const mnemopiCross: MnemopiProjectionClient = {
 			getScopedRetainTarget: () => ({ bank: bankA }),
 			getScopedRecallTargets: () => [{ bank: bankA }, { bank: bankB }],
 			// Simulate getScopedMemory returning same ID but from foreign bankB — accessible, but not proof of absence in bankA
@@ -340,13 +340,13 @@ describe("final projection recovery — P1 fixes", () => {
 				if (id === realId) return { bank: bankB };
 				return null;
 			},
-			editScopedMemoryInBank: (op: string, id: string, _bank: string) => {
+			editScopedMemoryInBank: (op: string, _id: string, _bank: string) => {
 				editCalls++;
 				// Simulate bankless not_found (exact bank lookup unavailable) -> should preserve projection/intent
-				return { status: "not_found", bank: undefined };
+				return { status: "not_found" };
 			},
 		};
-		const recovered = svc.recoverOperationIntents(mnemopiCross as never);
+		const recovered = svc.recoverOperationIntents(mnemopiCross);
 		// Must NOT have cleared intent as "absent" based on cross-bank mismatch; should retain for exact-bank reconciliation
 		// Previous buggy code would have set absent=true for bankB != bankA and cleared intent; fixed code retains
 		expect(recovered).toBe(0);

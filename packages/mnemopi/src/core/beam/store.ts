@@ -188,7 +188,7 @@ function extractRowIdempotencyKey(
 	if (row?.metadata_json) {
 		try {
 			const meta = JSON.parse(row.metadata_json) as Record<string, unknown>;
-			const mk = meta["idempotency_key"] ?? meta["idempotencyKey"];
+			const mk = meta.idempotency_key ?? meta.idempotencyKey;
 			if (typeof mk === "string" && mk.trim()) return mk.trim();
 		} catch {}
 	}
@@ -493,13 +493,13 @@ export function remember(beam: BeamMemoryState, content: string, options: StoreR
 	const idempotencyKeyRaw =
 		options.idempotencyKey ??
 		options.idempotency_key ??
-		metaRecord?.["idempotency_key"] ??
-		metaRecord?.["idempotencyKey"];
+		metaRecord?.idempotency_key ??
+		metaRecord?.idempotencyKey;
 	const idempotencyKey =
 		typeof idempotencyKeyRaw === "string" && idempotencyKeyRaw.trim() ? idempotencyKeyRaw.trim() : null;
 	const metadata: Metadata | null = idempotencyKey
 		? ((metaRecord
-				? metaRecord["idempotency_key"] === idempotencyKey
+				? metaRecord.idempotency_key === idempotencyKey
 					? rawMetadata
 					: { ...metaRecord, idempotency_key: idempotencyKey }
 				: { idempotency_key: idempotencyKey }) as Metadata)

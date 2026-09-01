@@ -416,8 +416,8 @@ export function consolidateToEpisodic(
 			let metaKey: string | null = null;
 			if (!colKey && row?.metadata_json) {
 				try {
-					const meta = JSON.parse(row.metadata_json as string) as Record<string, unknown>;
-					const mk = meta["idempotency_key"] ?? meta["idempotencyKey"];
+					const meta = JSON.parse(row.metadata_json as string) as Metadata;
+					const mk = meta.idempotency_key ?? meta.idempotencyKey;
 					if (typeof mk === "string" && mk.trim()) metaKey = mk.trim();
 				} catch {}
 			}
@@ -425,8 +425,8 @@ export function consolidateToEpisodic(
 			if (finalKey && typeof row?.source === "string" && row.source.trim()) {
 				preservedKey = finalKey;
 				preservedSource = row.source.trim();
-				if (!metadata["idempotency_key"]) metadata["idempotency_key"] = finalKey;
-				if (!metadata["original_source"]) metadata["original_source"] = preservedSource;
+				if (!metadata.idempotency_key) metadata.idempotency_key = finalKey;
+				if (!metadata.original_source) metadata.original_source = preservedSource;
 			}
 		} catch {}
 	}

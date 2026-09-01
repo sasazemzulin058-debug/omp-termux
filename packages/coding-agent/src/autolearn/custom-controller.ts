@@ -12,9 +12,9 @@ import {
 	// biome-ignore lint/correctness/noUnusedImports: file-content test expects this string
 	canonicalProjectIdentity,
 	isAllowlistedVerifierCommand,
+	type MnemopiProjectionClient,
 	resolveAutolearnMode,
 	resolveProjectIdentity,
-	type MnemopiProjectionClient,
 } from "./custom-service";
 
 const MAX_CANDIDATES_PER_EPISODE = 20;
@@ -233,11 +233,11 @@ export class CustomAutolearnController {
 		const normalizedActual = actualCommand.trim();
 		const normalizedExpected = proof.expectedCommand.trim();
 		const isActualAllowlisted = isAllowlistedVerifierCommand(normalizedActual);
-		if (!isActualAllowlisted) return;
 		const commandsMatch =
-			normalizedActual === normalizedExpected ||
-			normalizedActual.startsWith(normalizedExpected + " ") ||
-			normalizedActual.startsWith(normalizedExpected + "\t");
+			isActualAllowlisted &&
+			(normalizedActual === normalizedExpected ||
+				normalizedActual.startsWith(`${normalizedExpected} `) ||
+				normalizedActual.startsWith(`${normalizedExpected}\t`));
 		if (!commandsMatch) return;
 		// Exact linkage: canonical project, session, episode must match current context (using repository-root identity)
 		const normalizedProofProject = resolveProjectIdentity(proof.projectIdentity);
