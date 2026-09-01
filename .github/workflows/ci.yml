@@ -47,16 +47,12 @@ jobs:
       - name: Validate release inputs
         run: python3 android/scripts/check-release-inputs.py
       - uses: ./.github/actions/bun-install
+      - name: Build host native addon for applied tests
+        run: bun --cwd=packages/natives run build
       - name: Type check applied patch queue
-        run: bun run --cwd packages/coding-agent check:types
+        run: bun run ci:check:full
+      - name: Build applied collab web
+        run: bun run collab:web:build
       - name: Run applied overlay tests
         run: |
-          bun test ./packages/coding-agent/test/android-helpers.test.ts
-          bun test ./packages/coding-agent/test/custom-controller-termux.test.ts
-          bun test ./packages/coding-agent/test/custom-service-termux.test.ts
-          bun test ./packages/coding-agent/test/custom-service-extended.test.ts
-          bun test ./packages/coding-agent/test/generator-android.test.ts
-          bun test ./packages/coding-agent/test/learn-commands-termux.test.ts
-          bun test ./packages/coding-agent/test/repo-root-isolation.test.ts
-          bun test ./packages/coding-agent/test/reviewer-fixes-termux.test.ts
-          bun test ./packages/coding-agent/test/settings-policy.test.ts
+          bun test ./packages/coding-agent/test/android-helpers.test.ts ./packages/coding-agent/test/custom-controller-termux.test.ts ./packages/coding-agent/test/custom-service-termux.test.ts ./packages/coding-agent/test/custom-service-extended.test.ts ./packages/coding-agent/test/custom-service-approval-idempotent.test.ts ./packages/coding-agent/test/focused-recovery-identity-verifier.test.ts ./packages/coding-agent/test/grouped-fixes-regression.test.ts ./packages/coding-agent/test/learn-commands-registry.test.ts ./packages/coding-agent/test/p1-cleanup-state-machine.test.ts ./packages/coding-agent/test/race-foreign-regression.test.ts ./packages/coding-agent/test/final-projection-recovery.test.ts ./packages/coding-agent/test/mnemopi-idempotent-exact-bank.test.ts ./packages/mnemopi/test/beam-idempotency-concurrent.test.ts ./packages/mnemopi/test/beam-p1-keyed-reuse-collision.test.ts ./packages/mnemopi/test/beam-p1-gist-rekey-consolidation.test.ts
