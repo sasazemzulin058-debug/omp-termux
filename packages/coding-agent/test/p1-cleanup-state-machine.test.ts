@@ -4,6 +4,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { CustomAutolearnController } from "../src/autolearn/custom-controller";
 import { CustomAutolearnService, canonicalProjectIdentity } from "../src/autolearn/custom-service";
+import type { MnemopiProjectionClient } from "../src/autolearn/custom-service";
 import { handleLearnCommand } from "../src/autolearn/learn-commands";
 import type { Settings } from "../src/config/settings";
 import type { AgentSession } from "../src/session/agent-session";
@@ -95,10 +96,10 @@ describe("P1 cleanup state machine", () => {
 	});
 
 	it("bankless not_found after forget fails closed and preserves projection", () => {
-		const { id } = makeProjectedCandidate();
+		const { id, bank } = makeProjectedCandidate();
 		const beforeProj = svc.getProjection(id);
 		expect(beforeProj).not.toBeNull();
-		const mock = {
+		const mock: MnemopiProjectionClient = {
 			getScopedMemoryInBank: (mid: string, b: string) => (mid && b === bank ? { bank } : null),
 			editScopedMemoryInBank: () => ({ status: "not_found" }),
 		};

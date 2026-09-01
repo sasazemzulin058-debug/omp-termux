@@ -398,7 +398,7 @@ export function consolidateToEpisodic(
 	const timestamp = isoNow();
 	const scope = options.scope ?? "session";
 	const veracity = clampEpisodicVeracity(options.veracity ?? "unknown");
-	const metadata = { ...(options.metadata ?? {}) } as Record<string, unknown>;
+	const metadata: Metadata = { ...(options.metadata ?? {}) };
 	// Preserve idempotency_key when consolidating a single idempotent source row:
 	// fetch the source row's key/source so episodic can answer two-tier dedup after working trim.
 	let preservedKey: string | null = null;

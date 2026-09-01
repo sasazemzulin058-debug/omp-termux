@@ -4,7 +4,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { bankForScope, CustomAutolearnService, canonicalProjectIdentity } from "../src/autolearn/custom-service";
-
+import type { MnemopiProjectionClient } from "../src/autolearn/custom-service";
 describe("custom autolearn extended termux", () => {
 	let dir: string;
 	let svc: CustomAutolearnService;
@@ -359,7 +359,7 @@ describe("custom autolearn extended termux", () => {
 		// Cleanup eligibility: strict bank mismatch would leave stuck needs_review; after backfill delete with exact bank must succeed
 		for (const r of rows) {
 			const proj = svcLegacy.getProjection(r.id)!;
-			const mock = {
+			const mock: MnemopiProjectionClient = {
 				getScopedMemoryInBank: (mid: string, b: string) =>
 					mid === r.mem && b === proj.bank ? { bank: proj.bank } : null,
 				editScopedMemoryInBank: (_op: string, id: string, _bank: string) => {
@@ -367,14 +367,7 @@ describe("custom autolearn extended termux", () => {
 					return { status: "deleted", bank: _bank };
 				},
 			};
-			const ok = svcLegacy.deleteCandidateWithMnemopi(
-				r.id,
-				r.proj,
-				mock as unknown as {
-					getScopedMemoryInBank: (id: string, bank: string) => unknown;
-					editScopedMemoryInBank: (op: string, id: string, bank: string) => unknown;
-				},
-			);
+			const ok = svcLegacy.deleteCandidateWithMnemopi(r.id, r.proj, mock);
 			expect(ok).toBe(true);
 			expect(svcLegacy.getCandidate(r.id)).toBeNull();
 			expect(svcLegacy.getProjection(r.id)).toBeNull();

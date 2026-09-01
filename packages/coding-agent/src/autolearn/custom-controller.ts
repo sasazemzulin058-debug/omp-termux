@@ -14,6 +14,7 @@ import {
 	isAllowlistedVerifierCommand,
 	resolveAutolearnMode,
 	resolveProjectIdentity,
+	type MnemopiProjectionClient,
 } from "./custom-service";
 
 const MAX_CANDIDATES_PER_EPISODE = 20;
@@ -24,7 +25,7 @@ function extractInvocationCommand(toolName: string, args: unknown): string {
 		typeof args === "object" &&
 		"command" in (args as Record<string, unknown>)
 	) {
-		const c = (args as Record<string, unknown>)["command"];
+		const c = (args as Record<string, unknown>).command;
 		if (typeof c === "string" && c.trim()) return c.trim();
 	}
 	return toolName;

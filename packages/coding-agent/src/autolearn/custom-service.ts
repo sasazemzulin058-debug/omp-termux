@@ -52,7 +52,9 @@ export interface LearningEvent {
 		| "rejected"
 		| "deleted"
 		| "projected"
-		| "rolled_back";
+		| "rolled_back"
+		| "delete_intent"
+		| "rollback_intent";
 	payloadJson: string;
 	timestamp: number;
 }
@@ -1556,7 +1558,7 @@ export class CustomAutolearnService {
 			typeof exactHit === "object" &&
 			"bank" in (exactHit as Record<string, unknown>)
 		) {
-			const b = (exactHit as Record<string, unknown>)["bank"];
+			const b = (exactHit as Record<string, unknown>).bank;
 			if (typeof b === "string" && b.trim() !== proj.bank) {
 				// Foreign bank hit for exact query should not happen, but treat as mismatch -> do not mutate foreign
 				return markUncertain("mnemopi_bank_mismatch", { expectedBank: proj.bank, actualBank: b });
@@ -1988,13 +1990,16 @@ export class CustomAutolearnService {
 							});
 						} catch {}
 						if (recId && typeof recId === "string" && recId.trim()) {
-							recId = recId.trim();
+							const safeRecId = recId.trim();
+							if (!safeRecId) continue;
+							const safeBankRec = typeof bankRec === "string" ? bankRec : "";
+							if (!safeBankRec) continue;
 							try {
 								this.#db
 									.prepare(
 										"INSERT OR REPLACE INTO operation_intents (candidate_id, operation, project_identity, scope, mnemopi_id, mnemopi_bank, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
 									)
-									.run(candidateId, "projection", r.project_identity, r.scope, recId, bankRec, Date.now());
+									.run(candidateId, "projection", r.project_identity, r.scope, safeRecId, safeBankRec, Date.now());
 							} catch {}
 							try {
 								this.#db.transaction(() => {
@@ -2004,11 +2009,11 @@ export class CustomAutolearnService {
 											.prepare(
 												"INSERT INTO projection_references (candidate_id, project_identity, scope, mnemopi_id, mnemopi_bank, created_at) VALUES (?, ?, ?, ?, ?, ?)",
 											)
-											.run(candidateId, r.project_identity, r.scope, recId, bankRec, Date.now());
+											.run(candidateId, r.project_identity, r.scope, safeRecId, safeBankRec, Date.now());
 										try {
-											this.#recordEvent(candidateId, "projected", { mnemopiId: recId, bank: bankRec });
+											this.#recordEvent(candidateId, "projected", { mnemopiId: safeRecId, bank: safeBankRec });
 										} catch {}
-									} else if (cur2.mnemopiId !== recId || cur2.bank !== bankRec) {
+									} else if (cur2.mnemopiId !== safeRecId || cur2.bank !== safeBankRec) {
 										throw new Error("projection conflict during sentinel recovery");
 									}
 									this.#db
@@ -2063,7 +2068,7 @@ export class CustomAutolearnService {
 							r.mnemopi_bank,
 						);
 						if (hit && typeof hit === "object" && "bank" in (hit as Record<string, unknown>)) {
-							const b = (hit as Record<string, unknown>)["bank"];
+							const b = (hit as Record<string, unknown>).bank;
 							if (typeof b === "string" && b.trim() === r.mnemopi_bank) confirmed = true;
 						} else if (
 							hit &&
@@ -2079,7 +2084,7 @@ export class CustomAutolearnService {
 							r.mnemopi_id,
 						) as { bank?: string } | null | undefined;
 						if (hit && typeof hit === "object" && "bank" in (hit as Record<string, unknown>)) {
-							const b = (hit as Record<string, unknown>)["bank"];
+							const b = (hit as Record<string, unknown>).bank;
 							if (typeof b === "string" && b.trim() === r.mnemopi_bank) confirmed = true;
 						}
 					} catch {}
@@ -2130,7 +2135,7 @@ export class CustomAutolearnService {
 						);
 						if (hit2 == null) absent = true;
 						else if (typeof hit2 === "object" && hit2 !== null && "bank" in (hit2 as Record<string, unknown>)) {
-							const bb = (hit2 as Record<string, unknown>)["bank"];
+							const bb = (hit2 as Record<string, unknown>).bank;
 							if (typeof bb !== "string" || !(bb as string).trim()) absent = true;
 							else if ((bb as string).trim() !== r.mnemopi_bank) {
 								// Foreign bank hit via cross-bank getScopedMemory -> not proof of absence in stored bank, keep intent

@@ -67,8 +67,9 @@ export interface RememberInput extends MemoryInput {
 	readonly trust_tier?: string | null;
 	readonly memoryType?: string | null;
 	readonly memory_type?: string | null;
+	readonly idempotencyKey?: string | null;
+	readonly idempotency_key?: string | null;
 }
-
 export interface RememberFacadeOptions {
 	readonly source?: string | null;
 	readonly importance?: number;

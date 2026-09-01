@@ -354,8 +354,9 @@ describe("final projection recovery — P1 fixes", () => {
 		expect(svc.getOperationIntent(cand.id)?.mnemopiBank).toBe(bankA);
 		expect(svc.getProjection(cand.id)).toBeNull();
 		// Status should remain projection_pending or needs_review but not approved, and not deleted
-		expect(["projection_pending", "needs_review"]).toContain(svc.getCandidate(cand.id)?.status);
-		// Edit should NOT be called when exact read shows foreign bank (capability-gated, no foreign mutation)
+		const pendingStatus = svc.getCandidate(cand.id)?.status;
+		expect(pendingStatus).toBeDefined();
+		expect(["projection_pending", "needs_review"]).toContain(pendingStatus);
 		expect(editCalls).toBe(0);
 
 		svc.close();

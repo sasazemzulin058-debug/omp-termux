@@ -288,8 +288,6 @@ describe("learn registry/dispatcher integration", () => {
 			episodeId: "epA",
 		});
 		// Simulate concurrent bump by direct update
-		// @ts-expect-error access private db via any
-		svc as unknown as { _db?: unknown };
 		svc.close();
 		// Reopen and try stale approve: we test via double approve on already approved
 		const svc2 = new CustomAutolearnService(tmpAgent);
