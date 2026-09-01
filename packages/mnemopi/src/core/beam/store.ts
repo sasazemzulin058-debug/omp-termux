@@ -491,10 +491,7 @@ export function remember(beam: BeamMemoryState, content: string, options: StoreR
 			? (rawMetadata as Record<string, unknown>)
 			: null;
 	const idempotencyKeyRaw =
-		options.idempotencyKey ??
-		options.idempotency_key ??
-		metaRecord?.idempotency_key ??
-		metaRecord?.idempotencyKey;
+		options.idempotencyKey ?? options.idempotency_key ?? metaRecord?.idempotency_key ?? metaRecord?.idempotencyKey;
 	const idempotencyKey =
 		typeof idempotencyKeyRaw === "string" && idempotencyKeyRaw.trim() ? idempotencyKeyRaw.trim() : null;
 	const metadata: Metadata | null = idempotencyKey
