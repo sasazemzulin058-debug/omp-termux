@@ -2,7 +2,7 @@ name: CI
 
 on:
   push:
-    branches: [main, verified-release-9690622]
+    branches: [main, verified-release-9690622, termux-18.0.11-release]
     paths-ignore:
       - .github/VOUCHED.td
   pull_request:
