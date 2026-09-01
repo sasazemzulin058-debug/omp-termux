@@ -28,7 +28,7 @@ function makeState(file: string, sessionId = "sess-p1"): BeamMemoryState {
 			workingMemoryTtlHours: 1000,
 			proactiveLinking: false,
 		} as unknown as BeamMemoryState["config"],
-	} as BeamMemoryState;
+	} as unknown as BeamMemoryState;
 	states.push(state);
 	return state;
 }
@@ -99,7 +99,7 @@ describe("P1 finding 1: keyed content reuse persists key atomically across resta
 				workingMemoryTtlHours: 1000,
 				proactiveLinking: false,
 			} as unknown as BeamMemoryState["config"],
-		} as BeamMemoryState;
+		} as unknown as BeamMemoryState;
 		states.push(state2);
 
 		// Deterministic keyed write after restart should return same id without inserting duplicate

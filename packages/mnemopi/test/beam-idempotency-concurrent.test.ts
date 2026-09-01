@@ -28,7 +28,7 @@ function makeState(file: string, sessionId = "sess-conc"): BeamMemoryState {
 			embeddingModel: "none",
 			embeddingBatch: 0,
 		} as unknown as BeamMemoryState["config"],
-	} as BeamMemoryState;
+	} as unknown as BeamMemoryState;
 	states.push(state);
 	return state;
 }

@@ -3,6 +3,7 @@ import { describe, expect, it } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import type { MnemopiProjectionClient } from "../src/autolearn/custom-service";
 import {
 	bankForScope,
 	CustomAutolearnService,
@@ -356,7 +357,7 @@ describe("final projection recovery — P1 fixes", () => {
 		// Status should remain projection_pending or needs_review but not approved, and not deleted
 		const pendingStatus = svc.getCandidate(cand.id)?.status;
 		expect(pendingStatus).toBeDefined();
-		expect(["projection_pending", "needs_review"]).toContain(pendingStatus);
+		expect(["projection_pending", "needs_review"]).toContain(pendingStatus ?? "");
 		expect(editCalls).toBe(0);
 
 		svc.close();

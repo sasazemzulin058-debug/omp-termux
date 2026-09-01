@@ -26,7 +26,7 @@ function makeBeamState(db: Database, sessionId = "sess-gist"): BeamMemoryState {
 			workingMemoryTtlHours: 1000,
 			proactiveLinking: false,
 		} as unknown as BeamMemoryState["config"],
-	} as BeamMemoryState;
+	} as unknown as BeamMemoryState;
 	states.push(state);
 	return state;
 }
