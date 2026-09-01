@@ -3,8 +3,8 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { CustomAutolearnController } from "../src/autolearn/custom-controller";
-import { CustomAutolearnService, canonicalProjectIdentity } from "../src/autolearn/custom-service";
 import type { MnemopiProjectionClient } from "../src/autolearn/custom-service";
+import { CustomAutolearnService, canonicalProjectIdentity } from "../src/autolearn/custom-service";
 import { handleLearnCommand } from "../src/autolearn/learn-commands";
 import type { Settings } from "../src/config/settings";
 import type { AgentSession } from "../src/session/agent-session";
@@ -174,7 +174,7 @@ describe("P1 cleanup state machine", () => {
 describe("controller DB scope isolated agentDir", () => {
 	it("controller writes to injected agentDir, /learn reads same DB, global untouched", async () => {
 		const isolated = fs.mkdtempSync(path.join(os.tmpdir(), "p1-ctrl-isolated-"));
-		const globalDir = path.join(os.tmpdir(), "p1-ctrl-global-" + Date.now());
+		const globalDir = path.join(os.tmpdir(), `p1-ctrl-global-${Date.now()}`);
 		const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "p1-ctrl-cwd-"));
 		const globalDbPath = path.join(globalDir, "learn.db");
 		let capturedAgentDir: string | undefined;

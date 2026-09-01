@@ -281,6 +281,7 @@ describe("P1 finding: consolidation exact-once with keyed uniqueness reread", ()
 		const unkeyed = db
 			.query("SELECT COUNT(*) as c FROM episodic_memory WHERE source = ? AND idempotency_key IS NULL")
 			.get(source) as { c: number };
+		expect(unkeyed.c).toBe(0);
 		// should be 0 or at least not contain the duplicate B summary as unkeyed
 		const bRows = db.query("SELECT COUNT(*) as c FROM episodic_memory WHERE content = ?").get(summaryB) as {
 			c: number;

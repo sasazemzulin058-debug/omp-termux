@@ -273,7 +273,7 @@ describe("P1 finding 2: migration repoint unique collision rollbacks", () => {
 		let threw = false;
 		try {
 			initBeam(db2);
-		} catch (e) {
+		} catch {
 			threw = true;
 		}
 		expect(threw).toBe(false);

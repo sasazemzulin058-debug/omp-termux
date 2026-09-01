@@ -12,6 +12,7 @@ import { AuthStorage } from "../src/session/auth-storage";
 import { SessionManager } from "../src/session/session-manager";
 import { EventBus } from "../src/utils/event-bus";
 
+// biome-ignore lint/correctness/noUnusedVariables: helper retained for future tests
 function settingsFor(mode: string | undefined) {
 	return { get: (k: string) => (k === "autolearn.mode" ? mode : undefined) } as unknown as {
 		get(key: string): unknown;
@@ -391,7 +392,7 @@ describe("learn registry/dispatcher integration", () => {
 		const hadMd = fs.existsSync(learnMd);
 		let backup: string | null = null;
 		if (hadMd) {
-			backup = learnMd + ".bak";
+			backup = `${learnMd}.bak`;
 			try {
 				fs.renameSync(learnMd, backup);
 			} catch {}
@@ -571,7 +572,7 @@ describe("learn registry/dispatcher integration", () => {
 		const explicit = "custom-base-bank";
 		const mOk = {
 			rememberScopedIdempotent: () => "mem1",
-			getScopedMemoryInBank: (id: string, _bank: string) => ({ bank: explicit }),
+			getScopedMemoryInBank: (_id: string, _bank: string) => ({ bank: explicit }),
 		} as unknown as never;
 		const res = await svc.projectToMnemopiReal(cand.id, mOk, { targetBank: explicit });
 		expect(res.ok).toBe(true);
@@ -637,20 +638,13 @@ describe("learn registry/dispatcher integration", () => {
 		expect(rNoId.ok).toBe(false);
 		expect(svc.getCandidate(cNoId.id)?.status).toBe("needs_review");
 		const cPos = mk("tcPos");
-		const bankPos = svc.getCandidate(cPos.id)
-			? (
-					svc as unknown as { getCandidate: (id: string) => { scope: string; projectIdentity: string } }
-				).getCandidate(cPos.id)
-			: null;
-		// derive expected via service bankForScope indirectly via successful path with matching retain
-		const retainBank = svc as unknown as { getCandidate: (id: string) => { scope: string; projectIdentity: string } };
 		// use explicit to avoid mismatch
 		const explicitPos = "explicit-bank-pos";
 		const rPos = await svc.projectToMnemopiReal(
 			cPos.id,
 			{
 				rememberScopedIdempotent: () => "memPos",
-				getScopedMemoryInBank: (id: string, _bank: string) => ({ bank: explicitPos }),
+				getScopedMemoryInBank: (_id: string, _bank: string) => ({ bank: explicitPos }),
 			} as unknown as never,
 			{ targetBank: explicitPos },
 		);
@@ -707,7 +701,7 @@ describe("learn registry/dispatcher integration", () => {
 		const explicit = "retry-bank";
 		const mem = {
 			rememberScopedIdempotent: () => "memRetry",
-			getScopedMemoryInBank: (id: string, _bank: string) => ({ bank: explicit }),
+			getScopedMemoryInBank: (_id: string, _bank: string) => ({ bank: explicit }),
 		} as unknown as never;
 		const proj = await check.projectToMnemopiReal(c.id, mem, { targetBank: explicit });
 		expect(proj.ok).toBe(true);
@@ -750,13 +744,13 @@ describe("learn registry/dispatcher integration", () => {
 		const bank = "bank-for-delete";
 		const memOk = {
 			rememberScopedIdempotent: () => "memD",
-			getScopedMemoryInBank: (id: string, _bank: string) => ({ bank }),
+			getScopedMemoryInBank: (_id: string, _bank: string) => ({ bank }),
 		} as unknown as never;
 		const proj = await svc.projectToMnemopiReal(cand.id, memOk, { targetBank: bank });
 		expect(proj.ok).toBe(true);
 		// bankless not_found should be treated as failure (preserve)
 		const notFoundNoBank = {
-			getScopedMemoryInBank: (id: string, b: string) => (b === bank ? { bank } : null),
+			getScopedMemoryInBank: (_id: string, b: string) => (b === bank ? { bank } : null),
 			editScopedMemoryInBank: (_op: string, _id: string, _bank: string) => ({ status: "not_found" }),
 		} as unknown as never;
 		const delFail1 = svc.deleteCandidateWithMnemopi(cand.id, pid, notFoundNoBank);
@@ -765,7 +759,7 @@ describe("learn registry/dispatcher integration", () => {
 		expect(svc.getCandidate(cand.id)).not.toBeNull();
 		// not_found with correct bank is also strict failure in new semantics (old-bank risk)
 		const notFoundBank = {
-			getScopedMemoryInBank: (id: string, b: string) => (b === bank ? { bank } : null),
+			getScopedMemoryInBank: (_id: string, b: string) => (b === bank ? { bank } : null),
 			editScopedMemoryInBank: (_op: string, _id: string, _bank: string) => ({ status: "not_found", bank: _bank }),
 		} as unknown as never;
 		const delFail2 = svc.deleteCandidateWithMnemopi(cand.id, pid, notFoundBank);
@@ -773,7 +767,7 @@ describe("learn registry/dispatcher integration", () => {
 		expect(svc.getProjection(cand.id)).not.toBeNull();
 		// Correct deleted with matching bank succeeds
 		const okDel = {
-			getScopedMemoryInBank: (id: string, b: string) => (b === bank ? { bank } : null),
+			getScopedMemoryInBank: (_id: string, b: string) => (b === bank ? { bank } : null),
 			editScopedMemoryInBank: (_op: string, _id: string, _bank: string) => ({ status: "deleted", bank: _bank }),
 		} as unknown as never;
 		const delOk = svc.deleteCandidateWithMnemopi(cand.id, pid, okDel);
@@ -808,7 +802,7 @@ describe("learn registry/dispatcher integration", () => {
 		expect(svc.getProjection(cand2.id)).not.toBeNull();
 		// Rollback with mismatched bank fails closed
 		const mismatch = {
-			getScopedMemoryInBank: (id: string, b: string) => (b === bank ? { bank } : null),
+			getScopedMemoryInBank: (_id: string, b: string) => (b === bank ? { bank } : null),
 			editScopedMemoryInBank: (_op: string, _id: string, _bank: string) => ({
 				status: "deleted",
 				bank: "other-bank",

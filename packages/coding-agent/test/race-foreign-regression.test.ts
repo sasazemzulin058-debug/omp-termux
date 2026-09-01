@@ -96,7 +96,7 @@ describe("race compensation preserves first valid reference", () => {
 			expect(svc.getOperationIntent(cand2.id)?.mnemopiId).toBe("mem-race-orphan");
 		}
 		const mnemopiRecover: unknown = {
-			editScopedMemoryInBank: (op: string, id: string, _bank: string) => {
+			editScopedMemoryInBank: (_op: string, id: string, _bank: string) => {
 				if (id === "mem-race-orphan") return { status: "deleted", bank: bank2 };
 				return { status: "deleted", bank: bank2 };
 			},
@@ -216,7 +216,7 @@ describe("race compensation preserves first valid reference", () => {
 				rememberCalls++;
 				return "mem-should-not-be-created";
 			},
-			editScopedMemoryInBank: (op: string, id: string, _bank: string) =>
+			editScopedMemoryInBank: (_op: string, id: string, _bank: string) =>
 				id === realId ? { status: "deleted", bank } : { status: "not_found", bank },
 			getScopedMemoryInBank: () => null,
 			getScopedRetainTarget: () => ({ bank }),
@@ -320,8 +320,8 @@ describe("foreign-bank recovery filtering", () => {
 		expect(svc.getOperationIntent(candB.id)?.mnemopiBank).toBe(bankB);
 		// Now recover with mnemopi that only has access to bankA
 		const mnemopiOnlyA: unknown = {
-			getScopedMemoryInBank: (id: string, b: string) => (b === bankA ? { bank: b } : null),
-			editScopedMemoryInBank: (op: string, id: string, _bank: string) => ({ status: "deleted", bank: _bank }),
+			getScopedMemoryInBank: (_id: string, b: string) => (b === bankA ? { bank: b } : null),
+			editScopedMemoryInBank: (_op: string, _id: string, _bank: string) => ({ status: "deleted", bank: _bank }),
 			getScopedRetainTarget: () => ({ bank: bankA }),
 			getScopedRecallTargets: () => [{ bank: bankA }],
 		};
@@ -381,7 +381,6 @@ describe("foreign-bank recovery filtering", () => {
 		await svc.projectToMnemopiReal(candA.id, mnemopiA as never);
 		// Create a fake foreign intent that collides on candidateId but has different project bank
 		// Insert directly via operation_intents with same candidateId but foreign bank (simulate stolen ID)
-		const foreignId = candA.id;
 		// Manually insert a second intent for same id but foreign bank? Since PK is candidate_id, it will overwrite; instead create a separate candidate with same toolCallId but different project
 		const candB = svc.observeCandidate({
 			episodeId: "ep-id-b",
@@ -406,7 +405,7 @@ describe("foreign-bank recovery filtering", () => {
 		const mnemopiB: unknown = {
 			rememberScopedIdempotent: () => "mem-coll-B",
 			getScopedRetainTarget: () => ({ bank: bankB }),
-			getScopedMemoryInBank: (id: string, _bank: string) => (id === "mem-coll-B" ? { bank: bankB } : null),
+			getScopedMemoryInBank: (_id: string, _bank: string) => (_id === "mem-coll-B" ? { bank: bankB } : null),
 		};
 		await svc.projectToMnemopiReal(candB.id, mnemopiB as never);
 		// Make delete intents for both
@@ -419,10 +418,9 @@ describe("foreign-bank recovery filtering", () => {
 		svc.deleteCandidateWithMnemopi(candB.id, projB, fail as never);
 		// Recover with only bankA accessible
 		const mnemopiOnlyA: unknown = {
-			getScopedMemoryInBank: (id: string, b: string) => (b === bankA ? { bank: b } : null),
-			editScopedMemoryInBank: (op: string, id: string, _bank: string) => ({ status: "deleted", bank: _bank }),
+			getScopedMemoryInBank: (_id: string, b: string) => (b === bankA ? { bank: b } : null),
+			editScopedMemoryInBank: (_op: string, _id: string, _bank: string) => ({ status: "deleted", bank: _bank }),
 			getScopedRetainTarget: () => ({ bank: bankA }),
-			getScopedRecallTargets: () => [{ bank: bankA }],
 		};
 		const rec = svc.recoverOperationIntents(mnemopiOnlyA as never);
 		expect(rec).toBe(1);

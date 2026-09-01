@@ -72,7 +72,7 @@ describe("Mnemopi production state idempotent + exact-bank", () => {
 		const id2 = state.rememberScopedIdempotent(content, { scope: "bank", source, idempotencyKey: key });
 		expect(id2).toBe(id1);
 		// Different key must create new id (content dedup may still return same if same content, so use different content)
-		const id3 = state.rememberScopedIdempotent(content + " v2", {
+		const id3 = state.rememberScopedIdempotent(`${content} v2`, {
 			scope: "bank",
 			source,
 			idempotencyKey: "idem-key-2",

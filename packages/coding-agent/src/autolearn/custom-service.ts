@@ -1995,7 +1995,8 @@ export class CustomAutolearnService {
 							const safeBankRec = typeof bankRec === "string" ? bankRec : "";
 							if (!safeBankRec) continue;
 							// Fail-closed narrowing: required SQL bindings must be non-empty strings
-							const safeProjectIdentity = typeof r.project_identity === "string" ? r.project_identity.trim() : "";
+							const safeProjectIdentity =
+								typeof r.project_identity === "string" ? r.project_identity.trim() : "";
 							const safeScope = typeof r.scope === "string" ? r.scope.trim() : "";
 							const safeCandidateId = typeof candidateId === "string" ? candidateId.trim() : "";
 							if (!safeCandidateId || !safeProjectIdentity || !safeScope) continue;
@@ -2004,7 +2005,15 @@ export class CustomAutolearnService {
 									.prepare(
 										"INSERT OR REPLACE INTO operation_intents (candidate_id, operation, project_identity, scope, mnemopi_id, mnemopi_bank, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
 									)
-									.run(safeCandidateId, "projection", safeProjectIdentity, safeScope, safeRecId, safeBankRec, Date.now());
+									.run(
+										safeCandidateId,
+										"projection",
+										safeProjectIdentity,
+										safeScope,
+										safeRecId,
+										safeBankRec,
+										Date.now(),
+									);
 							} catch {}
 							try {
 								this.#db.transaction(() => {
@@ -2014,9 +2023,19 @@ export class CustomAutolearnService {
 											.prepare(
 												"INSERT INTO projection_references (candidate_id, project_identity, scope, mnemopi_id, mnemopi_bank, created_at) VALUES (?, ?, ?, ?, ?, ?)",
 											)
-											.run(safeCandidateId, safeProjectIdentity, safeScope, safeRecId, safeBankRec, Date.now());
+											.run(
+												safeCandidateId,
+												safeProjectIdentity,
+												safeScope,
+												safeRecId,
+												safeBankRec,
+												Date.now(),
+											);
 										try {
-											this.#recordEvent(safeCandidateId, "projected", { mnemopiId: safeRecId, bank: safeBankRec });
+											this.#recordEvent(safeCandidateId, "projected", {
+												mnemopiId: safeRecId,
+												bank: safeBankRec,
+											});
 										} catch {}
 									} else if (cur2.mnemopiId !== safeRecId || cur2.bank !== safeBankRec) {
 										throw new Error("projection conflict during sentinel recovery");
