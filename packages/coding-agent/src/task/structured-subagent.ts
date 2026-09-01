@@ -208,7 +208,7 @@ function assertPlanControlsAllowed(request: StructuredSubagentRequest, planMode:
 		(Object.hasOwn(isolation, "requested") ||
 			Object.hasOwn(isolation, "apply") ||
 			Object.hasOwn(isolation, "merge") ||
-			Object.hasOwn(isolation, "repoRoot"))
+			(isolation.requested === true && Object.hasOwn(isolation, "repoRoot")))
 	) {
 		throw new StructuredSubagentError(
 			"preflight",
@@ -317,7 +317,7 @@ export async function resolveEffectiveSubagentPolicy(
 		schema,
 		planMode,
 		isIsolated,
-		repoRoot: request.isolation?.repoRoot,
+		repoRoot: isIsolated ? request.isolation?.repoRoot : undefined,
 		mergeMode: request.isolation?.merge ?? request.session.settings.get("task.isolation.merge"),
 		applyChanges:
 			request.isolation?.apply ??
