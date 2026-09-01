@@ -40,10 +40,10 @@ afterEach(() => {
 			fs.unlinkSync(f);
 		} catch {}
 		try {
-			fs.unlinkSync(f + "-wal");
+			fs.unlinkSync(`${f}-wal`);
 		} catch {}
 		try {
-			fs.unlinkSync(f + "-shm");
+			fs.unlinkSync(`${f}-shm`);
 		} catch {}
 	}
 });
@@ -103,7 +103,7 @@ describe("P1 finding 1: keyed content reuse persists key atomically across resta
 		states.push(state2);
 
 		// Deterministic keyed write after restart should return same id without inserting duplicate
-		const idAfterRestart = remember(state2, content + " different payload but same key should still dedup by key", {
+		const idAfterRestart = remember(state2, `${content} different payload but same key should still dedup by key`, {
 			source,
 			idempotencyKey: key,
 		});
@@ -200,10 +200,10 @@ describe("P1 finding 2: migration repoint unique collision rollbacks", () => {
 		expect(idx?.sql).toContain("UNIQUE");
 		db2.close();
 		try {
-			fs.unlinkSync(tmp + "-wal");
+			fs.unlinkSync(`${tmp}-wal`);
 		} catch {}
 		try {
-			fs.unlinkSync(tmp + "-shm");
+			fs.unlinkSync(`${tmp}-shm`);
 		} catch {}
 		const idxFile = files.indexOf(tmp);
 		if (idxFile >= 0) files.splice(idxFile, 1);
@@ -313,10 +313,10 @@ describe("P1 finding 2: migration repoint unique collision rollbacks", () => {
 
 		db2.close();
 		try {
-			fs.unlinkSync(tmp + "-wal");
+			fs.unlinkSync(`${tmp}-wal`);
 		} catch {}
 		try {
-			fs.unlinkSync(tmp + "-shm");
+			fs.unlinkSync(`${tmp}-shm`);
 		} catch {}
 		const idxFile = files.indexOf(tmp);
 		if (idxFile >= 0) files.splice(idxFile, 1);

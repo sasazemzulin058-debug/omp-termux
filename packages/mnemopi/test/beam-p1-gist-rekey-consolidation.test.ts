@@ -38,10 +38,10 @@ afterEach(() => {
 			fs.unlinkSync(f);
 		} catch {}
 		try {
-			fs.unlinkSync(f + "-wal");
+			fs.unlinkSync(`${f}-wal`);
 		} catch {}
 		try {
-			fs.unlinkSync(f + "-shm");
+			fs.unlinkSync(`${f}-shm`);
 		} catch {}
 	}
 });

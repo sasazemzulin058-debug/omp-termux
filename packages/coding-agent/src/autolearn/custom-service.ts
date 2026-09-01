@@ -925,7 +925,7 @@ export class CustomAutolearnService {
 				// Sentinel crash recovery: recompute deterministic key and replay idempotent write
 				// Never call non-idempotent rememberScoped; preserve intent if capability unavailable
 				const candForRecovery = this.getCandidate(candidateId);
-				if (!candForRecovery || !candForRecovery.reviewedContent) {
+				if (!candForRecovery?.reviewedContent) {
 					try {
 						this.#db
 							.prepare("UPDATE candidates SET status = 'needs_review', updated_at = ? WHERE id = ?")
@@ -1744,7 +1744,7 @@ export class CustomAutolearnService {
 		mnemopi?: MnemopiProjectionClient | null,
 	): boolean {
 		const proj = this.getProjection(candidateId);
-		if (!proj || !proj.bank || !proj.mnemopiId) return false;
+		if (!proj?.bank || !proj?.mnemopiId) return false;
 		const tomb = this.#db.prepare("SELECT candidate_id FROM tombstones WHERE candidate_id = ?").get(candidateId);
 		if (tomb) return false;
 		if (proj.projectIdentity !== projectIdentity && proj.scope !== "global") return false;
@@ -1974,7 +1974,7 @@ export class CustomAutolearnService {
 					}
 					// Sentinel without projection: attempt idempotent recovery via deterministic key
 					// Never call non-idempotent rememberScoped; preserve intent if capability unavailable
-					if (cand && cand.reviewedContent && mnemopi && hasIdempotentWriteCapability(mnemopi)) {
+					if (cand?.reviewedContent && mnemopi && hasIdempotentWriteCapability(mnemopi)) {
 						const redactedRec = redactSensitiveText(cand.reviewedContent);
 						const keyRec = computeIdempotencyKey(candidateId, redactedRec, cand.scope, cand.projectIdentity);
 						const bankRec = r.mnemopi_bank?.trim()

@@ -40,10 +40,10 @@ afterEach(() => {
 			fs.unlinkSync(f);
 		} catch {}
 		try {
-			fs.unlinkSync(f + "-wal");
+			fs.unlinkSync(`${f}-wal`);
 		} catch {}
 		try {
-			fs.unlinkSync(f + "-shm");
+			fs.unlinkSync(`${f}-shm`);
 		} catch {}
 	}
 });
@@ -76,14 +76,14 @@ describe("beam idempotency concurrent and unique constraint", () => {
 		expect(idA.length).toBeGreaterThan(0);
 
 		// Second write from different connection + same source+key + different content should return same id (idempotency, not new row)
-		const idB = remember(stateB, content + " different payload but same key should still dedup", {
+		const idB = remember(stateB, `${content} different payload but same key should still dedup`, {
 			source,
 			idempotencyKey: key,
 		});
 		expect(idB).toBe(idA);
 
 		// Different source with same key should create distinct row (source is part of unique key)
-		const idC = remember(stateB, content, { source: source + "-other", idempotencyKey: key });
+		const idC = remember(stateB, content, { source: `${source}-other`, idempotencyKey: key });
 		expect(idC).not.toBe(idA);
 
 		// Count rows with original source+key = 1
