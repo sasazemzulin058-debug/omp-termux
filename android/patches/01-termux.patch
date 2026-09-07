@@ -97,8 +97,6 @@ index 6ade9a00..7ccf8662 100644
 +arboard.workspace = true
 +pi-voice.workspace = true
 +
-+[target.'cfg(not(target_os = "android"))'.dependencies]
-+
 +[target.'cfg(any(target_os = "macos", target_os = "windows"))'.dependencies]
 +enigo = { version = "=0.6.1", default-features = false }
 +xcap = { version = "=0.9.6", default-features = false }
