@@ -4,9 +4,12 @@
 //! Performs text copy synchronously so macOS writes run on the caller thread.
 //! This avoids worker-thread `AppKit` pasteboard warnings in CLI contexts.
 
+#[cfg(not(target_os = "android"))]
 use std::io::Cursor;
 
+#[cfg(not(target_os = "android"))]
 use arboard::{Clipboard, Error as ClipboardError, ImageData};
+#[cfg(not(target_os = "android"))]
 use image::{DynamicImage, ImageFormat, RgbaImage};
 use napi::{JsString, bindgen_prelude::*};
 use napi_derive::napi;
@@ -22,6 +25,7 @@ pub struct ClipboardImage {
 	pub mime_type: String,
 }
 
+#[cfg(not(target_os = "android"))]
 fn encode_png(image: ImageData<'_>) -> Result<Vec<u8>> {
 	let width = u32::try_from(image.width)
 		.map_err(|_| Error::from_reason("Clipboard image width overflow"))?;
@@ -33,6 +37,7 @@ fn encode_png(image: ImageData<'_>) -> Result<Vec<u8>> {
 	rgba_to_png(buffer)
 }
 
+#[cfg(not(target_os = "android"))]
 fn rgba_to_png(buffer: RgbaImage) -> Result<Vec<u8>> {
 	let capacity = (buffer
 		.width()
@@ -64,6 +69,7 @@ fn rgba_to_png(buffer: RgbaImage) -> Result<Vec<u8>> {
 		          tests cover it on every host"
 	)
 )]
+#[cfg(not(target_os = "android"))]
 fn dib_to_png(dib: &[u8]) -> Result<Vec<u8>> {
 	const FILE_HEADER_SIZE: u64 = 14;
 	const INFO_HEADER_SIZE: u64 = 40;
@@ -136,6 +142,12 @@ fn read_raw_cf_dib() -> Option<Vec<u8>> {
 /// Returns an error if clipboard access fails.
 #[napi]
 pub fn copy_to_clipboard(text: JsString) -> Result<()> {
+	#[cfg(target_os = "android")]
+	{
+		let _ = text;
+		return Err(Error::from_reason("Native arboard clipboard is unsupported on Android/Termux; use Termux/OSC52 clipboard helpers"));
+	}
+	#[cfg(not(target_os = "android"))]
 	set_clipboard_text(&js::utf8(text)?)
 }
 
@@ -178,8 +190,7 @@ fn set_clipboard_text(text: &str) -> Result<()> {
 /// macOS / Windows: the OS retains clipboard contents after the writing process
 /// exits, so a transient `Clipboard` is sufficient. Keeping the write on the
 /// calling thread also avoids worker-thread `AppKit` pasteboard warnings on
-/// macOS.
-#[cfg(not(target_os = "linux"))]
+#[cfg(all(not(target_os = "linux"), not(target_os = "android")))]
 fn set_clipboard_text(text: &str) -> Result<()> {
 	let mut clipboard = Clipboard::new()
 		.map_err(|err| Error::from_reason(format!("Failed to access clipboard: {err}")))?;
@@ -198,31 +209,34 @@ fn set_clipboard_text(text: &str) -> Result<()> {
 #[napi]
 pub fn read_image_from_clipboard() -> task::Promise<Option<ClipboardImage>> {
 	task::blocking("clipboard.read_image", (), move |_| -> Result<Option<ClipboardImage>> {
-		let mut clipboard = Clipboard::new()
-			.map_err(|err| Error::from_reason(format!("Failed to access clipboard: {err}")))?;
-		match clipboard.get_image() {
-			Ok(image) => {
-				let bytes = encode_png(image)?;
-				Ok(Some(ClipboardImage {
-					data:      Uint8Array::from(bytes),
-					mime_type: "image/png".to_string(),
-				}))
-			},
-			Err(ClipboardError::ContentNotAvailable) => Ok(None),
-			Err(err) => {
-				// arboard rejects the CF_DIBV5 payloads Qt-based screenshot
-				// tools (PixPin, Snipaste, ...) produce; decode the raw CF_DIB
-				// ourselves before surfacing the error (#3426). A fallback
-				// decode failure keeps the original arboard error.
-				#[cfg(windows)]
-				if let Some(bytes) = read_raw_cf_dib().and_then(|dib| dib_to_png(&dib).ok()) {
-					return Ok(Some(ClipboardImage {
+		#[cfg(target_os = "android")]
+		{
+			Err(Error::from_reason("Native arboard clipboard image read is unsupported on Android/Termux"))
+		}
+		#[cfg(not(target_os = "android"))]
+		{
+			let mut clipboard = Clipboard::new()
+				.map_err(|err| Error::from_reason(format!("Failed to access clipboard: {err}")))?;
+			match clipboard.get_image() {
+				Ok(image) => {
+					let bytes = encode_png(image)?;
+					Ok(Some(ClipboardImage {
 						data:      Uint8Array::from(bytes),
 						mime_type: "image/png".to_string(),
-					}));
-				}
-				Err(Error::from_reason(format!("Failed to read clipboard image: {err}")))
-			},
+					}))
+				},
+				Err(ClipboardError::ContentNotAvailable) => Ok(None),
+				Err(err) => {
+					#[cfg(windows)]
+					if let Some(bytes) = read_raw_cf_dib().and_then(|dib| dib_to_png(&dib).ok()) {
+						return Ok(Some(ClipboardImage {
+							data:      Uint8Array::from(bytes),
+							mime_type: "image/png".to_string(),
+						}));
+					}
+					Err(Error::from_reason(format!("Failed to read clipboard image: {err}")))
+				},
+			}
 		}
 	})
 }

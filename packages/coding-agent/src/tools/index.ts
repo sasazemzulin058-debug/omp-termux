@@ -3,6 +3,7 @@ import type { EditStore } from "@oh-my-pi/pi-natives";
 import type { FetchImpl, ImageContent, Model, ServiceTierByFamily, ToolChoice } from "@oh-my-pi/pi-ai";
 import { logger } from "@oh-my-pi/pi-utils";
 import type { AsyncJobManager } from "../async/job-manager";
+import { resolveAutolearnMode } from "../autolearn/custom-service";
 import type { Rule } from "../capability/rule";
 import type { EffectiveExtensionRoots } from "../capability/types";
 import type { EvalPreludeDefinition } from "../eval/preludes";
@@ -597,7 +598,7 @@ export async function createTools(session: ToolSession, toolNames?: string[]): P
 		// active still exposes the tools the nudge points at. Gated to top-level
 		// (taskDepth 0): the controller only runs there, so a subagent's explicit
 		// tool whitelist must never be silently widened with write-capable tools.
-		if (session.settings.get("autolearn.enabled") && (session.taskDepth ?? 0) === 0) {
+		if (resolveAutolearnMode(session.settings) === "builtin" && (session.taskDepth ?? 0) === 0) {
 			if (!requestedTools.includes("manage_skill")) requestedTools.push("manage_skill");
 			if (
 				["hindsight", "mnemopi", "local"].includes(session.settings.get("memory.backend") ?? "") &&
@@ -650,12 +651,12 @@ export async function createTools(session: ToolSession, toolNames?: string[]): P
 		if (name === "memory_edit") return session.settings.get("memory.backend") === "mnemopi";
 		if (name === "manage_skill")
 			return (
-				session.settings.get("autolearn.enabled") &&
+				resolveAutolearnMode(session.settings) === "builtin" &&
 				((session.taskDepth ?? 0) === 0 || requestedTools !== undefined)
 			);
 		if (name === "learn") {
 			return (
-				session.settings.get("autolearn.enabled") &&
+				resolveAutolearnMode(session.settings) === "builtin" &&
 				((session.taskDepth ?? 0) === 0 || requestedTools !== undefined) &&
 				["hindsight", "mnemopi", "local"].includes(session.settings.get("memory.backend") ?? "")
 			);
