@@ -70,7 +70,7 @@ index e4ee3da0..f4efaa27 100644
  	let value = fs::read_to_string("/proc/meminfo")
  		.ok()?
 diff --git a/crates/pi-natives/Cargo.toml b/crates/pi-natives/Cargo.toml
-index 6ade9a00..7ccf8662 100644
+index 6ade9a00..eb2f874a 100644
 --- a/crates/pi-natives/Cargo.toml
 +++ b/crates/pi-natives/Cargo.toml
 @@ -24,7 +24,6 @@ wayland-pipewire = ["dep:pipewire"]
@@ -89,7 +89,7 @@ index 6ade9a00..7ccf8662 100644
  pi-walker.workspace = true
  portable-pty.workspace = true
  png.workspace = true
-@@ -75,6 +73,15 @@ xutf.workspace = true
+@@ -75,6 +73,10 @@ xutf.workspace = true
  zstd.workspace = true
  xxhash-rust.workspace = true
  
@@ -97,9 +97,6 @@ index 6ade9a00..7ccf8662 100644
 +arboard.workspace = true
 +pi-voice.workspace = true
 +
-+[target.'cfg(any(target_os = "macos", target_os = "windows"))'.dependencies]
-+enigo = { version = "=0.6.1", default-features = false }
-+xcap = { version = "=0.9.6", default-features = false }
  [target.'cfg(target_os = "linux")'.dependencies]
  ashpd = { version = "=0.11.1", default-features = false, features = ["tokio"] }
  atspi = { version = "=0.30.0", features = ["tokio", "zbus"] }
