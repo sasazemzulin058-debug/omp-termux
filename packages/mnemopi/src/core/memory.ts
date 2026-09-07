@@ -67,10 +67,13 @@ export interface RememberInput extends MemoryInput {
 	readonly trust_tier?: string | null;
 	readonly memoryType?: string | null;
 	readonly memory_type?: string | null;
+	readonly idempotencyKey?: string | null;
+	readonly idempotency_key?: string | null;
 }
-
 export interface RememberFacadeOptions {
 	readonly source?: string | null;
+	readonly idempotencyKey?: string | null;
+	readonly idempotency_key?: string | null;
 	readonly importance?: number;
 	readonly metadata?: Metadata | null;
 	readonly validUntil?: string | Date | null;
@@ -163,6 +166,8 @@ type FacadeRememberOptions = {
 	veracity: string | undefined;
 	memoryType: string | undefined;
 	timestamp?: string;
+	idempotencyKey?: string;
+	idempotency_key?: string;
 };
 
 function hasOwn(options: MnemopiOptions, key: keyof MnemopiOptions): boolean {
@@ -300,6 +305,18 @@ function toRememberOptions(input: string | RememberInput, options: RememberFacad
 		trustTier: options.trustTier ?? options.trust_tier ?? memory?.trustTier ?? memory?.trust_tier ?? undefined,
 		veracity: options.veracity ?? memory?.veracity ?? undefined,
 		memoryType: options.memoryType ?? options.memory_type ?? memory?.memoryType ?? memory?.memory_type ?? undefined,
+		idempotencyKey:
+			options.idempotencyKey ??
+			options.idempotency_key ??
+			memory?.idempotencyKey ??
+			memory?.idempotency_key ??
+			undefined,
+		idempotency_key:
+			options.idempotency_key ??
+			options.idempotencyKey ??
+			memory?.idempotency_key ??
+			memory?.idempotencyKey ??
+			undefined,
 	};
 	if (timestamp !== null && timestamp !== undefined) rememberOptions.timestamp = timestamp;
 	return rememberOptions;
@@ -452,6 +469,17 @@ export class Mnemopi {
 	remember(memory: string | RememberInput, options: RememberFacadeOptions = {}): string {
 		const content = typeof memory === "string" ? memory : memory.content;
 		return this.#withRuntimeOptions(() => this.beam.remember(content, toRememberOptions(memory, options)));
+	}
+
+	rememberIdempotent(
+		memory: string | RememberInput,
+		options: RememberFacadeOptions & { idempotencyKey?: string; idempotency_key?: string } = {},
+	): string {
+		const content = typeof memory === "string" ? memory : memory.content;
+		const opts = toRememberOptions(memory, options) as Record<string, unknown>;
+		if (options.idempotencyKey) opts.idempotencyKey = options.idempotencyKey;
+		if (options.idempotency_key) opts.idempotency_key = options.idempotency_key;
+		return this.#withRuntimeOptions(() => this.beam.remember(content, opts as never));
 	}
 
 	recall(query: string, topK = 5, options: RecallFacadeOptions = {}): Promise<RecallResult[]> {
