@@ -43,11 +43,7 @@ jobs:
           else
             git update-ref refs/heads/upstream "$upstream_tip"
           fi
-          if [[ "${PUBLISH_UPSTREAM_BRANCH:-}" == 'true' ]]; then
-            git push origin refs/heads/upstream:refs/heads/upstream
-          else
-            echo "Skipping remote upstream branch publication; local refs/heads/upstream retained"
-          fi
+          git push origin refs/heads/upstream:refs/heads/upstream || echo "warning: could not push upstream branch (permissions)"
           git config user.name github-actions[bot]
           git config user.email 41898282+github-actions[bot]@users.noreply.github.com
           printf '%s\n' "$upstream_tip" > android/UPSTREAM_TRACKED

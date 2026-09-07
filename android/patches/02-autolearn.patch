@@ -1,5 +1,5 @@
 diff --git a/packages/coding-agent/src/autolearn/controller.ts b/packages/coding-agent/src/autolearn/controller.ts
-index b87422292b..cbfa47a21e 100644
+index b8742229..cbfa47a2 100644
 --- a/packages/coding-agent/src/autolearn/controller.ts
 +++ b/packages/coding-agent/src/autolearn/controller.ts
 @@ -16,6 +16,7 @@ import autolearnGuidance from "../prompts/system/autolearn-guidance.md" with { t
@@ -21,7 +21,7 @@ index b87422292b..cbfa47a21e 100644
  		// Never interrupt plan-mode review.
 diff --git a/packages/coding-agent/src/autolearn/custom-controller.ts b/packages/coding-agent/src/autolearn/custom-controller.ts
 new file mode 100644
-index 0000000000..3262c11da2
+index 00000000..3262c11d
 --- /dev/null
 +++ b/packages/coding-agent/src/autolearn/custom-controller.ts
 @@ -0,0 +1,306 @@
@@ -333,7 +333,7 @@ index 0000000000..3262c11da2
 +}
 diff --git a/packages/coding-agent/src/autolearn/custom-service.ts b/packages/coding-agent/src/autolearn/custom-service.ts
 new file mode 100644
-index 0000000000..1742a2a12b
+index 00000000..1742a2a1
 --- /dev/null
 +++ b/packages/coding-agent/src/autolearn/custom-service.ts
 @@ -0,0 +1,2421 @@
@@ -2760,7 +2760,7 @@ index 0000000000..1742a2a12b
 +}
 diff --git a/packages/coding-agent/src/autolearn/learn-commands.ts b/packages/coding-agent/src/autolearn/learn-commands.ts
 new file mode 100644
-index 0000000000..f9893f0a95
+index 00000000..f9893f0a
 --- /dev/null
 +++ b/packages/coding-agent/src/autolearn/learn-commands.ts
 @@ -0,0 +1,283 @@
@@ -3048,10 +3048,10 @@ index 0000000000..f9893f0a95
 +	});
 +};
 diff --git a/packages/coding-agent/src/config/settings-schema.ts b/packages/coding-agent/src/config/settings-schema.ts
-index 520290957b..9d919d9789 100644
+index 3c9b926c..5f69a8ca 100644
 --- a/packages/coding-agent/src/config/settings-schema.ts
 +++ b/packages/coding-agent/src/config/settings-schema.ts
-@@ -2988,6 +2988,18 @@ export const SETTINGS_SCHEMA = {
+@@ -3027,6 +3027,18 @@ export const SETTINGS_SCHEMA = {
  	// Auto-Learn (experimental): post-stop nudge to capture lessons to memory
  	// and mint/enhance isolated managed skills under ~/.omp/agent/managed-skills.
  	// Master flag is default-off → zero footprint; sub-flags gate behaviour.
@@ -3070,7 +3070,7 @@ index 520290957b..9d919d9789 100644
  	"autolearn.enabled": {
  		type: "boolean",
  		default: false,
-@@ -2996,7 +3008,7 @@ export const SETTINGS_SCHEMA = {
+@@ -3035,7 +3047,7 @@ export const SETTINGS_SCHEMA = {
  			group: "Auto-Learn",
  			label: "Auto-Learn (experimental)",
  			description:
@@ -3080,10 +3080,10 @@ index 520290957b..9d919d9789 100644
  	},
  	"autolearn.autoContinue": {
 diff --git a/packages/coding-agent/src/config/settings.ts b/packages/coding-agent/src/config/settings.ts
-index 107aaab407..47959eceb9 100644
+index d2160dd7..2eb5bcc2 100644
 --- a/packages/coding-agent/src/config/settings.ts
 +++ b/packages/coding-agent/src/config/settings.ts
-@@ -432,6 +432,17 @@ function resolvePathScopedStringArray(settingPath: SettingPath, value: unknown,
+@@ -470,6 +470,17 @@ function physicalTargetSegments(target: string, pathApi: typeof path = path): st
  // Settings Class
  // ═══════════════════════════════════════════════════════════════════════════
  
@@ -3101,7 +3101,7 @@ index 107aaab407..47959eceb9 100644
  export class Settings {
  	#configPath: string | null;
  	#cwd: string;
-@@ -2634,17 +2645,37 @@ export class Settings {
+@@ -2942,17 +2953,37 @@ export class Settings {
  	// ─────────────────────────────────────────────────────────────────────────
  
  	#projectSettingsForMerge(): RawSettings {
@@ -3149,7 +3149,7 @@ index 107aaab407..47959eceb9 100644
  
  	#rebuildMerged(): void {
 diff --git a/packages/coding-agent/src/extensibility/extensions/runner.ts b/packages/coding-agent/src/extensibility/extensions/runner.ts
-index 5be770d0a0..d2e9d1745d 100644
+index e2bbea87..dabd5904 100644
 --- a/packages/coding-agent/src/extensibility/extensions/runner.ts
 +++ b/packages/coding-agent/src/extensibility/extensions/runner.ts
 @@ -607,6 +607,8 @@ export class ExtensionRunner {
@@ -3161,7 +3161,7 @@ index 5be770d0a0..d2e9d1745d 100644
  	) {
  		this.#uiContext = noOpUIContext;
  		this.#getMemoryFn = getMemory;
-@@ -1178,6 +1180,13 @@ export class ExtensionRunner {
+@@ -1189,6 +1191,13 @@ export class ExtensionRunner {
  			getSystemPrompt: () => this.#getSystemPromptFn(),
  			localProtocolOptions: this.localProtocolOptions,
  			memory: this.#getMemoryFn?.(),
@@ -3176,7 +3176,7 @@ index 5be770d0a0..d2e9d1745d 100644
  			setTimeout: (callback, ms, ...args) => this.#managedTimers.setTimeout(callback, ms, ...args),
  			clearTimer: timer => this.#managedTimers.clear(timer),
 diff --git a/packages/coding-agent/src/mnemopi/state.ts b/packages/coding-agent/src/mnemopi/state.ts
-index e6fc3c7c04..9c2f618c5b 100644
+index 0ec7adbf..27fc72e0 100644
 --- a/packages/coding-agent/src/mnemopi/state.ts
 +++ b/packages/coding-agent/src/mnemopi/state.ts
 @@ -229,6 +229,28 @@ export interface MnemopiSessionStateOptions {
@@ -3394,7 +3394,7 @@ index e6fc3c7c04..9c2f618c5b 100644
  		const results = await this.collectScopedRecallResults(query);
  		if (results.length === 0) return undefined;
 diff --git a/packages/coding-agent/src/modes/components/settings-defs.ts b/packages/coding-agent/src/modes/components/settings-defs.ts
-index 5c9df98d63..13b5288524 100644
+index 5c9df98d..13b52885 100644
 --- a/packages/coding-agent/src/modes/components/settings-defs.ts
 +++ b/packages/coding-agent/src/modes/components/settings-defs.ts
 @@ -121,6 +121,9 @@ const CONDITIONS: Record<string, () => boolean> = {
@@ -3408,10 +3408,10 @@ index 5c9df98d63..13b5288524 100644
  		} catch {
  			return false;
 diff --git a/packages/coding-agent/src/sdk.ts b/packages/coding-agent/src/sdk.ts
-index 4f073becaa..e4023854d4 100644
+index 89d0d6a1..3efc2530 100644
 --- a/packages/coding-agent/src/sdk.ts
 +++ b/packages/coding-agent/src/sdk.ts
-@@ -49,6 +49,8 @@ import {
+@@ -50,6 +50,8 @@ import {
  } from "./advisor";
  import { AsyncJobManager } from "./async";
  import { AutoLearnController, buildAutoLearnInstructions } from "./autolearn/controller";
@@ -3419,8 +3419,8 @@ index 4f073becaa..e4023854d4 100644
 +import { createLearnExtension } from "./autolearn/learn-commands";
  import { createAutoresearchExtension } from "./autoresearch";
  import { loadCapability } from "./capability";
- import { type Rule, ruleCapability, setActiveRules } from "./capability/rule";
-@@ -2080,6 +2082,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
+ import {
+@@ -2131,6 +2133,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
  
  			inlineExtensions.push(...(options.extensions ?? []));
  			inlineExtensions.push(createAutoresearchExtension);
@@ -3428,7 +3428,7 @@ index 4f073becaa..e4023854d4 100644
  			if (customTools.length > 0) {
  				inlineExtensions.push(createCustomToolsExtension(customTools, customToolSourcePaths));
  			}
-@@ -2740,6 +2743,8 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
+@@ -2809,6 +2812,8 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
  			settings,
  			localProtocolOptions,
  			() => (hasSession ? session.getAsyncJobSnapshot() : null),
@@ -3437,7 +3437,7 @@ index 4f073becaa..e4023854d4 100644
  		);
  
  		credentialDisabledTarget = extensionRunner;
-@@ -4099,13 +4104,29 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
+@@ -4203,13 +4208,29 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
  		// mid-session DISABLE. The subscription lives for the session's lifetime; the
  		// reference is intentionally discarded (the listener retains it).
  		if (!restrictToolNames) {
@@ -3469,18 +3469,18 @@ index 4f073becaa..e4023854d4 100644
  				void logger.time("startMemoryStartupTask", startMemoryBackend);
  			}
 diff --git a/packages/coding-agent/src/tools/index.ts b/packages/coding-agent/src/tools/index.ts
-index cfa1aa4223..b4774909c8 100644
+index bcb89411..32ad4619 100644
 --- a/packages/coding-agent/src/tools/index.ts
 +++ b/packages/coding-agent/src/tools/index.ts
-@@ -3,6 +3,7 @@ import type { AgentOptions, AgentTelemetryConfig, AgentTool, AgentToolContext }
+@@ -3,6 +3,7 @@ import type { EditStore } from "@oh-my-pi/pi-natives";
  import type { FetchImpl, ImageContent, Model, ServiceTierByFamily, ToolChoice } from "@oh-my-pi/pi-ai";
  import { logger } from "@oh-my-pi/pi-utils";
  import type { AsyncJobManager } from "../async/job-manager";
 +import { resolveAutolearnMode } from "../autolearn/custom-service";
  import type { Rule } from "../capability/rule";
  import type { EffectiveExtensionRoots } from "../capability/types";
- import type { PromptTemplate } from "../config/prompt-templates";
-@@ -629,7 +630,7 @@ export async function createTools(session: ToolSession, toolNames?: string[]): P
+ import type { EvalPreludeDefinition } from "../eval/preludes";
+@@ -597,7 +598,7 @@ export async function createTools(session: ToolSession, toolNames?: string[]): P
  		// active still exposes the tools the nudge points at. Gated to top-level
  		// (taskDepth 0): the controller only runs there, so a subagent's explicit
  		// tool whitelist must never be silently widened with write-capable tools.
@@ -3489,7 +3489,7 @@ index cfa1aa4223..b4774909c8 100644
  			if (!requestedTools.includes("manage_skill")) requestedTools.push("manage_skill");
  			if (
  				["hindsight", "mnemopi", "local"].includes(session.settings.get("memory.backend") ?? "") &&
-@@ -685,12 +686,12 @@ export async function createTools(session: ToolSession, toolNames?: string[]): P
+@@ -650,12 +651,12 @@ export async function createTools(session: ToolSession, toolNames?: string[]): P
  		if (name === "memory_edit") return session.settings.get("memory.backend") === "mnemopi";
  		if (name === "manage_skill")
  			return (
@@ -3505,7 +3505,7 @@ index cfa1aa4223..b4774909c8 100644
  				["hindsight", "mnemopi", "local"].includes(session.settings.get("memory.backend") ?? "")
  			);
 diff --git a/packages/coding-agent/src/tools/learn.ts b/packages/coding-agent/src/tools/learn.ts
-index 74704a2b4e..b513831b7f 100644
+index 74704a2b..b513831b 100644
 --- a/packages/coding-agent/src/tools/learn.ts
 +++ b/packages/coding-agent/src/tools/learn.ts
 @@ -1,5 +1,6 @@
@@ -3525,7 +3525,7 @@ index 74704a2b4e..b513831b7f 100644
  		if (backend !== "hindsight" && backend !== "mnemopi" && backend !== "local") return null;
  		return new LearnTool(session);
 diff --git a/packages/coding-agent/src/tools/manage-skill.ts b/packages/coding-agent/src/tools/manage-skill.ts
-index e9246b03c4..492ee8ee60 100644
+index e9246b03..492ee8ee 100644
 --- a/packages/coding-agent/src/tools/manage-skill.ts
 +++ b/packages/coding-agent/src/tools/manage-skill.ts
 @@ -1,6 +1,7 @@
@@ -3547,7 +3547,7 @@ index e9246b03c4..492ee8ee60 100644
  
 diff --git a/packages/coding-agent/test/custom-controller-termux.test.ts b/packages/coding-agent/test/custom-controller-termux.test.ts
 new file mode 100644
-index 0000000000..9cf03e073b
+index 00000000..9cf03e07
 --- /dev/null
 +++ b/packages/coding-agent/test/custom-controller-termux.test.ts
 @@ -0,0 +1,87 @@
@@ -3640,7 +3640,7 @@ index 0000000000..9cf03e073b
 +});
 diff --git a/packages/coding-agent/test/custom-service-approval-idempotent.test.ts b/packages/coding-agent/test/custom-service-approval-idempotent.test.ts
 new file mode 100644
-index 0000000000..758157b412
+index 00000000..758157b4
 --- /dev/null
 +++ b/packages/coding-agent/test/custom-service-approval-idempotent.test.ts
 @@ -0,0 +1,232 @@
@@ -3878,7 +3878,7 @@ index 0000000000..758157b412
 +});
 diff --git a/packages/coding-agent/test/custom-service-extended.test.ts b/packages/coding-agent/test/custom-service-extended.test.ts
 new file mode 100644
-index 0000000000..a51832afe9
+index 00000000..a51832af
 --- /dev/null
 +++ b/packages/coding-agent/test/custom-service-extended.test.ts
 @@ -0,0 +1,465 @@
@@ -4349,7 +4349,7 @@ index 0000000000..a51832afe9
 +});
 diff --git a/packages/coding-agent/test/custom-service-termux.test.ts b/packages/coding-agent/test/custom-service-termux.test.ts
 new file mode 100644
-index 0000000000..0fb1ead222
+index 00000000..0fb1ead2
 --- /dev/null
 +++ b/packages/coding-agent/test/custom-service-termux.test.ts
 @@ -0,0 +1,162 @@
@@ -4517,7 +4517,7 @@ index 0000000000..0fb1ead222
 +});
 diff --git a/packages/coding-agent/test/final-projection-recovery.test.ts b/packages/coding-agent/test/final-projection-recovery.test.ts
 new file mode 100644
-index 0000000000..1a30d863b4
+index 00000000..1a30d863
 --- /dev/null
 +++ b/packages/coding-agent/test/final-projection-recovery.test.ts
 @@ -0,0 +1,529 @@
@@ -5052,7 +5052,7 @@ index 0000000000..1a30d863b4
 +});
 diff --git a/packages/coding-agent/test/focused-recovery-identity-verifier.test.ts b/packages/coding-agent/test/focused-recovery-identity-verifier.test.ts
 new file mode 100644
-index 0000000000..c7707318df
+index 00000000..c7707318
 --- /dev/null
 +++ b/packages/coding-agent/test/focused-recovery-identity-verifier.test.ts
 @@ -0,0 +1,386 @@
@@ -5444,7 +5444,7 @@ index 0000000000..c7707318df
 +});
 diff --git a/packages/coding-agent/test/grouped-fixes-regression.test.ts b/packages/coding-agent/test/grouped-fixes-regression.test.ts
 new file mode 100644
-index 0000000000..1d338cbf0d
+index 00000000..1d338cbf
 --- /dev/null
 +++ b/packages/coding-agent/test/grouped-fixes-regression.test.ts
 @@ -0,0 +1,717 @@
@@ -6167,7 +6167,7 @@ index 0000000000..1d338cbf0d
 +});
 diff --git a/packages/coding-agent/test/learn-commands-registry.test.ts b/packages/coding-agent/test/learn-commands-registry.test.ts
 new file mode 100644
-index 0000000000..f547ca02d6
+index 00000000..f547ca02
 --- /dev/null
 +++ b/packages/coding-agent/test/learn-commands-registry.test.ts
 @@ -0,0 +1,824 @@
@@ -6997,7 +6997,7 @@ index 0000000000..f547ca02d6
 +});
 diff --git a/packages/coding-agent/test/learn-commands-termux.test.ts b/packages/coding-agent/test/learn-commands-termux.test.ts
 new file mode 100644
-index 0000000000..df41a8458b
+index 00000000..df41a845
 --- /dev/null
 +++ b/packages/coding-agent/test/learn-commands-termux.test.ts
 @@ -0,0 +1,143 @@
@@ -7146,7 +7146,7 @@ index 0000000000..df41a8458b
 +});
 diff --git a/packages/coding-agent/test/mnemopi-idempotent-exact-bank.test.ts b/packages/coding-agent/test/mnemopi-idempotent-exact-bank.test.ts
 new file mode 100644
-index 0000000000..6296cf2c9b
+index 00000000..6296cf2c
 --- /dev/null
 +++ b/packages/coding-agent/test/mnemopi-idempotent-exact-bank.test.ts
 @@ -0,0 +1,236 @@
@@ -7388,7 +7388,7 @@ index 0000000000..6296cf2c9b
 +});
 diff --git a/packages/coding-agent/test/p1-cleanup-state-machine.test.ts b/packages/coding-agent/test/p1-cleanup-state-machine.test.ts
 new file mode 100644
-index 0000000000..d86cd21b3c
+index 00000000..d86cd21b
 --- /dev/null
 +++ b/packages/coding-agent/test/p1-cleanup-state-machine.test.ts
 @@ -0,0 +1,236 @@
@@ -7630,7 +7630,7 @@ index 0000000000..d86cd21b3c
 +});
 diff --git a/packages/coding-agent/test/race-foreign-regression.test.ts b/packages/coding-agent/test/race-foreign-regression.test.ts
 new file mode 100644
-index 0000000000..f9e5710934
+index 00000000..f9e57109
 --- /dev/null
 +++ b/packages/coding-agent/test/race-foreign-regression.test.ts
 @@ -0,0 +1,434 @@
@@ -8070,7 +8070,7 @@ index 0000000000..f9e5710934
 +});
 diff --git a/packages/coding-agent/test/reviewer-fixes-termux.test.ts b/packages/coding-agent/test/reviewer-fixes-termux.test.ts
 new file mode 100644
-index 0000000000..cabd8921fd
+index 00000000..cabd8921
 --- /dev/null
 +++ b/packages/coding-agent/test/reviewer-fixes-termux.test.ts
 @@ -0,0 +1,406 @@
@@ -8482,7 +8482,7 @@ index 0000000000..cabd8921fd
 +});
 diff --git a/packages/coding-agent/test/settings-policy.test.ts b/packages/coding-agent/test/settings-policy.test.ts
 new file mode 100644
-index 0000000000..c400ecc1aa
+index 00000000..c400ecc1
 --- /dev/null
 +++ b/packages/coding-agent/test/settings-policy.test.ts
 @@ -0,0 +1,29 @@
@@ -8516,7 +8516,7 @@ index 0000000000..c400ecc1aa
 +	});
 +});
 diff --git a/packages/mnemopi/src/core/beam/consolidate.ts b/packages/mnemopi/src/core/beam/consolidate.ts
-index 1a2a3da89b..bee987baa5 100644
+index 1a2a3da8..bee987ba 100644
 --- a/packages/mnemopi/src/core/beam/consolidate.ts
 +++ b/packages/mnemopi/src/core/beam/consolidate.ts
 @@ -398,35 +398,113 @@ export function consolidateToEpisodic(
@@ -8660,7 +8660,7 @@ index 1a2a3da89b..bee987baa5 100644
  		...metadata,
  	});
 diff --git a/packages/mnemopi/src/core/beam/schema.ts b/packages/mnemopi/src/core/beam/schema.ts
-index c119c9bf51..dccb626baa 100644
+index c119c9bf..dccb626b 100644
 --- a/packages/mnemopi/src/core/beam/schema.ts
 +++ b/packages/mnemopi/src/core/beam/schema.ts
 @@ -20,6 +20,374 @@ function runAll(db: Database, statements: readonly string[]): void {
@@ -9065,7 +9065,7 @@ index c119c9bf51..dccb626baa 100644
 +	);
  }
 diff --git a/packages/mnemopi/src/core/beam/store.ts b/packages/mnemopi/src/core/beam/store.ts
-index aba7988816..c94b931a26 100644
+index aba79888..c94b931a 100644
 --- a/packages/mnemopi/src/core/beam/store.ts
 +++ b/packages/mnemopi/src/core/beam/store.ts
 @@ -156,6 +156,45 @@ function invalidateCaches(beam: BeamMemoryState): void {
@@ -9466,7 +9466,7 @@ index aba7988816..c94b931a26 100644
  	// `extractText` lets a caller decouple "what gets stored" from "what facts are
  	// mined". coding-agent retains full multi-author transcripts but wants
 diff --git a/packages/mnemopi/src/core/beam/types.ts b/packages/mnemopi/src/core/beam/types.ts
-index f7f507e9c3..80579ef1fe 100644
+index f7f507e9..80579ef1 100644
 --- a/packages/mnemopi/src/core/beam/types.ts
 +++ b/packages/mnemopi/src/core/beam/types.ts
 @@ -118,6 +118,9 @@ export interface RememberOptions {
@@ -9480,10 +9480,10 @@ index f7f507e9c3..80579ef1fe 100644
  	extractEntities?: boolean;
  	/**
 diff --git a/packages/mnemopi/src/core/memory.ts b/packages/mnemopi/src/core/memory.ts
-index c3b843b196..05c401f2a3 100644
+index 926db34a..b17d0bfc 100644
 --- a/packages/mnemopi/src/core/memory.ts
 +++ b/packages/mnemopi/src/core/memory.ts
-@@ -67,8 +67,9 @@ export interface RememberInput extends MemoryInput {
+@@ -67,10 +67,13 @@ export interface RememberInput extends MemoryInput {
  	readonly trust_tier?: string | null;
  	readonly memoryType?: string | null;
  	readonly memory_type?: string | null;
@@ -9493,17 +9493,12 @@ index c3b843b196..05c401f2a3 100644
 -
  export interface RememberFacadeOptions {
  	readonly source?: string | null;
- 	readonly importance?: number;
-@@ -97,6 +98,8 @@ export interface RememberFacadeOptions {
- 	readonly veracity?: string | null;
- 	readonly memoryType?: string | null;
- 	readonly memory_type?: string | null;
 +	readonly idempotencyKey?: string | null;
 +	readonly idempotency_key?: string | null;
- }
- 
- export interface RecallFacadeOptions
-@@ -161,6 +164,8 @@ type FacadeRememberOptions = {
+ 	readonly importance?: number;
+ 	readonly metadata?: Metadata | null;
+ 	readonly validUntil?: string | Date | null;
+@@ -163,6 +166,8 @@ type FacadeRememberOptions = {
  	veracity: string | undefined;
  	memoryType: string | undefined;
  	timestamp?: string;
@@ -9512,7 +9507,7 @@ index c3b843b196..05c401f2a3 100644
  };
  
  function hasOwn(options: MnemopiOptions, key: keyof MnemopiOptions): boolean {
-@@ -298,6 +303,18 @@ function toRememberOptions(input: string | RememberInput, options: RememberFacad
+@@ -300,6 +305,18 @@ function toRememberOptions(input: string | RememberInput, options: RememberFacad
  		trustTier: options.trustTier ?? options.trust_tier ?? memory?.trustTier ?? memory?.trust_tier ?? undefined,
  		veracity: options.veracity ?? memory?.veracity ?? undefined,
  		memoryType: options.memoryType ?? options.memory_type ?? memory?.memoryType ?? memory?.memory_type ?? undefined,
@@ -9531,7 +9526,7 @@ index c3b843b196..05c401f2a3 100644
  	};
  	if (timestamp !== null && timestamp !== undefined) rememberOptions.timestamp = timestamp;
  	return rememberOptions;
-@@ -452,6 +469,17 @@ export class Mnemopi {
+@@ -454,6 +471,17 @@ export class Mnemopi {
  		return this.#withRuntimeOptions(() => this.beam.remember(content, toRememberOptions(memory, options)));
  	}
  
@@ -9551,7 +9546,7 @@ index c3b843b196..05c401f2a3 100644
  	}
 diff --git a/packages/mnemopi/test/beam-idempotency-concurrent.test.ts b/packages/mnemopi/test/beam-idempotency-concurrent.test.ts
 new file mode 100644
-index 0000000000..17203c70cf
+index 00000000..17203c70
 --- /dev/null
 +++ b/packages/mnemopi/test/beam-idempotency-concurrent.test.ts
 @@ -0,0 +1,176 @@
@@ -9733,7 +9728,7 @@ index 0000000000..17203c70cf
 +});
 diff --git a/packages/mnemopi/test/beam-p1-gist-rekey-consolidation.test.ts b/packages/mnemopi/test/beam-p1-gist-rekey-consolidation.test.ts
 new file mode 100644
-index 0000000000..1a0c3aef5f
+index 00000000..1a0c3aef
 --- /dev/null
 +++ b/packages/mnemopi/test/beam-p1-gist-rekey-consolidation.test.ts
 @@ -0,0 +1,328 @@
@@ -10067,7 +10062,7 @@ index 0000000000..1a0c3aef5f
 +});
 diff --git a/packages/mnemopi/test/beam-p1-keyed-reuse-collision.test.ts b/packages/mnemopi/test/beam-p1-keyed-reuse-collision.test.ts
 new file mode 100644
-index 0000000000..532c958dab
+index 00000000..532c958d
 --- /dev/null
 +++ b/packages/mnemopi/test/beam-p1-keyed-reuse-collision.test.ts
 @@ -0,0 +1,324 @@

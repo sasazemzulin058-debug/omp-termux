@@ -1,5 +1,5 @@
 diff --git a/crates/pi-builtins/src/proc_snapshot.rs b/crates/pi-builtins/src/proc_snapshot.rs
-index 43ea86799a..5c46af82fa 100644
+index 43ea8679..5c46af82 100644
 --- a/crates/pi-builtins/src/proc_snapshot.rs
 +++ b/crates/pi-builtins/src/proc_snapshot.rs
 @@ -41,7 +41,7 @@ pub(crate) fn sanitize_process_command(command: String) -> String {
@@ -57,7 +57,7 @@ index 43ea86799a..5c46af82fa 100644
  	use super::{HostProcesses, ProcInfo};
  
 diff --git a/crates/pi-builtins/src/ps.rs b/crates/pi-builtins/src/ps.rs
-index e4e5d7d951..bd43ca71b2 100644
+index e4ee3da0..f4efaa27 100644
 --- a/crates/pi-builtins/src/ps.rs
 +++ b/crates/pi-builtins/src/ps.rs
 @@ -1244,7 +1244,7 @@ fn format_ps_elapsed(duration: Duration) -> String {
@@ -70,26 +70,26 @@ index e4e5d7d951..bd43ca71b2 100644
  	let value = fs::read_to_string("/proc/meminfo")
  		.ok()?
 diff --git a/crates/pi-natives/Cargo.toml b/crates/pi-natives/Cargo.toml
-index 382df037f5..b84438a7b4 100644
+index 6ade9a00..7ccf8662 100644
 --- a/crates/pi-natives/Cargo.toml
 +++ b/crates/pi-natives/Cargo.toml
-@@ -23,7 +23,6 @@ wayland-pipewire = ["dep:pipewire"]
- 
+@@ -24,7 +24,6 @@ wayland-pipewire = ["dep:pipewire"]
  [dependencies]
  anyhow.workspace = true
+ async-trait.workspace = true
 -arboard.workspace = true
  ast-grep-core.workspace = true
  base64.workspace = true
  clap.workspace = true
-@@ -53,7 +52,6 @@ flume.workspace = true
- pi-ast.workspace = true
+@@ -58,7 +57,6 @@ pi-diff.workspace = true
+ pi-edit.workspace = true
  pi-iso.workspace = true
  pi-shell.workspace = true
 -pi-voice.workspace = true
  pi-walker.workspace = true
  portable-pty.workspace = true
  png.workspace = true
-@@ -70,6 +68,13 @@ xutf.workspace = true
+@@ -75,6 +73,15 @@ xutf.workspace = true
  zstd.workspace = true
  xxhash-rust.workspace = true
  
@@ -97,24 +97,16 @@ index 382df037f5..b84438a7b4 100644
 +arboard.workspace = true
 +pi-voice.workspace = true
 +
++[target.'cfg(not(target_os = "android"))'.dependencies]
++
 +[target.'cfg(any(target_os = "macos", target_os = "windows"))'.dependencies]
 +enigo = { version = "=0.6.1", default-features = false }
 +xcap = { version = "=0.9.6", default-features = false }
  [target.'cfg(target_os = "linux")'.dependencies]
  ashpd = { version = "=0.11.1", default-features = false, features = ["tokio"] }
  atspi = { version = "=0.30.0", features = ["tokio", "zbus"] }
-@@ -78,9 +83,6 @@ reis = { version = "=0.5.0", features = ["tokio"] }
- x11rb = { version = "=0.13.2", features = ["randr", "xinput", "xtest"] }
- xkeysym = "=0.2.1"
- 
--[target.'cfg(any(target_os = "macos", target_os = "windows"))'.dependencies]
--enigo = { version = "=0.6.1", default-features = false }
--xcap = { version = "=0.9.6", default-features = false }
- 
- [target.'cfg(target_os = "macos")'.dependencies]
- tempfile = "=3.27.0"
 diff --git a/crates/pi-natives/src/audio.rs b/crates/pi-natives/src/audio.rs
-index 6ca937fba9..b18788ea69 100644
+index 6ca937fb..b18788ea 100644
 --- a/crates/pi-natives/src/audio.rs
 +++ b/crates/pi-natives/src/audio.rs
 @@ -4,121 +4,197 @@
@@ -406,7 +398,7 @@ index 6ca937fba9..b18788ea69 100644
 +    }
  }
 diff --git a/crates/pi-natives/src/clipboard.rs b/crates/pi-natives/src/clipboard.rs
-index 390050d447..8a5988ca0a 100644
+index 390050d4..8a5988ca 100644
 --- a/crates/pi-natives/src/clipboard.rs
 +++ b/crates/pi-natives/src/clipboard.rs
 @@ -4,9 +4,12 @@
@@ -528,7 +520,7 @@ index 390050d447..8a5988ca0a 100644
  	})
  }
 diff --git a/crates/pi-natives/src/crash_handler.rs b/crates/pi-natives/src/crash_handler.rs
-index 7009bef3e3..ce44af550b 100644
+index 7009bef3..ce44af55 100644
 --- a/crates/pi-natives/src/crash_handler.rs
 +++ b/crates/pi-natives/src/crash_handler.rs
 @@ -92,7 +92,7 @@ pub fn install() {
@@ -541,7 +533,7 @@ index 7009bef3e3..ce44af550b 100644
  			// Print the canonical line before doing anything allocation-prone.
  			// If this is genuine process-wide OOM, report formatting/path work may
 diff --git a/crates/pi-natives/src/lib.rs b/crates/pi-natives/src/lib.rs
-index c9290581d7..6f4359b000 100644
+index 72864d31..87ec4ffc 100644
 --- a/crates/pi-natives/src/lib.rs
 +++ b/crates/pi-natives/src/lib.rs
 @@ -20,7 +20,7 @@
@@ -554,7 +546,7 @@ index c9290581d7..6f4359b000 100644
  pub mod appearance;
  pub mod ast;
 diff --git a/crates/pi-natives/src/live.rs b/crates/pi-natives/src/live.rs
-index 9cbcd99d66..0fc449fc76 100644
+index 9cbcd99d..0fc449fc 100644
 --- a/crates/pi-natives/src/live.rs
 +++ b/crates/pi-natives/src/live.rs
 @@ -5,117 +5,185 @@
@@ -837,7 +829,7 @@ index 9cbcd99d66..0fc449fc76 100644
 +    fn drop(&mut self) {}
  }
 diff --git a/crates/pi-shell/src/process.rs b/crates/pi-shell/src/process.rs
-index c039bb9b5e..1c775045d0 100644
+index 253ea8c9..b63aecfc 100644
 --- a/crates/pi-shell/src/process.rs
 +++ b/crates/pi-shell/src/process.rs
 @@ -16,7 +16,7 @@ pub use pi_builtins::ProcessStatus;
@@ -850,18 +842,18 @@ index c039bb9b5e..1c775045d0 100644
  	use std::{
  		collections::HashSet,
 diff --git a/packages/coding-agent/src/task/index.ts b/packages/coding-agent/src/task/index.ts
-index 38d7d4f38c..9c5bfa4298 100644
+index 09bfa50b..6871578b 100644
 --- a/packages/coding-agent/src/task/index.ts
 +++ b/packages/coding-agent/src/task/index.ts
-@@ -276,6 +276,7 @@ function resolveSpawnItems(params: TaskParams): TaskItem[] {
+@@ -268,6 +268,7 @@ function resolveSpawnItems(params: TaskParams): TaskItem[] {
  		return params.tasks;
  	}
  	const item: TaskItem = { name: params.name, agent: params.agent, task: params.task };
 +	if ("repoRoot" in params) item.repoRoot = params.repoRoot;
  	if ("outputSchema" in params) item.outputSchema = params.outputSchema;
  	if ("schemaMode" in params) item.schemaMode = params.schemaMode;
- 	if ("effort" in params) item.effort = params.effort;
-@@ -296,6 +297,11 @@ function spawnParamsFor(params: TaskParams, item: TaskItem, defaultAgent: string
+ 	if ("tools" in params) item.tools = params.tools;
+@@ -289,6 +290,16 @@ function spawnParamsFor(params: TaskParams, item: TaskItem, defaultAgent: string
  	const spawn: TaskParams = { agent: item.agent?.trim() || defaultAgent };
  	if (item.name !== undefined) spawn.name = item.name;
  	if (item.task !== undefined) spawn.task = item.task;
@@ -870,10 +862,15 @@ index 38d7d4f38c..9c5bfa4298 100644
 +	} else if (params.repoRoot !== undefined) {
 +		spawn.repoRoot = params.repoRoot;
 +	}
++	if (item.repoRoot !== undefined) {
++		spawn.repoRoot = item.repoRoot;
++	} else if (params.repoRoot !== undefined) {
++		spawn.repoRoot = params.repoRoot;
++	}
  	if (params.context !== undefined) spawn.context = params.context;
  	if ("outputSchema" in item) spawn.outputSchema = item.outputSchema;
  	if ("schemaMode" in item) spawn.schemaMode = item.schemaMode;
-@@ -663,7 +669,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
+@@ -659,7 +670,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
  			...(Object.hasOwn(params, "outputSchema") ? { outputSchema: params.outputSchema } : {}),
  			...(Object.hasOwn(params, "schemaMode") ? { schemaMode: params.schemaMode } : {}),
  			...(params.effort !== undefined ? { effort: params.effort } : {}),
@@ -883,7 +880,7 @@ index 38d7d4f38c..9c5bfa4298 100644
  			enableLsp: (this.session.enableLsp ?? true) && this.session.settings.get("task.enableLsp"),
  			enableIrc: isIrcEnabled(this.session.settings, this.session.taskDepth ?? 0),
 diff --git a/packages/coding-agent/src/task/isolation-runner.ts b/packages/coding-agent/src/task/isolation-runner.ts
-index 71d12b08ba..64a791f013 100644
+index d0dd7a66..b13dcb65 100644
 --- a/packages/coding-agent/src/task/isolation-runner.ts
 +++ b/packages/coding-agent/src/task/isolation-runner.ts
 @@ -101,8 +101,8 @@ export interface IsolationContext {
@@ -898,10 +895,10 @@ index 71d12b08ba..64a791f013 100644
  	return { repoRoot, baseline };
  }
 diff --git a/packages/coding-agent/src/task/structured-subagent.ts b/packages/coding-agent/src/task/structured-subagent.ts
-index e5189d0a00..8c43471222 100644
+index f5ae9690..c1507a84 100644
 --- a/packages/coding-agent/src/task/structured-subagent.ts
 +++ b/packages/coding-agent/src/task/structured-subagent.ts
-@@ -68,6 +68,7 @@ export interface StructuredSubagentIsolationControls {
+@@ -70,6 +70,7 @@ export interface StructuredSubagentIsolationControls {
  	requested?: boolean;
  	merge?: "patch" | "branch";
  	apply?: boolean;
@@ -909,7 +906,7 @@ index e5189d0a00..8c43471222 100644
  }
  
  /** Identity and presentation metadata supplied by the calling surface. */
-@@ -129,6 +130,7 @@ export interface EffectiveSubagentPolicy {
+@@ -143,6 +144,7 @@ export interface EffectiveSubagentPolicy {
  	schema: StructuredSubagentSchemaResolution;
  	planMode: boolean;
  	isIsolated: boolean;
@@ -917,7 +914,7 @@ index e5189d0a00..8c43471222 100644
  	mergeMode: "patch" | "branch";
  	applyChanges: boolean;
  	enableLsp: boolean;
-@@ -203,7 +205,10 @@ function assertPlanControlsAllowed(request: StructuredSubagentRequest, planMode:
+@@ -220,7 +222,10 @@ function assertPlanControlsAllowed(request: StructuredSubagentRequest, planMode:
  	const isolation = request.isolation;
  	if (
  		isolation &&
@@ -929,7 +926,7 @@ index e5189d0a00..8c43471222 100644
  	) {
  		throw new StructuredSubagentError(
  			"preflight",
-@@ -312,6 +317,7 @@ export async function resolveEffectiveSubagentPolicy(
+@@ -329,6 +334,7 @@ export async function resolveEffectiveSubagentPolicy(
  		schema,
  		planMode,
  		isIsolated,
@@ -937,7 +934,7 @@ index e5189d0a00..8c43471222 100644
  		mergeMode: request.isolation?.merge ?? request.session.settings.get("task.isolation.merge"),
  		applyChanges:
  			request.isolation?.apply ??
-@@ -578,7 +584,7 @@ export async function runStructuredSubagent(request: StructuredSubagentRequest):
+@@ -598,7 +604,7 @@ export async function runStructuredSubagent(request: StructuredSubagentRequest):
  		let isolationContext: IsolationContext | null = null;
  		if (policy.isIsolated) {
  			try {
@@ -947,7 +944,7 @@ index e5189d0a00..8c43471222 100644
  				const message = error instanceof Error ? error.message : String(error);
  				throw new StructuredSubagentError(
 diff --git a/packages/coding-agent/src/task/types.ts b/packages/coding-agent/src/task/types.ts
-index 062cab65a6..61459bf92e 100644
+index b4b5cf87..557d9d7f 100644
 --- a/packages/coding-agent/src/task/types.ts
 +++ b/packages/coding-agent/src/task/types.ts
 @@ -115,6 +115,7 @@ export const taskItemSchema = type({
@@ -957,41 +954,43 @@ index 062cab65a6..61459bf92e 100644
 +	"repoRoot?": "string",
  	"outputSchema?": outputSchemaInputSchema,
  	"schemaMode?": '"permissive" | "strict"',
- 	"+": "delete",
-@@ -123,6 +124,7 @@ const taskItemSchemaIsolated = type({
+ 	"tools?": "string[]",
+@@ -124,6 +125,7 @@ const taskItemSchemaIsolated = type({
  	"name?": "string",
  	agent: "string = 'task'",
  	task: "string",
 +	"repoRoot?": "string",
  	"outputSchema?": outputSchemaInputSchema,
  	"schemaMode?": '"permissive" | "strict"',
- 	"isolated?": "boolean",
-@@ -137,6 +139,8 @@ export interface TaskItem {
+ 	"tools?": "string[]",
+@@ -139,6 +141,10 @@ export interface TaskItem {
  	agent?: string;
  	/** The work; required by the schema. */
  	task?: string;
 +	/** Optional explicit git repository root for task isolation. */
 +	repoRoot?: string;
++	/** Optional explicit git repository root for task isolation. */
++	repoRoot?: string;
  	/** Per-spawn thinking effort: lowest/middle/highest level the resolved model supports. Overrides the agent's default selector (e.g. `auto`). */
  	effort?: TaskEffort;
  	/** Caller-provided output schema; its presence overrides the selected agent's schema. */
-@@ -151,6 +155,7 @@ export const taskSchema = type({
+@@ -155,6 +161,7 @@ export const taskSchema = type({
  	"name?": "string",
  	agent: "string = 'task'",
  	task: "string",
 +	"repoRoot?": "string",
  	"outputSchema?": outputSchemaInputSchema,
  	"schemaMode?": '"permissive" | "strict"',
- 	"isolated?": "boolean",
-@@ -160,6 +165,7 @@ const taskSchemaNoIsolation = type({
+ 	"tools?": "string[]",
+@@ -165,6 +172,7 @@ const taskSchemaNoIsolation = type({
  	"name?": "string",
  	agent: "string = 'task'",
  	task: "string",
 +	"repoRoot?": "string",
  	"outputSchema?": outputSchemaInputSchema,
  	"schemaMode?": '"permissive" | "strict"',
- 	"+": "delete",
-@@ -206,6 +212,7 @@ function createTaskSchema(options: {
+ 	"tools?": "string[]",
+@@ -214,6 +222,7 @@ function createTaskSchema(options: {
  				"name?": "string",
  				agent,
  				task: "string",
@@ -999,7 +998,7 @@ index 062cab65a6..61459bf92e 100644
  				...effortField,
  				"outputSchema?": outputSchemaInputSchema,
  				"schemaMode?": '"permissive" | "strict"',
-@@ -222,6 +229,7 @@ function createTaskSchema(options: {
+@@ -231,6 +240,7 @@ function createTaskSchema(options: {
  			"name?": "string",
  			agent,
  			task: "string",
@@ -1007,7 +1006,7 @@ index 062cab65a6..61459bf92e 100644
  			...effortField,
  			"outputSchema?": outputSchemaInputSchema,
  			"schemaMode?": '"permissive" | "strict"',
-@@ -238,6 +246,7 @@ function createTaskSchema(options: {
+@@ -248,6 +258,7 @@ function createTaskSchema(options: {
  			"name?": "string",
  			agent,
  			task: "string",
@@ -1015,7 +1014,7 @@ index 062cab65a6..61459bf92e 100644
  			...effortField,
  			"outputSchema?": outputSchemaInputSchema,
  			"schemaMode?": '"permissive" | "strict"',
-@@ -249,6 +258,7 @@ function createTaskSchema(options: {
+@@ -260,6 +271,7 @@ function createTaskSchema(options: {
  		"name?": "string",
  		agent,
  		task: "string",
@@ -1023,7 +1022,7 @@ index 062cab65a6..61459bf92e 100644
  		...effortField,
  		"outputSchema?": outputSchemaInputSchema,
  		"schemaMode?": '"permissive" | "strict"',
-@@ -290,6 +300,8 @@ export interface TaskParams {
+@@ -305,6 +317,8 @@ export interface TaskParams {
  	agent?: string;
  	/** The work (flat form). */
  	task?: string;
@@ -1033,10 +1032,10 @@ index 062cab65a6..61459bf92e 100644
  	effort?: TaskEffort;
  	/** Caller-provided output schema; its presence overrides the selected agent's schema. */
 diff --git a/packages/coding-agent/src/task/worktree.ts b/packages/coding-agent/src/task/worktree.ts
-index 1961d14a09..aae766642a 100644
+index 067fb6f7..b6f17cf2 100644
 --- a/packages/coding-agent/src/task/worktree.ts
 +++ b/packages/coding-agent/src/task/worktree.ts
-@@ -51,18 +51,35 @@ export interface WorktreeBaseline {
+@@ -52,18 +52,35 @@ export interface WorktreeBaseline {
  	nested: Array<{ relativePath: string; baseline: RepoBaseline }>;
  }
  
@@ -1049,7 +1048,7 @@ index 1961d14a09..aae766642a 100644
 -	if (vcs.isPureJj(cwd)) {
 +	if (vcs.isPureJj(targetPath)) {
  		throw new Error(
- 			"Isolated task execution requires a Git checkout, but this workspace is pure Jujutsu (`.jj/` without a colocated `.git/`). Run `jj git init --colocate` to add a Git checkout, or set `task.isolation.mode: none` to disable task isolation.",
+ 			"Isolated task execution requires a Git checkout, but this workspace is pure Jujutsu (`.jj/` without a colocated `.git/`). Run `jj git init --colocate` to add a Git checkout, or set `task.isolation.enabled: false` to disable task isolation.",
  		);
  	}
  
@@ -1076,8 +1075,19 @@ index 1961d14a09..aae766642a 100644
  
  	throw new Error("Git repository not found for isolated task execution.");
  }
+@@ -496,8 +513,9 @@ export async function ensureIsolation(
+ 	baseCwd: string,
+ 	id: string,
+ 	preferred?: IsoBackendKind,
++	explicitRepoRoot?: string,
+ ): Promise<IsolationHandle> {
+-	const repoRoot = await getRepoRoot(baseCwd);
++	const repoRoot = await getRepoRoot(baseCwd, explicitRepoRoot);
+ 	const sourceCommonDir = vcs.requireGit(repoRoot).info().commonDir;
+ 	const baseDir = getWorktreeDir(getTaskIsolationSegment(repoRoot, id));
+ 	const mergedDir = path.join(baseDir, TASK_ISOLATION_MOUNT_DIR);
 diff --git a/packages/coding-agent/src/tools/browser/launch.ts b/packages/coding-agent/src/tools/browser/launch.ts
-index b27e137a15..df5f9cfa6c 100644
+index b27e137a..df5f9cfa 100644
 --- a/packages/coding-agent/src/tools/browser/launch.ts
 +++ b/packages/coding-agent/src/tools/browser/launch.ts
 @@ -192,6 +192,10 @@ let chromiumExecutablePromise: Promise<string | undefined> | undefined;
@@ -1118,7 +1128,7 @@ index b27e137a15..df5f9cfa6c 100644
  			const programFilesX86 = process.env["ProgramFiles(x86)"] ?? "C:\\Program Files (x86)";
 diff --git a/packages/coding-agent/src/utils/android-helpers.ts b/packages/coding-agent/src/utils/android-helpers.ts
 new file mode 100644
-index 0000000000..84e5584046
+index 00000000..84e55840
 --- /dev/null
 +++ b/packages/coding-agent/src/utils/android-helpers.ts
 @@ -0,0 +1,97 @@
@@ -1221,7 +1231,7 @@ index 0000000000..84e5584046
 +}
 diff --git a/packages/coding-agent/test/android-helpers.test.ts b/packages/coding-agent/test/android-helpers.test.ts
 new file mode 100644
-index 0000000000..bce004421f
+index 00000000..bce00442
 --- /dev/null
 +++ b/packages/coding-agent/test/android-helpers.test.ts
 @@ -0,0 +1,43 @@
@@ -1270,7 +1280,7 @@ index 0000000000..bce004421f
 +});
 diff --git a/packages/coding-agent/test/generator-android.test.ts b/packages/coding-agent/test/generator-android.test.ts
 new file mode 100644
-index 0000000000..e5754d3cfa
+index 00000000..e5754d3c
 --- /dev/null
 +++ b/packages/coding-agent/test/generator-android.test.ts
 @@ -0,0 +1,115 @@
@@ -1391,7 +1401,7 @@ index 0000000000..e5754d3cfa
 +});
 diff --git a/packages/coding-agent/test/repo-root-isolation.test.ts b/packages/coding-agent/test/repo-root-isolation.test.ts
 new file mode 100644
-index 0000000000..c71b3bd92a
+index 00000000..c71b3bd9
 --- /dev/null
 +++ b/packages/coding-agent/test/repo-root-isolation.test.ts
 @@ -0,0 +1,36 @@
@@ -1432,10 +1442,10 @@ index 0000000000..c71b3bd92a
 +	});
 +});
 diff --git a/packages/natives/native/index.js b/packages/natives/native/index.js
-index 4d4e156ecc..bab260e1c1 100644
+index d39f7219..831caf6d 100644
 --- a/packages/natives/native/index.js
 +++ b/packages/natives/native/index.js
-@@ -17,13 +17,13 @@ import { adaptDesktopSession } from "./desktop-adapter.js";
+@@ -17,15 +17,15 @@ import { adaptDesktopSession } from "./desktop-adapter.js";
  const nativeBindings = loadNative();
  // --- generated native exports (do not edit) ---
  // classes
@@ -1445,14 +1455,16 @@ index 4d4e156ecc..bab260e1c1 100644
 +export const AudioPlayback = (() => { const v = nativeBindings.AudioPlayback; if (v !== undefined) return v; const err = () => { throw new Error("Native AudioPlayback is unsupported on Android/Termux"); }; return new Proxy(err, { construct: err, apply: err, get(_t, p){ if(p==="then") return undefined; return err; } }); })();
  export const DesktopSession = adaptDesktopSession(nativeBindings.DesktopSession);
  export const DiffStream = nativeBindings.DiffStream;
+ export const EditSession = nativeBindings.EditSession;
+ export const EditStore = nativeBindings.EditStore;
  export const FileLock = nativeBindings.FileLock;
  export const HighlightStream = nativeBindings.HighlightStream;
 -export const LiveWebRtcPeer = nativeBindings.LiveWebRtcPeer;
 +export const LiveWebRtcPeer = (() => { const v = nativeBindings.LiveWebRtcPeer; if (v !== undefined) return v; const err = () => { throw new Error("Native LiveWebRtcPeer is unsupported on Android/Termux"); }; return new Proxy(err, { construct: err, apply: err, get(_t, p){ if(p==="then") return undefined; return err; } }); })();
  export const MacAppearanceObserver = nativeBindings.MacAppearanceObserver;
- export const MacOSPowerAssertion = nativeBindings.MacOSPowerAssertion;
- export const Process = nativeBindings.Process;
-@@ -41,7 +41,7 @@ export const astEdit = nativeBindings.astEdit;
+ export const NativeOAuthCallback = nativeBindings.NativeOAuthCallback;
+ export const PowerAssertion = nativeBindings.PowerAssertion;
+@@ -44,7 +44,7 @@ export const astEdit = nativeBindings.astEdit;
  export const astGrep = nativeBindings.astGrep;
  export const astMatch = nativeBindings.astMatch;
  export const blockRangeAt = nativeBindings.blockRangeAt;
@@ -1460,8 +1472,8 @@ index 4d4e156ecc..bab260e1c1 100644
 +export const copyToClipboard = (() => { const v = nativeBindings.copyToClipboard; if (v !== undefined) return v; const err = () => { throw new Error("Native copyToClipboard is unsupported on Android/Termux"); }; return new Proxy(err, { construct: err, apply: err, get(_t, p){ if(p==="then") return undefined; return err; } }); })();
  export const cosineSimilarityPairs = nativeBindings.cosineSimilarityPairs;
  export const countTokens = nativeBindings.countTokens;
- export const detectMacOSAppearance = nativeBindings.detectMacOSAppearance;
-@@ -85,7 +85,7 @@ export const parseKey = nativeBindings.parseKey;
+ export const decodeSixelToPng = nativeBindings.decodeSixelToPng;
+@@ -101,7 +101,7 @@ export const parseKey = nativeBindings.parseKey;
  export const parseKittySequence = nativeBindings.parseKittySequence;
  export const pdfToMarkdown = nativeBindings.pdfToMarkdown;
  export const rasterizeSvg = nativeBindings.rasterizeSvg;
@@ -1471,20 +1483,19 @@ index 4d4e156ecc..bab260e1c1 100644
  export const search = nativeBindings.search;
  export const setHangulCompatJamoWidthOverride = nativeBindings.setHangulCompatJamoWidthOverride;
 diff --git a/packages/natives/native/loader-state.js b/packages/natives/native/loader-state.js
-index 5c07c410d4..a85e96c19d 100644
+index baa41871..64ba3650 100644
 --- a/packages/natives/native/loader-state.js
 +++ b/packages/natives/native/loader-state.js
-@@ -31,7 +31,7 @@ import { embeddedAddon } from "./embedded-addon.js";
-  * post-build `--reset` stub) is the authoritative compiled-mode signal.
-  */
- 
--const SUPPORTED_PLATFORMS = ["linux-x64", "linux-arm64", "darwin-x64", "darwin-arm64", "win32-x64"];
-+const SUPPORTED_PLATFORMS = ["linux-x64", "linux-arm64", "darwin-x64", "darwin-arm64", "win32-x64", "android-arm64"];
+@@ -38,6 +38,7 @@ const SUPPORTED_PLATFORMS = [
+ 	"darwin-arm64",
+ 	"win32-x64",
+ 	"win32-arm64",
++	"android-arm64",
+ ];
  
  /**
-  * Streaming startup marker, enabled by `PI_DEBUG_STARTUP`. Local copy of the
 diff --git a/packages/natives/scripts/gen-enums.ts b/packages/natives/scripts/gen-enums.ts
-index 3d42daa157..26b9496b2a 100644
+index 3d42daa1..26b9496b 100644
 --- a/packages/natives/scripts/gen-enums.ts
 +++ b/packages/natives/scripts/gen-enums.ts
 @@ -74,29 +74,49 @@ function collectMatches(dts: string, re: RegExp): string[] {

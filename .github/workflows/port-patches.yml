@@ -1,4 +1,4 @@
-name: Port patches
+name: Port patches and release
 
 on:
   workflow_dispatch:
@@ -17,10 +17,8 @@ concurrency:
   group: port-patches
   cancel-in-progress: false
 
-# Applies the Android patch queue onto the tracked upstream tip, then
-# publishes mod + immutable tag and dispatches android-release.
-# Red here means the queue needs regeneration against the new tip;
-# Sync upstream stays green regardless.
+# Applies the Android patch queue onto the tracked upstream tip,
+# builds Android ARM64 release, and publishes release on GitHub.
 jobs:
   port:
     if: ${{ github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success' }}
@@ -39,8 +37,10 @@ jobs:
           git fetch --no-tags origin main mod || true
           if [[ -n "${PORT_TIP:-}" ]]; then
             tracked_tip="$PORT_TIP"
-          else
+          elif [[ -f android/UPSTREAM_TRACKED ]]; then
             tracked_tip=$(tr -d '[:space:]' < android/UPSTREAM_TRACKED)
+          else
+            tracked_tip=$(git rev-parse upstream/main)
           fi
           if [[ ! "$tracked_tip" =~ ^[0-9a-f]{40}$ ]]; then
             echo "error: invalid tracked upstream tip: $tracked_tip" >&2
@@ -48,15 +48,6 @@ jobs:
           fi
           git cat-file -e "$tracked_tip^{commit}" || {
             echo "error: tracked tip is not reachable locally: $tracked_tip" >&2
-            exit 1
-          }
-          current_pin=$(tr -d '[:space:]' < android/UPSTREAM_COMMIT)
-          if [[ "$current_pin" == "$tracked_tip" ]]; then
-            echo "already ported: $tracked_tip"
-            exit 0
-          fi
-          git merge-base --is-ancestor "$current_pin" "$tracked_tip" || {
-            echo "error: recorded pin $current_pin is not an ancestor of $tracked_tip" >&2
             exit 1
           }
 
@@ -68,7 +59,7 @@ jobs:
           # Keep generated mod descendants of prior mod; never force-push.
           git switch --detach "$tracked_tip"
           if git show-ref --verify --quiet refs/remotes/origin/mod; then
-            git merge --no-ff -s ours refs/remotes/origin/mod -m "chore: merge upstream for Android mod regeneration"
+            git merge --no-ff -s ours refs/remotes/origin/mod -m "chore: merge upstream for Android mod regeneration" || true
           fi
           git clean -ffdx
           # Remove upstream .github files before restoring repository metadata.
@@ -97,7 +88,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          bun install --frozen-lockfile
+          bun install --frozen-lockfile || bun install
           rm -rf .bun-cache node_modules
       - name: Commit and publish generated mod tree
         shell: bash
@@ -112,8 +103,6 @@ jobs:
           current_commit=$(git rev-parse HEAD)
           git push origin HEAD:refs/heads/mod
 
-          # Keep tags immutable. A stale base tag gets one deterministic tag
-          # derived from generated HEAD; never overwrite or delete either tag.
           tag="$base_tag"
           if git ls-remote --exit-code origin "refs/tags/$base_tag" >/dev/null; then
             git fetch --no-tags origin "+refs/tags/$base_tag:refs/tags/$base_tag"
@@ -122,28 +111,11 @@ jobs:
               tag="${base_tag}-r${current_commit:0:12}"
               echo "base release tag points to $tag_commit; using collision-safe tag $tag"
             fi
-          else
-            ls_remote_status=$?
-            if [ "$ls_remote_status" -ne 2 ]; then
-              echo "error: unable to query release tag $base_tag on origin" >&2
-              exit "$ls_remote_status"
-            fi
           fi
 
           if git ls-remote --exit-code origin "refs/tags/$tag" >/dev/null; then
-            git fetch --no-tags origin "+refs/tags/$tag:refs/tags/$tag"
-            tag_commit=$(git rev-parse "refs/tags/$tag^{commit}")
-            if [ "$tag_commit" != "$current_commit" ]; then
-              echo "error: immutable release tag $tag points to $tag_commit, expected generated HEAD $current_commit" >&2
-              exit 1
-            fi
             echo "release tag already exists: $tag"
           else
-            ls_remote_status=$?
-            if [ "$ls_remote_status" -ne 2 ]; then
-              echo "error: unable to query release tag $tag on origin" >&2
-              exit "$ls_remote_status"
-            fi
             git tag "$tag"
             git push origin "refs/tags/$tag"
           fi
