@@ -3048,7 +3048,7 @@ index 00000000..f9893f0a
 +	});
 +};
 diff --git a/packages/coding-agent/src/config/settings-schema.ts b/packages/coding-agent/src/config/settings-schema.ts
-index 3c9b926c..5f69a8ca 100644
+index 3c9b926c..91cb2073 100644
 --- a/packages/coding-agent/src/config/settings-schema.ts
 +++ b/packages/coding-agent/src/config/settings-schema.ts
 @@ -3027,6 +3027,18 @@ export const SETTINGS_SCHEMA = {
@@ -3057,8 +3057,8 @@ index 3c9b926c..5f69a8ca 100644
  	// Master flag is default-off → zero footprint; sub-flags gate behaviour.
 +	"autolearn.mode": {
 +		type: "enum",
-+		options: ["off", "builtin", "custom"] as const,
-+		default: undefined,
++		values: ["off", "builtin", "custom"] as const,
++		default: "custom",
 +		ui: {
 +			tab: "memory",
 +			group: "Auto-Learn",
