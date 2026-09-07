@@ -33,31 +33,80 @@ esac
 
 NDK_BIN="$ANDROID_NDK_ROOT/toolchains/llvm/prebuilt/$NDK_HOST_TAG/bin"
 NDK_CLANG="$NDK_BIN/aarch64-linux-android24-clang$NDK_EXE_SUFFIX"
+NDK_CXX="$NDK_BIN/aarch64-linux-android24-clang++$NDK_EXE_SUFFIX"
 NDK_AR="$NDK_BIN/llvm-ar$NDK_EXE_SUFFIX"
 NDK_RANLIB="$NDK_BIN/llvm-ranlib$NDK_EXE_SUFFIX"
 NDK_STRIP="$NDK_BIN/llvm-strip$NDK_EXE_SUFFIX"
 
-for tool in "$NDK_CLANG" "$NDK_AR" "$NDK_RANLIB" "$NDK_STRIP"; do
+for tool in "$NDK_CLANG" "$NDK_CXX" "$NDK_AR" "$NDK_RANLIB" "$NDK_STRIP"; do
 	[ -x "$tool" ] || { echo "error: NDK tool not found: $tool" >&2; exit 1; }
 done
 
-# Point cargo + cc-rs at the NDK clang for the aarch64-linux-android target.
-# `cc` (cc-rs) reads CC_<target> (dashes → underscores); cargo reads
-# CARGO_TARGET_<TARGET>_LINKER / _AR. Both must agree on the toolchain.
+# Preflight: compile a trivial C object with the selected NDK clang and verify
+# it is aarch64. Catches host-compiler leakage (setup-ndk wrapper/PATH
+# contamination or mis-set CC) before the expensive cargo build — audiopus_sys
+# would otherwise emit x86_64 objects that fail late at link with
+# "incompatible with aarch64linux".
+echo "==> Preflight: verifying NDK clang emits aarch64 objects"
+TMP_PREFLIGHT="$(mktemp -d)"
+cat > "$TMP_PREFLIGHT/check.c" <<'CCEOF'
+int preflight_check = 42;
+CCEOF
+"$NDK_CLANG" -c "$TMP_PREFLIGHT/check.c" -o "$TMP_PREFLIGHT/check.o"
+if ! file "$TMP_PREFLIGHT/check.o" | grep -qi 'aarch64'; then
+	echo "error: NDK clang did not emit aarch64 object: $(file "$TMP_PREFLIGHT/check.o")" >&2
+	file "$TMP_PREFLIGHT/check.o" >&2 || true
+	"$NDK_BIN/llvm-readelf" --file-header "$TMP_PREFLIGHT/check.o" 2>/dev/null | head -n 20 >&2 || true
+	rm -rf "$TMP_PREFLIGHT"
+	exit 1
+fi
+echo "    preflight OK: NDK clang emits aarch64 ($(file -b "$TMP_PREFLIGHT/check.o"))"
+rm -rf "$TMP_PREFLIGHT"
+
+# Point cargo + cc-rs + cmake at the NDK clang for the aarch64-linux-android
+# target at API 24. `cc` reads CC_<target>; cargo reads
+# CARGO_TARGET_<TARGET>_LINKER/_AR; cmake reads CMAKE_C_COMPILER etc.;
+# ring/audiopus_sys also honour TARGET_CC/TARGET_CXX. Setting all
+# deterministically from the NDK path (not from setup-ndk PATH wrappers)
+# prevents CMake/cc from picking host gcc/clang and emitting x86_64
+# objects that later fail to link (previous release failure: audiopus_sys
+# objects incompatible with aarch64linux when linking with NDK clang).
 NDK_BIN="$(dirname "$NDK_CLANG")"
 # Do NOT create recursive symlinks on clang!
 export PATH="$NDK_BIN:$PATH"
 export CC="$NDK_CLANG"
-export CXX="$NDK_BIN/aarch64-linux-android24-clang++"
+export CXX="$NDK_CXX"
 export CC_aarch64_linux_android="$NDK_CLANG"
+export CXX_aarch64_linux_android="$NDK_CXX"
 export AR_aarch64_linux_android="$NDK_AR"
+export RANLIB_aarch64_linux_android="$NDK_RANLIB"
 export CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER="$NDK_CLANG"
 export CARGO_TARGET_AARCH64_LINUX_ANDROID_AR="$NDK_AR"
 export CARGO_TARGET_AARCH64_LINUX_ANDROID_RANLIB="$NDK_RANLIB"
+# Deterministic CMake / cc-rs target toolchain (cmake crate propagates these
+# to -DCMAKE_C_COMPILER / -DCMAKE_CXX_COMPILER / -DCMAKE_AR etc.; TARGET_*
+# covers ring and other crates reading TARGET_CC).
+export CMAKE_C_COMPILER="$NDK_CLANG"
+export CMAKE_CXX_COMPILER="$NDK_CXX"
+export CMAKE_AR="$NDK_AR"
+export CMAKE_RANLIB="$NDK_RANLIB"
+export CMAKE_STRIP="$NDK_STRIP"
+export TARGET_CC="$NDK_CLANG"
+export TARGET_CXX="$NDK_CXX"
+export TARGET_AR="$NDK_AR"
+export TARGET_RANLIB="$NDK_RANLIB"
+export TARGET_STRIP="$NDK_STRIP"
+# Per-target overrides that some cmake/cc invocations read (CMAKE_<VAR>_<triple>)
+export CMAKE_C_COMPILER_aarch64_linux_android="$NDK_CLANG"
+export CMAKE_CXX_COMPILER_aarch64_linux_android="$NDK_CXX"
+export CMAKE_AR_aarch64_linux_android="$NDK_AR"
+export CMAKE_RANLIB_aarch64_linux_android="$NDK_RANLIB"
 export CFLAGS="-Os -g0 -fvisibility=hidden"
 export CXXFLAGS="-Os -g0 -fvisibility=hidden"
 export CFLAGS_aarch64_linux_android="-Os -g0 -fvisibility=hidden"
 export CXXFLAGS_aarch64_linux_android="-Os -g0 -fvisibility=hidden"
+export TARGET_CFLAGS="-Os -g0 -fvisibility=hidden"
+export TARGET_CXXFLAGS="-Os -g0 -fvisibility=hidden"
 
 # napi may inject its own Android NDK linker. Cargo config wins over that
 # default and keeps all native objects on same NDK toolchain.
