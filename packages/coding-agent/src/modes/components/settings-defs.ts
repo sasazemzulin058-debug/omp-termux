@@ -121,6 +121,9 @@ const CONDITIONS: Record<string, () => boolean> = {
 	},
 	autolearnActive: () => {
 		try {
+			const mode = Settings.instance.get("autolearn.mode") as string | undefined;
+			if (mode === "off") return false;
+			if (mode === "builtin" || mode === "custom") return true;
 			return Settings.instance.get("autolearn.enabled") === true;
 		} catch {
 			return false;
