@@ -268,6 +268,7 @@ function resolveSpawnItems(params: TaskParams): TaskItem[] {
 		return params.tasks;
 	}
 	const item: TaskItem = { name: params.name, agent: params.agent, task: params.task };
+	if ("repoRoot" in params) item.repoRoot = params.repoRoot;
 	if ("outputSchema" in params) item.outputSchema = params.outputSchema;
 	if ("schemaMode" in params) item.schemaMode = params.schemaMode;
 	if ("tools" in params) item.tools = params.tools;
@@ -289,6 +290,16 @@ function spawnParamsFor(params: TaskParams, item: TaskItem, defaultAgent: string
 	const spawn: TaskParams = { agent: item.agent?.trim() || defaultAgent };
 	if (item.name !== undefined) spawn.name = item.name;
 	if (item.task !== undefined) spawn.task = item.task;
+	if (item.repoRoot !== undefined) {
+		spawn.repoRoot = item.repoRoot;
+	} else if (params.repoRoot !== undefined) {
+		spawn.repoRoot = params.repoRoot;
+	}
+	if (item.repoRoot !== undefined) {
+		spawn.repoRoot = item.repoRoot;
+	} else if (params.repoRoot !== undefined) {
+		spawn.repoRoot = params.repoRoot;
+	}
 	if (params.context !== undefined) spawn.context = params.context;
 	if ("outputSchema" in item) spawn.outputSchema = item.outputSchema;
 	if ("schemaMode" in item) spawn.schemaMode = item.schemaMode;
@@ -659,7 +670,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 			...(Object.hasOwn(params, "outputSchema") ? { outputSchema: params.outputSchema } : {}),
 			...(Object.hasOwn(params, "schemaMode") ? { schemaMode: params.schemaMode } : {}),
 			...(params.effort !== undefined ? { effort: params.effort } : {}),
-			...("isolated" in params ? { isolation: { requested: params.isolated } } : {}),
+			...(params.isolated === true ? { isolation: { requested: true, repoRoot: params.repoRoot } } : {}),
 			blockedAgent: this.#blockedAgent,
 			enableLsp: (this.session.enableLsp ?? true) && this.session.settings.get("task.enableLsp"),
 			enableIrc: isIrcEnabled(this.session.settings, this.session.taskDepth ?? 0),

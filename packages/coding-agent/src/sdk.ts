@@ -50,6 +50,8 @@ import {
 } from "./advisor";
 import { AsyncJobManager } from "./async";
 import { AutoLearnController, buildAutoLearnInstructions } from "./autolearn/controller";
+import { CustomAutolearnController } from "./autolearn/custom-controller";
+import { createLearnExtension } from "./autolearn/learn-commands";
 import { createAutoresearchExtension } from "./autoresearch";
 import { loadCapability } from "./capability";
 import {
@@ -2131,6 +2133,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 
 			inlineExtensions.push(...(options.extensions ?? []));
 			inlineExtensions.push(createAutoresearchExtension);
+			inlineExtensions.push(createLearnExtension);
 			if (customTools.length > 0) {
 				inlineExtensions.push(createCustomToolsExtension(customTools, customToolSourcePaths));
 			}
@@ -2809,6 +2812,8 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			settings,
 			localProtocolOptions,
 			() => (hasSession ? session.getAsyncJobSnapshot() : null),
+			agentDir,
+			() => (hasSession ? session.getMnemopiSessionState() : undefined),
 		);
 
 		credentialDisabledTarget = extensionRunner;
@@ -4200,13 +4205,29 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		// mid-session DISABLE. The subscription lives for the session's lifetime; the
 		// reference is intentionally discarded (the listener retains it).
 		if (!restrictToolNames) {
-			if (settings.get("autolearn.enabled") && taskDepth === 0) {
+			if (
+				(settings.get("autolearn.mode") === "builtin" ||
+					(settings.get("autolearn.mode") === undefined && settings.get("autolearn.enabled") === true)) &&
+				taskDepth === 0
+			) {
 				await logger.time("startMemoryStartupTask", startMemoryBackend);
 				new AutoLearnController({
 					session,
 					settings,
 					capture: content => session.runAutolearnCapture(signal => runAutoLearnCapture(content, signal)),
 				});
+			} else if (settings.get("autolearn.mode") === "custom" && taskDepth === 0) {
+				await logger.time("startMemoryStartupTask", startMemoryBackend);
+				const customCtrl = new CustomAutolearnController({ session, settings, agentDir });
+				// Production recovery: invoke after Mnemopi session state becomes available, before normal /learn mutations, same agentDir/session scope
+				try {
+					const mnemopiState = (
+						session as unknown as { getMnemopiSessionState?: () => unknown }
+					).getMnemopiSessionState?.();
+					customCtrl.recoverPendingIntents(mnemopiState as never);
+				} catch (e) {
+					logger.warn("custom autolearn startup recovery failed", { error: String(e).slice(0, 512) });
+				}
 			} else {
 				void logger.time("startMemoryStartupTask", startMemoryBackend);
 			}
