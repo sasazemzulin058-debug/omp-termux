@@ -16,6 +16,7 @@ import autolearnGuidance from "../prompts/system/autolearn-guidance.md" with { t
 import autolearnGuidanceLearn from "../prompts/system/autolearn-guidance-learn.md" with { type: "text" };
 import autolearnNudgeAutoContinue from "../prompts/system/autolearn-nudge-autocontinue.md" with { type: "text" };
 import type { AgentSession, AgentSessionEvent } from "../session/agent-session";
+import { resolveAutolearnMode } from "./custom-service";
 
 const AUTOLEARN_NUDGE_AUTOCONTINUE = autolearnNudgeAutoContinue.trim();
 const DEFAULT_MIN_TOOL_CALLS = 5;
@@ -110,7 +111,7 @@ export class AutoLearnController {
 		}
 		// Honor a live opt-out: the subscription outlives the setting, so re-check
 		// the current flag rather than trusting install-time state.
-		if (!this.#settings.get("autolearn.enabled")) return;
+		if (resolveAutolearnMode(this.#settings) !== "builtin") return;
 		const minToolCalls = this.#settings.get("autolearn.minToolCalls") ?? DEFAULT_MIN_TOOL_CALLS;
 		if (toolCalls < minToolCalls) return;
 		// Never interrupt plan-mode review.

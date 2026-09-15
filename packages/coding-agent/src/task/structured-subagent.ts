@@ -74,6 +74,7 @@ export interface StructuredSubagentIsolationControls {
 	requested?: boolean;
 	merge?: "patch" | "branch";
 	apply?: boolean;
+	repoRoot?: string;
 }
 
 /** Identity and presentation metadata supplied by the calling surface. */
@@ -149,6 +150,7 @@ export interface EffectiveSubagentPolicy {
 	schema: StructuredSubagentSchemaResolution;
 	planMode: boolean;
 	isIsolated: boolean;
+	repoRoot?: string;
 	mergeMode: "patch" | "branch";
 	applyChanges: boolean;
 	enableLsp: boolean;
@@ -226,7 +228,10 @@ function assertPlanControlsAllowed(request: StructuredSubagentRequest, planMode:
 	const isolation = request.isolation;
 	if (
 		isolation &&
-		(Object.hasOwn(isolation, "requested") || Object.hasOwn(isolation, "apply") || Object.hasOwn(isolation, "merge"))
+		(Object.hasOwn(isolation, "requested") ||
+			Object.hasOwn(isolation, "apply") ||
+			Object.hasOwn(isolation, "merge") ||
+			(isolation.requested === true && Object.hasOwn(isolation, "repoRoot")))
 	) {
 		throw new StructuredSubagentError(
 			"preflight",
@@ -342,6 +347,7 @@ export async function resolveEffectiveSubagentPolicy(
 		schema,
 		planMode,
 		isIsolated,
+		repoRoot: isIsolated ? request.isolation?.repoRoot : undefined,
 		mergeMode: request.isolation?.merge ?? request.session.settings.get("task.isolation.merge"),
 		applyChanges:
 			request.isolation?.apply ??
@@ -630,7 +636,7 @@ export async function runStructuredSubagent(request: StructuredSubagentRequest):
 		let isolationContext: IsolationContext | null = null;
 		if (policy.isIsolated) {
 			try {
-				isolationContext = await prepareIsolationContext(request.session.cwd);
+				isolationContext = await prepareIsolationContext(request.session.cwd, policy.repoRoot);
 			} catch (error) {
 				const message = error instanceof Error ? error.message : String(error);
 				throw new StructuredSubagentError(

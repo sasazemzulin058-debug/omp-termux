@@ -1,5 +1,6 @@
 import { type } from "@oh-my-pi/omptype";
 import type { AgentTool, AgentToolResult } from "@oh-my-pi/pi-agent-core";
+import { resolveAutolearnMode } from "../autolearn/custom-service";
 import { sanitizeSkillName, writeManagedSkill } from "../autolearn/managed-skills";
 import { isNameClaimedByAuthoredSkill } from "../extensibility/skills";
 import { localBackend } from "../memory-backend/local-backend";
@@ -42,7 +43,7 @@ export class LearnTool implements AgentTool<typeof learnSchema> {
 	constructor(private readonly session: ToolSession) {}
 
 	static createIf(session: ToolSession): LearnTool | null {
-		if (!session.settings.get("autolearn.enabled")) return null;
+		if (resolveAutolearnMode(session.settings) !== "builtin") return null;
 		const backend = session.settings.get("memory.backend");
 		if (backend !== "hindsight" && backend !== "mnemopi" && backend !== "local") return null;
 		return new LearnTool(session);

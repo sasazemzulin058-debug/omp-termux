@@ -1,6 +1,7 @@
 import * as path from "node:path";
 import { type } from "@oh-my-pi/omptype";
 import type { AgentTool, AgentToolResult } from "@oh-my-pi/pi-agent-core";
+import { resolveAutolearnMode } from "../autolearn/custom-service";
 import {
 	deleteManagedSkill,
 	getManagedSkillsDir,
@@ -48,7 +49,7 @@ export class ManageSkillTool implements AgentTool<typeof manageSkillSchema> {
 	constructor(private readonly refreshSkills?: () => Promise<void>) {}
 
 	static createIf(session: ToolSession): ManageSkillTool | null {
-		if (!session.settings.get("autolearn.enabled")) return null;
+		if (resolveAutolearnMode(session.settings) !== "builtin") return null;
 		return new ManageSkillTool(session.refreshSkills);
 	}
 
