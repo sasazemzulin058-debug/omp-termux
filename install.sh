@@ -64,10 +64,13 @@ if find "$LIB_DIR.new" -maxdepth 2 -type f \( -name "chrome" -o -name "chromium"
 fi
 
 # Pre-swap smoke test on .new
-FIX_SO="$PREFIX_DIR/lib/libfix_close_range.so"
+COMPAT_SO="$LIB_DIR.new/libomp-compat.so"
+FALLBACK_SO="$PREFIX_DIR/lib/libfix_close_range.so"
 if ! "$LIB_DIR.new/bun" --version >/dev/null 2>&1; then
-    if [ -f "$FIX_SO" ] && LD_PRELOAD="$FIX_SO" "$LIB_DIR.new/bun" --version >/dev/null 2>&1; then
-        export LD_PRELOAD="$FIX_SO${LD_PRELOAD:+:$LD_PRELOAD}"
+    if [ -f "$COMPAT_SO" ]; then
+        export LD_PRELOAD="$COMPAT_SO${LD_PRELOAD:+:$LD_PRELOAD}"
+    elif [ -f "$FALLBACK_SO" ]; then
+        export LD_PRELOAD="$FALLBACK_SO${LD_PRELOAD:+:$LD_PRELOAD}"
     fi
 fi
 
@@ -105,10 +108,13 @@ cat > "$BIN_DIR/omp" <<EOF
 #!/bin/sh
 PREFIX_DIR="\${PREFIX:-$PREFIX_DIR}"
 LIB_DIR="\$PREFIX_DIR/lib/omp-termux"
-FIX_SO="\$PREFIX_DIR/lib/libfix_close_range.so"
+COMPAT_SO="\$LIB_DIR/libomp-compat.so"
+FALLBACK_SO="\$PREFIX_DIR/lib/libfix_close_range.so"
 
-if [ -f "\$FIX_SO" ]; then
-    export LD_PRELOAD="\$FIX_SO\${LD_PRELOAD:+:\$LD_PRELOAD}"
+if [ -f "\$COMPAT_SO" ]; then
+    export LD_PRELOAD="\$COMPAT_SO\${LD_PRELOAD:+:\$LD_PRELOAD}"
+elif [ -f "\$FALLBACK_SO" ]; then
+    export LD_PRELOAD="\$FALLBACK_SO\${LD_PRELOAD:+:\$LD_PRELOAD}"
 fi
 exec env OMP_PLATFORM=android "\$LIB_DIR/bun" "\$LIB_DIR/cli.js" "\$@"
 EOF

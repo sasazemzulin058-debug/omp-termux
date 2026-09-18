@@ -53,7 +53,7 @@ jobs:
 
           metadata_dir="$RUNNER_TEMP/android-metadata"
           mkdir -p "$metadata_dir"
-          tar -C . -czf "$metadata_dir/metadata.tar.gz" android .github
+          tar -C . -czf "$metadata_dir/metadata.tar.gz" android .github install.sh
           git config user.name github-actions[bot]
           git config user.email 41898282+github-actions[bot]@users.noreply.github.com
           # Keep generated mod descendants of prior mod; never force-push.

@@ -86,9 +86,19 @@ async function main(): Promise<void> {
 		const nativesPkg = path.join(repoRoot, "packages/natives/package.json");
 		const nativesNative = path.join(repoRoot, "packages/natives/native");
 		await Bun.$`cp ${nativesPkg} ${bundleDir}/node_modules/@oh-my-pi/pi-natives/`.quiet();
-		for (const name of ["index.js", "loader-state.js", "embedded-addon.js", "clipboard.js", "desktop.js", "desktop-adapter.js", "vcs.js"]) {
+		const nativeFilesGlob = new Glob("*.js");
+		for await (const name of nativeFilesGlob.scan(nativesNative)) {
 			await Bun.$`cp ${path.join(nativesNative, name)} ${bundleDir}/node_modules/@oh-my-pi/pi-natives/native/`.quiet();
 		}
+
+		// Provide omp-legacy-pi-modules fallback stub so extensions never fail on import
+		const legacyDir = path.join(bundleDir, "node_modules/omp-legacy-pi-modules");
+		await Bun.$`mkdir -p ${legacyDir}`.quiet();
+		await Bun.write(
+			path.join(legacyDir, "package.json"),
+			JSON.stringify({ name: "omp-legacy-pi-modules", version: "1.0.0", type: "module", main: "index.js" }, null, 2),
+		);
+		await Bun.write(path.join(legacyDir, "index.js"), "export const BUNDLED_PI_MODULE_LOADERS = {};\n");
 
 		const tarPath = path.join(repoRoot, "termux-js.tar.gz");
 		await Bun.$`tar -czf ${tarPath} -C ${bundleDir} .`.quiet();

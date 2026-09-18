@@ -149,6 +149,13 @@ jobs:
           TARGET_RANLIB: ${{ steps.ndk.outputs.ndk-path }}/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-ranlib
         run: bash android/scripts/build-android-ci.sh
 
+      - name: Build Android compatibility library (close_range seccomp fallback)
+        run: |
+          set -euo pipefail
+          ${{ steps.ndk.outputs.ndk-path }}/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android24-clang \
+            -shared -fPIC -O2 -ldl -o packages/natives/native/libomp-compat.so android/compat/libomp-compat.c
+          test -s packages/natives/native/libomp-compat.so
+
       - name: Verify native addon artifact naming and checksum
         run: |
           set -euo pipefail
@@ -163,6 +170,7 @@ jobs:
           path: |
             packages/natives/native/pi_natives.android-arm64.node
             packages/natives/native/pi_natives.android-arm64.node.sha256
+            packages/natives/native/libomp-compat.so
           if-no-files-found: error
   js-bundle:
     name: Build Termux JavaScript bundle
@@ -312,8 +320,11 @@ jobs:
           mkdir -p termux-bundle/node_modules/@oh-my-pi/pi-natives/native
           cp packages/natives/native/pi_natives.android-arm64.node \
             termux-bundle/node_modules/@oh-my-pi/pi-natives/native/
+          cp packages/natives/native/libomp-compat.so termux-bundle/libomp-compat.so
+          chmod 755 termux-bundle/libomp-compat.so
           test -s termux-bundle/cli.js
           test -s termux-bundle/node_modules/@oh-my-pi/pi-natives/native/pi_natives.android-arm64.node
+          test -s termux-bundle/libomp-compat.so
 
           # Android ARM64 Bun cannot execute on x86_64 GitHub runners; URL,
           # manifest version, SHA256, and ELF architecture verify asset identity.
@@ -329,6 +340,7 @@ jobs:
           sha256sum -c omp-termux.tar.gz.sha256
           tar -tzf omp-termux.tar.gz | grep -Fx './cli.js'
           tar -tzf omp-termux.tar.gz | grep -Fx './bun'
+          tar -tzf omp-termux.tar.gz | grep -Fx './libomp-compat.so'
           tar -tzf omp-termux.tar.gz | grep -F './node_modules/@oh-my-pi/pi-natives/native/pi_natives.android-arm64.node'
           (cd packages/natives/native && sha256sum -c pi_natives.android-arm64.node.sha256)
 
