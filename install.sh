@@ -66,18 +66,26 @@ fi
 # Pre-swap smoke test on .new
 COMPAT_SO="$LIB_DIR.new/libomp-compat.so"
 FALLBACK_SO="$PREFIX_DIR/lib/libfix_close_range.so"
+PRELOAD_PRE=""
 if ! "$LIB_DIR.new/bun" --version >/dev/null 2>&1; then
     if [ -f "$COMPAT_SO" ]; then
-        export LD_PRELOAD="$COMPAT_SO${LD_PRELOAD:+:$LD_PRELOAD}"
+        PRELOAD_PRE="$COMPAT_SO"
     elif [ -f "$FALLBACK_SO" ]; then
-        export LD_PRELOAD="$FALLBACK_SO${LD_PRELOAD:+:$LD_PRELOAD}"
+        PRELOAD_PRE="$FALLBACK_SO"
     fi
 fi
 
-"$LIB_DIR.new/bun" "$LIB_DIR.new/cli.js" --version >/dev/null 2>&1 || {
-    echo 'error: new OMP bundle failed smoke test' >&2
-    exit 1
-}
+if [ -n "$PRELOAD_PRE" ]; then
+    LD_PRELOAD="$PRELOAD_PRE" "$LIB_DIR.new/bun" "$LIB_DIR.new/cli.js" --version >/dev/null 2>&1 || {
+        echo 'error: new OMP bundle failed smoke test' >&2
+        exit 1
+    }
+else
+    "$LIB_DIR.new/bun" "$LIB_DIR.new/cli.js" --version >/dev/null 2>&1 || {
+        echo 'error: new OMP bundle failed smoke test' >&2
+        exit 1
+    }
+fi
 
 # Guarded two-rename swap
 if [ -d "$LIB_DIR" ]; then
@@ -95,13 +103,34 @@ if ! mv "$LIB_DIR.new" "$LIB_DIR"; then
 fi
 
 # Post-swap smoke test
-if ! "$LIB_DIR/bun" "$LIB_DIR/cli.js" --version >/dev/null 2>&1; then
-    echo 'error: installed OMP bundle failed post-swap smoke test' >&2
-    rm -rf "$LIB_DIR"
-    if [ "$had_old" -eq 1 ]; then
-        mv "$LIB_DIR.old" "$LIB_DIR"
+POST_COMPAT_SO="$LIB_DIR/libomp-compat.so"
+PRELOAD_POST=""
+if ! "$LIB_DIR/bun" --version >/dev/null 2>&1; then
+    if [ -f "$POST_COMPAT_SO" ]; then
+        PRELOAD_POST="$POST_COMPAT_SO"
+    elif [ -f "$FALLBACK_SO" ]; then
+        PRELOAD_POST="$FALLBACK_SO"
     fi
-    exit 1
+fi
+
+if [ -n "$PRELOAD_POST" ]; then
+    LD_PRELOAD="$PRELOAD_POST" "$LIB_DIR/bun" "$LIB_DIR/cli.js" --version >/dev/null 2>&1 || {
+        echo 'error: installed OMP bundle failed post-swap smoke test' >&2
+        rm -rf "$LIB_DIR"
+        if [ "$had_old" -eq 1 ]; then
+            mv "$LIB_DIR.old" "$LIB_DIR"
+        fi
+        exit 1
+    }
+else
+    "$LIB_DIR/bun" "$LIB_DIR/cli.js" --version >/dev/null 2>&1 || {
+        echo 'error: installed OMP bundle failed post-swap smoke test' >&2
+        rm -rf "$LIB_DIR"
+        if [ "$had_old" -eq 1 ]; then
+            mv "$LIB_DIR.old" "$LIB_DIR"
+        fi
+        exit 1
+    }
 fi
 rm -f "$BIN_DIR/omp"
 cat > "$BIN_DIR/omp" <<EOF
