@@ -64,6 +64,13 @@ if find "$LIB_DIR.new" -maxdepth 2 -type f \( -name "chrome" -o -name "chromium"
 fi
 
 # Pre-swap smoke test on .new
+FIX_SO="$PREFIX_DIR/lib/libfix_close_range.so"
+if ! "$LIB_DIR.new/bun" --version >/dev/null 2>&1; then
+    if [ -f "$FIX_SO" ] && LD_PRELOAD="$FIX_SO" "$LIB_DIR.new/bun" --version >/dev/null 2>&1; then
+        export LD_PRELOAD="$FIX_SO${LD_PRELOAD:+:$LD_PRELOAD}"
+    fi
+fi
+
 "$LIB_DIR.new/bun" "$LIB_DIR.new/cli.js" --version >/dev/null 2>&1 || {
     echo 'error: new OMP bundle failed smoke test' >&2
     exit 1
@@ -93,9 +100,17 @@ if ! "$LIB_DIR/bun" "$LIB_DIR/cli.js" --version >/dev/null 2>&1; then
     fi
     exit 1
 fi
+rm -f "$BIN_DIR/omp"
 cat > "$BIN_DIR/omp" <<EOF
 #!/bin/sh
-exec env OMP_PLATFORM=android "$LIB_DIR/bun" "$LIB_DIR/cli.js" "\$@"
+PREFIX_DIR="\${PREFIX:-$PREFIX_DIR}"
+LIB_DIR="\$PREFIX_DIR/lib/omp-termux"
+FIX_SO="\$PREFIX_DIR/lib/libfix_close_range.so"
+
+if [ -f "\$FIX_SO" ]; then
+    export LD_PRELOAD="\$FIX_SO\${LD_PRELOAD:+:\$LD_PRELOAD}"
+fi
+exec env OMP_PLATFORM=android "\$LIB_DIR/bun" "\$LIB_DIR/cli.js" "\$@"
 EOF
 chmod 755 "$BIN_DIR/omp"
 
