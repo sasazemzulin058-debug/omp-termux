@@ -1,5 +1,3 @@
-# Active patch order: clean upstream -> 01-termux -> 02-autolearn
-# 02-autolearn.patch requires 01-termux.patch.
+# Active patch order: clean upstream -> 01-termux
 # This manifest is validated by android/scripts/apply-patches.sh
 01-termux.patch
-02-autolearn.patch

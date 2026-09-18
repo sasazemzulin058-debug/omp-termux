@@ -55,4 +55,25 @@ jobs:
         run: bun run collab:web:build
       - name: Run applied overlay tests
         run: |
-          bun test ./packages/coding-agent/test/android-helpers.test.ts ./packages/coding-agent/test/custom-controller-termux.test.ts ./packages/coding-agent/test/custom-service-termux.test.ts ./packages/coding-agent/test/custom-service-extended.test.ts ./packages/coding-agent/test/custom-service-approval-idempotent.test.ts ./packages/coding-agent/test/focused-recovery-identity-verifier.test.ts ./packages/coding-agent/test/grouped-fixes-regression.test.ts ./packages/coding-agent/test/learn-commands-registry.test.ts ./packages/coding-agent/test/p1-cleanup-state-machine.test.ts ./packages/coding-agent/test/race-foreign-regression.test.ts ./packages/coding-agent/test/final-projection-recovery.test.ts ./packages/coding-agent/test/mnemopi-idempotent-exact-bank.test.ts ./packages/mnemopi/test/beam-idempotency-concurrent.test.ts ./packages/mnemopi/test/beam-p1-keyed-reuse-collision.test.ts ./packages/mnemopi/test/beam-p1-gist-rekey-consolidation.test.ts
+          tests=()
+          for t in \
+            ./packages/coding-agent/test/android-helpers.test.ts \
+            ./packages/coding-agent/test/generator-android.test.ts \
+            ./packages/coding-agent/test/repo-root-isolation.test.ts \
+            ./packages/coding-agent/test/custom-controller-termux.test.ts \
+            ./packages/coding-agent/test/custom-service-termux.test.ts \
+            ./packages/coding-agent/test/custom-service-extended.test.ts \
+            ./packages/coding-agent/test/custom-service-approval-idempotent.test.ts \
+            ./packages/coding-agent/test/focused-recovery-identity-verifier.test.ts \
+            ./packages/coding-agent/test/grouped-fixes-regression.test.ts \
+            ./packages/coding-agent/test/learn-commands-registry.test.ts \
+            ./packages/coding-agent/test/p1-cleanup-state-machine.test.ts \
+            ./packages/coding-agent/test/race-foreign-regression.test.ts \
+            ./packages/coding-agent/test/final-projection-recovery.test.ts \
+            ./packages/coding-agent/test/mnemopi-idempotent-exact-bank.test.ts \
+            ./packages/mnemopi/test/beam-idempotency-concurrent.test.ts \
+            ./packages/mnemopi/test/beam-p1-keyed-reuse-collision.test.ts \
+            ./packages/mnemopi/test/beam-p1-gist-rekey-consolidation.test.ts; do
+            [[ -f "$t" ]] && tests+=("$t")
+          done
+          bun test "${tests[@]}"
